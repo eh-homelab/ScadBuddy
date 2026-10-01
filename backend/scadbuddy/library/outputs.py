@@ -186,8 +186,17 @@ class OutputStore:
         path = self._find_dir(output_id) / INPUTS_NAME
         if not path.is_file():
             return legacy_inputs(self.params(output_id))
-        loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        return loaded
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            # The record itself (meta, files, params) is intact: read it as one from
+            # before inputs rather than lose it to a damaged side file.
+            logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
+            return legacy_inputs(self.params(output_id))
+        checked: dict[str, Any] = loaded
+        return checked
 
     def list_for(self, slug: str) -> list[OutputMeta]:
         directory = self.paths.outputs / slug
@@ -221,6 +230,11 @@ class OutputStore:
     ) -> OutputMeta:
         if job.result is None:
             raise ValueError("the job has no result to persist")
+        # Checked before anything is written: inputs the job did not render leave no
+        # directory behind, whichever caller sent them.
+        recorded = normalize_inputs(
+            inputs if inputs is not None else (job.inputs or None), job.params
+        )
         output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -235,9 +249,6 @@ class OutputStore:
             raise
         (directory / PARAMS_NAME).write_text(
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        recorded = normalize_inputs(
-            inputs if inputs is not None else (job.inputs or None), job.params
         )
         (directory / INPUTS_NAME).write_text(
             json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
