@@ -68,7 +68,12 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
-from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import (
+    PresetStore,
+    TemplatePreset,
+    TemplatePresets,
+    for_model_json,
+)
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -706,11 +711,19 @@ class Catalogue:
         except RecursionError:
             raise InvalidModelMetaError(slug, "nested too deeply") from None
 
-    def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
+    def write_raw_meta(self, slug: str, meta: dict[str, Any], *, presets: bool = False) -> None:
+        """Write ``model.json``. With ``presets`` (the write sets them), the presets are
+        written as :func:`for_model_json` keeps them; otherwise they are left exactly as
+        the file had them, so an unrelated edit never rewrites a hand-edited list."""
         # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
         # Dropping it here retires the key from volumes written before that was
         # true, rather than leaving a cache blob in the versioned tree forever.
         meta.pop("schema", None)
+        written = meta.get("presets")
+        if presets and isinstance(written, list):
+            meta["presets"] = [
+                for_model_json(preset) if isinstance(preset, dict) else preset for preset in written
+            ]
         # No `mkdir`: the model directory must already exist (`create` makes it).
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
@@ -920,7 +933,7 @@ class Catalogue:
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
-            self.write_raw_meta(slug, meta.model_dump(exclude=excluded))
+            self.write_raw_meta(slug, meta.model_dump(exclude=excluded), presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
@@ -1094,7 +1107,7 @@ class Catalogue:
         def change() -> None:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
-            self.write_raw_meta(slug, raw)
+            self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
                 # The list written is the template's presets whole: a legacy file left
                 # beside it would add its entries back (they are read below model.json),
