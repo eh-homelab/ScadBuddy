@@ -10,7 +10,7 @@ exists, or by a new one.
 
 Ground rule, decided in the brainstorm: **follow the Temporal SDK and Temporal's agent
 frameworks as they are documented.** Anything in this spec that departs from them is
-listed as a deviation, and the user decides. §8 lists the open ones (none).
+listed as a deviation, and the user decides. §9 lists the open ones (none).
 
 Base design: `2026-09-22-scadbuddy-design.md`. Renders on Temporal, the blob store and
 the trust model (§9): `2026-09-27-template-pipelines-design.md` (the "template spec"
@@ -53,14 +53,16 @@ Goals
   session, or a human.
 - ScadBuddy stays the system of record. Our Postgres rows are written by the workflows,
   and Temporal's Visibility and Archival sit beside them.
+- **One architecture for every operation (§4).** Every command, whether a render, a
+  print, a git commit, a Bambuddy write or a download, is a Temporal workflow of the same
+  shape. ScadBuddy's own background loops become workflows or Schedules. No request
+  waits on work a proxy can cut off, and no retry repeats an effect.
 
 Non-goals
 
-- Changing renders. `RenderService` keeps its insert-then-start and reconciler for now
-  (§4.1 says why that should change, as a follow-up).
 - Sandboxing beyond what the frameworks give. A flow's script runs in Code Mode's
   sandbox, and a template's pipeline is governed by the template spec §9.
-- Classic sessions as flow targets. Only a durable session can be sent a step (§6.3).
+- Classic sessions as flow targets. Only a durable session can be sent a step (§7.3).
 - A TypeScript agent runtime on Temporal. The integration is Python only (§3.2).
 
 ## 3. External facts this rests on (verified 2026-10-01)
@@ -132,9 +134,120 @@ Non-goals
 - DO Spaces (`atl1.digitaloceanspaces.com`, bucket `eh-hs-db-backups`) already holds
   the databases' backups (`applications/scadbuddy/cnpg-objectstore.yaml`).
 
-## 4. Printing on Temporal
+## 4. One shape for every operation
 
-### 4.1 Creates: update-with-start, the workflow writes our record
+Renders, prints, flows and sessions each got a Temporal design above. They must not
+become four architectures, so this section fixes the one they share. It also says what
+happens to every other operation ScadBuddy performs. As of 2026-10-01, every route below
+does its slow or outward work inside the request, except an output's print run, and the
+API process runs its own background loops.
+
+### 4.1 Commands and reads
+
+- **A command** is an operation with an effect outside the one Postgres transaction that
+  records it: a git commit, a file written to the data volume, a clone or download, a
+  Bambuddy write, an `openscad` render, or a message to an agent. **Every command is a
+  Temporal workflow, in the shape of §4.2.**
+- **A read** has no effect: a `GET`, a proxied Bambuddy stream, a `/check` or `/choices`
+  that only reads, or an LSP socket. It stays a plain request. Temporal's durability buys
+  nothing for a call that changes nothing, and the result belongs to the caller who
+  waits for it.
+- **A write that is only one Postgres transaction**, such as settings, saved presets
+  (`saved_presets`) and the credential, is already atomic and leaves nothing half-done
+  to resume. It stays a request. If such a write ever gains an outward step (for example
+  registering ScadBuddy in Bambuddy's sidebar), it becomes a command.
+
+### 4.2 The command shape
+
+The same for every kind:
+
+1. **Identity.** The workflow ID is `<kind>-<key>`.
+   - The key hashes the subject (the model slug, output id, library file id, etc.), the
+     canonical body, and a client `request_id` (one per deliberate press, as #470 made
+     for prints).
+   - It is started with `id_conflict_policy = USE_EXISTING`, so a retry after a lost
+     answer (a proxy 502/504/524, a dropped connection) attaches to the same execution
+     and never repeats the effect.
+2. **Update-with-start.** The route calls `execute_update_with_start_workflow` with the
+   Update `accepted`.
+3. **First activity: validate and record.** Refusals (422, 404, 409, as each route
+   answers today) end the workflow with nothing written. Otherwise, in one transaction, it
+   writes our record and publishes the event (the `core/events.py` / `publish_in`
+   pattern).
+4. **The answer.** Each kind declares one of two:
+   - **`done`**, for commands that normally finish in under a second (a git commit, a
+     delete). The Update waits for the workflow's result, and the route answers as it
+     does today (200/201/204 with today's body). If the result is not there within
+     `command_answer_deadline` (default 10 s, below Envoy's 15 s), the route answers
+     **202** with the operation instead, and the client follows it.
+   - **`accepted`**, for commands that take long (a print, a pin's clone, a URL import,
+     a font install, a send). The route answers **202** with the record once step 3
+     is done.
+5. **Then** the workflow carries on with its activities. Each transition is a guarded
+   write to our record plus an event in the same transaction, the `render/projection.py`
+   pattern. Search Attributes `ScadbuddyKind`, `ScadbuddySubject` and `ScadbuddyStatus`
+   are upserted at each one.
+
+**Our record.**
+- A kind that already has its own table writes that: `render_jobs`, `print_runs`,
+  `workflow_runs`.
+- Every other kind writes one generic table, `operations(id, kind, subject, status,
+  request jsonb, result jsonb, error jsonb, workflow_id, created_at, finished_at)`. It is
+  read by `GET /api/v1/operations/{id}` (and so a tool) and announced as `operation.*`
+  events. Its pruning is a Postgres setting, `operation_retention_days`, like
+  `print_run_retention_days`.
+- Temporal's namespace Archival (§5.4) covers history past 168h for every kind.
+
+**The client.**
+- One helper, `command()` in `frontend/src/api/client.ts`, sends a `request_id`. It takes
+  either answer, follows a 202 (event or `GET /operations/{id}`) to its result, and
+  re-sends the same `request_id` after an answer that never arrived.
+- This generalises today's `runPrint` loop with its `reattach` and `mayHaveRun`
+  (`client.ts:812`, `:273`).
+- The agent's tools get the same behaviour from one wrapper in `agent/src/api/`.
+
+### 4.3 Queues follow what a worker holds
+
+The template spec §9's containment rule, applied to every command:
+
+| Queue | Worker | Commands | Holds |
+|---|---|---|---|
+| `render` | `scadbuddy-render` | renders, previews, Arrange | store key; runs template code |
+| `library` | `scadbuddy-library`, a container in the API pod (it needs `scadbuddy-data`, which is RWO) | model create/import/patch/duplicate/delete, source and file writes, thumbnail/readme/media writes, preset writes that need `openscad`, version restore, upstream merge/dismiss/detach, library pin/repin/unpin/remove, font install, the sweeps | the data volume and git; no Bambuddy key; runs no template code |
+| `bambuddy` | `scadbuddy-print` (§5.5) | prints, send, project file, create project, file into project, Bambuddy part of output delete, reprint, timelapse pull, sidebar registration, analyzer fix apply | full Bambuddy key |
+| `agent-tools`, `agent` | agent pod (§6) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
+| `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward |
+
+Git writes to one model's history still take the catalogue's existing lock inside the
+activity. Two commands on one model are therefore ordered as git requires, and nothing
+new serialises across models.
+
+### 4.4 Background loops
+
+| Today (`main.py` lifespan) | Becomes |
+|---|---|
+| render reconciler (`render/submit.py:112`) | deleted: renders are created by §4.2, so nothing needs reconciling |
+| print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
+| print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by `PrintRun`'s record step as an abandoned child. It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
+| asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
+| preview scheduler and backfill (`render/previews.py:160`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
+| PgNotify bus, settings follower, in-process dev worker, openscad version probe, git reaper thread, LSP subprocesses | stay. They are the process's own plumbing, not operations |
+
+### 4.5 Renders join the shape
+
+`POST /models/{slug}/render` becomes §4.2 with answer `accepted`:
+- the first activity resolves the revision and schema (today's `git rev-parse` and
+  `cached_schema`, `api/jobs.py:173,216`) and inserts the `render_jobs` row;
+- `TemplatePipeline` continues;
+- `RenderService`'s insert-then-start and `reconcile_once` are deleted.
+
+`render_key` coalescing becomes the workflow ID: `render-<render_key>` attaches identical
+jobs, and `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap
+them).
+
+## 5. Printing on Temporal
+
+### 5.1 Creates: update-with-start, the workflow writes our record
 
 Today the API inserts and then starts. `RenderService.submit` commits the `render_jobs`
 row, then starts `TemplatePipeline`, and `reconcile_once` starts any row whose start was
@@ -158,11 +271,10 @@ From here on a create is one call to Temporal:
    - **a repeat** (the workflow already existed): the Update returns that run's
      current row, and the route answers 200 with `repeated: true`.
 
-A row exists only if its workflow does, so there is nothing to reconcile. Renders
-should move to the same shape (it deletes `reconcile_once`). That is a follow-up issue,
-not this spec.
+A row exists only if its workflow does, so there is nothing to reconcile. This is §4.2's
+shape with answer `accepted`; renders take the same shape (§4.5).
 
-### 4.2 Identity and repeats
+### 5.2 Identity and repeats
 
 - `run_key` is `bambuddy/runs.py:167`. Its first argument becomes a source key,
   `output:<id>` or `library:<file id>`, followed by the canonical request body including
@@ -175,7 +287,7 @@ not this spec.
   completes at once, so a retry is a new run. This is #567's rule, kept by the workflow
   instead of `PrintRunStore.find`.
 
-### 4.3 The workflow
+### 5.3 The workflow
 
 `backend/scadbuddy/workflows/printing.py`, `PrintRun`, on `bambuddy`. The activities are
 today's `execute_run` (`bambuddy/print_run.py:378`) and `slice_and_queue`
@@ -183,8 +295,8 @@ today's `execute_run` (`bambuddy/print_run.py:378`) and `slice_and_queue`
 
 | Activity | Does | Retry |
 |---|---|---|
-| `print_accept` | §4.1 step 2 | default; a refusal is non-retryable |
-| `print_upload` | `source.file_to_print`. An output's 3MF is fetched from the API (§4.5), replated and recoloured, and `POST /library/files`; a library file is a no-op | default; phase 1 confirms a retried upload reuses `ensure_uploaded`'s existing file rather than adding a second |
+| `print_accept` | §5.1 step 2 | default; a refusal is non-retryable |
+| `print_upload` | `source.file_to_print`. An output's 3MF is fetched from the API (§5.5), replated and recoloured, and `POST /library/files`; a library file is a no-op | default; phase 1 confirms a retried upload reuses `ensure_uploaded`'s existing file rather than adding a second |
 | `print_resolve` | spool presets, `gather_plate_options`, `resolve` per plate, hardware warnings | default |
 | `print_slice` | `POST /library/files/{id}/slice`, then polls `/slice-jobs/{id}` every 2 s **inside the activity**, heartbeating, up to `DEFAULT_SLICE_TIMEOUT` (600 s) | default; heartbeat timeout 30 s |
 | `print_enqueue` | `POST /queue/` | **`maximum_attempts = 1`** |
@@ -198,7 +310,7 @@ with `may_have_queued = true`, which is today's meaning. A worker that dies mid-
 loses only that activity attempt, which retries. A worker that dies mid-enqueue cannot
 retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
-### 4.4 Our record, Visibility, Archival
+### 5.4 Our record, Visibility, Archival
 
 - **`print_runs` is our system of record**, written only by the workflow's activities,
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
@@ -226,7 +338,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 `PrintRuns`, `PrintRunStore`'s claim/find/heartbeat/expire, `HEARTBEAT_INTERVAL`,
 `LOST_AFTER` and the `LOST`/`LOST_UNQUEUED` texts are deleted.
 
-### 4.5 The `scadbuddy-print` worker
+### 5.5 The `scadbuddy-print` worker
 
 - `python -m scadbuddy.worker --queue bambuddy`. The `--queue` flag is new (today the
   queue comes only from `temporal_task_queue_render`, `worker.py:175`), with a setting
@@ -241,19 +353,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   (`GET /api/v1/outputs/{id}/model.3mf`). Once the blob store's `StoreBundle` lands
   (#672), it reads from the store instead. Phase 1's plan confirms the route returns the
   stored bytes that `OutputSource` expects, or adds a variant that does.
-- `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` serves `bambuddy` (and `projects`, §6) too, for
+- `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` serves `bambuddy` (and `projects`, §7) too, for
   dev and `tests/api`.
 
-### 4.6 The frontend and the agent
+### 5.6 The frontend and the agent
 
 - `runLibraryPrint` (`frontend/src/api/client.ts:987`) follows the run exactly like
   `runPrint` (`:812`). The 202, the follow loop, `reattach` and `mayHaveRun` are shared.
 - `agent/src/tools/print.ts`: the library print tool re-attaches with the same
   `request_id`, like the output one.
 
-## 5. Durable agent sessions
+## 6. Durable agent sessions
 
-### 5.1 Mode
+### 6.1 Mode
 
 - `ai_sessions.mode text not null default 'classic' check (mode in ('classic','durable'))`,
   in a new agent migration. It is set at insert and never updated.
@@ -272,7 +384,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - Settings → Assistant gains "Default session mode", next to Session limits, through a
     `GET`/`PUT /api/v1/ai/settings/session-mode` route group (a `src/routes/` module).
 
-### 5.2 The session workflow
+### 6.2 The session workflow
 
 - `DurableSession`, workflow ID `session-<ai_sessions.id>`, on queue `agent`, in a new
   Python package `agent-durable/`. It is shipped as the Dockerfile target
@@ -291,7 +403,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     built.
   - Phase 3's first task checks that `uv lock` resolves that SHA from
     `temporalio/ai-integrations`. If it does not, the work stops and the user decides
-    (§8).
+    (§9).
   - **Every bump is reviewed.** A pin change is its own PR, carrying the diff of
     `python/claude_agent_sdk` between the old and new SHAs. It is a supply-chain change:
     this package runs in the container that holds the Anthropic credential.
@@ -331,7 +443,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   render a durable session unchanged. That is the README's one-subscriber-in-the-backend
   advice.
 
-### 5.3 Tools as activities
+### 6.3 Tools as activities
 
 - Every `/api/v1` operation already has a tool, or a `src/tools/coverage.ts` entry
   (`agent/test/coverage.test.ts`). The registry `ALL_TOOLS` (`agent/src/tools/index.ts:26`)
@@ -350,7 +462,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`browser_*` tools** need a paired tab. With none, they fail at once with that
   message rather than wait.
 
-### 5.4 Human-in-the-loop
+### 6.4 Human-in-the-loop
 
 - An outward call waits in the workflow (`needs_approval`) until a decision.
 - The panel's existing approve/deny actions, for a durable session, send the workflow's
@@ -362,9 +474,9 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   waiting call that decides *deny* when it fires.
 - Classic sessions keep `ai_approvals` unchanged.
 
-## 6. Flows
+## 7. Flows
 
-### 6.1 What a flow is
+### 7.1 What a flow is
 
 - A flow is a Python script an agent writes (or anyone writes through the API). It runs
   in Code Mode over these host functions:
@@ -372,9 +484,9 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 | Host function | Is | Answered by |
 |---|---|---|
 | `render(slug, inputs)` | child `TemplatePipeline` via `RenderService` | the render pipeline |
-| `print(source, choices)` | child `PrintRun` (§4) | the print worker |
+| `print(source, choices)` | child `PrintRun` (§5) | the print worker |
 | `arrange(...)` | child `Arrange` (template spec phase 5, when it lands) | the render worker |
-| `tool(name, args)` | activity on `agent-tools` (§5.3) | the tool registry |
+| `tool(name, args)` | activity on `agent-tools` (§6.3) | the tool registry |
 | `agent(prompt, skills=…, result_schema=…)` | child `DurableSession` | a new durable session |
 | `ask_session(session_id, message)` | `send_message` to that session; waits for the turn's answer | an existing durable session |
 | `wait_for_human(question, timeout=…)` | waits on the run's `answer` Update | a person |
@@ -385,7 +497,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   calls and logic. Pre/post steps and file transforms are `tool(...)` and `agent(...)`
   calls.
 
-### 6.2 Running on the harness
+### 7.2 Running on the harness
 
 - `ProjectWorkflow` is a temporal-agent-harness agent (`@agent.defn`) with a model-free
   `execute(script)` operation, the shape of `agent_dag`'s `DagBuilderAgent.execute`. It
@@ -399,10 +511,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   each run. A script that fails is refused with its errors, by line.
 - Phase 4 starts by verifying what the harness needs around `ProjectWorkflow` (its
   `SessionManagerWorkflow`, the `code-mode` extra) and how `execute` behaves across a
-  Reset (§6.4). Anything that would mean departing from the harness is brought to the
-  user (§8).
+  Reset (§7.4). Anything that would mean departing from the harness is brought to the
+  user (§9).
 
-### 6.3 Records and API
+### 7.3 Records and API
 
 - **Tables** (backend migrations, our system of record):
   - `workflow_definitions(id, name, version, script, created_by, created_at)`; versions
@@ -410,7 +522,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - `workflow_runs(id, definition_id, version, status, waiting_on jsonb, steps jsonb,
     workflow_id, created_at, updated_at)`, written by the workflow's activities.
 
-  Creates follow §4.1: `POST /runs` is update-with-start, and the first activity
+  Creates follow §5.1: `POST /runs` is update-with-start, and the first activity
   type-checks, inserts the row and publishes the event. Search Attributes
   `ScadbuddyFlow` and `ScadbuddyStatus` are set on each run.
 - **Routes:** `POST /api/v1/workflows`, `GET /api/v1/workflows`,
@@ -423,7 +535,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   Workflows page lists runs with their status, what each waits on, and Approve/Answer. An
   agent panel links to the runs its session started.
 
-### 6.4 Changing course: Temporal Reset
+### 7.4 Changing course: Temporal Reset
 
 - There is no in-place revision. When a run goes wrong (a jammed printer on plate 7),
   you reset it to the last good event with Temporal Reset. The run replays to there and
@@ -441,10 +553,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - Phase 4's plan states what Reset does to child workflows and activities that were
     in flight past the reset point. A child `PrintRun` already past its enqueue keeps its
     own history and outcome, and the replayed flow does not re-attach to it.
-- `print_enqueue`'s `maximum_attempts = 1` (§4.3) is set explicitly on that activity and
+- `print_enqueue`'s `maximum_attempts = 1` (§5.3) is set explicitly on that activity and
   asserted by a test, never inherited from a default retry policy.
 
-## 7. Errors and testing
+## 8. Errors and testing
 
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
   - the 422 through update-with-start;
@@ -476,7 +588,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - the `agent-durable` image gets a scope of its own;
   - the git-pinned dependency is in the lockfile, so `--frozen` installs reproduce it.
 
-## 8. Deviations from Temporal
+## 9. Deviations from Temporal
 
 None. The ones considered, and how each was resolved:
 
@@ -484,29 +596,37 @@ None. The ones considered, and how each was resolved:
 |---|---|
 | Our Postgres rows beside Temporal | Kept, and Visibility + Archival added. The user decided ScadBuddy is the system of record. Rows are written only by workflow activities, and creates are update-with-start, so no row exists without its execution. |
 | Polling slices on a workflow timer | Replaced by polling inside the activity with heartbeats (§3.1). |
-| `resume_from` (reusing earlier runs' results) | Dropped for Temporal Reset (§6.4). |
-| Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§6.2). |
-| Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§5.3). |
+| `resume_from` (reusing earlier runs' results) | Dropped for Temporal Reset (§7.4). |
+| Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§7.2). |
+| Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
 not possible, the work stops and the user decides.
 
-## 9. Phasing
+## 10. Phasing
 
 Each phase is its own implementation plan and ships alone.
 
-1. **PrintRun on Temporal** (§4): `PrintRun` and its activities, update-with-start
-   creates, the `print_runs` migration and retention setting, the library route's 202,
-   `runLibraryPrint`, `scadbuddy.worker --queue`, and the clusters manifests
-   (`scadbuddy-print`, Search Attributes, Archival). Fixes #742 and the lost run.
-2. **Tools as activities** (§5.3): the `ALL_TOOLS` export and the `agent-tools` worker in
-   the agent service.
-3. **Durable session mode** (§5.1, §5.2, §5.4): `agent-durable/`, the plugin pin, the
+1. **The command shape and PrintRun** (§4.2, §5).
+   - The shared pieces: the update-with-start helper, the `operations` table and route,
+     the Search Attributes, the frontend `command()` and the agent wrapper.
+   - `PrintRun` is their first user: its activities, the `print_runs` migration and
+     retention setting, the library route's 202, `scadbuddy.worker --queue`.
+   - The clusters manifests: `scadbuddy-print`, Search Attributes, Archival.
+   - Fixes #742 and the lost run.
+2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
+   join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
+   sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
+3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
+   container, every git, file and download command, and the sweeps as Schedules. Done by
+   route group, one plan per group if the plan says so.
+4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
+   the agent service, plus the plugin package install as a command.
+5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
    `SessionStore`, the credential port, the event subscriber, HITL, the mode UI and
    setting.
-4. **Flows** (§6): the harness verification, `ProjectWorkflow`, host functions, records,
+6. **Flows** (§7): the harness verification, `ProjectWorkflow`, host functions, records,
    routes, Reset, and the Workflows page.
 
-Follow-up issues, outside this spec: renders' creates move to update-with-start (§4.1),
-deleting `reconcile_once`; and moving the plugin pin to PyPI once the package is
+Follow-up outside this spec: moving the plugin pin to PyPI once the package is
 published.
