@@ -271,6 +271,20 @@ def test_a_failing_existence_check_does_not_fail_the_dialog(client: TestClient, 
 
 
 @respx.mock
+def test_a_send_still_fails_on_a_failing_existence_check(client: TestClient, model: str) -> None:
+    """A send reports the file name that read supplies, so it cannot tolerate a 500."""
+    output_id = set_up(client, model)
+    uploads(41)
+    send = f"/api/v1/outputs/{output_id}/send"
+    assert client.post(send, json={"mode": "library"}).status_code == 200
+
+    respx.get(f"{API}/library/files/41").mock(return_value=httpx.Response(500, json={}))
+    response = client.post(send, json={"mode": "library"})
+
+    assert response.status_code >= 500
+
+
+@respx.mock
 def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: str) -> None:
     output_id = set_up(client, model)
     upload = uploads(41)

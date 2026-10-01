@@ -209,6 +209,14 @@ def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:
     return folder_id == settings.library_folder_id
 
 
+class CopyFound(NamedTuple):
+    """A recorded copy Bambuddy still has (:func:`_still_there`)."""
+
+    #: ``None`` when the check failed in a way that does not say the copy is gone, so
+    #: its name is unknown (#863).
+    filename: str | None
+
+
 class EnsuredCopy(NamedTuple):
     """A copy :func:`ensure_copy` found or made."""
 
@@ -352,7 +360,6 @@ async def ensure_copy(
     target: Target | None,
     folder_id: int | None,
     stem: str | None = None,
-    filename_needed: bool = True,
 ) -> EnsuredCopy:
     """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under and
     whether this call uploaded it.
@@ -370,25 +377,56 @@ async def ensure_copy(
     The lock is taken in this process first, then in the database, so it holds across
     replicas too without every waiter here holding a database connection.
 
-    A reused copy is read from Bambuddy first, to drop one that was deleted there. When
-    the caller has no use for the file name (``filename_needed=False``) a failure of
-    that read other than a 404 is not a reason to fail: the recorded copy is used as it
-    is, and a dead one fails the slice or slot read that follows (#863).
+    A reused copy is read from Bambuddy first, to drop one that was deleted there, and
+    that read also gives the file name, so any failure of it but a 404 raises here.
+    :func:`ensure_uploaded` does not need the name and tolerates it (#863).
     """
+    found = await _ensure_copy(
+        client,
+        store,
+        uploads,
+        meta,
+        settings,
+        target=target,
+        folder_id=folder_id,
+        stem=stem,
+        tolerate_errors=False,
+    )
+    assert found.filename is not None  # only a tolerated check failure leaves it unknown
+    return EnsuredCopy(found.library_file_id, found.filename, found.created)
+
+
+class _Ensured(NamedTuple):
+    library_file_id: int
+    #: ``None`` only for a reused copy whose check failed and was tolerated.
+    filename: str | None
+    created: bool
+
+
+async def _ensure_copy(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    *,
+    target: Target | None,
+    folder_id: int | None,
+    stem: str | None,
+    tolerate_errors: bool,
+) -> _Ensured:
     target = target if target is not None else await target_for(client, settings)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     key = _copy_lock_key(meta.id, folder, settings)
     async with _copy_lock(key), uploads.copy_lock(f"{key[0] or ''}:{key[1]}"):
         for copy in await _reusable(uploads, meta, settings, target, folder):
-            filename = await _still_there(
-                client, uploads, meta, copy, tolerate_errors=not filename_needed
-            )
-            if filename is not None:
-                return EnsuredCopy(copy.id, filename, created=False)
+            found = await _still_there(client, uploads, meta, copy, tolerate_errors=tolerate_errors)
+            if found is not None:
+                return _Ensured(copy.id, found.filename, created=False)
         library_file_id, filename = await upload_output(
             client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
         )
-    return EnsuredCopy(library_file_id, filename, created=True)
+    return _Ensured(library_file_id, filename, created=True)
 
 
 #: One per folder while :func:`ensure_copy` holds it; weak, so an idle folder's lock is
@@ -464,14 +502,14 @@ async def _still_there(
     copy: LibraryCopy,
     *,
     tolerate_errors: bool = False,
-) -> str | None:
-    """The copy's file name, or ``None`` once it is found deleted in Bambuddy.
+) -> CopyFound | None:
+    """``None`` once the copy is found deleted in Bambuddy, else a :class:`CopyFound`.
 
     Someone may have deleted it there since. Reusing a dead id would fail the slice or
     the slot read with an upstream 404, so it is read first, and a 404 is forgotten.
 
     Only a 404 says the copy is gone. With ``tolerate_errors`` any other failure keeps
-    the copy and returns ``""`` (the name is unknown), so a transient Bambuddy error
+    the copy and returns a :class:`CopyFound` with no ``filename``, so a transient Bambuddy error
     here is not a new way for a print or the dialog to fail (#863).
     """
     try:
@@ -484,14 +522,14 @@ async def _still_there(
                 "could not check a recorded library copy; using it as recorded",
                 extra={"library_file_id": copy.id, "status": error.status},
             )
-            return ""
+            return CopyFound(filename=None)
         logger.info(
             "a recorded library copy was deleted in Bambuddy; uploading it again",
             extra={"library_file_id": copy.id},
         )
         await uploads.forget(meta.id, copy.id)
         return None
-    return found.filename
+    return CopyFound(filename=found.filename)
 
 
 @dataclass(frozen=True)
@@ -557,7 +595,7 @@ async def ensure_uploaded(
     so moving the file to project B would leave A pointing at nothing. And never a
     delete outside the inbox; see :func:`upload_output`.
     """
-    ensured = await ensure_copy(
+    ensured = await _ensure_copy(
         client,
         store,
         uploads,
@@ -566,7 +604,7 @@ async def ensure_uploaded(
         target=target,
         folder_id=folder_id,
         stem=stem,
-        filename_needed=False,
+        tolerate_errors=True,
     )
     return ensured.library_file_id
 
