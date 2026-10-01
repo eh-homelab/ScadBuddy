@@ -20,7 +20,7 @@ import { useAsync } from '../lib/useAsync'
 import { seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
 import { usePrintProgress } from '../lib/usePrintProgress'
-import { arrangedNote, GOAL_LABELS, runArrange, type ArrangeGoal } from '../lib/arrange'
+import { arrangedName, arrangedNote, GOAL_LABELS, runArrange, type ArrangeGoal } from '../lib/arrange'
 import { FilamentPicker, WarningList } from './FilamentPicker'
 import { NozzleStep } from './print/NozzleStep'
 import { PlateStep } from './print/PlateStep'
@@ -84,6 +84,18 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const [arrangeGoal, setArrangeGoal] = useState<ArrangeGoal>('fewest_swaps')
   const [arranging, setArranging] = useState(false)
   const [arrangeNote, setArrangeNote] = useState<string | null>(null)
+  const [arrangeError, setArrangeError] = useState<string | null>(null)
+  /**
+   * What a re-arrange was made for, carried across the switch to its output: the new
+   * file's slot N is the old one's colour (`colours` pins the order), so the plan and
+   * the settings still apply. `ready` once the new output's choices are in.
+   */
+  const carry = useRef<{
+    plan: SlotChoice[]
+    overrides: Record<string, PresetRef>
+    options: PrintOptions
+    ready: boolean
+  } | null>(null)
   const [choices, setChoices] = useState<ChoicesView | null>(null)
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
@@ -200,7 +212,10 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         setChoices(next)
         // The server already applied last archive → remembered → default.
         setBedType(next.bed_type)
-        if (!seeded.current) {
+        if (carry.current) {
+          // A re-arrange keeps the dialog's nozzles, tier, process and Advanced.
+          carry.current.ready = true
+        } else if (!seeded.current) {
           seeded.current = true
           seedDialog(next.model_choices)
         }
@@ -215,11 +230,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       })
   }, [open, outputId, askedPrinter])
 
-  // One output's plates and overrides do not survive a change of output.
+  // One output's plates and overrides do not survive a change of output, except to the
+  // output a re-arrange made of it, which keeps the dialog's settings.
   useEffect(() => {
-    setOptions({})
     setPlate(1)
     setPlates([])
+    if (carry.current) return
+    setOptions({})
     setOverrides({})
     seeded.current = false
   }, [outputId])
@@ -243,6 +260,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     if (!target) return
     setArranging(true)
     setArrangeNote(null)
+    setArrangeError(null)
     try {
       const next = await runArrange(slug, {
         objects: (target.manifest ?? []).map((object) => ({
@@ -254,12 +272,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         printer_id: printerId,
         filament_plan: { slots: plan, force_colour_match: false },
         colours: target.colors ?? [],
-        name: target.name ? `${target.name} (arranged)` : null,
+        name: arrangedName(target.name),
       })
+      carry.current = { plan, overrides, options, ready: false }
       setTarget(next.output)
       setArrangeNote(arrangedNote(next.plates))
     } catch (cause) {
-      setArrangeNote(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      setArrangeError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
     } finally {
       setArranging(false)
     }
@@ -289,6 +308,18 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     }
     const seed = (next: FilamentOptions) => {
       setFilaments(next)
+      const carried = carry.current
+      if (carried) {
+        // A re-arrange: the plan it was made for, less any slot the new file lacks.
+        setPlan(seedPlan(next, carried.plan))
+        if (carried.ready) {
+          const slots = new Set((next.slots ?? []).map((slot) => String(slot.slot_id)))
+          setOverrides(Object.fromEntries(Object.entries(carried.overrides).filter(([id]) => slots.has(id))))
+          setOptions(carried.options)
+          carry.current = null
+        }
+        return
+      }
       // What this model last printed with seeds the selection, else the server's
       // auto-match (#78); every slot stays editable.
       setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
@@ -680,6 +711,11 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                   {arrangeNote && (
                     <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
                       {arrangeNote}
+                    </p>
+                  )}
+                  {arrangeError && (
+                    <p role="alert" className="mt-1.5 text-[13px] text-warn">
+                      {arrangeError}
                     </p>
                   )}
                 </fieldset>

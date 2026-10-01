@@ -268,6 +268,62 @@ describe('PrintPicker', () => {
     await screen.findByTestId('filament-slot-1')
   })
 
+  it('keeps the spools and settings a re-arrange was made for', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    const slot1 = screen.getByTestId('filament-slot-1')
+    const other = within(slot1)
+      .getAllByRole('radio')
+      .find((radio) => !(radio as HTMLInputElement).checked) as HTMLInputElement
+    const spool = Number(other.value)
+    await user.click(other)
+    await user.click(screen.getByRole('radio', { name: /Fine/ }))
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    expect(lastArrangeRequest()?.filament_plan?.slots).toContainEqual({ slot_id: 1, spool_id: spool })
+    // The new output's choices are read again; the mapping and the tier survive it.
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
+    )
+    expect(screen.getByRole('radio', { name: /Fine/ })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
+      choices: { tier: 'fine' },
+    })
+  })
+
+  it('shows a failed re-arrange as an error, not as a note', async () => {
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'nothing to arrange' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    const alert = await screen.findByText('nothing to arrange')
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert).toHaveClass('text-warn')
+  })
+
+  it('does not stack "(arranged)" on a re-arranged output', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    const again = screen.getByRole('button', { name: 'Re-arrange for these spools' })
+    await waitFor(() => expect(again).toBeEnabled())
+    await user.click(again)
+    await waitFor(() => expect(lastArrangeRequest()?.objects[0]?.output_id).not.toBe(output.id))
+    expect(lastArrangeRequest()?.name).toBe('Reagan (arranged)')
+  })
+
   it('offers no re-arrange for an output saved before manifests', async () => {
     renderPage(
       <PrintPicker

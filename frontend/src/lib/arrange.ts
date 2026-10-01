@@ -16,6 +16,14 @@ export interface Arranged {
   plates: number
 }
 
+const ARRANGED = ' (arranged)'
+
+/** A re-arranged output's name: one "(arranged)", however often it is arranged again. */
+export function arrangedName(name: string | null | undefined): string | null {
+  if (!name) return null
+  return name.endsWith(ARRANGED) ? name : `${name}${ARRANGED}`
+}
+
 export function arrangedNote(plates: number): string {
   return `Arranged onto ${plates} ${plates === 1 ? 'plate' : 'plates'}.`
 }
