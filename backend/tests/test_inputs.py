@@ -44,6 +44,11 @@ def test_params_that_differ_only_in_type_disagree() -> None:
         normalize_inputs({"params": {"flag": True}}, {"flag": 1})
 
 
+def test_the_same_nan_in_params_and_inputs_is_named_as_nan_not_disagreement() -> None:
+    with pytest.raises(InputsError, match="NaN"):
+        normalize_inputs({"params": {"width": float("nan")}}, {"width": float("nan")})
+
+
 @pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize(
     "shape",
