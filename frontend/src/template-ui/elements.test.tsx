@@ -117,6 +117,23 @@ describe('host custom elements', () => {
     expect(shadowOf(container).querySelector('sb-preview')?.querySelector('[data-testid="the-preview"]')).not.toBeNull()
   })
 
+  it('picks the first sb-preview in document order, not connect order', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        const b = document.createElement('sb-preview')
+        b.id = 'b'
+        root.append(b)
+        const first = document.createElement('sb-preview')
+        first.id = 'a'
+        root.insertBefore(first, b)
+      },
+    }))
+    const { container } = render(page({ params: {} }, vi.fn(), 'page'))
+    await waitFor(() => expect(shadowOf(container).querySelector('#b')?.textContent).toContain('Only the first <sb-preview>'))
+    expect(shadowOf(container).querySelector('#a')?.querySelector('[data-testid="the-preview"]')).not.toBeNull()
+    expect(shadowOf(container).querySelectorAll('[data-testid="the-preview"]')).toHaveLength(1)
+  })
+
   it('says why sb-preview is empty in the panel slot', async () => {
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
@@ -149,6 +166,36 @@ describe('host custom elements', () => {
     const { container } = render(page(inputs, vi.fn()))
     await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder'))
     expect(shadowOf(container).textContent).toContain('extruder 1')
+  })
+
+  it('numbers a parameter by its default-bound element, not one rebound elsewhere', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        // The rebound element comes last: it must not override the parameter's own value.
+        root.innerHTML = '<sb-param name="text_color"></sb-param><sb-param name="text_color" bind="style.text"></sb-param>'
+      },
+    }))
+    const inputs = { params: { body_color: '#111111', text_color: '#222222' }, style: { text: '#111111' } }
+    const { container } = render(page(inputs, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder'))
+    expect(shadowOf(container).textContent).toContain('extruder 2')
+    expect(shadowOf(container).textContent).not.toContain('extruder 1')
+  })
+
+  it('treats an empty bind as the default binding', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="name" bind=""></sb-param>'
+      },
+    }))
+    const onInputs = vi.fn()
+    const { container } = render(page({ params: { name: 'Hi' } }, onInputs))
+    await waitFor(() => expect(shadowOf(container).querySelector('input')).not.toBeNull())
+    const input = shadowOf(container).querySelector('input') as HTMLInputElement
+    expect(input.value).toBe('Hi')
+    fireEvent.change(input, { target: { value: 'Ho' } })
+    expect(onInputs).toHaveBeenLastCalledWith({ params: { name: 'Ho' } })
+    expect(Object.hasOwn(onInputs.mock.lastCall?.[0] as object, '')).toBe(false)
   })
 
   it('renders again into an element that is removed and added back', async () => {

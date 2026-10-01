@@ -32,7 +32,8 @@ import { bambuddyLink } from '../lib/bambuddyLinks'
 
 /** What a template UI's `host.openPrint` reaches (spec §4.3). */
 export interface ActionBarHandle {
-  openPrint(outputId: string): void
+  /** False, and nothing opens, when ``outputId`` is not the output on screen. */
+  openPrint(outputId: string): boolean
 }
 
 interface Props {
@@ -141,10 +142,9 @@ export function ActionBar({
     ref,
     () => ({
       openPrint: (outputId) => {
-        if (output?.id !== outputId) {
-          throw new Error(`output ${outputId} is not the one on screen; call generate() first`)
-        }
+        if (output?.id !== outputId) return false
         setPrintOpen(true)
+        return true
       },
     }),
     [output],
