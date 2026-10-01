@@ -1040,6 +1040,41 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
   })
 
+  it('keeps refusing to close when Advanced is switched off mid-create (#710 review)', async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <PrintPicker
+          open={open}
+          source={{ kind: 'output', output }}
+          onClose={() => setOpen(false)}
+          onRan={vi.fn()}
+        />
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByTestId('project-select'), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    const release = hold('/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(screen.getByTestId('project-select')).toBeDisabled())
+
+    // Simple mode unmounts the picker; the create is still outstanding.
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByTestId('project-select')).toBeNull())
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+
+    release()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
+  })
+
   it('sends the last project in Simple mode, with no project from the page (#772 review)', async () => {
     const { bodies } = watch('POST', '/run')
     server.use(

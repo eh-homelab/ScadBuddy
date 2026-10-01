@@ -107,12 +107,6 @@ export function ProjectPicker({
   useEffect(() => {
     reportCreating.current = onCreating
   })
-  useEffect(() => {
-    if (!saving) return
-    reportCreating.current?.(true)
-    // Also on unmount (the print dialog closing mid-create).
-    return () => reportCreating.current?.(false)
-  }, [saving])
 
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)
@@ -139,6 +133,9 @@ export function ProjectPicker({
       colour: colour.trim() || null,
     }
     setSaving(true)
+    // Tied to the request, not this component: the picker can unmount mid-create (the
+    // dialog toggling to Simple), and the guard must hold until the request settles.
+    reportCreating.current?.(true)
     setCreateError(null)
     try {
       const created = await api.createProject(body)
@@ -151,6 +148,7 @@ export function ProjectPicker({
     } catch (cause) {
       setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
     } finally {
+      reportCreating.current?.(false)
       setSaving(false)
     }
   }
