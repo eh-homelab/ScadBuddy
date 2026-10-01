@@ -149,6 +149,12 @@ describe('safeImageSrc', () => {
     ]) {
       expect(safeImageSrc(src, base), src).toBeNull()
     }
+    // A model image route named outright is on the allowlist; another route is not.
+    expect(safeImageSrc('/api/v1/models/demo/images/images/a.png?commit=abc1234')).toBe(
+      '/api/v1/models/demo/images/images/a.png?commit=abc1234',
+    )
+    expect(safeImageSrc('/api/v1/models/demo/images/model.scad')).toBeNull()
+    expect(safeImageSrc('/api/v1/models/demo/files/a.png')).toBeNull()
     // An API path and a data: image are what they were without a base.
     expect(safeImageSrc('/api/v1/jobs/j/views/top.png', base)).toBe('/api/v1/jobs/j/views/top.png')
     expect(safeImageSrc('data:image/png;base64,AAAA', base)).toBe('data:image/png;base64,AAAA')
