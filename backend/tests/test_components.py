@@ -31,6 +31,7 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 #: A stand-in: these tests only check that `build` is handed the core it was given.
 CORE = cast(Core, object())
@@ -307,6 +308,7 @@ def test_a_replaced_state_keeps_its_components(
             frontend_dir=Path("/nonexistent"),
             # build_state connects to nothing; the lifespan opens the pools.
             database_url="postgresql://unused@127.0.0.1:1/unused",
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
             preview_renders=False,
         )
     )
@@ -336,6 +338,7 @@ def test_the_lifespan_enters_a_discovered_components_run(
             seed_models_dir=seed,
             frontend_dir=Path("/nonexistent"),
             database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
             preview_renders=False,
         )
     )

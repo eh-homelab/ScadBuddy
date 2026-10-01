@@ -1,11 +1,12 @@
-"""The app wired to Postgres (`SCADBUDDY_DATABASE_URL`), end to end: the lifespan
-opens the store and migrates, renders are recorded in the table, `/metrics` reads
-the queue from it."""
+"""The app wired to Postgres (`SCADBUDDY_DATABASE_URL`), end to end: the bus shares the
+projection's listener, a failed start releases what did start, and the analyzer
+decisions are kept there. A render through the projection is `test_temporal_path`'s."""
 
 from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -21,29 +22,8 @@ from scadbuddy.core.events import Event, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.render.pg_store import PostgresJobStore
-from tests.api.conftest import wait_for_job
-
-
-@pytest.mark.requires_postgres
-def test_the_app_queues_renders_in_postgres(
-    settings: Settings, model: str, pg_conninfo: str
-) -> None:
-    app = create_app(settings)
-    with TestClient(app) as client:
-        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
-        assert accepted.status_code == 202
-        job_id = accepted.json()["job_id"]
-        # The fake openscad may or may not produce geometry; either way the job
-        # settles, and it is Postgres that says so.
-        settled = wait_for_job(client, job_id)
-        metrics = client.get("/metrics").text
-
-    assert isinstance(app.state.scadbuddy.queue.store, PostgresJobStore)
-    with psycopg.connect(pg_conninfo) as conn:
-        row = conn.execute("SELECT state FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
-    assert row is not None and row[0] == settled["status"]
-    assert "scadbuddy_render_queue_depth 0.0" in metrics
+from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.submit import RenderService
 
 
 def _wait(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -76,8 +56,8 @@ def test_two_replicas_each_hear_every_event_once(
         for name, app in (("one", one), ("other", other)):
             bus = app.state.scadbuddy.events
             assert isinstance(bus, PgNotifyEventBus)
-            # The render queue's listener, shared: one connection per process.
-            assert app.state.scadbuddy.queue.listener is bus.listener
+            # The projection's listener, shared: one connection per process.
+            assert app.state.scadbuddy.projection.pg_listener is bus.listener
             _wait(partial(_connected, bus))
             bus.add_listener(heard[name].append)
 
@@ -91,33 +71,34 @@ def test_two_replicas_each_hear_every_event_once(
 
 
 @pytest.mark.requires_postgres
-def test_a_bus_that_fails_to_start_releases_the_queue_that_did(
+def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
     settings: Settings, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bus starts after the queue and before the lifespan's `try`, whose
+    """The bus starts after the render service and before the lifespan's `try`, whose
     `finally` a failed start never reaches: the lifespan must close both itself."""
     app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
     state = app.state.scadbuddy
-    bus, queue = state.events, state.queue
+    bus, service, projection = state.events, state.render, state.projection
     assert isinstance(bus, PgNotifyEventBus)
-    store = queue.store
-    assert isinstance(store, PostgresJobStore)
+    assert isinstance(service, RenderService)
+    assert isinstance(projection, JobProjection)
     started: list[asyncio.Task[None]] = []
 
     async def unreachable(*args: object, **kwargs: object) -> None:
-        started.extend(queue._tasks)  # the queue is fully up by now
+        assert service._reconciler is not None  # the service is fully up by now
+        started.append(service._reconciler)
         raise PoolTimeout("the database refused a second pool")
 
     monkeypatch.setattr(bus._pool, "open", unreachable)
     with pytest.raises(PoolTimeout), TestClient(app):
         pass
 
-    assert started, "the queue had started before the bus failed"
+    assert started, "the render service had started before the bus failed"
     assert all(task.done() for task in started)
-    assert queue._tasks == []
-    assert store._pool.closed
+    assert service._reconciler is None
+    assert projection.pool.closed
     assert bus._pool.closed
-    assert store.pg_listener.backend_pid is None
+    assert projection.pg_listener.backend_pid is None
 
 
 @pytest.mark.requires_postgres
@@ -136,3 +117,26 @@ def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()
     assert row is not None and row[0] == "ignore"
+
+
+@pytest.mark.requires_postgres
+def test_start_up_fails_what_a_legacy_queue_left_running(
+    settings: Settings, pg_conninfo: str
+) -> None:
+    """#546: a row a pre-Temporal release was running (no workflow) is failed before
+    the reconciler starts; nothing else would ever settle it."""
+    job_id = uuid.uuid4().hex
+    with TestClient(create_app(settings)):
+        pass  # the first start migrates the schema
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO render_jobs (id, slug, params, render_key, state, created_at,"
+            " started_at) VALUES (%s, 'widget', '{}', 'k', 'running', now(), now())",
+            (job_id,),
+        )
+
+    with TestClient(create_app(settings)) as client:
+        job = client.get(f"/api/v1/jobs/{job_id}").json()
+
+    assert job["status"] == "failed"
+    assert "upgrade to Temporal" in job["error"]

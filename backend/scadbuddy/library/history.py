@@ -198,7 +198,7 @@ def git_env() -> dict[str, str]:
 def _gitignore_body(wrapper_prefix: str) -> str:
     # Every transient file a render drops beside a model: the colour wrappers and,
     # since #204, the uploaded assets staged for `import()` -- which are not .scad
-    # -- and the finished renders kept under the template (`render_cache`).
+    # -- and what the legacy queue kept under the template (`RENDERS_DIR_NAME`).
     transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"

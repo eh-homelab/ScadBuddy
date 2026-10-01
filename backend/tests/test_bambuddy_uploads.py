@@ -16,7 +16,8 @@ from scadbuddy.bambuddy.uploads import (
     SlicedCopy,
 )
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.pg_store import MIGRATIONS, PostgresJobStore
+from scadbuddy.render.pg_store import MIGRATIONS
+from scadbuddy.render.projection import JobProjection
 
 OUTPUT = "a" * 32
 OTHER = "b" * 32
@@ -29,7 +30,7 @@ def paths(tmp_path: Path) -> DataPaths:
 
 @pytest.fixture
 def uploads(pg_conninfo: str, paths: DataPaths) -> Iterator[BambuddyUploadStore]:
-    jobs = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    jobs = JobProjection(pg_conninfo, pool_size=2)
     jobs.open()
     try:
         yield BambuddyUploadStore(jobs.pool)
@@ -46,7 +47,7 @@ def test_the_tables_are_created_on_a_fresh_database_and_reopening_changes_nothin
     pg_conninfo: str, paths: DataPaths
 ) -> None:
     for _ in range(2):
-        store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+        store = JobProjection(pg_conninfo, pool_size=2)
         store.open()
         store.close()
     with psycopg.connect(pg_conninfo) as conn:

@@ -42,7 +42,12 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.url_import import ResolverUnavailableError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import PUBLIC_ADDRESS, UNUSED_DATABASE_URL, make_library_upstream
+from tests.conftest import (
+    PUBLIC_ADDRESS,
+    UNUSED_DATABASE_URL,
+    UNUSED_TEMPORAL_ADDRESS,
+    make_library_upstream,
+)
 from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
@@ -534,6 +539,7 @@ def test_the_size_cap_comes_from_the_environment(
             data_dir=tmp_path,
             frontend_dir=Path("/nonexistent"),
             database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
         )
     )
 

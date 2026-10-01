@@ -25,13 +25,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "RenderStage"]
 
-#: How a job left the queue. ``expired`` waited past SCADBUDDY_RENDER_QUEUE_TIMEOUT
-#: and never reached a worker; ``superseded`` was replaced by a newer render first.
-RenderOutcome = Literal["done", "failed", "expired", "superseded"]
+#: How a job settled; ``superseded`` was replaced by a newer render first.
+RenderOutcome = Literal["done", "failed", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
-#: What a job store call that failed was doing: a worker claiming or recording a
-#: job, a heartbeat, the lease reaper, or the per-scrape read of the queue gauges.
-StoreOperation = Literal["work", "heartbeat", "reap", "read"]
+#: What a `render_jobs` call that failed was doing: the per-scrape read of the
+#: queue gauges, or starting a submitted job's workflow or cancelling a superseded one.
+StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]
@@ -65,15 +64,10 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
-        self.render_cached = Counter(
-            "scadbuddy_render_jobs_cached",
-            "Render requests answered with a finished render kept under the template.",
-            registry=r,
-        )
         self.store_info = Gauge(
             "scadbuddy_render_store_info",
-            'Which job store holds the render queue: backend="postgres" when '
-            'SCADBUDDY_DATABASE_URL is set, "files" otherwise; always 1.',
+            'Which job store holds the render jobs: backend="postgres" (the '
+            "render_jobs projection); always 1.",
             ["backend"],
             registry=r,
         )
@@ -85,22 +79,20 @@ class Metrics:
         )
         self.store_errors = Counter(
             "scadbuddy_render_store_errors",
-            "Job store calls that failed, by what they were doing.",
+            "render_jobs calls that failed, by what they were doing.",
             ["operation"],
             registry=r,
         )
         self.listener_connected = Gauge(
             "scadbuddy_render_queue_listener_connected",
-            "1 while this process LISTENs for the NOTIFY that wakes its render workers "
-            "(Postgres); 0 while that connection is down and the workers fall back to "
-            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none. "
-            "The same connection carries the event bus (scadbuddy_events).",
+            "1 while this process's LISTEN connection (the event bus's, scadbuddy_events) "
+            "is up; 0 while it is down and reconnecting.",
             registry=r,
         )
         self.listener_reconnects = Counter(
             "scadbuddy_render_queue_listener_reconnects",
-            "Times the render queue's LISTEN connection was re-established after it "
-            "dropped (Postgres). A first connection is not counted.",
+            "Times this process's LISTEN connection was re-established after it "
+            "dropped. A first connection is not counted.",
             registry=r,
         )
         # The Postgres event bus (spec §7): what went out, what came in, what was lost.
@@ -210,8 +202,23 @@ class Metrics:
             registry=r,
         )
 
+        # The content store under the blob store (spec 2026-09-27 §6.2, #426).
+        self.store_ops = Counter(
+            "scadbuddy_store_operations_total",
+            "Blob store calls by operation (put, get, delete) and outcome"
+            " (ok, full, corrupt, missing).",
+            ["op", "outcome"],
+            registry=r,
+        )
+        self.worker_cache = Counter(
+            "scadbuddy_worker_cache_total",
+            "Piece fetches answered from this process's local cache (hit) or downloaded (miss).",
+            ["result"],
+            registry=r,
+        )
+
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
-        # store per scrape, like the queue's.
+        # store per scrape, like the render queue's from the projection.
         self.assets_stored = Gauge(
             "scadbuddy_assets_stored",
             "Distinct files stored for `// file` parameters under data/assets/.",

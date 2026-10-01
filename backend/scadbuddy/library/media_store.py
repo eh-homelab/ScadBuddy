@@ -40,7 +40,7 @@ class MediaStore(Protocol):
 
 
 class PostgresMediaStore:
-    """`template_media` over the render queue's connection pool."""
+    """`template_media` over the projection's connection pool."""
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
