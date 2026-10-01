@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from pathlib import Path
 
@@ -46,7 +46,13 @@ class LocalBlobStore:
     def keys(self) -> list[str]:
         if not self.root.is_dir():
             return []
-        return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+        # Only names `_path` accepts: a stray directory (`lost+found`) is no blob, and
+        # its name would fail the sweep's every call on it.
+        return sorted(
+            p.name
+            for p in self.root.iterdir()
+            if p.is_dir() and _KEY.fullmatch(p.name) and p.name not in (".", "..")
+        )
 
     def touched_at(self, key: str) -> float:
         return self._path(key).stat().st_mtime
@@ -105,7 +111,7 @@ class LocalContentBackend:
         await asyncio.to_thread(write)
         return backend_id
 
-    async def download(self, backend_id: str) -> AsyncIterator[bytes]:
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         try:
             data = await asyncio.to_thread(self._path(backend_id).read_bytes)
         except FileNotFoundError:

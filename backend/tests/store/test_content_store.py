@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from scadbuddy.store.content import (
     BlobMissingError,
     BlobRef,
     BlobScope,
+    ContentStore,
     RefusedDeleteError,
     ReuseLostError,
     StoreFullError,
@@ -50,6 +51,35 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(tmp_path: Path, 
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})
     assert (await store.stat(f"asset-{first.sha256}")) is not None
+
+
+class _ClosingBackend(LocalContentBackend):
+    """Records each download whose generator was closed."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.closed: list[str] = []
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        try:
+            async for chunk in super().download(backend_id):
+                yield chunk
+        finally:
+            self.closed.append(backend_id)
+
+
+async def test_a_read_stopped_early_closes_the_backends_download(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A consumer that stops mid-stream and closes `get` closes the backend's download
+    with it (#680), rather than leaving its HTTP stream to the garbage collector."""
+    backend = _ClosingBackend(tmp_path / "remote")
+    store = ContentStore(backend, BlobIndex(pool))
+    ref = await store.put("piece", os.urandom(3 << 20), name="p", scope=SCOPE)
+    async with contextlib.aclosing(store.get(ref)) as chunks:
+        async for _ in chunks:
+            break
+    assert backend.closed == [ref.backend_id]
 
 
 async def test_put_refuses_past_the_cap_except_a_re_put(tmp_path: Path, pool: Pool) -> None:
@@ -136,6 +166,37 @@ def _age(pool: Pool, *keys: str) -> None:
             "UPDATE store_blobs SET touched_at = %s WHERE key = ANY(%s)",
             (datetime.now(UTC) - timedelta(hours=2), list(keys)),
         )
+
+
+class _ClaimedAfterSnapshot(BlobRefs):
+    """A claim of ``key`` that lands right after the sweep's `referenced()` snapshot:
+    the claimant's `touch` (when ``touch``), then its `add`."""
+
+    def __init__(self, pool: Pool, store: ContentStore, key: str, *, touch: bool) -> None:
+        super().__init__(pool)
+        self.store, self.key, self.touch = store, key, touch
+
+    def referenced(self) -> set[str]:
+        snapshot = super().referenced()
+        if self.touch:
+            self.store.index.touch(self.key)
+        self.add(self.key, "job", "late")
+        return snapshot
+
+
+@pytest.mark.parametrize("touch", [True, False], ids=["touched-first", "added-only"])
+async def test_a_claim_after_the_sweeps_snapshot_survives_only_when_touched_first(
+    tmp_path: Path, pool: Pool, touch: bool
+) -> None:
+    """The claim protocol end to end (#637): `ContentStore.touch` before `refs.add`
+    keeps a blob a sweep already decided was unreferenced; an `add` alone does not."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"claimed", name="c", scope=SCOPE, key="claimed")
+    _age(pool, "claimed")
+    refs = _ClaimedAfterSnapshot(pool, store, "claimed", touch=touch)
+    removed = await sweep_content(store, refs, grace=3600, now=time.time())
+    assert removed == ([] if touch else ["claimed"])
+    assert (store.index.get("claimed") is not None) is touch
 
 
 async def test_the_sweep_leaves_another_backends_rows_alone(
@@ -280,6 +341,34 @@ async def test_a_reuse_that_loses_to_a_release_uploads_its_own_copy(
     gone = old.model_copy(update={"backend_id": f"snapshot/{'0' * 64}"})
     with pytest.raises(ReuseLostError):
         store.index.put("c", gone, slug="demo", meta={}, reuse=True)
+
+
+async def test_a_sweep_racing_a_put_of_the_same_bytes_under_another_key_loses_nothing(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """The sweep takes a stale key while a put of another key reuses its object: the
+    put stores its own copy, so the new key stays readable."""
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    await store.put("piece", b"same", name="a", scope=SCOPE, key="a")
+    _age(pool, "a")
+    released = asyncio.Event()
+    backend = _ReleasedWhileReused(root, released)
+    store.backend = backend
+
+    async def sweep() -> list[str]:
+        await backend.gate.wait()  # the put found `a`'s object and means to reuse it
+        removed = await sweep_content(store, BlobRefs(pool), grace=3600, now=time.time())
+        released.set()
+        return removed
+
+    ref, removed = await asyncio.gather(
+        store.put("piece", b"same", name="b", scope=SCOPE, key="b"), sweep()
+    )
+    assert removed == ["a"]
+    assert await store.read(ref) == b"same"
+    named = store.index.get("b")
+    assert named is not None and named.ref == ref
 
 
 async def test_a_lost_reuse_at_the_cap_is_still_stored(
@@ -544,6 +633,46 @@ async def test_a_release_cancelled_midway_keeps_the_row(tmp_path: Path, pool: Po
     store.backend = _CancelledRemove(tmp_path / "remote")
     with pytest.raises(asyncio.CancelledError):
         await store.delete("k")
+    assert store.index.get("k") is not None
+
+
+class _SlowRemove(LocalContentBackend):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.removing = asyncio.Event()
+
+    async def remove(self, backend_id: str) -> None:
+        self.removing.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_release_cancelled_twice_still_puts_the_row_back(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case the shield is for: a second cancellation lands while the row is going
+    back. The re-insert finishes on its own, and `aclose` waits for it."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"p", name="p", scope=SCOPE, key="k")
+    backend = _SlowRemove(tmp_path / "remote")
+    store.backend = backend
+    swapping, go = threading.Event(), threading.Event()
+    swap = store.index.swap
+
+    def slow_swap(*args: Any, **kwargs: Any) -> Any:
+        swapping.set()
+        go.wait(10)
+        return swap(*args, **kwargs)
+
+    monkeypatch.setattr(store.index, "swap", slow_swap)
+    delete = asyncio.create_task(store.delete("k"))
+    await backend.removing.wait()
+    delete.cancel()  # mid-remove: the row starts going back
+    assert await asyncio.to_thread(swapping.wait, 10)
+    delete.cancel()  # mid-re-insert
+    with pytest.raises(asyncio.CancelledError):
+        await delete
+    go.set()
+    await store.aclose()
     assert store.index.get("k") is not None
 
 

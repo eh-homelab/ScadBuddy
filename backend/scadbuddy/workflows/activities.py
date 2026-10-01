@@ -97,20 +97,28 @@ def _failure(error: OpenSCADError) -> ApplicationError:
 
 
 async def _ensure_assets(d: WorkerDeps, params: Mapping[str, object]) -> set[str] | None:
-    """Bring the render's uploads in from the store; the ids it did not bring in (the
-    ones already local among them), or None without a store (one volume: nothing to
-    bring in). A render that then finds one missing names it as not in the store."""
+    """Bring the render's uploads in from the store; the ids it could not provide, or
+    None without a store (one volume: nothing to bring in). A render that then finds
+    one of those missing names it as not in the store."""
     if d.remote_assets is None:
         return None
     wanted = asset_ids_in(params)
-    brought = await _heartbeating(asyncio.create_task(d.remote_assets.ensure(d.assets, wanted)))
-    return wanted - set(brought)
+    absent = await _heartbeating(asyncio.create_task(d.remote_assets.ensure(d.assets, wanted)))
+    return set(absent)
 
 
 def _unavailable(error: AssetUnavailableError, missing: set[str] | None) -> ApplicationError:
-    """Non-retryable: the same parameters name the same missing file on every attempt."""
+    """Non-retryable: the same parameters name the same missing file on every attempt.
+    The one exception is a copy `ensure` provided that went before the render read it
+    (the worker's upload sweep): the next attempt brings it in again."""
+    if missing is not None and error.asset_id not in missing:
+        return ApplicationError(
+            f"parameter {error.parameter!r} names uploaded file {error.asset_id}, whose copy"
+            " on this worker went before the render read it",
+            type="AssetUnavailable",
+        )
     message = str(error)
-    if missing is not None and error.asset_id in missing:
+    if missing is not None:
         message = (
             f"parameter {error.parameter!r} names uploaded file {error.asset_id}, which is"
             " not in the blob store"
@@ -160,8 +168,8 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
 
 
 async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
-    """Where the piece's blob goes: its template's folder, named by `model.json`; the
-    template's root even for a piece in a subdirectory (`parts/roof.scad`).
+    """Where the piece's blob goes: its template's folder, named by `model.json` in
+    the template's root (a piece in `parts/` reads the root's, not `parts/`).
 
     Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
     """

@@ -136,6 +136,31 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert content.index.get(font_key(family.name)) is not None
 
 
+async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#687: `install(force=True)` republishes a family under the same key; a worker
+    holding the old files fetches the new ones, and the API's own install (no marker,
+    the source of what was published) is never overwritten by a sync."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v1")
+    api = FontMirror(content, api_fonts)
+    await api.publish("Lobster Two")
+    worker_fonts = FontService(tmp_path / "worker")
+    worker = FontMirror(content, worker_fonts)
+    assert await worker.sync() == [family.name]
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v2")
+    await api.publish("Lobster Two")
+    assert await worker.sync() == [family.name]
+    assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"v2"
+    assert await worker.sync() == []
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v3, not yet published")
+    assert await api.sync() == []
+    assert (family / "LobsterTwo-Regular.ttf").read_bytes() == b"v3, not yet published"
+
+
 def _worker_deps(tmp_path: Path, pool: Pool, snapshots: SnapshotStore) -> WorkerDeps:
     return WorkerDeps(
         config=Config(data_dir=tmp_path / "worker"),
@@ -311,6 +336,48 @@ async def test_an_export_a_worker_uses_again_is_not_pruned_within_the_ttl(
     assert await worker.materialize("demo", rev)  # a hit
     assert prune_revision_exports(worker_paths, 86400) == []
     assert (export / "model.scad").is_file()
+
+
+async def test_ensure_marks_an_old_export_used_before_packing_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#688: `ensure` packs an existing export, so it touches it first; otherwise the
+    prune (its mtime past the TTL) could remove it mid-pack."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "7" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    old = time.time() - 7 * 86400
+    os.utime(export, (old, old))
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    assert prune_revision_exports(api_paths, 86400) == []
+
+
+async def test_concurrent_ensures_of_a_new_revision_store_it_once(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: debounced submits of a revision's first render all `pin` at once; one
+    packs and uploads, the others find its row."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "6" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(6);")
+    put = content.put
+    calls = 0
+
+    async def counting(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)  # an upload takes a while
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = counting  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None)
+    keys = await asyncio.gather(*(api.ensure("demo", rev) for _ in range(5)))
+    assert keys == [snapshot_key("demo", rev)] * 5
+    assert calls == 1
 
 
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:

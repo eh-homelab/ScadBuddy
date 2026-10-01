@@ -395,6 +395,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     source = RenderSettingsSource(pool, state.settings)
     try:
         current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+        source.seed(current)
         state.store = build_store(
             backend=current.store_backend,
             current=current,
