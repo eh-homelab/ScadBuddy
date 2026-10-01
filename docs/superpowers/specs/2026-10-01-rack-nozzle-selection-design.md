@@ -78,8 +78,10 @@ on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
 - **Diameter** is compared as `round(float(x), 2)`, never as a string: the rack
   reports `"0.2"` and `filament-requirements` reports `"0.20"` for the same
   nozzle (§2, §8), so a string compare would make every position ineligible and
-  the feature would silently do nothing. A diameter that does not parse makes
-  that position ineligible.
+  the feature would silently do nothing. A diameter that does not parse, on the
+  slot or on the group, makes no position eligible for that pair: an unparsable
+  slot is skipped, and an unparsable group gets no pick and a
+  `rack-left-to-bambuddy` warning ("group N: nozzle size unreadable").
 - **Flow**: the group's `volume_type` is a name (`"Standard"`, `"High Flow"`)
   and the slot's `nozzle_type` is a code. The group wants High Flow when
   `volume_type.strip().lower()` starts with `"high flow"`; the slot is High Flow
@@ -143,13 +145,17 @@ is one physical print: a queue item with `quantity` N produces N archives, and
 each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
 (two replicas, a restart) cannot count a print twice.
 
-`rack_nozzle_seen`, primary key `(printer_id, serial)`:
+`rack_nozzle_seen`, primary key `serial`:
 
 | Column | Type | Notes |
 |---|---|---|
-| `printer_id` | int | |
-| `serial` | text | |
-| `first_seen_at` | timestamptz | |
+| `serial` | text | the hotend's own serial, unique across printers |
+| `printer_id` | int | the printer it was last seen on |
+| `first_seen_at` | timestamptz | first time any printer's print flow saw it |
+
+Use and age follow the hotend, not the printer: a hotend moved to another H2C
+keeps its `first_seen_at` and its print history, and the write updates
+`printer_id` only.
 
 `rack_nozzle_picks`, primary key `(queue_item_id, group_id)`: what was picked.
 
@@ -194,7 +200,10 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
   output never printed through `slice_queue`, see `progress_for`), which has no
   picks and must not reach the write. It is advisory:
   every exception from it, Bambuddy's or the database's, is caught and logged
-  with the output id and archive id only (never a serial), and the watcher goes
+  with a fixed message, `type(exc).__name__`, the output id and the archive id,
+  and never `str(exc)` or a traceback: a database or HTTP error can carry the
+  serial it failed on in its own text (§7). The same rule holds for every
+  `RackUsageStore` and `choose_rack` error path. The watcher goes
   on to `_done` exactly as today. A failed write is not retried; that print's
   use is simply missing. Each row is written:
   - `print_seconds` is `actual_time_seconds`, else `print_time_seconds` (the
@@ -207,7 +216,7 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
 - An archive linked by `content_hash` with no `queue_item_id` cannot be tied to
   a pick and is not counted.
 - A group's use is `count(*)`, `sum(print_seconds)` and `sum(grams)` over its
-  serial's `rack_nozzle_prints` rows. "Least used" orders by `print_seconds`,
+  serial's `rack_nozzle_prints` rows, on whichever printer they were printed. "Least used" orders by `print_seconds`,
   then prints.
 - The serial is recorded when the pick is made, because a hotend can be moved to
   another position later.
@@ -379,11 +388,14 @@ so the trade is accepted.
 - Migration: `rack_nozzle_seen`, `rack_nozzle_picks` and `rack_nozzle_prints`.
 - `bambuddy/rack_usage.py` (new): `RackUsageStore`, the one store that owns all
   three tables: `seen()`, `record_picks()`, `record_prints()` and
-  `usage(printer_id)`. It is a `Component` (`core/components.py`), registered in
+  `usage(serials)`. It is a `Component` (`core/components.py`), registered in
   `bambuddy/component.py` beside `ARCHIVE_CACHE`, never a new `AppState` field;
   routes read it through `api/components.py` `component_dep`. `PrintLinkStore`
   is on the older `AppState` wiring and is not the pattern to copy.
   `print_run.py`, `choices.py` and `watcher.py` call it; none of them holds SQL.
+- `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` §6: amend
+  "ScadBuddy does not set `nozzle_rack_choice`" to point at this spec, so the two
+  approved specs do not contradict each other.
 - `bambuddy/dispatch.py` module docstring: name `nozzle_rack_choice` beside
   `filament_overrides` as a queue-only field.
 - `api/printing.py` / `/check`: rack options and picks per side.
@@ -424,6 +436,10 @@ fixtures (which use invented serials), or in commits.
     slicing; with two `on_rack` groups the manual pick goes to the lower id and the
     result carries `rack-manual-partial`, not `rack-left-to-bambuddy`;
   - `"#00B1B7"` on a group matching `"00B1B7FF"` on a slot;
+  - an unparsable group diameter giving no pick and a `rack-left-to-bambuddy`
+    warning;
+  - a serial seen on printer 2 after printer 1 keeping its `first_seen_at` and
+    history;
   - a `used_in_plate: false` CF filament not making its group abrasive;
   - a group of PLA and PLA-CF counted as abrasive;
   - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
@@ -438,7 +454,9 @@ fixtures (which use invented serials), or in commits.
   - an archive with no `queue_item_id` is not counted;
   - an archive read or database write that raises is logged, writes nothing, and
     the print still settles and publishes `print.settled` once;
-  - an output whose progress is `None` never reaches the write.
+  - an output whose progress is `None` never reaches the write;
+  - a database error whose text contains a serial logs neither the serial nor
+    a traceback.
 - A `choose_rack` test: on a two-plate print the second plate's pick uses a
   rack read after the first plate sliced.
 - A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
