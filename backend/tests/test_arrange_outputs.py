@@ -212,3 +212,26 @@ async def test_one_object_arranged_alone_still_takes_the_planned_order(tmp_path:
     with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
         settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
     assert [c.upper() for c in settings["filament_colour"][:2]] == planned
+
+
+async def test_a_colour_planned_twice_in_two_cases_takes_one_slot(tmp_path: Path) -> None:
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    own = part.colours[0].upper()
+    req = OutputRequest(
+        job_id="j5",
+        index=0,
+        slug="demo",
+        layout=Layout(plates=[LayoutPlate(items=[Placed(piece_key=part.piece_key, x=0, y=0)])]),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+        colours=["#abcdef", "#ABCDEF", own.lower()],
+    )
+    out = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert out.result.colors == ["#ABCDEF", own]
+    with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    assert [c.upper() for c in settings["filament_colour"]] == ["#ABCDEF", own]

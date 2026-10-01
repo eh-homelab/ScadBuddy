@@ -198,7 +198,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
     layouts: dict[str, PlateLayout] = {}
-    colours: list[str] = [c.upper() for c in req.colours]
+    # One slot per colour: a plan that spells it twice (in two cases) still gets one.
+    colours: list[str] = list(dict.fromkeys(c.upper() for c in req.colours))
     plates: list[PlateParts] = []
     for plate in req.layout.plates:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
