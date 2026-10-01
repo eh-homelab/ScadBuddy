@@ -227,6 +227,35 @@ async def test_an_identical_submit_coalesces_and_starts_nothing_new(
     assert (await asyncio.to_thread(projection.read, first.id)).claims == 2
 
 
+async def test_a_submit_that_coalesces_keeps_the_first_submitters_inputs(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The render is keyed on `params`, so a second submit with other UI state joins the
+    waiting job: one workflow, and the row keeps the inputs of the submission that made
+    it (the route answers each caller with its own)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue, reconcile_after=0.0)
+        started: list[str] = []
+        start = client.start_workflow
+
+        async def counting(*args: Any, **kwargs: Any) -> Any:
+            started.append(kwargs["id"])
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(client, "start_workflow", counting)
+        lid = {"params": {"width": 5}, "ui": {"tab": "lid"}, "v": 0}
+        base = {"params": {"width": 5}, "ui": {"tab": "base"}, "v": 0}
+        # No worker: the first job stays pending, so the second is answered by it.
+        first = await service.submit(SLUG, {"width": 5}, inputs=lid)
+        second = await service.submit(SLUG, {"width": 5}, inputs=base)
+        await service.aclose()
+
+    assert second.id == first.id
+    assert started == [workflow_id_for(first.id)]
+    assert (await asyncio.to_thread(projection.read, first.id)).inputs == lid
+
+
 async def test_a_row_whose_start_fails_does_not_stop_the_next_one(
     make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

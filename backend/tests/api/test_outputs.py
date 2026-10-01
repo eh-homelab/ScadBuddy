@@ -16,6 +16,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.split import ColourPart
@@ -480,6 +481,55 @@ def test_an_output_refuses_inputs_the_job_did_not_render(
     assert refused.json()["detail"] == f"inputs.params are not the parameters job {job_id} rendered"
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("inputs", "detail"),
+    [
+        ({"params": "not-an-object"}, "inputs.params must be an object of parameter values"),
+        ({"params": {"width": 12}, "ui": {"note": "x" * 70_000}}, "bytes; at most 65536"),
+    ],
+    ids=["malformed", "oversized"],
+)
+def test_an_output_refuses_inputs_that_are_not_inputs(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    inputs: dict[str, object],
+    detail: str,
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "inputs": inputs}
+    )
+    assert refused.status_code == 422, refused.text
+    assert detail in refused.json()["detail"]
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    job = state.render.store.read(job_id)
+    with pytest.raises(InputsError):
+        state.outputs.create(job, inputs={"params": {"width": "12"}})
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
+    inputs_path.write_text("{not json", encoding="utf-8")
+    expected = {"params": {"width": 12}, "v": 0}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
 
 
 def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:

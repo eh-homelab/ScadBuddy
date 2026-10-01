@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -10,7 +12,8 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
-from scadbuddy.render.job_models import QueueFullError
+from scadbuddy.render.job_models import Job, QueueFullError
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
@@ -246,6 +249,34 @@ def test_a_render_takes_inputs_and_the_job_reports_them(client: TestClient, mode
     assert job["inputs"] == {"params": {"width": 12}, "ui": {"tab": "lid"}, "v": 0}
 
 
+def test_a_coalesced_submit_answers_with_the_callers_own_inputs(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#706 gate: a submit that joins a waiting job (the same `params`) gets that job,
+    whose row keeps the first submitter's inputs. The response carries the caller's own,
+    so a UI never takes a stranger's state for its own."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    submit = state.render.submit
+    jobs: list[Job] = []
+
+    async def coalescing(slug: str, params: Mapping[str, ParamValue], **kwargs: Any) -> Job:
+        # As the service answers a submit whose render key matches a pending job.
+        if not jobs:
+            jobs.append(await submit(slug, params, **kwargs))
+        return jobs[0]
+
+    monkeypatch.setattr(state.render, "submit", coalescing)
+    url = f"/api/v1/models/{model}/render"
+    first = client.post(url, json={"inputs": {"params": {"width": 5}, "ui": {"tab": "lid"}}})
+    second = client.post(url, json={"inputs": {"params": {"width": 5}, "ui": {"tab": "base"}}})
+    assert first.status_code == second.status_code == 202, second.text
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert first.json()["inputs"] == {"params": {"width": 5}, "ui": {"tab": "lid"}, "v": 0}
+    assert second.json()["inputs"] == {"params": {"width": 5}, "ui": {"tab": "base"}, "v": 0}
+    status = client.get(second.json()["status_url"]).json()
+    assert status["inputs"]["ui"] == {"tab": "lid"}  # the submission that created it
+
+
 def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: str) -> None:
     accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert accepted.status_code == 202
@@ -262,8 +293,23 @@ def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: st
         ({"inputs": {"params": {}, "blob": "x" * 70000}}, f"at most {MAX_INPUTS_BYTES}"),
         ('{"inputs": {"params": {"width": NaN}}}', "no NaN or Infinity"),
         ('{"inputs": {"params": {}, "ui": {"zoom": Infinity}}}', "no NaN or Infinity"),
+        # The params-only body takes the same checks (#706 gate): an integer
+        # parameter at Infinity was a 500 from `int(float("inf"))`.
+        ('{"params": {"width": Infinity}}', "no NaN or Infinity"),
+        ('{"params": {"width": NaN}}', "no NaN or Infinity"),
+        ({"params": {"label": "x" * 70000}}, f"at most {MAX_INPUTS_BYTES}"),
     ],
-    ids=["disagree", "unknown", "type", "size", "nan-param", "inf-nested"],
+    ids=[
+        "disagree",
+        "unknown",
+        "type",
+        "size",
+        "nan-param",
+        "inf-nested",
+        "legacy-inf",
+        "legacy-nan",
+        "legacy-size",
+    ],
 )
 def test_bad_inputs_are_refused_before_a_job_exists(
     client: TestClient, model: str, body: dict[str, object] | str, detail: str

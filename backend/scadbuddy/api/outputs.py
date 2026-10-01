@@ -162,16 +162,18 @@ async def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    inputs = None
+    inputs: dict[str, Any] | None = None
     if body.inputs is not None:
         try:
-            inputs = normalize_inputs(body.inputs, None)
+            inputs = normalize_inputs(body.inputs, None).data
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         rendered = f"inputs.params are not the parameters job {job.id} rendered"
-        # The store's rule, which compares type as well as value (12.0 is not 12), so
-        # nothing this lets through fails the store's check half-way through the copy.
-        # It skips a job with no params, which the equality check covers.
+        # Two checks, both needed. The equality is Python's, where 12.0 == 12 and
+        # True == 1, so it is only a cheap first answer (and the one that covers a job
+        # with no params, which the store's rule skips). The store's rule below
+        # compares type as well as value; it is the guarantee that nothing reaching
+        # the copy is refused there.
         if inputs["params"] != job.params:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
         try:

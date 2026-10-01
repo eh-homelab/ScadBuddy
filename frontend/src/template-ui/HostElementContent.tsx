@@ -2,7 +2,6 @@ import type { ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily } from '../api/types'
 import { ParamWidget } from '../components/widgets/ParamWidget'
 import { setPath, type JsonObject } from '../lib/inputs'
-import { extrudersOf, type ParamValues } from '../lib/params'
 import { bindingOf } from './bindings'
 import type { HostElement } from './elements'
 import type { UiSlot } from './types'
@@ -25,7 +24,7 @@ function Problem({ children }: { children: ReactNode }) {
   return <p role="alert" className="px-3 py-2 text-[12px] text-warn">{children}</p>
 }
 
-function BoundParam({ element, context, values }: { element: HostElement; context: ElementContext; values: ParamValues }) {
+function BoundParam({ element, context, extruders }: { element: HostElement; context: ElementContext; extruders: ReadonlyMap<string, number> }) {
   const binding = bindingOf(element, context)
   if (typeof binding === 'string') return <Problem>{binding}</Problem>
   const { name, bind, param, value, mistyped } = binding
@@ -40,7 +39,7 @@ function BoundParam({ element, context, values }: { element: HostElement; contex
         slug={context.slug}
         version={context.version}
         fonts={context.fonts}
-        extruder={extrudersOf(context.schema, values).get(name)}
+        extruder={extruders.get(name)}
         onChange={(next) => context.onInputs(setPath(context.getInputs?.() ?? context.inputs, bind, next))}
       />
     </div>
@@ -50,19 +49,19 @@ function BoundParam({ element, context, values }: { element: HostElement; contex
 export function HostElementContent({
   element,
   context,
-  values,
+  extruders,
   firstPreview,
 }: {
   element: HostElement
   context: ElementContext
-  /** `effectiveValues` over every element, for the extruder numbers. */
-  values: ParamValues
+  /** Each colour parameter's extruder, from `effectiveValues` over every element: once per render. */
+  extruders: ReadonlyMap<string, number>
   /** The one `<sb-preview>` the preview mounts into: one canvas, one capture ref. */
   firstPreview: HostElement | undefined
 }) {
   switch (element.localName) {
     case 'sb-param':
-      return <BoundParam element={element} context={context} values={values} />
+      return <BoundParam element={element} context={context} extruders={extruders} />
     case 'sb-preview':
       if (context.slot !== 'page') {
         return <Problem>The preview is beside the panel in the panel slot; &lt;sb-preview&gt; shows it only in the page slot.</Problem>

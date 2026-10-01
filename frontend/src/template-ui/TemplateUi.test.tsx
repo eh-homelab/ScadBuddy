@@ -72,6 +72,34 @@ describe('TemplateUi', () => {
     expect(urls).toEqual([])
   })
 
+  it('refuses a module path outside ui/ without loading it', async () => {
+    const urls = withModule(vi.fn())
+    const onFailure = vi.fn()
+    render(
+      <TemplateUi slug="s" ui={{ ...UI, module: 'ui/../model.scad' }} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />,
+    )
+    await waitFor(() => expect(onFailure).toHaveBeenCalledWith({ file: 'ui/../model.scad', message: expect.stringContaining('not a file under ui/') }))
+    expect(urls).toEqual([])
+  })
+
+  it('keeps the deps it mounted with when only the deps prop changes (HostDeps members are stable)', async () => {
+    let kept: Host | undefined
+    const mount = vi.fn<Mount>((_root, host) => {
+      kept = host
+    })
+    withModule(mount)
+    const a = deps()
+    const b = { ...deps(), getInputs: vi.fn(() => ({ params: { name: 'B' } })) }
+    const props = { slug: 's', ui: UI, version: undefined, inputs: { params: {} }, onFailure: vi.fn() }
+    const { rerender } = render(<TemplateUi {...props} deps={a} />)
+    await waitFor(() => expect(kept).toBeDefined())
+    rerender(<TemplateUi {...props} deps={b} />)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(mount).toHaveBeenCalledOnce()
+    expect((kept as Host).inputs.get()).toEqual({ params: { name: 'Hi' } })
+    expect(b.getInputs).not.toHaveBeenCalled()
+  })
+
   it('runs the cleanup and empties the root on unmount, and notifies input changes', async () => {
     const cleanup = vi.fn()
     const seen: unknown[] = []
@@ -174,5 +202,29 @@ describe('TemplateUi', () => {
     rerender(<TemplateUi {...props} version="abc1234" />)
     await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
     expect(onFailure).toHaveBeenCalledOnce()
+  })
+
+  it('gives a host kept after a template switch nothing of the next template', async () => {
+    let kept: Host | undefined
+    withModule((root, host) => {
+      kept ??= host
+      root.append(document.createElement('span'))
+    })
+    const a = deps()
+    const b = { ...deps(), slug: 'other', getInputs: () => ({ params: { name: 'B' } }) }
+    const { container, rerender } = render(
+      <TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={a} inputs={{ params: {} }} onFailure={vi.fn()} />,
+    )
+    await waitFor(() => expect(kept).toBeDefined())
+    rerender(<TemplateUi slug="other" ui={UI} version={undefined} deps={b} inputs={{ params: {} }} onFailure={vi.fn()} />)
+    await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
+    const old = kept as Host
+    expect(() => old.inputs.get()).toThrow(/unmounted/)
+    await expect(old.schema()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.list()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.save('x')).rejects.toThrow(/unmounted/)
+    await expect(old.presets.load('x')).rejects.toThrow(/unmounted/)
+    expect(b.presets.list).not.toHaveBeenCalled()
+    expect(b.presets.save).not.toHaveBeenCalled()
   })
 })

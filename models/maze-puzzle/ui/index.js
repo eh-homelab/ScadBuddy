@@ -51,7 +51,7 @@ export async function mount(root, host) {
   }
   draw(host.inputs.get())
   const unsubscribe = host.inputs.subscribe(draw)
-  host.describe?.(() =>
+  host.describe(() =>
     modeOf(host.inputs.get(), schema) === 'ball_lid'
       ? 'Ball maze with a snap-on lid; lid_color is shown.'
       : 'Open-tray ball maze; lid_color is hidden because there is no lid.',
