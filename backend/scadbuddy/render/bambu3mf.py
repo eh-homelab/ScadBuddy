@@ -594,7 +594,9 @@ def write_plates_3mf(
             )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Written aside and swapped in whole (#867): a timed-out attempt's thread that is
-    # still writing can never leave a half-written archive at `out_path`.
+    # still writing can never leave a half-written archive at `out_path`. A hard kill
+    # before the replace leaves the dot-named staging file: `pack_dir` never publishes
+    # dot files, and it goes when the piece's directory is evicted or swept.
     staging = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}")
     try:
         with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as archive:
