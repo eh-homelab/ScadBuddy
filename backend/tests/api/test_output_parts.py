@@ -141,8 +141,10 @@ def test_a_save_whose_write_fails_holds_nothing(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(OutputStore, "create", full)
-    with pytest.raises(OSError, match="No space left"):
-        client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+    # The base's answer for a copy that fails (#427), raised after the release.
+    response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+    assert response.status_code == 404
+    assert "is gone" in response.json()["detail"]
     assert held(pool) == set()
 
 
