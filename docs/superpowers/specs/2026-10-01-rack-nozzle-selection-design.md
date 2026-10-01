@@ -16,7 +16,7 @@ ScadBuddy now ranks the rack itself and sends its pick on the queue item. Simple
 mode shows the pick and the reason for it. Advanced mode lets the user change the
 ranking algorithm or pick a position by hand.
 
-This supersedes one decision of the spool-first-print work: its spec (§4.3,
+This supersedes one decision of the spool-first-print work: its spec (§6,
 `2026-09-27-spool-first-print-design.md`) and plan (`2026-09-27-spool-first-print.md`)
 say ScadBuddy sends no `nozzle_rack_choice`, and
 `backend/tests/api/test_print_run_choices.py` asserts
@@ -337,6 +337,10 @@ fixtures (which use invented serials), or in commits.
   longer fits the printer" shows that message in the print's progress and run
   result, for a ranked pick and for a manual one.
 - A `/check` test that no serial appears in the response body.
+- A logging test (`caplog` at `DEBUG`, as in `tests/test_library_processes.py`):
+  a full pick, enqueue and settle with invented serials, including the failure
+  paths of §5, leaves none of those serials in any log record's message or
+  `extra`.
 - Frontend tests: the Simple line, the warning, and the Advanced selects sending
   a manual pick.
 - Live acceptance after deploy (unknown 3 above), recorded in §8.
