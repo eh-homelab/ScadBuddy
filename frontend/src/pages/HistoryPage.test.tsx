@@ -287,6 +287,43 @@ describe('HistoryPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     expect(within(dialog).getByRole('radio', { name: /Slice and queue/ })).toBeChecked()
   })
+
+  it('arranges the outputs ticked on the page', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(within(reagan).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Copies of wall — Reagan')).not.toBeInTheDocument(),
+    )
+    // The list reloads with the arranged output, and the selection is cleared.
+    expect(await screen.findByText('Arranged from 1 output')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
+  it('offers no Edit on an arranged output', async () => {
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...outputs[0],
+            id: 'f'.repeat(32),
+            name: 'Batch',
+            params: {},
+            arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+          },
+        ]),
+      ),
+    )
+    render()
+    const batch = await row('Batch')
+    expect(within(batch).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Send again' })).toBeInTheDocument()
+  })
 })
 
 describe('template inputs (spec 2026-09-27 §4.3)', () => {

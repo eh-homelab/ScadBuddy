@@ -20,6 +20,7 @@ import { useAsync } from '../lib/useAsync'
 import { seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
 import { usePrintProgress } from '../lib/usePrintProgress'
+import { arrangedNote, GOAL_LABELS, runArrange, type ArrangeGoal } from '../lib/arrange'
 import { FilamentPicker, WarningList } from './FilamentPicker'
 import { NozzleStep } from './print/NozzleStep'
 import { PlateStep } from './print/PlateStep'
@@ -77,6 +78,12 @@ interface Props {
 }
 
 export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
+  /** §7 — the output being printed: the one passed in, or what Re-arrange made of it. */
+  const [target, setTarget] = useState<Output | undefined>(output)
+  useEffect(() => setTarget(output), [output])
+  const [arrangeGoal, setArrangeGoal] = useState<ArrangeGoal>('fewest_swaps')
+  const [arranging, setArranging] = useState(false)
+  const [arrangeNote, setArrangeNote] = useState<string | null>(null)
   const [choices, setChoices] = useState<ChoicesView | null>(null)
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
@@ -129,7 +136,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   // As typed in Settings: a trailing slash would make `…//queue` below.
   const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
-  const outputId = output?.id
+  const outputId = target?.id
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
    * output printed last week does not start polling a run nobody is watching.
@@ -231,6 +238,32 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   }, [open, outputId])
 
   const printerId = choices?.printer_id ?? null
+
+  async function rearrange() {
+    if (!target) return
+    setArranging(true)
+    setArrangeNote(null)
+    try {
+      const next = await runArrange(slug, {
+        objects: (target.manifest ?? []).map((object) => ({
+          output_id: target.id,
+          part: object.part,
+          count: object.count,
+        })),
+        goal: arrangeGoal,
+        printer_id: printerId,
+        filament_plan: { slots: plan, force_colour_match: false },
+        colours: target.colors ?? [],
+        name: target.name ? `${target.name} (arranged)` : null,
+      })
+      setTarget(next.output)
+      setArrangeNote(arrangedNote(next.plates))
+    } catch (cause) {
+      setArrangeNote(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+    } finally {
+      setArranging(false)
+    }
+  }
   const printers = choices?.printers ?? []
   const printer = printers.find((entry) => entry.id === printerId)
   const size = nozzles[0]?.size ?? '0.4'
@@ -615,6 +648,41 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                   onChange={setPlan}
                   copies={effectiveCopies}
                 />
+              )}
+              {(target?.manifest ?? []).length > 0 && (
+                <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
+                  <legend className="px-1 text-[13px] text-ink">Arrange</legend>
+                  <label htmlFor="arrange-for" className="text-[12px] text-muted">
+                    Arrange for
+                  </label>
+                  <select
+                    id="arrange-for"
+                    value={arrangeGoal}
+                    onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
+                    className="sb-field mt-1.5"
+                  >
+                    {Object.entries(GOAL_LABELS)
+                      .filter(([value]) => value !== 'keep_together')
+                      .map(([value, text]) => (
+                        <option key={value} value={value}>
+                          {text}
+                        </option>
+                      ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    className="mt-1.5"
+                    disabled={arranging}
+                    onClick={() => void rearrange()}
+                  >
+                    Re-arrange for these spools
+                  </Button>
+                  {arrangeNote && (
+                    <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
+                      {arrangeNote}
+                    </p>
+                  )}
+                </fieldset>
               )}
 
               {advanced && filaments && (filaments.slots ?? []).length > 0 && (

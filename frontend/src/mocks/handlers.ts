@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  ArrangeRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -11,6 +12,7 @@ import type {
   FontFamily,
   Job,
   CatalogueLibrary,
+  ManifestObject,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -98,6 +100,10 @@ const state = {
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
+  /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
+  arranged: new Map<string, { sources: string[]; manifest: ManifestObject[] }>(),
+  /** The last `POST /outputs/arrange` body, for tests to read back. */
+  lastArrange: null as ArrangeRequest | null,
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
@@ -213,6 +219,8 @@ export function resetMockState(): void {
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
+  state.arranged.clear()
+  state.lastArrange = null
   state.modelChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
@@ -301,6 +309,11 @@ export function setMockMedia(slug: string, media: MediaView[]): void {
 
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/** The body of the last `POST /outputs/arrange`, or null when none was sent. */
+export function lastArrangeRequest(): ArrangeRequest | null {
+  return state.lastArrange
 }
 
 function initialSourceAt(): Record<string, string> {
@@ -2048,6 +2061,61 @@ export const handlers = [
     return HttpResponse.arrayBuffer(bytes.buffer, { headers: { 'Content-Type': sample.type } })
   }),
 
+  // spec 2026-09-27 §7 / §10 — Arrange refuses what the API refuses, then finishes at
+  // once. Its plates are what the writer reports: `plates` lists every plate of the
+  // new file and is empty when there is one. The mock's packer: more than four copies
+  // take a second plate.
+  http.post(`${base}/outputs/arrange`, async ({ request }) => {
+    const body = (await request.json()) as ArrangeRequest
+    state.lastArrange = body
+    const manifest: ManifestObject[] = []
+    for (const object of body.objects) {
+      const source = state.outputs.find((o) => o.id === object.output_id)
+      if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
+      if ((source.manifest ?? []).length === 0) {
+        return problem(
+          409,
+          'Conflict',
+          `output ${source.id} was saved before outputs recorded their objects; generate it again to arrange it`,
+        )
+      }
+      const entry = (source.manifest ?? []).find((m) => m.part === object.part)
+      if (!entry) {
+        return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
+      }
+      if (object.count > 0) {
+        manifest.push({ ...entry, count: object.count, source_output: entry.source_output ?? source.id })
+      }
+    }
+    if (manifest.length === 0) {
+      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    }
+    const first = state.outputs.find((o) => o.id === body.objects[0]?.output_id)
+    if (!first?.bbox_mm) return problem(409, 'Conflict', 'the output has no dimensions')
+    const colors = body.colours ?? first.colors ?? []
+    const copies = manifest.reduce((sum, m) => sum + m.count, 0)
+    const bbox = first.bbox_mm
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: first.slug,
+      status: 'done',
+      created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      params: {},
+      log_tail: [],
+      bbox_mm: bbox,
+      colors,
+      plates: copies > 4 ? [1, 2].map((index) => ({ index, bbox_mm: bbox, colors })) : [],
+    }
+    state.jobs.set(jobId, job)
+    state.arranged.set(jobId, {
+      sources: [...new Set(body.objects.map((o) => o.output_id))],
+      manifest,
+    })
+    return HttpResponse.json(job, { status: 202 })
+  }),
+
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
@@ -2089,6 +2157,10 @@ export const handlers = [
       colors: job.colors ?? [],
       parts: [],
       warnings: [],
+      // An arranged output keeps its objects and where they came from (§7); a render's
+      // output has no manifest in the mock.
+      manifest: state.arranged.get(job.id)?.manifest ?? [],
+      arranged_from: state.arranged.get(job.id)?.sources ?? [],
       bom: [],
       files: [],
       record: null,

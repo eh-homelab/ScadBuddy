@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, Output } from '../api/types'
+import { ArrangeDialog } from '../components/ArrangeDialog'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
@@ -36,6 +37,11 @@ export function HistoryPage() {
   const [deleting, setDeleting] = useState<string | null>(null)
   // #316 — an output with copies in Bambuddy asks first, and offers the inbox ones.
   const [confirmFor, setConfirmFor] = useState<Output | undefined>(undefined)
+  /** §7 — outputs ticked for the next Arrange (#314). */
+  const [picked, setPicked] = useState<string[]>([])
+  const [arranging, setArranging] = useState(false)
+  const togglePicked = (id: string) =>
+    setPicked((current) => (current.includes(id) ? current.filter((p) => p !== id) : [...current, id]))
 
   async function remove(id: string, deleteInboxCopies = false) {
     setDeleting(id)
@@ -90,24 +96,33 @@ export function HistoryPage() {
         )}
 
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
-          <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
-            {outputsState.data.map((output) => (
-              <OutputRow
-                key={output.id}
-                output={output}
-                schema={schema}
-                deleting={deleting === output.id}
-                onEdit={() =>
-                  void navigate(editPath(output.id), {
-                    state: { editTarget: editTargetFor(output) } satisfies EditNavigationState,
-                  })
-                }
-                onSend={() => setSendFor(output)}
-                onDelete={() => requestDelete(output)}
-                bambuddyUrl={bambuddyUrl}
-              />
-            ))}
-          </ul>
+          <>
+            <div className="mb-2 flex justify-end">
+              <Button size="sm" disabled={picked.length === 0} onClick={() => setArranging(true)}>
+                Arrange selected ({picked.length})
+              </Button>
+            </div>
+            <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
+              {outputsState.data.map((output) => (
+                <OutputRow
+                  key={output.id}
+                  output={output}
+                  schema={schema}
+                  deleting={deleting === output.id}
+                  picked={picked.includes(output.id)}
+                  onPick={() => togglePicked(output.id)}
+                  onEdit={() =>
+                    void navigate(editPath(output.id), {
+                      state: { editTarget: editTargetFor(output) } satisfies EditNavigationState,
+                    })
+                  }
+                  onSend={() => setSendFor(output)}
+                  onDelete={() => requestDelete(output)}
+                  bambuddyUrl={bambuddyUrl}
+                />
+              ))}
+            </ul>
+          </>
         )}
       </div>
 
@@ -126,6 +141,17 @@ export function HistoryPage() {
         output={sendFor}
         onClose={() => setSendFor(undefined)}
         onSent={() => outputsState.reload()}
+      />
+      <ArrangeDialog
+        open={arranging}
+        slug={slug}
+        outputs={(outputsState.data ?? []).filter((o) => picked.includes(o.id))}
+        onClose={() => setArranging(false)}
+        onArranged={() => {
+          setArranging(false)
+          setPicked([])
+          outputsState.reload()
+        }}
       />
     </div>
   )
@@ -276,6 +302,8 @@ function OutputRow({
   output,
   schema,
   deleting,
+  picked,
+  onPick,
   onEdit,
   onSend,
   onDelete,
@@ -284,6 +312,9 @@ function OutputRow({
   output: Output
   schema: CustomizerSchema
   deleting: boolean
+  /** §7 — ticked for the next Arrange. */
+  picked: boolean
+  onPick: () => void
   onEdit: () => void
   onSend: () => void
   onDelete: () => void
@@ -291,12 +322,21 @@ function OutputRow({
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
+  /** An arranged output has no template inputs to reopen in the customizer. */
+  const arrangedFrom = (output.arranged_from ?? []).length
 
   return (
     <li className="rounded-[6px] border border-line bg-surface p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
+            <input
+              type="checkbox"
+              aria-label={`Select ${output.name ?? shortId(output.id)}`}
+              checked={picked}
+              onChange={onPick}
+              className="accent-[var(--sb-accent)]"
+            />
             <ColorStrip colors={output.colors ?? []} size="sm" />
             <span className="text-[13px] text-ink">{output.name ?? shortId(output.id)}</span>
             <span className="text-[12px] text-faint">{timeAgo(output.created_at)}</span>
@@ -335,9 +375,15 @@ function OutputRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" onClick={onEdit}>
-            Edit
-          </Button>
+          {arrangedFrom > 0 ? (
+            <span className="text-[12px] text-muted">
+              {`Arranged from ${arrangedFrom} ${arrangedFrom === 1 ? 'output' : 'outputs'}`}
+            </span>
+          ) : (
+            <Button size="sm" onClick={onEdit}>
+              Edit
+            </Button>
+          )}
           <Button size="sm" onClick={onSend}>
             Send again
           </Button>

@@ -1,4 +1,5 @@
 import type {
+  ArrangeRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -583,6 +584,10 @@ export const api = {
       .split('/')
       .map(seg)
       .join('/')}`,
+
+  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
+  arrangeOutputs: (body: ArrangeRequest) =>
+    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
 
   /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
   createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>

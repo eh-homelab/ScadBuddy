@@ -7,7 +7,7 @@ import { api, ApiError } from '../api/client'
 import type { Output, PrintRunResult } from '../api/types'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
-import { resetMockState } from '../mocks/handlers'
+import { lastArrangeRequest, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
@@ -247,6 +247,39 @@ describe('PrintPicker', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+  })
+
+  it('re-arranges for the chosen spools and switches to the new output', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.selectOptions(screen.getByLabelText('Arrange for'), 'fewest_swaps')
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    // Two copies: the mock writes one plate, and the job's empty `plates` says so.
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    const sent = lastArrangeRequest()
+    expect(sent).toMatchObject({
+      goal: 'fewest_swaps',
+      colours: output.colors,
+      objects: [{ output_id: output.id, part: 'piece-wall', count: 2 }],
+      name: 'Reagan (arranged)',
+    })
+    expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
+    // The dialog now reads the new output: its plates are asked for by the new id.
+    await screen.findByTestId('filament-slot-1')
+  })
+
+  it('offers no re-arrange for an output saved before manifests', async () => {
+    renderPage(
+      <PrintPicker
+        open
+        slug="name-keychain"
+        output={{ ...output, manifest: [], library_files: [], pipeline_run_id: undefined }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    expect(screen.queryByLabelText('Arrange for')).not.toBeInTheDocument()
   })
 })
 
