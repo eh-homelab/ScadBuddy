@@ -191,9 +191,12 @@ export function SettingsPage() {
     if (isSecret(name) && next !== '') setClearing((current) => current.filter((secret) => secret !== name))
   }
 
-  // #426 — the Bambuddy store needs a URL and an inbox folder in the form: while either is
-  // empty the Blob store choice shows, sends and compares the local store instead.
-  const bambuddyStoreReady = value('bambuddy_url') !== '' && value('library_folder_id') !== ''
+  // #426 — the Bambuddy store needs a SAVED Bambuddy URL and an inbox folder in the form:
+  // until then the Blob store choice shows, sends and compares the local store. The URL is
+  // the saved one, never Connection's unsaved draft: a Projects & files save cannot commit
+  // it, so what the choice shows and what that save sends always agree.
+  const savedBambuddyUrl = settings ? baseline(settings, 'bambuddy_url') !== '' : false
+  const bambuddyStoreReady = savedBambuddyUrl && value('library_folder_id') !== ''
   const chosenBackend = bambuddyStoreReady ? value('store_backend') : 'local'
 
   const changed = (name: FieldName): boolean => {
@@ -261,7 +264,13 @@ export function SettingsPage() {
     }
     // A Connection save that loses the Bambuddy URL takes the store back to local with it,
     // or the server would refuse the save (it never keeps an unready Bambuddy store).
-    if (id === 'connection' && !bambuddyStoreReady && changed('store_backend')) {
+    // Only this save's own change counts: another section's unsaved draft does not.
+    if (
+      id === 'connection' &&
+      changed('bambuddy_url') &&
+      value('bambuddy_url') === '' &&
+      settings.store_backend === 'bambuddy'
+    ) {
       body.store_backend = 'local'
     }
     return body as SettingsUpdate
@@ -323,8 +332,12 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
-      const next = await api.putSettings({ reset: [name] })
-      reseed.current = [name]
+      // Resetting what the Bambuddy store needs takes the store back to local with it, as a
+      // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
+      const fallBack =
+        (name === 'bambuddy_url' || name === 'library_folder_id') && settings?.store_backend === 'bambuddy'
+      const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
+      reseed.current = fallBack ? [name, 'store_backend'] : [name]
       settingsState.setData(next)
       setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
@@ -666,17 +679,34 @@ export function SettingsPage() {
                 error={errors.bambuddy_render_api_key}
                 help="A second key with Manage Library only. Render workers run template code and hold this key alone."
               >
-                <input
-                  id="bambuddy-render-key"
-                  type="password"
-                  value={value('bambuddy_render_api_key')}
-                  autoComplete="off"
-                  onChange={(event) => setField('bambuddy_render_api_key', event.target.value)}
-                  placeholder={
-                    settings.has_render_api_key ? 'A key is stored. Paste a new one to replace it.' : 'Paste the key'
-                  }
-                  className="sb-field sb-num"
-                />
+                <div className="flex gap-2">
+                  <input
+                    id="bambuddy-render-key"
+                    type="password"
+                    value={value('bambuddy_render_api_key')}
+                    autoComplete="off"
+                    onChange={(event) => setField('bambuddy_render_api_key', event.target.value)}
+                    placeholder={
+                      clearing.includes('bambuddy_render_api_key')
+                        ? 'Cleared when you save.'
+                        : settings.has_render_api_key
+                          ? 'A key is stored. Paste a new one to replace it.'
+                          : 'Paste the key'
+                    }
+                    className="sb-field sb-num"
+                  />
+                  {settings.has_render_api_key && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={clearing.includes('bambuddy_render_api_key')}
+                      onClick={() => clearSecret('bambuddy_render_api_key')}
+                      {...USER_ONLY}
+                    >
+                      Remove key
+                    </Button>
+                  )}
+                </div>
                 {settings.render_key_fallback && (
                   <p
                     role="status"
@@ -919,6 +949,13 @@ export function SettingsPage() {
                     Bambuddy library (any number of render workers)
                   </option>
                 </select>
+                {!bambuddyStoreReady && (
+                  <p className="mt-1.5 text-[12px] text-muted" data-testid="store-backend-hint">
+                    {!savedBambuddyUrl && value('bambuddy_url') !== ''
+                      ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
+                      : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
+                  </p>
+                )}
               </FieldRow>
 
               {storeUsage && (
