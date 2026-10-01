@@ -7,6 +7,7 @@ import { installStaleChunkReload } from './lib/staleChunks'
 import './index.css'
 
 async function start() {
+  installStaleChunkReload()
   if (import.meta.env.VITE_MOCK_API === '1') {
     const { worker } = await import('./mocks/browser')
     await worker.start({
@@ -15,7 +16,6 @@ async function start() {
     })
   }
 
-  installStaleChunkReload()
   installAgentBridge()
 
   const root = document.getElementById('root')

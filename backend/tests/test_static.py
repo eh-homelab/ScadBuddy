@@ -11,10 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from starlette.applications import Starlette
+from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from scadbuddy.api.static import IMMUTABLE, REVALIDATE, SPAStaticFiles
+from scadbuddy.core.problems import install_problem_handlers
 
 
 @pytest.fixture
@@ -24,7 +25,9 @@ def client(tmp_path: Path) -> TestClient:
     (dist / "index.html").write_text("<!doctype html><title>ScadBuddy</title>", encoding="utf-8")
     (dist / "assets" / "index-abc123.js").write_text("export {}", encoding="utf-8")
     (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
-    app = Starlette()
+    # As main.py composes it: the problem handlers answer any HTTPException the mount raises.
+    app = FastAPI()
+    install_problem_handlers(app)
     app.mount("/", SPAStaticFiles(dist), name="frontend")
     return TestClient(app)
 
@@ -62,6 +65,7 @@ def test_missing_asset_is_a_404_not_the_spa(client: TestClient, path: str) -> No
     response = client.get(path)
     assert response.status_code == 404
     assert not response.headers.get("content-type", "").startswith("text/html")
+    assert response.headers["cache-control"] == REVALIDATE
 
 
 def test_other_root_files_are_revalidated(client: TestClient) -> None:

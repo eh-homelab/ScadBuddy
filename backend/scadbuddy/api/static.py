@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from starlette.exceptions import HTTPException
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, PlainTextResponse, Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
@@ -65,11 +65,11 @@ class SPAStaticFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except HTTPException as error:
-            if error.status_code != 404 or not fallback:
-                # Starlette's handler answers it as text/plain, without the CSP:
-                # not a document, so nothing runs in it.
+            if error.status_code != 404:
                 raise
-            response = FileResponse(self.index)
+            # Returned, not re-raised: a raised 404 would reach the app's problem handler
+            # and skip get_response's Cache-Control. Plain text, so nothing runs in it.
+            response = FileResponse(self.index) if fallback else PlainTextResponse("Not Found", 404)
         if response.status_code == 404 and fallback:
             response = FileResponse(self.index)
         response.headers["Content-Security-Policy"] = PAGE_CSP
