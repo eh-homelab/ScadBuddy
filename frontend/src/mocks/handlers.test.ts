@@ -903,6 +903,11 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
+  it('echoes the caller\'s normalised inputs on a submit, as RenderAccepted does (#904)', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Echo' }, tab: 'a' })
+    expect(accepted.inputs).toEqual({ params: { name: 'Echo' }, tab: 'a', v: 0 })
+  })
+
   it('refuses the Bambuddy store without a URL and an inbox, as the backend does (#700)', async () => {
     const put = (body: Record<string, unknown>) =>
       fetch('/api/v1/settings', {
