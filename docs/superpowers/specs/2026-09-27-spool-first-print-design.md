@@ -322,10 +322,11 @@ filament/plate-temperature warning.
 
 - **Errors** block the Print button (422) and name the slot or setting: no filament
   preset for a slot (§4.3.4); mixed nozzle sizes (§4.1 — there is no override).
-- **Warnings** show and allow printing: spool not loaded; nozzle not installed; High
-  Flow slicing as Standard (§4.1); no size-specific preset for a spool, falling back to
-  Bambu's Generic (§4.3); plate differs from the last print (§4.4 — there is no
-  plate/filament-temperature warning).
+- **Warnings** show and allow printing: spool not loaded; nozzle not installed; a
+  mounted High Flow nozzle of the chosen size (`hf-mounted`, §4.3 — shown in Simple and
+  Advanced mode alike, and never blocks Print); High Flow slicing as Standard (§4.1); no
+  size-specific preset for a spool, falling back to Bambu's Generic (§4.3); plate
+  differs from the last print (§4.4 — there is no plate/filament-temperature warning).
 
 ### 4.6 Template print settings (#770)
 
