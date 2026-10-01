@@ -65,6 +65,24 @@ async def test_the_plan_is_what_is_sliced(bambuddy: BambuddyClient) -> None:
 
 
 @respx.mock
+async def test_process_overrides_go_on_the_slice_and_into_its_key(
+    bambuddy: BambuddyClient,
+) -> None:
+    """A template's print settings (#770) ride on the slice as Bambuddy's
+    ``process_overrides``, and a slice made with them is not the plain preset's."""
+    sliced, _ = routes()
+    plan = PLAN.model_copy(update={"process_overrides": {"enable_prime_tower": "1"}})
+
+    outcome = await slice_and_queue(bambuddy, library_file_id=41, plan=plan, printer_id=1)
+    plain = await slice_and_queue(bambuddy, library_file_id=41, plan=PLAN, printer_id=1)
+
+    sent = json.loads(sliced.calls[0].request.read())
+    assert sent["process_overrides"] == {"enable_prime_tower": "1"}
+    assert "process_overrides" not in json.loads(sliced.calls[1].request.read())
+    assert outcome.preset_key == f"{plain.preset_key}/enable_prime_tower=1"
+
+
+@respx.mock
 async def test_the_item_names_the_printer_and_carries_the_options(
     bambuddy: BambuddyClient,
 ) -> None:

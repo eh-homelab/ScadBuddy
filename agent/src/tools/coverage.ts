@@ -9,8 +9,23 @@ const ANALYZERS_LATER =
   'Recording a decision or applying a fix writes only to ScadBuddy (write tier) and sends nothing; ' +
   'a send that consumes accepted diffs must go through the outward approval flow (AI spec §8.2).'
 
+const LIBRARY_PRINT_LATER =
+  'Printing a file already in Bambuddy\'s library (#313) lands UI-first; an agent tool for it is a ' +
+  'follow-up (spec 2026-09-28 §6). A run slices and queues a real print, so the tool must go through ' +
+  'the outward approval flow (AI spec §8.2) when it is written.'
+
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
+  {
+    operation: 'GET /api/v1/models/{slug}/ui/{path}',
+    reason:
+      "Serves a template's own UI module and assets to the browser (#425). An agent reads the `ui` " +
+      'declaration from get_model and has no page to mount a module in.',
+  },
+  {
+    operation: 'GET /api/v1/models/{slug}/versions/{commit}/ui/{path}',
+    reason: 'The same UI files at a pinned revision, for the browser (#425).',
+  },
   {
     operation: 'PUT /api/v1/settings',
     reason:
@@ -56,14 +71,24 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'PATCH /api/v1/models/{slug}/media/{item_id}',
       'PUT /api/v1/models/{slug}/media/order',
+      'PUT /api/v1/models/{slug}/media/cover',
       'DELETE /api/v1/models/{slug}/media/{item_id}',
     ] as const
   ).map((operation) => ({
     operation,
     reason:
-      "Captioning, reordering and removing a template's media happen on the edit page (#279); the plan " +
-      'adds no agent tools in the gallery epic (#273, decision 7).',
+      "Captioning, reordering, choosing the cover of and removing a template's media happen on the edit page " +
+      '(#279, #722); the plan adds no agent tools in the gallery epic (#273, decision 7).',
   })),
+  // #185: the source editor's go-to-definition opens the file a definition is in. The
+  // model-directory reader is also get_source_file's route (#252), so only the library one stays here.
+  {
+    operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
+    reason:
+      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
+      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
+      "model's own files through get_source and get_source_file.",
+  },
   {
     operation: 'GET /api/v1/analyzers',
     reason: ANALYZERS_LATER,
@@ -101,6 +126,33 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
         "come with it. The check clones from the model's pinned URL, so its tier follows repin_library's.",
     }),
   ),
+  ...(
+    [
+      'GET /api/v1/print/library',
+      'GET /api/v1/print/library/{file_id}/plates',
+      'GET /api/v1/print/library/{file_id}/choices',
+      'PUT /api/v1/print/library/{file_id}/choices',
+      'GET /api/v1/print/library/{file_id}/filaments',
+      'POST /api/v1/print/library/{file_id}/run',
+    ] as const
+  ).map((operation) => ({ operation, reason: LIBRARY_PRINT_LATER })),
+  ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "The print dialog's check before Print (#755). An agent's print_output run makes the same refusals " +
+        'itself, as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
+    }),
+  ),
+  ...(
+    [
+      'GET /api/v1/print/library/{file_id}/thumbnail',
+      'GET /api/v1/print/library/{file_id}/plates/{index}/thumbnail',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
+  })),
 ]
 
 /**

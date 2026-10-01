@@ -26,8 +26,7 @@ const selection: PrintSelection = {
  */
 function input(overrides: Partial<PrintSelection> = {}) {
   return {
-    outputId: OUTPUT,
-    slug: 'name-keychain',
+    source: { kind: 'output' as const, output: { id: OUTPUT, slug: 'name-keychain' } },
     choices: choicesView,
     printerId: 1,
     selection: { ...selection, ...overrides },
@@ -51,6 +50,22 @@ describe('useRunPrint', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('stops following the run when the dialog unmounts', async () => {
+    let signal: AbortSignal | undefined
+    runPrint.mockImplementationOnce((_output, _body, given) => {
+      signal = given
+      return new Promise(() => undefined)
+    })
+    const { result, unmount } = renderHook(() => useRunPrint(input()))
+    void act(() => void result.current.run())
+    await waitFor(() => expect(signal).toBeDefined())
+    expect(signal?.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal?.aborted).toBe(true)
   })
 
   it('sends the selection, leaving an unset quantity to the remembered one', async () => {

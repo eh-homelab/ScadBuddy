@@ -15,6 +15,7 @@ import type {
 } from '../api/types'
 import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
+import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
@@ -25,14 +26,17 @@ import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 
 interface Props {
   slug: string
   job: Job | undefined
   rendering: boolean
   /**
-   * #254 — whether `job` is the render of the values on screen. Only an agent's
-   * `generate` reads it: a person cannot press Generate in the frame where it is not.
+   * #254 — whether `job` is the render of the values on screen. Also gates the
+   * Generate button (#754): between a param edit settling and `rendering` flipping
+   * true for the new render, `job` and `rendering` still describe the PREVIOUS,
+   * already-`done` job — this is the only prop that already knows it is stale.
    */
   upToDate?: boolean
   output: Output | undefined
@@ -42,6 +46,8 @@ interface Props {
   captureImage: (options: SnapshotOptions) => Promise<Blob | null>
   /** The view's size in CSS pixels. */
   viewSize: () => { width: number; height: number }
+  /** #722 — the viewer's camera now, which the image dialog frames a copy of. */
+  cameraView?: () => CameraView | null
   /** The template, so the rendered image can be added to its media. */
   model?: ModelSummary
   onModelChanged?: (model: ModelSummary) => void
@@ -69,6 +75,7 @@ export function ActionBar({
   capture,
   captureImage,
   viewSize,
+  cameraView,
   model,
   onModelChanged,
   fit,
@@ -118,7 +125,7 @@ export function ActionBar({
     }
   }
 
-  const ready = job?.status === 'done' && !rendering
+  const ready = job?.status === 'done' && !rendering && upToDate
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
@@ -149,7 +156,7 @@ export function ActionBar({
     }
   }
 
-  const live = useLatest({ ready: ready && upToDate, generating, output, sendOpen, printOpen })
+  const live = useLatest({ ready, generating, output, sendOpen, printOpen })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
   useAgentHandlers('actions', {
@@ -233,7 +240,7 @@ export function ActionBar({
               <span className="truncate text-ok">Saved to {filed.name}</span>
               <button
                 type="button"
-                onClick={() => openExternal(filed.file.bambuddy_url)}
+                onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
                 className="shrink-0 text-accent underline"
               >
                 Open in Bambuddy
@@ -297,6 +304,7 @@ export function ActionBar({
         slug={slug}
         captureImage={captureImage}
         viewSize={viewSize}
+        cameraView={cameraView}
         model={model}
         onMediaChanged={onModelChanged}
         onClose={() => setImageOpen(false)}
@@ -311,8 +319,7 @@ export function ActionBar({
 
       <PrintPicker
         open={printOpen}
-        slug={slug}
-        output={output}
+        source={output ? { kind: 'output', output } : undefined}
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}

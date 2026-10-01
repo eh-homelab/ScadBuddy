@@ -193,8 +193,10 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   reachable from a harness query alone, whose seam has already stopped the call.
 - **The session's principal.** The tools run as the session owner
   (`harnessPrincipal()` in [`agent/src/auth/principal.ts`](../../agent/src/auth/principal.ts)):
-  the browser user with every tier, any other owner with `read` only, until the
-  `sessions.*` MCP tools and flows pass the tiers of the token or flow behind it.
+  the browser user with every tier, any other owner with `read` only, unless the
+  turn carries its sender's tiers: a turn sent through `sessions_start` or
+  `sessions_send` runs with the calling token's tiers (`turnPrincipal()` in
+  `tools/harness.ts`, #300). Flows do not pass theirs yet.
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -325,6 +327,54 @@ the UI approval". As built:
 - **No database.** `main.ts` falls back to the in-memory `PendingActionStore`
   ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)). Nothing can approve
   its actions, so its `confirm_action` always refuses.
+
+## Agent-to-agent control and the approval grant (#300)
+
+The `sessions_*` tools ([agent-sessions.md](agent-sessions.md),
+[`agent/src/tools/sessions.ts`](../../agent/src/tools/sessions.ts)) let another agent
+drive sessions over `/mcp`. What bounds them:
+
+- **Visibility and control** are the session manager's (`canSee()` in
+  [`agent/src/sessions/protocol.ts`](../../agent/src/sessions/protocol.ts), the claim in
+  `SessionManager.send()`): a caller sees only the sessions it owns or started, or that
+  are offered to it, and anything else answers "no session". Only the owner sends or
+  hands off.
+- **Handoff to another agent is an offer** (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715#issuecomment-5896053771)):
+  `sessions_handoff` used to make any principal it named the owner, so a `write` token
+  could make another agent the sole sender of a session that agent never asked for, a
+  prompt-injection channel across a trust boundary. Now only a handoff to the browser
+  user moves at once; to an MCP principal it records a pending offer
+  (`ai_sessions.pending_owner_*`) that only that principal can accept
+  (`sessions_accept_handoff`, as `confirm_action` completes only for the principal that
+  prepared it), that the owner can withdraw and the target decline
+  (`sessions_cancel_handoff`), and that ends after an hour or on any change of owner
+  ([agent-sessions.md §2.1](agent-sessions.md#21-handoff-to-another-agent-is-an-offer)).
+- **Principal ids are the caller's own.** The same review: a session's creator keeps
+  seeing it, and saw the new owner's id, which is what a handoff addresses. The tools
+  and the session resources show every principal but the caller by kind and a label
+  that does not name it (`ownerSeenBy()` in `protocol.ts`); only the browser user sees
+  ids ([agent-sessions.md §2.2](agent-sessions.md#22-principal-ids)).
+- **Tiers.** Reads are `read`; start, send, fork, interrupt and handoff (offer, accept,
+  withdraw, decline) are `write`;
+  approve and deny are `outward`. A token's session turns run with that token's tiers,
+  never more.
+- **The approval grant** is per token (`ai_mcp_tokens.approval_grant`), off by default,
+  `outward` tokens only (route check and table `CHECK`), read on every decision so a
+  revoke withdraws it. `ApprovalService.authorize` still refuses a grant holder's own
+  calls and sessions (spec §8.2: "never for its own calls or sessions"). OIDC subjects
+  and `anonymous` never hold it.
+- **Not from inside a session.** The same tools are offered to a session's model as the
+  session's owner, but deciding an approval and handing off, accepting or declining a
+  handoff are refused there
+  (`notInHarness()`): a model running as the browser user could otherwise approve its
+  own outward calls.
+- **Resource subscriptions** to `scadbuddy://sessions/{id}` read the session first, so
+  nobody can follow a session it may not see. Notifications carry only the URI.
+- **`session.*` events** carry ids and a seq, never content
+  ([`agent/src/sessions/busEvents.ts`](../../agent/src/sessions/busEvents.ts)). Anyone
+  who can LISTEN on the database can see that sessions are active and when; that is the
+  same exposure as every other event on the channel (spec §7).
 
 ## Envelope encryption and AAD binding
 
@@ -635,6 +685,97 @@ origins or files", as built. Details and measurements are in
   a seccomp profile that allows user namespaces, not `RuntimeDefault`
   ([headless-browser.md](headless-browser.md#sandbox)).
 
+## HTTP request tool (#827)
+
+The assistant has no shell (`tools: []`) and refuses plugins that start a process, so
+"curl" is a built-in tool: `mcp__scadbuddy_http__http_request`, an in-process SDK MCP
+server in [`agent/src/harness/httpRequest.ts`](../../agent/src/harness/httpRequest.ts),
+with `mcp__scadbuddy_http__http_response_read` beside it to page through a saved body.
+It is offered to session turns only, not over `/mcp`.
+
+**Reach is open until the sandbox. Decided by the owner on 2026-09-30 (#827).** The
+tool may reach the internet and the LAN: private ranges (`10/8`, `172.16/12`,
+`192.168/16`, `fc00::/7`), loopback, `*.internal` names, and plain `http:` to any host,
+since LAN services are mostly plain http. There is deliberately **no private-range
+block**; security for this tool is to come from running it in a sandbox, and until then
+anything on the agent pod's network is reachable, including the backend, Bambuddy and
+other cluster services. The one refusal it shares with every URL the agent fetches is
+`assertHostAllowed()` ([Egress check](#egress-check-on-gateway-urls)): link-local
+addresses and the cloud metadata hosts, where a node's own cloud credentials live.
+Every hop goes through `assertHttpUrl()` (http or https, no `user:password@`) and
+`assertHostAllowed()`, and connects to exactly the address that was checked
+(`pinnedRequestOptions()` in [`agent/src/http/pinned.ts`](../../agent/src/http/pinned.ts)),
+so a name re-pointed between check and connect reaches nothing new.
+
+- **Tiers by method.** `GET` and `HEAD` are `read` and run at once; `POST`, `PUT`,
+  `PATCH` and `DELETE` are `outward` and park for a human approval bound to the exact
+  input, like every outward tool. This is the one tool whose tier reads its input:
+  `TierResolver` takes the call's input (`permissions.ts`), and `httpTierOf()` answers
+  `outward` for any method it does not recognise, before the schema has validated it.
+- **Only the model's headers.** The request is built from the tool input alone: no
+  user agent, no cookies, no proxy variables, nothing from the agent's environment. The
+  Claude credential lives in Claude Code's per-query `env`, which this code never reads.
+- **Never the agent-actor header.** A request naming `X-ScadBuddy-Agent-Session` (any
+  case) is refused, as are `Host`, `Content-Length`, `Transfer-Encoding` and the other
+  connection-level headers Node sets itself.
+- **Never the turn's secrets.** A header value (`Authorization`, `Cookie` or any other),
+  the URL or the body that contains the Claude credential or a plugin's header token
+  (the same list the event log is redacted of) is refused, so an injected instruction
+  cannot make the model send its own credential anywhere. Other tokens the model was
+  given for a LAN service are sent as given.
+- **Limits.** One deadline for the whole request, redirects included: `timeout_ms`,
+  default 30 s, at most 120 s. At most 5 redirects. The body is read up to 20 MiB and
+  returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
+  body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
+  newest kept) and read in pages of up to 1 MiB, text as text and anything else as
+  base64.
+- **Redirects** follow fetch's rules: a 303, or a 301/302 after a `POST`, becomes a
+  `GET` with no body. `Authorization`, `Cookie` and `Proxy-Authorization` are dropped
+  when a redirect leaves the origin, and a 307/308 that would re-send an approved
+  outward method to another origin is returned to the model instead of followed.
+- **Untrusted.** Every result is wrapped in the `untrusted_data` envelope
+  ([Prompt-injection hardening](#prompt-injection-hardening-258)) with the source
+  naming the response's host.
+- **Audited.** Every request, each redirect hop its own row, is an `http` row in the
+  audit log: the method as the action, the tier, and `{method, scheme, host, status,
+  size_bytes, redirect?}` as the summary, never a path, a header or a body. The tool
+  call itself is also a `tool_call` row, whose input summary is scrubbed like any
+  other (`Authorization` and `Cookie` headers are blanked by name).
+- **On by default, and a user-only switch.** `ai_settings` key `http_request_enabled`;
+  anything but a stored `false` is on. It is set through
+  `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
+  behind `uiRequestProblem` like the other AI settings writes, and the write is audited
+  as a `settings` row. Settings → AI shows it as "Let the assistant make HTTP requests".
+
+## Browser bridge and pairing (#254)
+
+The `browser_*` tools act in the user's own tab. How they are built is
+[browser-bridge.md](browser-bridge.md); what protects the tab:
+
+- **Only a paired agent reaches a tab** (spec §8.5). A chat session reaches the tab it
+  is chatted from; any other principal only the tab the user paired it with by typing
+  the code `browser_pair` gave it, in that tab, in every MCP auth mode. The prompt is
+  user-only, so a paired agent's `click` and `fill` cannot accept another agent or keep
+  itself paired.
+- **Codes are short-lived, single-use and hashed**: 5 minutes, once, 5 tries, and only
+  the SHA-256 in `ai_browser_pairings`. One live pairing per principal, enforced by a
+  partial unique index. Requests are capped per principal and overall.
+- **Tiers.** Acting in the tab is at least `write`; `browser_open_print_dialog` is
+  `outward` and goes through the approval gate (§8.2). The confirmation controls stay
+  user-only (`data-agent-user-only`), so nothing an agent does in the tab sends,
+  prints, deletes or saves settings.
+- **The tab's socket** passes the chat socket's gate (HTTPS through the trusted ingress,
+  an allowlisted `Origin`, spec §8.4). A socket that passes is the browser user's tab,
+  which is what the UI's lack of a login already implies (spec §8.3, "Stated
+  plainly"): anyone who can open the UI can accept a pairing, as they can approve an
+  outward action.
+- **What comes back is untrusted.** Tab results carry page content (READMEs, source,
+  Bambuddy data), so they are in the untrusted-data envelope, and the tab's own error
+  messages too (#258).
+- **Limitation.** A tab id is a random 128-bit value, but anything already on the UI's
+  origin could open a socket claiming one it learned; the tab id is not a secret
+  against script in the page, which can drive the page anyway.
+
 ## Event-log scrubbing (#377)
 
 Each session's panel events go into `ai_session_events` and are replayed to every
@@ -671,6 +812,8 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `approval` | `ApprovalService` (`approvals/service.ts`) | approved, denied, expired, cancelled, and approved-but-voided |
 | `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
+| `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
+| `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
@@ -783,6 +926,34 @@ so the marking is defence in depth and the approval gate is the boundary.
   stop a model from reading text inside the image, which is why the approval gate,
   not the marking, is the boundary.
 
+## Render limits (#252)
+
+Issue [#252](https://github.com/eh-homelab/ScadBuddy/issues/252) ("Guardrails": "A
+render timeout and resource limits"). Each render is already bounded by the backend:
+the render timeout, the queue's workers and the body-size gates in
+[`backend/scadbuddy/api/limits.py`](../../backend/scadbuddy/api/limits.py). The backend
+cannot tell a person dragging a slider from an agent rendering in a loop, so the
+agent bounds its own callers before a render reaches the queue
+([`agent/src/tools/renderLimits.ts`](../../agent/src/tools/renderLimits.ts), used by
+`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts)):
+
+- per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
+  or the browser user, whose harness sessions share one count);
+- at most **2** of its renders in flight at once, counted until the backend job
+  settles (done, failed or cancelled). A render `render_model` hands back still
+  running keeps its slot while the agent polls the job in the background, for at most
+  **30 minutes**, or until the backend stops answering for it (PR #752 review). Past
+  30 minutes the slot is freed even if the job still runs, so for a job that long (a
+  raised render timeout, applied per colour) this cap is best effort, and only the
+  backend's shared render concurrency bounds it;
+- at most **30** started in any **10 minutes**.
+
+A refusal is an error result that names the limit and when to try again, and nothing is
+sent to the backend. The counts are in memory. They bound a burst, not a total, so a
+restart clears them, and there is no new state or setting. A principal with nothing in
+flight and nothing started in the window is dropped, so the counts hold only recent
+callers (anonymous MCP principals are one per session).
+
 ## Known limitations
 
 From the merged code and PR bodies:
@@ -842,6 +1013,13 @@ From the merged code and PR bodies:
     §8.3.
 12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
     without its sandbox** (see above).
+13. **The `http_request` tool's reach is open until it runs in a sandbox** (#827,
+    decided 2026-09-30; [HTTP request tool](#http-request-tool-827)). A `GET` runs
+    without a human, so injected content can make the model read anything on the
+    pod's network, and put data it already holds into a URL's query string. The
+    turn's own secrets are refused in any request, and every request is audited, but
+    neither is a network boundary; an egress NetworkPolicy on the pod, or the sandbox,
+    is.
 
 ## Spec §3.2 items still open
 

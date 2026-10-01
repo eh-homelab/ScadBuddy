@@ -32,8 +32,8 @@ export function restartMockBackend(): void {
 const SECRETS = { bambuddy_api_key: 'has_api_key', google_fonts_api_key: 'has_google_fonts_api_key' } as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
 const NULLABLE = new Set(['bambuddy_url', 'bambuddy_api_key', 'public_url', 'default_plate', 'google_fonts_api_key', 'temporal_ui_url'])
-const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'render_max_attempts', 'library_max_bytes'])
-const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'render_poll_interval', 'render_fallback_poll_interval', 'render_lease_timeout', 'media_upload_max_bytes'])
+const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
+const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'media_upload_max_bytes'])
 
 function envName(name: string): string {
   return `SCADBUDDY_${name.toUpperCase()}`

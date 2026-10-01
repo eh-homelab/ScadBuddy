@@ -39,6 +39,7 @@ from scadbuddy.library.assets import (
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
+from scadbuddy.store.content import template_title
 
 router = APIRouter(tags=["assets"])
 
@@ -117,7 +118,7 @@ async def upload_asset(
         )
     try:
         # Decoding a PNG and parsing an SVG are CPU work; keep them off the loop.
-        return await asyncio.to_thread(assets.put, data, file.filename)
+        meta = await asyncio.to_thread(assets.put, data, file.filename)
     except AssetRejectedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except AssetQuotaError as error:
@@ -125,6 +126,13 @@ async def upload_asset(
         raise ApiError(
             status.HTTP_413_CONTENT_TOO_LARGE, str(error), usage=error.usage.model_dump()
         ) from None
+    # A failed mirror (Bambuddy unreachable) fails the upload with Bambuddy's problem:
+    # a file a worker could not read must not look uploaded.
+    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
+    if store is not None and store.remote_assets is not None:
+        title = template_title(state.paths.model_source(slug).parent, slug)
+        await store.remote_assets.mirror(assets, meta, slug=slug, title=title)
+    return meta
 
 
 @router.get(

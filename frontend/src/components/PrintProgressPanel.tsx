@@ -1,5 +1,6 @@
 import type { CopyProgress, PrintProgress } from '../api/types'
 import { Spinner } from './ui/Spinner'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 
 /**
  * Where a print got to (#89): the slice, then the queue entries it produced.
@@ -32,7 +33,7 @@ interface Props {
  * same-frame navigation would replace the app (spec §1).
  */
 function queueEntryUrl(progress: PrintProgress, entryId: number): string {
-  return `${progress.bambuddy_url}/${entryId}`
+  return bambuddyLink(`${progress.bambuddy_url}/${entryId}`)
 }
 
 /** How many entries have a queue entry id — the thing the poll is waiting for. */

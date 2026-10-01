@@ -21,7 +21,7 @@ from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.api.test_fonts import FakeBackedService, FakeClient
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import follow_run, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
 
@@ -417,7 +417,10 @@ def test_a_print_publishes_progress_and_then_settled_once(
     )
     events.clear()
 
-    _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()))
+    run_id = _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()), 202)[
+        "id"
+    ]
+    follow_run(client, run_id)
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))  # nothing new
     item.mock(return_value=httpx.Response(200, json=queue_item("completed")))
@@ -426,8 +429,11 @@ def test_a_print_publishes_progress_and_then_settled_once(
 
     cast(Recorded, events).wait_for_kind("print.settled")
     ids = {"output_id": output_id, "slug": model}
-    assert [e for e in published(events) if e["kind"].startswith("print.")] == [
-        {"kind": "print.progress", **ids},  # the run
+    # The run's own (#470): accepted, then ended. The second is published once the end
+    # is recorded, so it may land either side of the first progress read.
+    assert published(events, "print.run") == [{"kind": "print.run", **ids, "run_id": run_id}] * 2
+    assert [e for e in published(events) if e["kind"] in {"print.progress", "print.settled"}] == [
+        {"kind": "print.progress", **ids},  # the run queued it
         {"kind": "print.progress", **ids},  # the first read
         {"kind": "print.progress", **ids},  # it finished
         {"kind": "print.settled", **ids},

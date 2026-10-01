@@ -33,7 +33,7 @@ def apply_runtime(state: AppState, values: Settings, *, booting: bool = False) -
     config = running.to_config()
     state.settings = running
     state.config = config
-    state.queue.reconfigure(config)
+    state.render.reconfigure(config)
     state.assets.max_total_bytes = config.asset_max_total_bytes
     state.assets.max_count = config.asset_max_count
     state.libraries.max_bytes = config.library_max_bytes

@@ -1,7 +1,10 @@
+import { randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -25,6 +28,116 @@ import { defineTool, json, type Tool } from './registry.js'
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
 
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional()
+
+/** Print run ids are 32 lowercase hex digits (`run_id` in backend/openapi.json). */
+const runId = z
+  .string()
+  .regex(/^[0-9a-f]{32}$/, 'must be a print run id: 32 lowercase hex digits, as print_output returns it')
+  .describe('Print run id, as print_output returns it')
+
+type PrintRun = Awaited<ReturnType<typeof getRun>>
+
+type FetchResult<T> = { data?: T; error?: unknown; response: Response }
+
+/** How many more times a print run request no ScadBuddy answer described is sent (#470). */
+export const RUN_REATTEMPTS = 3
+
+/**
+ * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
+ * from something in between, whose body is not one of the backend's problems (they
+ * always carry a `detail`). The same list as the browser client's `unanswered`.
+ */
+function unanswered(result: FetchResult<unknown>): boolean {
+  const { error, response } = result
+  const detail = typeof error === 'object' && error !== null && typeof (error as { detail?: unknown }).detail === 'string'
+  return [502, 503, 504, 524].includes(response.status) && !detail
+}
+
+/**
+ * `send`, again while it goes unanswered (a dropped connection, fetch's `TypeError`, or
+ * a proxy's own 502/503/504/524), as the browser client's `reattach` does. Safe only for a
+ * request keyed to its run: the POST's `request_id` makes a re-send the same run, never a
+ * second print, and the GET only reads. A problem the backend wrote is never re-sent.
+ */
+async function reattach<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    let result: FetchResult<T>
+    try {
+      result = await send()
+    } catch (caught) {
+      if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
+      if (tries >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      continue
+    }
+    if (unanswered(result)) {
+      if (tries >= RUN_REATTEMPTS) {
+        throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
+      }
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      continue
+    }
+    return ok(Promise.resolve(result), what)
+  }
+}
+
+async function getRun(ctx: ToolContext, id: string) {
+  return ok(
+    ctx.backend.GET('/api/v1/print/runs/{run_id}', { params: { path: { run_id: id } }, signal: ctx.signal }),
+    `get print run ${id}`,
+  )
+}
+
+/**
+ * `POST .../run` answers 202 and slices in the background (#470): follow the
+ * run until it ends or `renderWaitMs` passes, as render_model follows a render.
+ * A read that stays unanswered names the run, so it is followed, not printed again.
+ */
+async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
+  const deadline = Date.now() + ctx.renderWaitMs
+  for (let step = 1; run.status === 'running' && Date.now() < deadline; step++) {
+    await ctx.progress(step, undefined, 'print run: slicing and queueing')
+    await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    const id = run.id
+    try {
+      run = await reattach(
+        ctx,
+        () => ctx.backend.GET('/api/v1/print/runs/{run_id}', { params: { path: { run_id: id } }, signal: ctx.signal }),
+        `get print run ${id}`,
+      )
+    } catch (caught) {
+      if (ctx.signal.aborted) throw caught
+      const reason = caught instanceof Error ? caught.message : String(caught)
+      throw new ToolError(
+        `print run ${id} was started, but reading it failed: ${reason}. ` +
+          'Follow it with get_print_run; calling print_output again would be a second print.',
+      )
+    }
+  }
+  return run
+}
+
+/** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
+function runOutcome(run: PrintRun) {
+  if (run.status === 'failed') {
+    const error = run.error
+    // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
+    // another print_output call is a new print (its own request_id), so check first.
+    const queued = run.may_have_queued
+      ? " The print may still have been queued: check Bambuddy's queue before printing again."
+      : ''
+    throw new ToolError(
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}${queued}`,
+    )
+  }
+  if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
+  return json(run)
+}
 const calibration = z.enum(['off', 'on', 'auto'])
 
 /** `PrintOptions` in backend/openapi.json: sparse, and the backend refuses unknown fields. */
@@ -164,15 +277,30 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_print_run',
+    description:
+      'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
+      '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it.',
+    input: z.object({ run_id: runId }),
+    risk: 'read',
+    routes: ['GET /api/v1/print/runs/{run_id}'],
+    handler: async ({ run_id }, ctx) => json(await getRun(ctx, run_id)),
+  }),
+
+  defineTool({
     name: 'list_print_projects',
-    description: "Bambuddy's projects, to file prints under.",
-    input: z.object({}),
+    description: "Bambuddy's projects, to file prints under, and the one last used." + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/print/projects'), 'list projects')),
+    handler: async (args, { backend }) => {
+      const { last_project_id, projects } = await ok(backend.GET('/api/v1/print/projects'), 'list projects')
+      const { items, ...rest } = page(projects ?? [], args, (p) => String(p.id), 'list_print_projects')
+      return json({ last_project_id, projects: items, ...rest })
+    },
   }),
 
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
@@ -274,7 +402,9 @@ export const printTools: Tool[] = [
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
-      'Follow it with get_print_progress.',
+      'The run slices and queues in the background: this waits for it and answers with the run and its ' +
+      '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
+      'get_print_run. Then follow the print with get_print_progress.',
     input: z.object({
       output_id: outputId,
       printer_id: z.number().int().optional(),
@@ -299,7 +429,7 @@ export const printTools: Tool[] = [
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
-    routes: ['POST /api/v1/print/outputs/{output_id}/run'],
+    routes: ['POST /api/v1/print/outputs/{output_id}/run', 'GET /api/v1/print/runs/{run_id}'],
     summarize: (args) => {
       const { output_id, printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
       const defaulted =
@@ -317,7 +447,8 @@ export const printTools: Tool[] = [
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
-    handler: async (args, { backend }) => {
+    handler: async (args, ctx) => {
+      const { backend } = ctx
       const path = { output_id: args.output_id }
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
       let slots = args.filament_plan?.slots
@@ -369,10 +500,15 @@ export const printTools: Tool[] = [
           slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
       }
-      return json(
-        await ok(
-          backend.POST('/api/v1/print/outputs/{output_id}/run', {
+      // One per call (#470): a call is a deliberate print, so the same choices again are
+      // a new one rather than the last call's run. Every re-send below reuses it, so a
+      // POST whose answer was lost re-attaches to its run instead of printing twice.
+      const requestId = randomUUID()
+      const started = await reattach(
+          ctx,
+          () => backend.POST('/api/v1/print/outputs/{output_id}/run', {
             params: { path },
+            signal: ctx.signal,
             body: {
               printer_id: printerId ?? null,
               copies: args.copies ?? null,
@@ -389,11 +525,13 @@ export const printTools: Tool[] = [
               // Omitted stays omitted (the remembered project); null is "No project" (#317).
               ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
+              request_id: requestId,
             },
           }),
           `print ${args.output_id}`,
-        ),
-      )
+          " The print may still have started: check Bambuddy's queue before printing again.",
+        )
+      return runOutcome(await waitForRun(ctx, started))
     },
   }),
 

@@ -108,7 +108,7 @@ export class TurnAuditor {
     if (e.type === 'tool.call') {
       this.open.set(e.id, {
         name: e.name,
-        tier: this.context.tierOf(e.name) ?? 'outward',
+        tier: this.context.tierOf(e.name, e.input) ?? 'outward',
         input: e.input,
         startedAt: new Date(),
       })

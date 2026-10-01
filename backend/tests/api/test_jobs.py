@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.jobs import QueueFullError, RenderQueue
-from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, wait_for_job
+from scadbuddy.core.settings import Settings
+from scadbuddy.render.job_models import QueueFullError
+from scadbuddy.render.submit import RenderService
+from scadbuddy.store.content import StoreFullError
+from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 
 
-def test_render_is_accepted_and_the_job_completes(client: TestClient, model: str) -> None:
+def test_render_is_accepted_and_the_job_completes(
+    client: TestClient, model: str, settings: Settings
+) -> None:
+    logged = [
+        "rendered fine",
+        'ECHO: "NOTE: a note"',
+        "WARNING: The file 'logo.svg' couldn't be opened",
+    ]
+    set_fake_env(Path(settings.openscad).parent, "FAKE_STDERR", logged)
     response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert response.status_code == 202
     accepted = response.json()
@@ -21,11 +33,11 @@ def test_render_is_accepted_and_the_job_completes(client: TestClient, model: str
     assert job["slug"] == model
     assert job["params"] == {"width": 12}
     assert job["colors"] == ["#FF0000"]
-    assert job["warnings"] == ["a warning"]
+    assert job["warnings"] == ["OpenSCAD could not open logo.svg; the model rendered without it"]
     assert job["notes"] == ["a note"]
     assert job["bbox_mm"]["size"] == [10.0, 10.0, 5.0]
     assert job["parts"][0]["extruder"] == 1
-    assert job["log_tail"] == ["rendered fine"]
+    assert job["log_tail"] == logged
     assert job["preview_url"] == f"/api/v1/jobs/{accepted['job_id']}/preview.glb"
 
 
@@ -71,7 +83,10 @@ def test_a_failed_render_carries_the_log_tail(client: TestClient, model: str) ->
     job = wait_for_job(client, response.json()["job_id"])
     assert job["status"] == "failed"
     assert job["error"] == "openscad exited with 1"
-    assert job["log_tail"] == ["ERROR: something broke"]
+    assert job["log_tail"] == [
+        "WARNING: The file 'pic.svg' couldn't be opened",
+        "ERROR: something broke",
+    ]
     # A failed render has no result, and still says what it could (#408).
     assert job["warnings"] == [FAILED_WARNING]
     assert job["preview_url"] is None
@@ -110,10 +125,9 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
         json={"params": {"width": 12}, "supersedes": first.json()["job_id"]},
     )
     assert second.status_code == 202
-    # The stub renders at once, so the first has usually started: either way both
-    # settle, and the newer one is rendered.
+    # The first is cancelled unless its render finished first; the newer one renders.
     assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
-    assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "failed")
+    assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
 
 
 def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:
@@ -126,7 +140,7 @@ def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:
 def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model: str) -> None:
     """Only with SCADBUDDY_RENDER_QUEUE_MAX set; by default nothing is refused."""
     full = mock.AsyncMock(side_effect=QueueFullError(depth=16, retry_after=7))
-    with mock.patch.object(RenderQueue, "submit", full):
+    with mock.patch.object(RenderService, "submit", full):
         response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert response.status_code == 503
     assert response.headers["retry-after"] == "7"
@@ -134,6 +148,18 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     body = response.json()
     assert body["retry_after"] == 7
     assert "queue is full" in body["detail"]
+
+
+def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
+    client: TestClient, model: str
+) -> None:
+    """`submit` pins the template's snapshot in the store; a full store is a problem, not a 500."""
+    full = mock.AsyncMock(side_effect=StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (10)"))
+    with mock.patch.object(RenderService, "submit", full):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 507
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
 
 
 # -- the customizer's range and options (#432) -------------------------------------

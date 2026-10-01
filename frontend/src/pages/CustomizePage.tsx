@@ -221,6 +221,7 @@ export function CustomizePage() {
     () => captureRef.current?.viewSize() ?? { width: 0, height: 0 },
     [],
   )
+  const cameraView = useCallback(() => captureRef.current?.cameraView() ?? null, [])
 
   // #254 — the parameter the agent last touched: the panel shows its tab, and the row
   // gets the highlight once it is on screen.
@@ -536,6 +537,12 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
+          <Link
+            to={modelPath(slug, 'prints')}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Prints
+          </Link>
           {modelState.data && origin && (
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
@@ -706,6 +713,7 @@ export function CustomizePage() {
               capture={capture}
               captureImage={captureImage}
               viewSize={viewSize}
+              cameraView={cameraView}
               model={modelState.data}
               onModelChanged={modelState.setData}
               fit={fit}

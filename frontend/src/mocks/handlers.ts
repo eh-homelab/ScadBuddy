@@ -28,8 +28,13 @@ import type {
   ParamValue,
   Plate,
   PlateFit,
+  PrintAgain,
+  PrintDetail,
+  PrintPage,
   PrintProgress,
+  PrintCheck,
   PrintRunRequest,
+  PrintRun,
   PrintRunResult,
   PrintOptions,
   PrintOptionsState,
@@ -65,7 +70,7 @@ import * as fixtures from './fixtures'
 const base = '/api/v1'
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
-const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
   filament_plan: [],
   nozzles: [],
@@ -74,7 +79,7 @@ const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
-function isNoModelChoices(choices: ModelPrintChoices): boolean {
+export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   return (
     choices.printer_id == null &&
     !choices.filament_plan?.length &&
@@ -86,6 +91,8 @@ function isNoModelChoices(choices: ModelPrintChoices): boolean {
 
 const state = {
   models: [...fixtures.models] as ModelSummary[],
+  /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
+  printRuns: new Map<string, PrintRun>(),
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
   sources: {
@@ -103,6 +110,8 @@ const state = {
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
+  /** #313 — per library-file choices, the store's `library_print_choices`. */
+  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
@@ -123,6 +132,12 @@ const state = {
   plates: {} as Record<string, NonNullable<Job['plates']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
+  /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
+  pulledTimelapses: new Map<number, string>(),
+  /** #311 — the queue items "Print again" made, newest last. */
+  reprints: [] as { archive_id: number; queue_item_id: number }[],
+  /** #722 — each built-in's media overlay, read from its record on its first write. */
+  mediaOverlays: new Map<string, MediaOverlay>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -210,6 +225,7 @@ export function resetMockState(): void {
   resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
+  state.printRuns = new Map()
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.sources = {
@@ -223,6 +239,7 @@ export function resetMockState(): void {
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
@@ -235,6 +252,9 @@ export function resetMockState(): void {
   state.mergeFiles = {}
   state.plates = {}
   state.mediaFiles.clear()
+  state.pulledTimelapses.clear()
+  state.reprints = []
+  state.mediaOverlays.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -308,7 +328,8 @@ export function setMockRemembered(remembered: {
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
-  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media, media_cover: null } : m))
+  state.mediaOverlays.delete(slug)
 }
 
 /** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
@@ -316,6 +337,17 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
   state.models = state.models.map((m) =>
     m.slug === slug ? { ...m, invalid_libraries: entries } : m,
   )
+}
+
+/** #169 — every model as the mock has it now, for a feature module (`features/`). */
+export function mockModels(): readonly ModelSummary[] {
+  return state.models
+}
+
+/** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
+export function replaceMockModel(model: ModelSummary): ModelSummary {
+  state.models = state.models.map((m) => (m.slug === model.slug ? model : m))
+  return view(model)
 }
 
 /** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
@@ -506,7 +538,7 @@ export function nextHexId(): string {
   return state.seq.toString(16).padStart(32, '0')
 }
 
-function nextNumber(): number {
+export function nextNumber(): number {
   state.seq += 1
   return 8800 + state.seq
 }
@@ -638,10 +670,27 @@ export function mockRemembered() {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
+}
+
+/**
+ * #313 — what the print dialog remembers for one Bambuddy library file. The routes are in
+ * `features/library.ts`; the state is here with the other remembered choices, so "Forget
+ * all" (`forgetMockRemembered`) drops it too.
+ */
+export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
+  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+}
+
+/** Remembers one library file's choices; the empty choice forgets them, as the store does. */
+export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
+  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
+  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  return mockLibraryChoices(fileId)
 }
 
 /**
@@ -662,7 +711,6 @@ export function problem(status: number, title: string, detail?: string, extensio
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 }
-
 
 /**
  * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
@@ -772,7 +820,7 @@ function sniffMedia(bytes: Uint8Array): SniffedMedia | undefined {
   return undefined
 }
 
-function legacyItem(): MediaView {
+function legacyItem(readonly: boolean): MediaView {
   return {
     id: 'thumbnail',
     file: 'thumbnail.png',
@@ -780,14 +828,71 @@ function legacyItem(): MediaView {
     caption: '',
     poster: null,
     missing: false,
+    readonly,
     content_type: 'image/png',
     size: 67,
   }
 }
 
-/** A model's media: a model with no `media` lists its own thumbnail as the legacy item. */
+/**
+ * A model's media: a model with no `media` lists its own thumbnail as the legacy item
+ * (a built-in's, as everything it ships, `readonly`).
+ */
 function mediaOf(model: ModelSummary): MediaView[] {
-  return model.media ?? (model.thumbnail_source === 'model' ? [legacyItem()] : [])
+  const legacy = model.thumbnail_source === 'model' ? [legacyItem(model.origin === 'builtin')] : []
+  return model.media ?? legacy
+}
+
+/**
+ * #722 — a built-in's media as `_media_listing` builds it: what it ships (read-only),
+ * then what was added to it, with the chosen cover moved to the front.
+ */
+interface MediaOverlay {
+  shipped: MediaView[]
+  added: MediaView[]
+  cover: string | null
+}
+
+function overlayOf(model: ModelSummary): MediaOverlay {
+  const known = state.mediaOverlays.get(model.slug)
+  if (known) return known
+  const listed = mediaOf(model)
+  return {
+    shipped: listed.filter((item) => item.readonly),
+    added: listed.filter((item) => !item.readonly),
+    cover: model.media_cover ?? null,
+  }
+}
+
+function listOverlay(overlay: MediaOverlay): Pick<ModelSummary, 'media' | 'media_cover'> {
+  const listed = [...overlay.shipped, ...overlay.added]
+  const chosen = listed.find((item) => item.id === overlay.cover)
+  if (!chosen || chosen === listed[0]) return { media: listed, media_cover: null }
+  return { media: [chosen, ...listed.filter((item) => item !== chosen)], media_cover: chosen.id }
+}
+
+/** A built-in's media write: kept outside its history, so no revision (`_overlay_change`). */
+function writeOverlay(model: ModelSummary, overlay: MediaOverlay): ModelSummary {
+  state.mediaOverlays.set(model.slug, overlay)
+  const listed = listOverlay(overlay)
+  const media = listed.media ?? []
+  const covered = media.some((item) => !item.missing && (item.kind === 'image' || item.poster))
+  const updated: ModelSummary = {
+    ...model,
+    ...listed,
+    // Without a cover of its own, whatever stood in (its preview) still does.
+    ...(covered || model.thumbnail_source === 'model' ? coverOf(model.slug, media) : {}),
+  }
+  state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
+  return updated
+}
+
+function shippedItem(slug: string, id: string) {
+  return problem(
+    403,
+    'Error',
+    `'${id}' is shipped with the built-in template '${slug}' and is read-only; only the media added to it can change`,
+  )
 }
 
 /** The first write gives the legacy item an id of its own, as `_edit_media` does. */
@@ -838,10 +943,8 @@ function writeMedia(
   })
 }
 
-/** The model a media write is for, or the problem the backend answers first. */
-function mediaTarget(slug: string, write: boolean): ModelSummary | Response {
-  const refused = write ? refuseBuiltin(slug) : undefined
-  if (refused) return refused
+/** The model media is read from or written to, or the 404. A built-in takes media too (#722). */
+function mediaTarget(slug: string): ModelSummary | Response {
   const model = state.models.find((m) => m.slug === slug)
   return model ?? problem(404, 'Not Found', `no model named '${slug}'`)
 }
@@ -857,6 +960,41 @@ function mediaBytes(slug: string, file: string, kind: MediaView['kind']): ArrayB
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer
 }
 
+/** The `PrintSummary` half of a fixture print: what the list serves. */
+function printSummary(print: PrintDetail): PrintPage['items'][number] {
+  const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
+  return summary
+}
+
+/** `api/print_history.py` `_matches`. */
+function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
+  const status = query.get('status')
+  if (status !== null && print.status !== status) return false
+  const printer = query.get('printer_id')
+  if (printer !== null && print.printer_id !== Number(printer)) return false
+  const archive = fixtures.printArchives[print.archive_id]
+  // The backend's `_day`: when it started, else (for a deleted archive) first seen.
+  const day = (print.started_at ?? archive?.first_seen)?.slice(0, 10) ?? null
+  const from = query.get('from')
+  const to = query.get('to')
+  if ((from !== null || to !== null) && day === null) return false
+  if (from !== null && day !== null && day < from) return false
+  if (to !== null && day !== null && day > to) return false
+  const slug = query.get('slug')
+  if (slug !== null && print.slug !== slug) return false
+  const q = query.get('q')?.toLowerCase()
+  if (q) {
+    const haystack = [
+      print.output_name ?? '',
+      print.slug,
+      archive?.print_name ?? '',
+      JSON.stringify(print.provenance.params),
+    ]
+    if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
+  }
+  return true
+}
+
 /** A multipart file part as `_staged` reads it: absent, or sent empty, is none. */
 async function stagedPart(form: FormData, name: string) {
   const part = form.get(name)
@@ -869,7 +1007,7 @@ async function stagedPart(form: FormData, name: string) {
  * `require_mine` in `api/models.py`: a built-in is refused before the model is even
  * looked up, with the backend's problem (403 is not in its title table, so "Error").
  */
-function refuseBuiltin(slug: string) {
+export function refuseBuiltin(slug: string) {
   return slug.startsWith('builtin:')
     ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
     : undefined
@@ -1290,6 +1428,10 @@ export const handlers = [
       name: body.name,
       origin: 'mine',
       origin_url: null,
+      // #722: a built-in's list as it is shown, what was added to it included, all
+      // of it the copy's own.
+      media: upstream.media?.map((item) => ({ ...item, readonly: false })),
+      media_cover: null,
       // #179: the copy is the upstream's directory, so its thumbnail.png and
       // README.md come too; its outputs, and so any plate fallback, do not -- nor
       // its default-render preview, a derived file the copy gets rendered afresh.
@@ -1574,7 +1716,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item || item.missing) return noMediaItem(slug, id)
@@ -1589,7 +1731,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id/poster`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item?.poster) return problem(404, 'Not Found', `'${slug}' has no poster for '${id}'`)
@@ -1600,7 +1742,7 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const form = await request.formData()
     const upload = await stagedPart(form, 'file')
@@ -1641,11 +1783,18 @@ export const handlers = [
       caption: formText(form, 'caption') ?? '',
       poster: poster ? `${id}-poster.${poster.sniffed!.extension}` : null,
       missing: false,
+      readonly: false,
       content_type: kind.contentType,
       size: upload.size,
     }
     state.mediaFiles.set(`${slug}/${item.file}`, upload.bytes)
     if (poster && item.poster) state.mediaFiles.set(`${slug}/${item.poster}`, poster.bytes)
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      const added = writeOverlay(model, { ...overlay, added: [...overlay.added, item] })
+      await delay(120)
+      return HttpResponse.json(added)
+    }
     // Videos are not committed (the models' `.gitignore`); images and posters are.
     const files: ChangedFiles = [
       ...(item.kind === 'image' ? [{ status: 'A', path: `media/${item.file}` }] : []),
@@ -1662,9 +1811,16 @@ export const handlers = [
   http.patch(`${base}/models/:slug/media/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const { caption } = (await request.json()) as { caption: string }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const added = overlay.added.map((item) => (item.id === id ? { ...item, caption } : item))
+      return HttpResponse.json(writeOverlay(model, { ...overlay, added }))
+    }
     const media = mediaOf(model)
     if (!media.some((item) => item.id === id)) return noMediaItem(slug, id)
     const updated = writeMedia(
@@ -1678,15 +1834,25 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/media/order`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
-    const { ids } = (await request.json()) as { ids: string[] }
-    const media = mediaOf(model)
+    const { ids: named } = (await request.json()) as { ids: string[] }
+    // A built-in's shipped items keep their place: their ids are passed over (#722).
+    const overlay = model.origin === 'builtin' ? overlayOf(model) : undefined
+    const shipped = new Set(overlay?.shipped.map((item) => item.id))
+    const ids = named.filter((id) => !shipped.has(id))
+    const media = overlay ? overlay.added : mediaOf(model)
     const byId = new Map(media.map((item) => [item.id, item]))
     const permutation =
       ids.length === media.length && new Set(ids).size === ids.length && ids.every((id) => byId.has(id))
     if (!permutation) {
-      return problem(422, 'Unprocessable Content', 'the order must name every media item exactly once')
+      const what = overlay ? 'added media item' : 'media item'
+      return problem(422, 'Unprocessable Content', `the order must name every ${what} exactly once`)
+    }
+    if (overlay) {
+      return HttpResponse.json(
+        writeOverlay(model, { ...overlay, added: ids.map((id) => byId.get(id)!) }),
+      )
     }
     const updated = writeMedia(
       slug,
@@ -1697,11 +1863,57 @@ export const handlers = [
     return HttpResponse.json(updated)
   }),
 
+  // #722 — the cover: a template of mine's first item; a built-in's a choice of its own.
+  http.put(`${base}/models/:slug/media/cover`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const { id } = (await request.json()) as { id: string | null }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (id === null) return HttpResponse.json(writeOverlay(model, { ...overlay, cover: null }))
+      const listed = [...overlay.shipped, ...overlay.added]
+      if (!listed.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const cover = listed[0]?.id === id ? null : id
+      return HttpResponse.json(writeOverlay(model, { ...overlay, cover }))
+    }
+    if (id === null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        "a template's cover is its first item: name the one to move there",
+      )
+    }
+    const media = mediaOf(model)
+    const chosen = media.find((item) => item.id === id)
+    if (!chosen) return noMediaItem(slug, id)
+    if (media[0] === chosen) return HttpResponse.json(view(model))
+    const updated = writeMedia(
+      slug,
+      `Make ${id} the cover of ${slug}`,
+      [],
+      converted([chosen, ...media.filter((item) => item !== chosen)]),
+    )
+    return HttpResponse.json(updated)
+  }),
+
   http.delete(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      return HttpResponse.json(
+        writeOverlay(model, {
+          added: overlay.added.filter((item) => item.id !== id),
+          shipped: overlay.shipped,
+          cover: overlay.cover === id ? null : overlay.cover,
+        }),
+      )
+    }
     const media = mediaOf(model)
     const gone = media.find((item) => item.id === id)
     if (!gone) return noMediaItem(slug, id)
@@ -1737,7 +1949,7 @@ export const handlers = [
     const media = mediaOf(model)
     const legacy = media.length === 0 || (media.length === 1 && media[0]!.id === 'thumbnail')
     const id = nextMediaId()
-    const cover: MediaView = { ...legacyItem(), id, file: `${id}.png` }
+    const cover: MediaView = { ...legacyItem(false), id, file: `${id}.png` }
     const updated = reviseModel(
       slug,
       `Set ${slug} thumbnail`,
@@ -1748,7 +1960,7 @@ export const handlers = [
         thumbnail_source: 'model',
         thumbnail_output_id: null,
         media: legacy
-          ? [legacyItem()]
+          ? [legacyItem(false)]
           : [cover, ...converted(media[0]!.kind === 'image' ? media.slice(1) : media)],
         thumbnail_preview_id: null,
       },
@@ -2199,6 +2411,141 @@ export const handlers = [
     })
   }),
 
+  http.get(`${base}/outputs/:id/preview.glb`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const [x, y, z] = output.bbox_mm.size
+    const glb = keychainGlb(output.colors ?? ['#9AA4B2'], { x, y, z })
+    return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #308 — the prints API, filtered and paged as `api/print_history.py` does.
+  http.get(`${base}/prints`, ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const limit = Number(query.get('limit') ?? 50)
+    const cursor = query.get('cursor')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
+      return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
+    }
+    const matches = fixtures.prints.filter((print) => printMatches(print, query))
+    const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
+    const items = after.slice(0, limit).map(printSummary)
+    const last = items.at(-1)
+    return HttpResponse.json({
+      items,
+      next_cursor: after.length > limit && last ? String(last.archive_id) : null,
+    } satisfies PrintPage)
+  }),
+
+  http.get(`${base}/prints/:archiveId`, ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
+    const pulled = state.pulledTimelapses.get(print.archive_id)
+    const remote = (fixtures.printerFiles[print.archive_id] ?? []).filter((file) => file.name !== pulled)
+    return HttpResponse.json({
+      ...print,
+      has_timelapse: print.has_timelapse || pulled !== undefined,
+      media:
+        pulled === undefined
+          ? print.media
+          : {
+              ...print.media,
+              timelapse: { url: `/api/v1/prints/${print.archive_id}/timelapse`, info: null, poster_frames: [] },
+            },
+      printer_media:
+        wantsPrinter && print.status !== 'deleted_in_bambuddy'
+          ? { archive_id: print.archive_id, printer_id: print.printer_id, local_timelapse: null, remote_files: remote, warnings: [] }
+          : null,
+    } satisfies PrintDetail)
+  }),
+
+  // #311 — "Print again": `POST /queue/` with the archive, on its printer.
+  http.post(`${base}/prints/:archiveId/reprint`, ({ params }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so it cannot be printed again`)
+    }
+    const queued = { archive_id: print.archive_id, queue_item_id: 200 + state.reprints.length }
+    state.reprints.push(queued)
+    return HttpResponse.json(
+      {
+        queue_item_id: queued.queue_item_id,
+        printer_id: print.printer_id ?? 1,
+        bambuddy_url: 'https://bambuddy.example/queue',
+      } satisfies PrintAgain,
+      { status: 201 },
+    )
+  }),
+
+  // #311 — "Pull timelapse from printer": `timelapse/select`, 404 for a name the printer lacks.
+  http.post(`${base}/prints/:archiveId/timelapse/pull`, async ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so no timelapse can be attached to it`)
+    }
+    const { filename } = (await request.json()) as { filename: string }
+    if (!(fixtures.printerFiles[print.archive_id] ?? []).some((file) => file.name === filename)) {
+      return problem(404, 'Not Found', `Bambuddy has no such resource when asked to attach a timelapse: Timelapse '${filename}' not found on printer`)
+    }
+    state.pulledTimelapses.set(print.archive_id, filename)
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // #307 — the timelapse, with Range as Bambuddy's FileResponse answers it.
+  http.get(`${base}/prints/:archiveId/timelapse`, ({ params, request }) => {
+    const id = Number(params['archiveId'])
+    const print = fixtures.prints.find((p) => p.archive_id === id)
+    if (!print || (print.media.timelapse === null && !state.pulledTimelapses.has(id))) {
+      return problem(404, 'Not Found', `archive ${String(params['archiveId'])} has no timelapse`)
+    }
+    const bytes = new Uint8Array(mediaBytes('', '', 'video'))
+    const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.get('Range') ?? '')
+    if (!range) {
+      return HttpResponse.arrayBuffer(bytes.buffer, {
+        headers: { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' },
+      })
+    }
+    const start = Number(range[1])
+    const end = Math.min(range[2] ? Number(range[2]) : bytes.length - 1, bytes.length - 1)
+    if (start >= bytes.length) {
+      return new HttpResponse(null, { status: 416, headers: { 'Content-Range': `bytes */${bytes.length}` } })
+    }
+    return HttpResponse.arrayBuffer(bytes.slice(start, end + 1).buffer, {
+      status: 206,
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+      },
+    })
+  }),
+
+  // #307 — the sliced file and slicer project Bambuddy kept.
+  ...['files/sliced', 'files/source'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer, {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      })
+    }),
+  ),
+
+  ...['thumbnail', 'photos/:name', 'plates/:index/thumbnail'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } })
+    }),
+  ),
+
   // #83 — every ScadBuddy render is one plate; a test overrides this for a multi-plate 3MF.
   http.get(`${base}/outputs/:id/plates`, ({ params }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
@@ -2386,7 +2733,7 @@ export const handlers = [
           },
         ]
       : []
-    return HttpResponse.json({
+    const result = {
       route: 'slice_queue',
       library_file_id: libraryFileId,
       printer_id: body.printer_id ?? null,
@@ -2398,7 +2745,37 @@ export const handlers = [
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-    } satisfies PrintRunResult)
+    } satisfies PrintRunResult
+    // #470: the server answers 202 with a run. This one has already finished, so the
+    // client reads its result without polling; GET /print/runs/:id answers it too.
+    const now = new Date().toISOString()
+    const run: PrintRun = {
+      id: `run-${nextNumber()}`,
+      output_id: output.id,
+      status: 'succeeded',
+      created_at: now,
+      finished_at: now,
+      result,
+      error: null,
+      may_have_queued: false,
+      repeated: false,
+    }
+    state.printRuns.set(run.id, run)
+    return HttpResponse.json(run, { status: 202 })
+  }),
+
+  http.get(`${base}/print/runs/:id`, ({ params }) => {
+    const run = state.printRuns.get(String(params['id']))
+    return run ? HttpResponse.json(run) : problem(404, 'Not Found', `there is no print run ${params['id']}`)
+  }),
+
+  /**
+   * #755 — the check before Print. The run checks no mounted nozzle (#768), so it
+   * refuses nothing here; a test that needs a verdict answers this route itself.
+   */
+  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+    if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
+    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
   }),
 
   // --- #79 projects -----------------------------------------------------------------

@@ -27,6 +27,88 @@ describe('AiAuditSection', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
+  it('shows memory rows in words, not their JSON summary', async () => {
+    const memory = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'memory' as const,
+      tier: null,
+      duration_ms: 120,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            memory('3', { action: 'retain', outcome: 'ok', input_summary: '{"bank":"scadbuddy","document_id":"conversation:abc"}' }),
+            memory('2', { action: 'recall', outcome: 'ok', input_summary: '{"bank":"scadbuddy","results":3}' }),
+            memory('1', {
+              action: 'recall',
+              outcome: 'error',
+              input_summary: '{"bank":"scadbuddy"}',
+              detail: 'timed out after 3000 ms',
+            }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    const [retain, recall, failed] = rows()
+    expect(retain).toHaveTextContent('Memory save')
+    expect(retain).toHaveTextContent('bank scadbuddy · conversation:abc')
+    expect(recall).toHaveTextContent('Memory recall')
+    expect(recall).toHaveTextContent('bank scadbuddy · 3 memories')
+    expect(recall).not.toHaveTextContent('{')
+    expect(failed).toHaveTextContent('Error')
+    expect(failed).toHaveTextContent('bank scadbuddy · timed out after 3000 ms')
+    expect(screen.getByRole('option', { name: 'Memory' })).toBeInTheDocument()
+  })
+
+  it('shows http rows as method, host, status and size (#827)', async () => {
+    const row = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'http' as const,
+      duration_ms: 40,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            row('2', {
+              action: 'GET',
+              tier: 'read',
+              outcome: 'ok',
+              input_summary: '{"method":"GET","scheme":"http","host":"printer.lan:8080","status":200,"size_bytes":512}',
+            }),
+            row('1', {
+              action: 'POST',
+              tier: 'outward',
+              outcome: 'refused',
+              input_summary: '{"method":"POST","host":"example.com"}',
+              detail: "the Authorization header contains the agent's own credential",
+            }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const [get, refused] = rows()
+    expect(get).toHaveTextContent('HTTP GET')
+    expect(get).toHaveTextContent('http://printer.lan:8080 · HTTP 200 · 512 bytes')
+    expect(get).not.toHaveTextContent('{')
+    expect(refused).toHaveTextContent('Refused')
+    expect(refused).toHaveTextContent("example.com · the Authorization header contains the agent's own credential")
+    expect(screen.getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
+  })
+
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))

@@ -5,7 +5,7 @@ import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
-import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
+import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
@@ -27,8 +27,12 @@ import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
+import { TabHub } from './bridge/hub.js'
+import { PostgresPairingStore } from './bridge/pairings.js'
 import { startHeartbeat } from './routes/chat.js'
+import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { SessionManager } from './sessions/manager.js'
+import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -41,6 +45,14 @@ import type { ToolServices } from './tools/registry.js'
 const PORT = 8081
 /** How often approvals nobody is waiting on are expired (approvals/service.ts). */
 const APPROVAL_SWEEP_MS = 30_000
+/** How often sessions whose turn died with its lease are ended (SessionManager.reapExpired). */
+const SESSION_REAP_MS = 30_000
+// The shutdown's budget for running turns, inside the pod's 30 s
+// terminationGracePeriodSeconds (clusters, strategy Recreate): TURN_DRAIN_MS
+// for them to finish, TURN_ABORT_WAIT_MS for the rest to record that they were
+// stopped, then shutdown()'s own 10 s.
+const TURN_DRAIN_MS = 12_000
+const TURN_ABORT_WAIT_MS = 5_000
 /** How often audit rows past their retention are deleted (audit/log.ts). */
 const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
 
@@ -155,6 +167,11 @@ const toolServices: ToolServices = {
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
 }
+// The browser bridge (#254, bridge/hub.ts): the tabs connected over
+// /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
+// one through `ai_browser_pairings` (spec §8.5).
+const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined })
+toolServices.browser = tabs
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -183,8 +200,14 @@ const chromiumSandbox = (): Promise<boolean> =>
     return probe.available
   }))
 
+// `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
+// append is announced on `scadbuddy_events`, and this replica's LISTEN
+// consumer (below) wakes its followers for sessions other replicas write.
+const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
+
 // Sessions (#300) and their approvals (#258): started from the assistant
-// panel's socket (routes/chat.ts) and the session routes (routes/sessions.ts).
+// panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
+// and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const sessions =
@@ -202,6 +225,11 @@ const sessions =
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Other agents decide approvals only with their token's grant (spec §6, #300).
+        approvalGrants: approvalGrantCheck(tokens),
+        // A resumed approval's turn gets no more than its token holds now (#300).
+        currentTiers: liveTokenTiers(tokens),
+        ...(sessionEvents ? { onAppend: sessionEvents.onAppend } : {}),
         // Every tool call a turn makes, and every approval decision (#258).
         ...(audit ? { audit } : {}),
         // Enabled plugins (#297), per turn, through the loopback forwarder.
@@ -215,8 +243,19 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It may open only this origin, which serves the SPA.
-        headlessBrowser: { backendUrl: config.backendUrl, sandbox: chromiumSandbox },
+        // It opens the backend, which serves the SPA; the UI's public origins
+        // are rewritten onto it, and SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what
+        // else a human may let it open (harness/browserOrigins.ts).
+        headlessBrowser: {
+          backendUrl: config.backendUrl,
+          ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
+          ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
+          ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
+          sandbox: chromiumSandbox,
+        },
+        // The http_request tool (#827): on for a turn unless the
+        // `http_request_enabled` setting is false (routes/httpRequest.ts).
+        httpRequest: {},
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)
@@ -228,9 +267,20 @@ const sessions =
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
+// The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
+if (sessions) toolServices.sessions = sessions
+// The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
+const stopSessionWake =
+  sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+})
+// Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
+// or a restart that closed the pool under it) say so and stop claiming to run.
+const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('session lease reaper failed:', (err as Error).message),
 })
 // Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
 const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
@@ -258,6 +308,7 @@ const app = createApp({
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
+  tabs,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -297,36 +348,59 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websoc
 // Drain the listener first (bounded, see shutdown.ts), then close the pool,
 // then exit: non-zero when the drain timed out and requests were cut.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.once(signal, () => {
-    stopSweeper?.()
-    stopRetention?.()
-    stopHeartbeat()
-    // 1001 "going away": the panel reconnects to another replica or after the restart.
-    for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
-    // A peer that never answers the close frame would hold server.close() for
-    // ws's 30 s close timeout, past the 10 s deadline.
-    setTimeout(() => {
-      for (const socket of wss.clients) socket.terminate()
-    }, 2_000).unref()
-    // Running turns stop; their pending approvals stay pending (approvals/service.ts).
-    sessions?.abortAll()
-    void shutdown({
-      // End the /mcp sessions and the session event streams first: their
-      // standing SSE responses would otherwise hold server.close() until the deadline.
-      closeSessions: async () => {
-        await app.close()
-        resources.close()
-        await events?.close()
-      },
-      closeServer: async () => {
-        await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
-        await pluginForwarder.close()
-      },
-      closeDatabase: database ? () => database.close() : undefined,
-      timeoutMs: 10_000,
-    }).then((result) => {
-      if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
-      process.exit(result === 'clean' ? 0 : 1)
-    })
+  process.once(signal, () => void stop())
+}
+
+async function stop(): Promise<void> {
+  stopSweeper?.()
+  stopReaper?.()
+  stopRetention?.()
+  // Running turns first, while the panel's socket, the paired tab and the pool
+  // are all still up: no new turn starts, running ones may finish, the rest are
+  // aborted and record that they were (SessionManager.stopTurns). Aborted
+  // turns' pending approvals stay pending (approvals/service.ts).
+  await sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
+  stopSessionWake?.()
+  stopHeartbeat()
+  tabs.close()
+  // 1001 "going away": the panel reconnects to another replica or after the restart.
+  for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
+  // A peer that never answers the close frame would hold server.close() for
+  // ws's 30 s close timeout, past the 10 s deadline.
+  setTimeout(() => {
+    for (const socket of wss.clients) socket.terminate()
+  }, 2_000).unref()
+  const result = await shutdown({
+    // End the /mcp sessions and the session event streams first: their
+    // standing SSE responses would otherwise hold server.close() until the deadline.
+    closeSessions: async () => {
+      // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
+      await drainRetains()
+      // stopTurns waited for the aborted turns only so long: any still winding
+      // down append their final session.status/session.done, and publish them,
+      // before closeDatabase runs; within the same deadline (#802).
+      await sessions?.settled()
+      await app.close()
+      resources.close()
+      await events?.close()
+    },
+    closeServer: async () => {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+      await pluginForwarder.close()
+    },
+    // The session-event publisher closes only now, after the drain: turns
+    // stopped above append their final session.status/session.done while they
+    // wind down (stopTurns waits for that, but only for so long), and closing
+    // it first would swallow that NOTIFY, so another replica's followers would
+    // never wake (#715 review; busEvents.ts).
+    closeDatabase: database
+      ? async () => {
+          sessionEvents?.close()
+          await database.close()
+        }
+      : undefined,
+    timeoutMs: 10_000,
   })
+  if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
+  process.exit(result === 'clean' ? 0 : 1)
 }

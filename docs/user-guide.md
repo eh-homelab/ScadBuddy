@@ -188,8 +188,13 @@ stored on ScadBuddy's server and is never sent to the browser.
    a second one.
 5. Press **Save changes**.
 
+If the Bambuddy URL is one only ScadBuddy's server can reach (an in-cluster address,
+say), list the addresses browsers use under **Bambuddy web URLs**, comma-separated.
+"Open in Bambuddy" links use the first, or, when ScadBuddy is open inside one of the
+others, that one.
+
 The same values can be set on first start with `SCADBUDDY_BAMBUDDY_URL`,
-`SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
+`SCADBUDDY_BAMBUDDY_WEB_URLS`, `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
 saved from the UI, the saved values take precedence.
 
 ![Settings](images/settings.png)
@@ -218,7 +223,10 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
 
 - **Generate** saves the current render as an output, with its parameters and a
   thumbnail.
-- **Download 3MF** downloads that output.
+- **Download 3MF** downloads that output. When the template declares default slicer
+  settings (`print_settings` in its `model.json`, such as the name keychain's prime
+  tower), the file carries them, and Bambu Studio shows them as changes to the system
+  process. **Print** slices with them too.
 - **Send to Bambuddy** uploads the output to the library, laid out for the printer set
   in Settings, or on the default plate without one. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
   is set, the library file gets an "Edit in ScadBuddy" link that opens these parameters
@@ -307,6 +315,24 @@ model, the same way print options and copies already are. The plate type is reme
 per **printer**, not per model. Reopening the dialog restores all of it, and opens
 straight into Advanced mode if the remembered choice is a named process or a High Flow
 flow — either would otherwise apply unseen from Simple mode.
+
+### Library
+
+The **Library** page lists everything already in Bambuddy's library, by folder. By
+default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
+shown without **Print**, since a sliced file is printed from Bambuddy directly.
+
+**Print** on a file opens the same print picker an output uses. The file itself is
+never touched: it prints exactly as its author left it, never replated for the
+printer (#105) or recolored for the spools (#476), and never uploaded again. The
+nozzle refusals above still apply, since they read the printer, not the file.
+
+Choices are remembered per library file, the way an output's are remembered per
+model. There's no ScadBuddy progress panel or History entry for a library print —
+Bambuddy's queue and archives are the record — so once it's queued, the dialog
+links to Bambuddy's queue instead. The queue item is tagged with the last-used
+project, the same as an output's.
 
 ### History and versions
 

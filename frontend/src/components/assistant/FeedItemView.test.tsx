@@ -32,3 +32,107 @@ describe('the approval card', () => {
     }
   })
 })
+
+describe('the memory line', () => {
+  const memory = (item: Partial<Extract<FeedItem, { kind: 'memory' }>>, advanced = false) =>
+    render(
+      <FeedItemView
+        item={{ kind: 'memory', id: 'memory-0', action: 'recall', bank: 'scadbuddy', outcome: 'ok', ...item }}
+        onDecide={vi.fn()}
+        advanced={advanced}
+      />,
+    )
+  const cases: [Parameters<typeof memory>[0], string][] = [
+    [{ count: 3 }, 'Recalled 3 memories'],
+    [{ count: 1 }, 'Recalled 1 memory'],
+    [{ count: 0 }, 'No memories recalled'],
+    [{ outcome: 'timeout', detail: 'timed out after 3000 ms' }, 'Memory recall timed out'],
+    [{ outcome: 'error', detail: 'HTTP 500' }, 'Memory recall failed'],
+    [{ action: 'retain' }, 'Saved to memory'],
+    [{ action: 'retain', outcome: 'timeout' }, 'Saving to memory timed out'],
+    [{ action: 'retain', outcome: 'error', detail: 'HTTP 503' }, 'Could not save to memory'],
+  ]
+
+  it('in basic mode says only what memory did, and why when it failed', () => {
+    for (const [item, headline] of cases.filter(([c]) => !(c.action === 'retain' && (c.outcome ?? 'ok') === 'ok'))) {
+      const { unmount } = memory({ ...item, input: 'make a box', memories: ['1. The user prints in PETG.'] })
+      const line = screen.getByTestId('agent-memory')
+      expect(line).toHaveTextContent(headline)
+      if (item.detail) expect(line).toHaveTextContent(item.detail)
+      expect(line).not.toHaveTextContent('Bank scadbuddy')
+      expect(screen.queryByTestId('agent-memory-input')).toBeNull()
+      expect(screen.queryByTestId('agent-memory-output')).toBeNull()
+      unmount()
+    }
+  })
+
+  it('in basic mode says nothing for a retain that worked', () => {
+    memory({ action: 'retain', input: 'user: a box' })
+    expect(screen.queryByTestId('agent-memory')).toBeNull()
+  })
+
+  it('in advanced mode shows the bank, the query and the memories, open', () => {
+    for (const [item, headline] of cases) {
+      const { unmount } = memory(item, true)
+      const line = screen.getByTestId('agent-memory')
+      expect(line).toHaveAttribute('open')
+      expect(line.querySelector('summary')).toHaveTextContent(headline)
+      expect(line).toHaveTextContent('Bank scadbuddy')
+      if (item.detail) expect(line).toHaveTextContent(item.detail)
+      unmount()
+    }
+    memory({ count: 1, input: 'make a <b>box</b>', memories: ['1. The user prints in PETG.'] }, true)
+    expect(screen.getByTestId('agent-memory')).toHaveTextContent('Bank scadbuddy · 1 found')
+    const query = screen.getByTestId('agent-memory-input')
+    expect(query).toHaveAttribute('open')
+    expect(query.querySelector('summary')).toHaveTextContent('Query')
+    // Plain text, never markup: memories and queries are untrusted.
+    expect(query).toHaveTextContent('make a <b>box</b>')
+    expect(query.querySelector('b')).toBeNull()
+    const found = screen.getByTestId('agent-memory-output')
+    expect(found).toHaveAttribute('open')
+    expect(found).toHaveTextContent('1. The user prints in PETG.')
+  })
+
+  it("labels a retain's input as what was saved", () => {
+    memory({ action: 'retain', input: 'user: a box, 40 mm' }, true)
+    const saved = screen.getByTestId('agent-memory-input')
+    expect(saved.querySelector('summary')).toHaveTextContent('Saved')
+    expect(saved).toHaveTextContent('user: a box, 40 mm')
+    expect(screen.queryByTestId('agent-memory-output')).toBeNull()
+  })
+})
+
+describe('the tool card', () => {
+  const card = (advanced: boolean) =>
+    render(
+      <FeedItemView
+        item={{
+          kind: 'tool',
+          id: 't1',
+          name: 'mcp__scadbuddy__set_parameters',
+          risk: 'write',
+          input: { width: 40 },
+          result: { ok: true, summary: 'Set 1 parameter', sources: [{ title: 'Customizer docs', url: 'https://example.com/c' }] },
+        } as Extract<FeedItem, { kind: 'tool' }>}
+        onDecide={vi.fn()}
+        advanced={advanced}
+      />,
+    )
+
+  it('in basic mode shows what ran and how it ended, without its arguments', () => {
+    card(false)
+    const tool = screen.getByTestId('agent-tool')
+    expect(tool).toHaveTextContent('Set 1 parameter')
+    expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
+    expect(tool.querySelector('details')).not.toHaveAttribute('open')
+  })
+
+  it('in advanced mode shows its arguments and sources, open', () => {
+    card(true)
+    const args = screen.getByTestId('agent-tool-arguments')
+    expect(args).toHaveAttribute('open')
+    expect(args).toHaveTextContent('"width": 40')
+    expect(screen.getByRole('link', { name: 'Customizer docs' })).toBeVisible()
+  })
+})

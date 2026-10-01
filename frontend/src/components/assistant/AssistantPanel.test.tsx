@@ -197,6 +197,19 @@ describe('assistant panel', () => {
     expect(within(send!).getByText('running…')).toBeInTheDocument()
   })
 
+  it('shows tool arguments only in Advanced, and remembers the switch per browser', async () => {
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+    const { user } = await openAndSend()
+    expect(screen.queryAllByTestId('agent-tool-arguments')).toEqual([])
+    const advanced = screen.getByRole('button', { name: 'Advanced' })
+    expect(advanced).toHaveAttribute('aria-pressed', 'false')
+    await user.click(advanced)
+    expect(advanced).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getAllByTestId('agent-tool-arguments').length).toBeGreaterThan(0)
+    expect(window.localStorage.getItem('scadbuddy.assistant.advanced')).toBe('1')
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+  })
+
   it('holds the outward step until Approve, then sends the decision', async () => {
     const { user } = await openAndSend()
     const card = screen.getByRole('region', { name: 'Needs your approval' })

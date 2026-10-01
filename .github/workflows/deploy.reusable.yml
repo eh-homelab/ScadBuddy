@@ -14,6 +14,9 @@ name: Deploy (reusable)
 #      render worker, same image; #547): in each, the image line to
 #      `ghcr.io/eh-homelab/scadbuddy:<version>@sha256:<digest>` and the three
 #      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
+#      The agent sidecar's line in the API manifest (#738) is pinned to
+#      `ghcr.io/eh-homelab/scadbuddy-agent:<version>@sha256:<its digest>`, the
+#      same build's agent image, so the two containers never drift apart.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
@@ -76,12 +79,16 @@ env:
   MANIFEST_WORKER: applications/scadbuddy/scadbuddy-render.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
+  # The agent sidecar (#261), built by the same Build Image run under the same
+  # tags, and pinned in $MANIFEST beside the API (#738).
+  AGENT_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent
 
 jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The agent wait below can take up to 10 of these.
+    timeout-minutes: 25
     # The one place the two callers can race: this job closes the previous
     # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
     # Job-level, so only these few seconds serialise — deploy-release's image
@@ -130,6 +137,30 @@ jobs:
           DIGEST: ${{ inputs.digest }}
         run: docker buildx imagetools inspect "${IMAGE}@${DIGEST}" > /dev/null
 
+      # The agent is tagged like the API by the same Build Image run, so its
+      # digest is resolved from the tag rather than passed in. Its job runs
+      # beside the API's: a release deploy, which waits for the API image only,
+      # can get here first, so this waits up to 10 minutes for it.
+      - name: Resolve the agent image
+        id: agent
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ref="${AGENT_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            # Parsed from the human output, as deploy-main.yml does; `|| true`
+            # so an unpublished tag means "keep waiting", not an aborted step.
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $ref (got '$digest')"; exit 1; }
+          echo "$ref -> $digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Mint an App token for clusters
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -158,6 +189,7 @@ jobs:
         working-directory: clusters
         env:
           DIGEST: ${{ inputs.digest }}
+          AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -171,7 +203,16 @@ jobs:
           # One manifest, one Deployment: every guard below is per file.
           pin() { # manifest deployment
             local target=$1 deployment=$2
-            expect_one "$target" "^\s*image: ${IMAGE//./\\.}[^[:space:]]*$" "image"
+            # `[:@]` ends the repository name, so the pattern matches this image
+            # and never a sibling package that shares its prefix: the agent
+            # sidecar, ghcr.io/eh-homelab/scadbuddy-agent, runs in the same pod
+            # and has its own image line in the same manifest.
+            # A bare `image: ghcr.io/eh-homelab/scadbuddy` with no tag or digest
+            # therefore no longer matches, and the run fails "found 0". That is
+            # deliberate: clusters pins by digest (an untagged ref would pull
+            # the Nexus proxy's day-old `latest`), and deploy-pin.test.sh pins it.
+            local image_line="^(\s*)image: ${IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$image_line" "image"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/version: ' "version annotation"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/revision: ' "revision annotation"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/source: ' "source annotation"
@@ -183,7 +224,7 @@ jobs:
             # writes a full-SHA revision, so a leftover one would make every
             # later verify run warn about a pin that no longer exists. Drop it.
             sed -i -E \
-              -e "s|^(\s*)image: ${IMAGE//./\\.}[^[:space:]]*\$|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
+              -e "s|${image_line}|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/version: .*\$|\1scadbuddy.eh-homelab.io/version: \"${VERSION}\"|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/revision: .*\$|\1scadbuddy.eh-homelab.io/revision: \"${REVISION}\"|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/source: .*\$|\1scadbuddy.eh-homelab.io/source: \"${SOURCE_URL}\"|" \
@@ -217,8 +258,21 @@ jobs:
               || { echo "::error file=$target::the ${deployment} Deployment's pinned container must set imagePullPolicy: IfNotPresent once the image is digest-pinned (found '${policy:-<unset>}')"; exit 1; }
           }
 
+          # The agent sidecar's line (#738). Required: clusters runs the agent
+          # in the API's pod, so a manifest without its line is a dropped
+          # sidecar to catch, not a layout to deploy around. The provenance
+          # annotations are the Deployment's and are already written above.
+          pin_agent() { # manifest
+            local target=$1
+            local agent_line="^(\s*)image: ${AGENT_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$agent_line" "agent image"
+            sed -i -E "s|${agent_line}|\1image: ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${AGENT_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DIGEST}\$" "pinned agent image"
+          }
+
           manifests=("$MANIFEST")
           pin "$MANIFEST" scadbuddy
+          pin_agent "$MANIFEST"
           # Conditional until clusters#1454 adds the worker's file: without it
           # this still deploys the API alone, as before #547.
           if [ -f "$MANIFEST_WORKER" ]; then
@@ -246,6 +300,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ env.CLUSTERS_REPO }}
           DIGEST: ${{ inputs.digest }}
+          AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -274,6 +329,7 @@ jobs:
           deploy(scadbuddy): ${VERSION}
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
+          and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -292,6 +348,7 @@ jobs:
           Automated by eh-homelab/ScadBuddy \`deploy.reusable.yml\` — [run](${RUN_URL}).
 
           - **Image:** \`${IMAGE}:${VERSION}@${DIGEST}\`
+          - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
           - **Files:** ${listed}
           - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)
           - **Path:** ${KIND}

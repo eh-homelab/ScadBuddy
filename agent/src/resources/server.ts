@@ -25,6 +25,7 @@ import {
   type ToolServices,
   UNEXPECTED_ERROR_SOURCE,
 } from '../tools/registry.js'
+import { allPages, isPaged } from '../tools/pagination.js'
 import { expand, isTemplate, matchUri, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
 import { type ResourceHub, SubscriptionLimitError } from './hub.js'
 
@@ -133,8 +134,11 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
     progress: async () => {},
     signal: extra.signal,
   })
+  // A resource is the whole collection, so a paged list tool is read to its last page (#837).
   const run = async (def: ResourceDef, vars: Record<string, string>, principal: Principal, extra: Extra) =>
-    toolOf(def).execute(def.args ? def.args(vars) : vars, ctx(principal, extra))
+    readTool(toolOf(def), def.args ? def.args(vars) : vars, principal, extra)
+  const readTool = (tool: Tool, args: Record<string, unknown>, principal: Principal, extra: Extra) =>
+    isPaged(tool) ? allPages((a) => tool.execute(a, ctx(principal, extra)), args) : tool.execute(args, ctx(principal, extra))
 
   /** The resource `uri` names, checked against the caller's tier. */
   const resolve = (uri: string, principal: Principal) => {
@@ -267,7 +271,13 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
   low.setRequestHandler(SubscribeRequestSchema, (req, extra) =>
     audited('subscribe', req.params.uri, extra, async () => {
       const principal = principalOf(extra)
-      const { uri } = resolve(req.params.uri, principal)
+      const { def, vars, uri } = resolve(req.params.uri, principal)
+      // Who may see it, beyond the tier (catalog.ts `readToSubscribe`): the
+      // same answer a read would give, and no hint of what it holds.
+      if (def.readToSubscribe) {
+        const seen = await run(def, vars, principal, extra).catch(() => undefined)
+        if (!seen || seen.isError) throw notFound(req.params.uri)
+      }
       try {
         subscriptions.add(uri)
       } catch (err) {
@@ -298,8 +308,9 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
   }
 
   async function readJson(tool: Tool, args: Record<string, unknown>, principal: Principal, extra: Extra): Promise<unknown> {
-    const result = await tool.execute(args, ctx(principal, extra))
+    const result = await readTool(tool, args, principal, extra)
     const text = result.content.find((c) => c.type === 'text')
+    // A paged tool is read to its end by readTool, which answers a plain list as the bare array.
     return text?.type === 'text' ? JSON.parse(text.text) : undefined
   }
 
@@ -313,7 +324,7 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
         return (await slugs(principal, extra)).map((m) => m.slug)
       case 'commit':
         return context.slug
-          ? field(await readJson(byName.get('list_versions')!, { slug: context.slug, limit: 100 }, principal, extra), 'commit')
+          ? field(await readJson(byName.get('list_versions')!, { slug: context.slug }, principal, extra), 'commit')
           : []
       case 'output_id':
         return context.slug
