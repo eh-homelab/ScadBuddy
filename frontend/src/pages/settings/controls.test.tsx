@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
 import { BytesInput } from './controls'
-import { bestUnit, inUnit } from './fields'
+import { bestUnit, hasKey, inUnit } from './fields'
 
 // #322 review: a byte limit must never change unless its number is edited.
 
@@ -59,5 +59,13 @@ describe('byte units', () => {
     expect(bestUnit(1024 ** 3)).toBe('GiB')
     expect(bestUnit(1_000_000_000)).toBe('GB')
     expect(bestUnit(0)).toBe('MB')
+  })
+})
+
+describe('hasKey', () => {
+  it('names the flag each secret is reported under, the render key included (#855)', () => {
+    expect(hasKey('bambuddy_api_key')).toBe('has_api_key')
+    expect(hasKey('bambuddy_render_api_key')).toBe('has_render_api_key')
+    expect(hasKey('google_fonts_api_key')).toBe('has_google_fonts_api_key')
   })
 })

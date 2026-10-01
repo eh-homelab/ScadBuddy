@@ -2,6 +2,8 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
   AssetUsage,
+  RenderAccepted,
+  StoreUsage,
   AttachResult,
   ChoicesView,
   BoundingBox,
@@ -2347,18 +2349,20 @@ export const handlers = [
     }
 
     const jobId = nextHexId()
+    const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
       id: jobId,
       slug,
       status: 'pending',
       created_at: new Date().toISOString(),
       params: renderParams,
-      inputs: withVersion({ ...(body.inputs ?? {}), params: renderParams }),
+      inputs,
       log_tail: [],
     })
     runJob(jobId)
+    // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.
     return HttpResponse.json(
-      { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
+      { job_id: jobId, status_url: `${base}/jobs/${jobId}`, inputs } satisfies RenderAccepted,
       { status: 202 },
     )
   }),
@@ -2400,7 +2404,7 @@ export const handlers = [
       max_count: 200000,
       max_total_bytes: 53687091200,
       by_kind: { piece: 4096 },
-    }),
+    } satisfies StoreUsage),
   ),
 
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {

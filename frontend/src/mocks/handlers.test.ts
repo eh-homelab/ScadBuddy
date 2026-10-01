@@ -903,6 +903,31 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
+  it('echoes the caller\'s normalised inputs on a submit, as RenderAccepted does (#904)', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Echo' }, tab: 'a' })
+    expect(accepted.inputs).toEqual({ params: { name: 'Echo' }, tab: 'a', v: 0 })
+  })
+
+  it('refuses the Bambuddy store without a URL and an inbox, as the backend does (#700)', async () => {
+    const put = (body: Record<string, unknown>) =>
+      fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const noInbox = await put({ store_backend: 'bambuddy', library_folder_id: null })
+    expect(noInbox.status).toBe(422)
+    expect(((await noInbox.json()) as { detail: string }).detail).toBe(
+      'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
+    )
+    expect((await put({ store_backend: 'bambuddy', bambuddy_url: null })).status).toBe(422)
+    // Nothing of a refused save is kept.
+    expect((await api.getSettings()).store_backend).toBe('local')
+    expect((await put({ store_backend: 'bambuddy' })).status).toBe(200)
+    // With the store on Bambuddy, clearing the inbox alone is refused too.
+    expect((await put({ library_folder_id: null })).status).toBe(422)
+  })
+
   it('refuses an upload over the limit with a 413 naming it', async () => {
     const saved = (await api.getSettings()).media_upload_max_bytes
     try {
