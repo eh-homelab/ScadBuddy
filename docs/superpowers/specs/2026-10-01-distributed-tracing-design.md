@@ -47,6 +47,13 @@ cluster does not run and which covers neither the browser nor Temporal context.
 - **No endpoint, no export.** With `OTEL_EXPORTER_OTLP_ENDPOINT` unset, each
   service installs a provider with no exporter: spans are created (so context
   still propagates) and dropped. Tests, CI and a local `docker run` need nothing.
+- **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
+  problem, not for "tracing off": it replaces the provider with the API's
+  no-op one. No spans are created, so nothing propagates.
+  `render_jobs.traceparent` and `ai_approvals.traceparent` stay null, and the
+  relay still answers `off` (it keys only on the endpoint). Leaving the
+  endpoint unset is the normal way to run without tracing. Clusters never
+  sets this variable unless it is ruling the SDK out of an incident.
 - **Resource.** Each process sets `service.name`: `scadbuddy-api`,
   `scadbuddy-worker`, `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
   the build's version, and `service.instance.id` the pod's own, with the build's
@@ -129,7 +136,10 @@ names), httpx (per client, as §4 limits it), psycopg, and the Temporal
 interceptor. Dependencies:
 `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`,
 `opentelemetry-instrumentation-{fastapi,httpx,psycopg}`, and
-`temporalio[opentelemetry]` inside the existing `<1.34` pin.
+`temporalio[opentelemetry]` inside the existing `<1.34` pin. Verified against
+PyPI on 2026-10-01: 1.33.0 declares the `opentelemetry` extra
+(`opentelemetry-api` and `opentelemetry-sdk`, `>=1.26,<2`) and ships
+`temporalio.contrib.opentelemetry`, so no Temporal bump comes first.
 
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
@@ -196,6 +206,19 @@ path except `/api/v1/ai/*` to the backend.
   endpoint with httpx in the background; the browser never waits on the
   collector. A forged span can still name any trace ID, but never claim to be
   the API or the worker.
+- **Accepted residual risk.** Script running on ScadBuddy's origin (today
+  only the app; in future an XSS or a compromised dependency) can post spans
+  into any trace ID it knows or guesses, so they show up inside someone
+  else's render or turn in Tempo. This is accepted:
+  - the harm is to what the trace view shows, never to data;
+  - the relay never reads anything back;
+  - the forged spans are always `service.name=scadbuddy-web` and carry the
+    relay's client address, so they can be told apart from the backend's
+    own;
+  - an attacker who can already run script on the origin can call the API
+    directly, which is far worse.
+
+  The dashboard's trace panels filter on server-side services by default.
 - **Tracing off** (no endpoint): `204` with `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
@@ -309,8 +332,7 @@ and the `render_jobs` row agree.
 
 ## 7. Dashboard and how it deploys
 
-**In this repo:** `deploy/grafana/` holds the dashboard JSON (uid `scadbuddy`,
-checked against the live Grafana's uids before merge) and a
+**In this repo:** `deploy/grafana/` holds the dashboard JSON (uid `scadbuddy`) and a
 `kustomization.yaml` whose `configMapGenerator` makes a ConfigMap labelled
 `grafana_dashboard: "1"` in `cattle-dashboards`, the namespace the
 rancher-monitoring sidecar watches. Datasources are dashboard variables
@@ -349,16 +371,24 @@ The #547 precedent skips a whole manifest file that is absent (`[ -f ... ]`),
 but the dashboard line sits in `clusters/prod/scadbuddy/kustomization.yaml`, a
 file that already exists. So the new step counts the anchored line first:
 
-- **0 matches:** `::notice::` that clusters has no dashboard pin yet, and pin
-  the images only. This keeps deploys working until clusters#1596 Phase 5 adds
-  the line.
+- **Not configured:** the anchored pattern matches 0 lines and the file
+  does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
+  unanchored, fixed-string `grep -F`). Post a `::notice::` that clusters has
+  no dashboard pin yet, and pin the images only. This keeps deploys working
+  until clusters#1596 Phase 5 adds the line.
+- **Malformed:** the anchored pattern matches 0 lines but the path does
+  appear (a short SHA, a tag or branch for `ref`, a comment on the line,
+  different spacing or casing). `::error::` and stop. A near miss must never
+  be read as "not configured", or a stale dashboard would stay pinned
+  silently.
 - **1 match:** rewrite it with the same anchored `sed`, then `expect_one` the
   rewritten line (`ref=` followed by exactly `REVISION`), as the image line is
   round-tripped.
 - **More than 1:** `::error::` and stop, as for any other pinned line.
 
 The anchor is `^\s*- https://github\.com/eh-homelab/ScadBuddy//deploy/grafana\?ref=[0-9a-f]{40}$`.
-The `.github/scripts/*.test.sh` suite gets cases for all three counts.
+The `.github/scripts/*.test.sh` suite gets cases for all four outcomes, the
+malformed one among them with a short SHA, a branch ref and a trailing comment.
 
 Clusters needs, in clusters#1596 Phase 5: the remote resource line, and the
 `unsetOnly` NamespaceTransformer in place of the overlay's plain
@@ -370,6 +400,15 @@ deploy/grafana` succeeds. The `lint` job installs no kustomize today, so PR #5
 adds a setup step that downloads a pinned kustomize release and checks its
 published sha256 before use. It does not rely on whatever happens to be on the
 runner image.
+
+**A manual step CI cannot do.** Nothing in CI checks that uid `scadbuddy` is
+free in the live Grafana: the hosted runners cannot reach the cluster, and
+this repo's jobs never run on the LAN pools. If two dashboards share a uid,
+the sidecar loads both and one silently replaces the other. So PR #5's
+description carries a checkbox: whoever opens it lists the live uids (Grafana
+`GET /api/search?type=dash-db` from the LAN) and confirms `scadbuddy` is not
+among them, as the bambuddy dashboard's `bambuddy` uid was checked in clusters.
+The uid never changes after that, so the check is needed once.
 
 ## 8. Testing
 
