@@ -184,7 +184,42 @@ class BambuddyUploadStore:
         """Record the printer and nozzle a print into ``project_id`` used (#317)."""
         await asyncio.to_thread(self._remember_project_target, project_id, target)
 
+    async def project_targets(self) -> dict[int, ProjectTarget]:
+        """Every project's remembered printer and nozzle, for Settings (#599)."""
+        return await asyncio.to_thread(self._project_targets)
+
+    async def forget_project_target(self, project_id: int) -> None:
+        """Forget what ``project_id`` last printed on; the next Generate lays it out
+        for the default again. Forgetting what is not remembered is not an error."""
+        await asyncio.to_thread(self._forget_project_targets, project_id)
+
+    async def forget_all_project_targets(self) -> None:
+        """Forget every project's remembered printer and nozzle (#599)."""
+        await asyncio.to_thread(self._forget_project_targets, None)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
+
+    def _project_targets(self) -> dict[int, ProjectTarget]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT project_id, printer_id, nozzle_diameter FROM project_print_targets"
+                " ORDER BY project_id"
+            ).fetchall()
+        return {
+            row["project_id"]: ProjectTarget(
+                printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"]
+            )
+            for row in rows
+        }
+
+    def _forget_project_targets(self, project_id: int | None) -> None:
+        with self._require().connection() as conn:
+            if project_id is None:
+                conn.execute("DELETE FROM project_print_targets")
+            else:
+                conn.execute(
+                    "DELETE FROM project_print_targets WHERE project_id = %s", (project_id,)
+                )
 
     def _project_target(self, project_id: int) -> ProjectTarget | None:
         with self._require().connection() as conn:

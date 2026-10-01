@@ -30,8 +30,8 @@ from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
+from tests.support.activities import demo_paths, piece_request, worker_deps
 from tests.support.store import local_content
-from tests.test_activities import _deps, _paths, _request
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
@@ -292,8 +292,8 @@ async def test_cached_piece_answers_on_a_worker_that_never_rendered_it(
 
 def _stage_worker(tmp_path: Path, content: ContentStore) -> RenderActivities:
     """The activities over a cache of their own, as on a worker with no shared volume."""
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
     blobs = CachedBlobStore(LocalBlobStore(paths.blobs), content, max_bytes=1 << 30, min_age=0)
     return RenderActivities(dataclasses.replace(deps, blobs=blobs))
 
@@ -303,7 +303,7 @@ async def test_the_stages_publish_so_a_third_worker_answers_the_piece(
 ) -> None:
     env = ActivityEnvironment()
     a, b, c = (_stage_worker(tmp_path / n, content) for n in "abc")
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await env.run(b.render_solids, req, prepared, main)
@@ -317,7 +317,7 @@ async def test_a_finished_piece_whose_publish_failed_is_not_answered_by_its_work
 ) -> None:
     env = ActivityEnvironment()
     a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await env.run(a.render_solids, req, prepared, main)
@@ -338,7 +338,7 @@ async def test_a_stage_whose_piece_is_gone_fails_by_name(
 ) -> None:
     env = ActivityEnvironment()
     a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await content.forget(req.piece_key)  # deleted in the backend between two stages

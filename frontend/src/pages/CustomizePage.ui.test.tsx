@@ -150,6 +150,25 @@ describe('CustomizePage with a template UI', () => {
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
 
+  it('keeps both of two writes in one tick, and get() sees them at once (#864)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined())
+    host?.inputs.set({ params: { name: 'Seven' } })
+    host?.inputs.set({ history: [7] })
+    // Synchronously, before React commits either write.
+    const now = host?.inputs.get()
+    expect((now?.['params'] as Record<string, unknown>)['name']).toBe('Seven')
+    expect(now?.['history']).toEqual([7])
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Seven'))
+    expect(host?.inputs.get()['history']).toEqual([7])
+  })
+
   it('a write right after a preset load starts from the preset', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

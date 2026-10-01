@@ -50,10 +50,10 @@ class RemoteAssets:
         return await asyncio.to_thread(self.content.index.now)
 
     async def ensure(self, store: AssetStore, ids: Iterable[str]) -> list[str]:
-        """Bring every id the store holds into this process's ``store``; the ids fetched.
-        One it cannot bring in is logged by id and reason: the render then refuses the
-        parameter, and the log says it was not in the blob store."""
-        fetched: list[str] = []
+        """Bring every id the store holds into this process's ``store``; the ids it could
+        not provide, each logged by id and reason: the render then refuses the parameter
+        as not in the blob store."""
+        absent: list[str] = []
         for asset_id in sorted(set(ids)):
             try:
                 # `use`, not `get`: a hit is a use, so the worker's own sweep (by last
@@ -71,6 +71,7 @@ class RemoteAssets:
                     "a parameter's value is not an upload in the blob store",
                     extra={"asset_id": asset_id, "reason": "no row"},
                 )
+                absent.append(asset_id)
                 continue
             try:
                 data = await self.content.read(stat.ref)
@@ -81,9 +82,8 @@ class RemoteAssets:
                     extra={"asset_id": asset_id, "reason": repr(error)},
                 )
                 await self._drop_bad(key)
-                continue
-            fetched.append(asset_id)
-        return fetched
+                absent.append(asset_id)
+        return absent
 
     async def _drop_bad(self, key: str) -> None:
         """Drop a copy that cannot be read, object too, so the API's `backfill` mirrors

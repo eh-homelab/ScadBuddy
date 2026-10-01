@@ -11,7 +11,7 @@ from pathlib import Path
 
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.googlefonts import licence_slug
-from scadbuddy.store.archive import pack_dir, unpack_dir
+from scadbuddy.store.archive import pack_dir, read_marker, unpack_dir
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
 from scadbuddy.store.locks import KeyLocks
@@ -91,9 +91,9 @@ class FontMirror:
         return done
 
     async def sync(self, families: Collection[str] | None = None) -> list[str]:
-        """Install the mirrored families this process lacks: only ``families`` (family
-        directory names, `wanted_families`) when given, else every one. One index query
-        when there is nothing to do."""
+        """Install the mirrored families this process lacks or holds an older blob of:
+        only ``families`` (family directory names, `wanted_families`) when given, else
+        every one. One index query when there is nothing to do."""
         added: list[str] = []
         # This backend's rows only: `read` downloads from this backend.
         stats = await asyncio.to_thread(
@@ -106,10 +106,10 @@ class FontMirror:
             if families is not None and name not in families:
                 continue
             target = self.fonts.root / name
-            if target.is_dir():
+            if _current(target, stat.ref.sha256):
                 continue
             async with self.locks.hold(stat.key):
-                if target.is_dir():
+                if _current(target, stat.ref.sha256):
                     continue
                 try:
                     data = await self.content.read(stat.ref)
@@ -117,9 +117,20 @@ class FontMirror:
                     # Gone or altered: forget it; the API's `backfill` publishes it again.
                     await self.content.forget(stat.key)
                     continue
-                await asyncio.to_thread(unpack_dir, data, target)
+                await asyncio.to_thread(unpack_dir, data, target, sha256=stat.ref.sha256)
             added.append(name)
         if added:
             await asyncio.to_thread(self.fonts.prepare)
             await asyncio.to_thread(self.fonts.refresh_cache)
         return added
+
+
+def _current(target: Path, sha256: str) -> bool:
+    """Whether ``target`` needs no fetch. A directory a sync unpacked carries the sha of
+    its blob (`MARKER`), and is fetched again when the family is republished (#687);
+    one without a marker was installed here (the API's own), and is the source of what
+    was published, so a sync never replaces it."""
+    if not target.is_dir():
+        return False
+    marker = read_marker(target)
+    return marker is None or marker == sha256

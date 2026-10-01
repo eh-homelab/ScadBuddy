@@ -161,3 +161,23 @@ def test_the_named_recovery_puts_a_stored_bambuddy_back_on_the_local_store(
     with pool.connection() as conn:
         conn.execute(RECOVER_LOCAL_SQL)
     assert load_render_store_settings(pool, defaults).store_backend == "local"
+
+
+async def test_a_failed_reload_keeps_the_last_good_settings_and_says_so(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database blip must not turn `/healthz` into a 500 on the API and every worker
+    (a liveness probe would restart them all): the last good settings stand, flagged."""
+    _, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    assert (await store_health(bundle)).settings_current is True
+
+    def down(*_: object) -> RenderStoreSettings:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("scadbuddy.store.bambuddy.load_render_store_settings", down)
+    bundle.source.invalidate()
+    health = await store_health(bundle)
+    assert health.settings_current is False and health.configured_backend == "local"
+    monkeypatch.undo()
+    bundle.source.invalidate()
+    assert (await store_health(bundle)).settings_current is True

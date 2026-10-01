@@ -2,6 +2,8 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
   AssetUsage,
+  RenderAccepted,
+  StoreUsage,
   AttachResult,
   ChoicesView,
   BoundingBox,
@@ -115,6 +117,7 @@ const state = {
   libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
+  projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
@@ -242,6 +245,7 @@ export function resetMockState(): void {
   state.modelChoices = {}
   state.libraryChoices = {}
   state.printerBedTypes = {}
+  state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
@@ -322,9 +326,11 @@ export function setMockUploadLimit(bytes: number): void {
 export function setMockRemembered(remembered: {
   modelChoices?: Record<string, ModelPrintChoices>
   printerBedTypes?: Record<string, string>
+  projectTargets?: Record<string, { printer_id: number; nozzle_diameter?: string }>
 }): void {
   if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
+  if (remembered.projectTargets) state.projectTargets = structuredClone(remembered.projectTargets)
 }
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
@@ -665,7 +671,13 @@ export function mockRemembered() {
     print_options: dropEmpty(state.printOptions.global_options),
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
+    project_print_targets: structuredClone(state.projectTargets),
   }
+}
+
+/** #599 — forgets one project's remembered printer and nozzle. */
+export function forgetMockProjectTarget(projectId: string): void {
+  delete state.projectTargets[projectId]
 }
 
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
@@ -673,6 +685,7 @@ export function forgetMockRemembered(): void {
   state.modelChoices = {}
   state.libraryChoices = {}
   state.printerBedTypes = {}
+  state.projectTargets = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
@@ -2347,18 +2360,20 @@ export const handlers = [
     }
 
     const jobId = nextHexId()
+    const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
       id: jobId,
       slug,
       status: 'pending',
       created_at: new Date().toISOString(),
       params: renderParams,
-      inputs: withVersion({ ...(body.inputs ?? {}), params: renderParams }),
+      inputs,
       log_tail: [],
     })
     runJob(jobId)
+    // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.
     return HttpResponse.json(
-      { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
+      { job_id: jobId, status_url: `${base}/jobs/${jobId}`, inputs } satisfies RenderAccepted,
       { status: 202 },
     )
   }),
@@ -2400,7 +2415,7 @@ export const handlers = [
       max_count: 200000,
       max_total_bytes: 53687091200,
       by_kind: { piece: 4096 },
-    }),
+    } satisfies StoreUsage),
   ),
 
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {

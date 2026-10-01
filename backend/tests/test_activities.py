@@ -21,11 +21,10 @@ from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import AssetStore, AssetUnavailableError, file_assets
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
@@ -37,14 +36,12 @@ from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import make_current_until_polled
 from scadbuddy.workflows import activities
 from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
     RenderActivities,
-    WorkerDeps,
     _heartbeating,
     _main_result,
     _process_output,
@@ -62,64 +59,10 @@ from scadbuddy.workflows.models import (
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import PgPool, fake_3mf_openscad, write_openscad_3mf
+from tests.conftest import PgPool, write_openscad_3mf
+from tests.support.activities import REVISION, demo_paths, piece_request, worker_deps
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
-
-REVISION = "c0ffee0"
-
-
-class _History:
-    """A repository whose every template was last committed at `REVISION`."""
-
-    available = True
-
-    def last_commit(self, path: str) -> str:
-        return REVISION
-
-
-def _paths(tmp_path: Path, source: str = "cube();\n") -> DataPaths:
-    paths = DataPaths(tmp_path / "data")
-    paths.ensure()
-    paths.model_dir("demo").mkdir(parents=True)
-    paths.model_source("demo").write_text(source, encoding="utf-8")
-    return paths
-
-
-def _config(tmp_path: Path, paths: DataPaths) -> Config:
-    return Config(openscad=fake_3mf_openscad(tmp_path / "bin"), data_dir=paths.root)
-
-
-def _deps(
-    tmp_path: Path,
-    paths: DataPaths,
-    *,
-    projection: JobProjection | None = None,
-    refs: BlobRefs | None = None,
-) -> WorkerDeps:
-    return WorkerDeps(
-        config=_config(tmp_path, paths),
-        paths=paths,
-        assets=AssetStore(paths.assets),
-        blobs=LocalBlobStore(paths.blobs),
-        refs=refs,  # type: ignore[arg-type]
-        projection=projection,  # type: ignore[arg-type]
-        history=_History(),  # type: ignore[arg-type]
-    )
-
-
-def _request(revision: str | None = REVISION) -> PieceRequest:
-    params = {"width": 12}
-    scope = None if revision is not None else "job:test"
-    return PieceRequest(
-        slug="demo",
-        revision=revision,
-        scope=scope,
-        params=dict(params),
-        piece_key=piece_key(
-            "demo", revision if revision is not None else scope, "model.scad", params
-        ),
-    )
 
 
 async def test_a_pieces_scope_reads_model_json_off_the_event_loop(
@@ -135,9 +78,21 @@ async def test_a_pieces_scope_reads_model_json_off_the_event_loop(
 
     monkeypatch.setattr(activities, "template_title", title)
     prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
-    scope = await _scope(_request(), prepared)
+    scope = await _scope(piece_request(), prepared)
     assert (scope.slug, scope.title) == ("demo", "Demo")
     assert readers and loop_thread not in readers
+
+
+async def test_a_piece_in_a_subdirectory_takes_its_templates_title(tmp_path: Path) -> None:
+    """`parts/roof.scad`'s folder is named from the template's `model.json`, not from
+    `parts/` (which has none, so the slug would name it)."""
+    (tmp_path / "model.json").write_text('{"name": "Dollhouse"}')
+    (tmp_path / "parts").mkdir()
+    req = piece_request().model_copy(update={"file": "parts/roof.scad"})
+    prepared = PrepareResult(
+        version=REVISION, scad=str(tmp_path / "parts" / "roof.scad"), schema_cache=""
+    )
+    assert (await _scope(req, prepared)).title == "Dollhouse"
 
 
 # ── the library lease, per activity ────────────────────────────────────────────
@@ -165,12 +120,12 @@ async def test_each_stage_activity_holds_the_library_lease_for_itself(
 ) -> None:
     """Held while the activity reads the checkouts, released when it returns: a lease
     cannot span activities, each one is its own unit of work."""
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     gate = CheckoutGate()
-    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    deps = replace(worker_deps(tmp_path, paths), checkouts=gate)
     acts = RenderActivities(deps)
     env = ActivityEnvironment()
-    req = _request()
+    req = piece_request()
     checkout = _checkout(paths)
     holder = f"piece:{req.piece_key}"
     seen: dict[str, list[str]] = {}
@@ -208,12 +163,12 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
     """The gap between two activities is open to a removal. The next activity's lease
     re-checks its checkouts, so it fails fast rather than reading what is gone; the
     fetcher restores the pin and the retry renders."""
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     gate = CheckoutGate()
-    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    deps = replace(worker_deps(tmp_path, paths), checkouts=gate)
     acts = RenderActivities(deps)
     env = ActivityEnvironment()
-    req = _request()
+    req = piece_request()
     checkout = _checkout(paths)
     prepared = await _prepared_with_library(acts, env, req, checkout)
     main = RenderMainResult()
@@ -251,11 +206,11 @@ def test_a_render_that_echoed_no_plates_carries_none_between_activities() -> Non
 
 
 async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
     acts = RenderActivities(deps)
     env = ActivityEnvironment()
-    req = _request()
+    req = piece_request()
 
     assert await env.run(acts.cached_piece, req) is None
     prepared = await env.run(acts.prepare, req)
@@ -277,14 +232,14 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
 async def test_a_piece_records_the_library_pins_its_template_declares(tmp_path: Path) -> None:
     """#169: the pins `prepare` resolved cross the activities and land on the result,
     so the output saved from it names the exact library commits it was built from."""
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     checkout = _checkout(paths)
     commit = checkout.name
     pin = {"name": "bosl", "url": "https://example.invalid/bosl.git", "ref": "v2", "commit": commit}
     paths.model_meta("demo").write_text(json.dumps({"libraries": [pin]}), encoding="utf-8")
-    acts = RenderActivities(_deps(tmp_path, paths))
+    acts = RenderActivities(worker_deps(tmp_path, paths))
     env = ActivityEnvironment()
-    req = _request()
+    req = piece_request()
 
     prepared = await env.run(acts.prepare, req)
     assert prepared.library_path == [str(checkout)]
@@ -300,28 +255,28 @@ async def test_a_piece_without_a_revision_is_never_answered_from_its_blob(
     tmp_path: Path,
 ) -> None:
     """Its key names no revision, so the live source can change under it."""
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
-    req = _request(revision=None)
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
+    req = piece_request(revision=None)
     _write_piece(deps.blobs.dir_for(req.piece_key), PieceResult(result=_result()))
 
     assert await ActivityEnvironment().run(RenderActivities(deps).cached_piece, req) is None
 
 
 async def test_an_unreadable_piece_is_a_miss(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
-    req = _request()
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
+    req = piece_request()
     (deps.blobs.dir_for(req.piece_key) / PIECE_NAME).write_text('{"result": 1}')
 
     assert await ActivityEnvironment().run(RenderActivities(deps).cached_piece, req) is None
 
 
 async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path: Path) -> None:
-    paths = _paths(tmp_path, "%%FAIL%%\n")
-    acts = RenderActivities(_deps(tmp_path, paths))
+    paths = demo_paths(tmp_path, "%%FAIL%%\n")
+    acts = RenderActivities(worker_deps(tmp_path, paths))
     env = ActivityEnvironment()
-    req = _request()
+    req = piece_request()
     prepared = await env.run(acts.prepare, req)
 
     with pytest.raises(ApplicationError) as raised:
@@ -336,11 +291,11 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
 
 
 async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:
-    paths = _paths(tmp_path, "%%FAIL%%\n")
-    acts = RenderActivities(_deps(tmp_path, paths))
+    paths = demo_paths(tmp_path, "%%FAIL%%\n")
+    acts = RenderActivities(worker_deps(tmp_path, paths))
 
     with pytest.raises(ApplicationError) as raised:
-        await ActivityEnvironment().run(acts.render_preview_png, _request().slug)
+        await ActivityEnvironment().run(acts.render_preview_png, piece_request().slug)
 
     assert raised.value.type == "OpenSCADError"
     assert raised.value.non_retryable
@@ -381,8 +336,8 @@ async def test_render_main_heartbeats_while_its_checkout_waits(
 ) -> None:
     """#674 gate: `checkout_fresh` waits on the key's lock, which another fetch of the
     same key may hold for a whole transfer; the activity heartbeats through it."""
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
     beat = asyncio.Event()
     beats_in_checkout: list[bool] = []
     real = activities._heartbeating
@@ -404,7 +359,7 @@ async def test_render_main_heartbeats_while_its_checkout_waits(
     env.on_heartbeat = lambda *details: beat.set()
     prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
     with pytest.raises(_StoppedError):
-        await env.run(RenderActivities(deps).render_main, _request(), prepared)
+        await env.run(RenderActivities(deps).render_main, piece_request(), prepared)
     assert beats_in_checkout == [True]
 
 
@@ -449,9 +404,9 @@ def projecting(
     tmp_path: Path, projection: JobProjection
 ) -> tuple[RenderActivities, JobProjection, BlobRefs]:
     refs = BlobRefs(projection.pool)
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     return (
-        RenderActivities(_deps(tmp_path, paths, projection=projection, refs=refs)),
+        RenderActivities(worker_deps(tmp_path, paths, projection=projection, refs=refs)),
         projection,
         refs,
     )
@@ -629,9 +584,9 @@ async def _make_current(client: Client) -> None:
 async def test_a_job_renders_end_to_end_on_the_render_worker(
     tmp_path: Path, pg_conninfo: str, projection: JobProjection
 ) -> None:
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     refs = BlobRefs(projection.pool)
-    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+    deps = worker_deps(tmp_path, paths, projection=projection, refs=refs)
     job, again = (_job(width=1).model_copy(update={"model_version": REVISION}) for _ in "ab")
     projection.submit(job, render_key("demo", {"width": 1}, REVISION))
     key = piece_key("demo", REVISION, "model.scad", {"width": 1})
@@ -685,9 +640,9 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
 ) -> None:
     """#642: without a revision the key named only the slug and params, so a second job
     re-rendered a live source into the first job's blob directory, under its row."""
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     refs = BlobRefs(projection.pool)
-    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+    deps = worker_deps(tmp_path, paths, projection=projection, refs=refs)
 
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -751,10 +706,10 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
 
     monkeypatch.setattr(activities_module, "render_main", refuses)
     monkeypatch.setattr(activities_module, "render_solids_stage", refuses)
-    paths = _paths(tmp_path)
+    paths = demo_paths(tmp_path)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
-            _deps(tmp_path, paths),
+            worker_deps(tmp_path, paths),
             assets=AssetStore(paths.assets, pg_pool),
             remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
         )
@@ -774,3 +729,38 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
             await ActivityEnvironment().run(run, *args)
     assert raised.value.type == "AssetUnavailable" and raised.value.non_retryable
     assert missing in str(raised.value) and "not in the blob store" in str(raised.value)
+
+
+async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the_store(
+    tmp_path: Path, pg_conninfo: str, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ensure` found the upload already local, then the worker's sweep took the copy
+    before the render read it: a retry brings it back, so the stage is retried, and the
+    error does not say the store lacks it."""
+    paths = demo_paths(tmp_path)
+    assets = AssetStore(paths.assets, pg_pool)
+    meta = assets.put(b'<svg xmlns="http://www.w3.org/2000/svg"/>', "logo.svg")
+
+    async def vanished(*_: object, **__: object) -> None:
+        raise AssetUnavailableError("label", meta.id)
+
+    monkeypatch.setattr(activities_module, "render_main", vanished)
+    with store_pool(pg_conninfo) as pool:
+        deps = dataclasses.replace(
+            worker_deps(tmp_path, paths),
+            assets=assets,
+            remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
+        )
+        acts = RenderActivities(deps)
+        params: dict[str, str | int | float | bool] = {"label": meta.id}
+        req = PieceRequest(
+            slug="demo",
+            revision=REVISION,
+            params=params,
+            piece_key=piece_key("demo", REVISION, "model.scad", params),
+        )
+        prepared = await ActivityEnvironment().run(acts.prepare, req)
+        with pytest.raises(ApplicationError) as raised:
+            await ActivityEnvironment().run(acts.render_main, req, prepared)
+    assert raised.value.type == "AssetUnavailable" and not raised.value.non_retryable
+    assert meta.id in str(raised.value) and "not in the blob store" not in str(raised.value)

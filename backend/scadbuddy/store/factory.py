@@ -47,6 +47,8 @@ class StoreBundle:
     local_usage: tuple[float, StoreUsage] | None = field(default=None, repr=False)
 
     async def aclose(self) -> None:
+        if self.content is not None:
+            await self.content.aclose()
         if self.remote is not None:
             await self.remote.aclose()
 
@@ -72,7 +74,8 @@ def build_store(
         raise StoreNotReadyError(
             "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
             " library folder (its inbox). To start on the local store, run"
-            f" {RECOVER_LOCAL_SQL} in ScadBuddy's database (or, when no store_backend is"
+            f" {RECOVER_LOCAL_SQL} in ScadBuddy's database, in the schema its"
+            " SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
             " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
             ' See README, "Recovering an unready blob store".'
         )
@@ -137,6 +140,9 @@ class StoreHealth(BaseModel):
     render_key_fallback: bool
     #: The render worker Deployment may run more than one replica (spec §3.1).
     multi_worker: bool
+    #: False while the stored settings cannot be re-read: the fields above are then
+    #: the last good ones, and the API's `/healthz` says `degraded`.
+    settings_current: bool
 
 
 async def store_health(bundle: StoreBundle) -> StoreHealth:
@@ -146,6 +152,7 @@ async def store_health(bundle: StoreBundle) -> StoreHealth:
         configured_backend=current.store_backend,
         render_key_fallback=current.key_is_fallback and bool(current.api_key),
         multi_worker=bundle.backend != "local",
+        settings_current=bundle.source.fresh,
     )
 
 
