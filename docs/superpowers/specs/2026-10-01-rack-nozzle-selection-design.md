@@ -16,6 +16,14 @@ ScadBuddy now ranks the rack itself and sends its pick on the queue item. Simple
 mode shows the pick and the reason for it. Advanced mode lets the user change the
 ranking algorithm or pick a position by hand.
 
+This supersedes one decision of the spool-first-print work: its spec (§4.3,
+`2026-09-27-spool-first-print-design.md`) and plan (`2026-09-27-spool-first-print.md`)
+say ScadBuddy sends no `nozzle_rack_choice`, and
+`backend/tests/api/test_print_run_choices.py` asserts
+`sent.get("nozzle_rack_choice") is None`. That test changes with this work: it
+keeps asserting no choice when the rack is unreadable, and a new case asserts the
+ranked choice otherwise.
+
 Out of scope:
 
 - the non-rack extruder (one fixed hotend, nothing to choose);
@@ -51,9 +59,13 @@ filament_color}`, read from the sliced 3MF (`extract_rack_plan_from_3mf`).
 The keys are **filament group ids**, not extruder indexes. ScadBuddy's
 `QueueItemCreate` comment says otherwise and is corrected by this change.
 Bambuddy re-checks the pick against the live rack at dispatch
-(`resolve_rack_plan_mapping`). An explicit pick that no longer fits fails the
-item with "Nozzle rack pick no longer fits the printer". Groups left out are
+(`resolve_rack_plan_mapping`). A sent pick that no longer fits fails the item
+with "Nozzle rack pick no longer fits the printer". Groups left out are
 auto-assigned as today.
+
+In this spec, **a sent pick** is any entry ScadBuddy puts in
+`nozzle_rack_choice`, whether the ranking chose it or the user did. **A manual
+pick** is one the user chose in Advanced mode.
 
 ## 3. The ranking
 
@@ -186,19 +198,39 @@ A `RackChoice` carries `nozzle_rack_choice` and the picks' serials.
 `QueueItemCreate.nozzle_rack_choice` already has and the JSON shape Bambuddy
 expects; `rank_rack` returns int group ids and `print_run.py` converts them when
 it builds the `RackChoice`. `slice_and_queue` puts the choice on
-`QueueItemCreate` and returns the serials on `QueueOutcome`. `print_run.py`, its only caller, builds the callback:
+`QueueItemCreate` and returns the serials on `QueueOutcome`.
+
+`print_run.py`, its only caller, builds the callback:
 
 1. Read `filament-requirements` for the sliced file and the live `nozzle_rack`.
-2. Rank the rack for each `on_rack` group, and return the choice from the
-   algorithm or the user's override.
-3. After the enqueue, write the picks to `rack_nozzle_picks` against the
+2. Collapse the requirements into groups. Several filaments can share one
+   `group_id` (two colors on one hotend, §8), so `print_run.py` keeps one
+   `RackGroup` per `group_id`, with that group's `group` fields and the material
+   of its filaments; `rank_rack` never sees a duplicate.
+3. Rank the rack for each `on_rack` group, and return the choice from the
+   algorithm or the user's manual pick.
+4. After the enqueue, write the picks to `rack_nozzle_picks` against the
    returned queue item id.
 
 A raise or `None` from the callback means no choice: the item is queued without
 `nozzle_rack_choice`, and Bambuddy picks, as today.
 
-The pure ranking lives in `bambuddy/rack.py` (`rank_rack(groups, rack,
-algorithm, usage) -> {group_id: Pick}`), with no I/O.
+The pure ranking lives in `bambuddy/rack.py`, with no I/O:
+
+```python
+rank_rack(groups: list[RackGroup], rack: list[NozzleRackSlot],
+          algorithm: Algorithm, usage: Mapping[str, Usage]) -> dict[int, Pick]
+```
+
+`Pick` is internal and carries the serial: `group_id`, `position`, `serial`,
+`reason`, `unsafe_material: bool` and the ranked `candidates`. `usage` is keyed
+by serial. Nothing that carries a serial reaches the browser:
+
+- `/check` answers with its own models, `RackOption` (`position`, `color`,
+  `nozzle_type`, `material`, `prints`, `print_seconds`) and `RackPickView`
+  (`group_id`, `position`, `reason`, `unsafe_material`, `options`), built field
+  by field from `Pick`. A test asserts no serial appears in the `/check` body.
+- `QueueOutcome` carries serials only as far as `print_run.py` (§6).
 
 The choices endpoint (`/check`) returns the rack options per side, so the dialog
 can show them before the run:
@@ -216,7 +248,7 @@ blocks Print.
 
 - an **Algorithm** select (§4), saved per printer;
 - a per-group **Nozzle** select listing the eligible positions with color, type,
-  material and use. Choosing one sends it as an explicit pick. "Automatic" goes
+  material and use. Choosing one sends it as a manual pick. "Automatic" goes
   back to the ranking.
 
 **Failure handling.**
@@ -225,7 +257,14 @@ blocks Print.
 |---|---|
 | Status or requirements unreadable | Send no choice, so Bambuddy picks. The run result says "rack pick left to Bambuddy: <reason>" |
 | No eligible position for a group | Send no choice for that group. Bambuddy fails or auto-assigns exactly as today |
-| An explicit pick goes stale before dispatch | Bambuddy fails the item with its own message, which the run tracking already surfaces |
+| A sent pick goes stale before dispatch | Bambuddy fails the item with its own message, which the run tracking already surfaces |
+
+That last row applies in Simple mode too, not only to manual picks: every sent
+pick is checked again at dispatch. It happens only when the rack changed while
+the item waited so that the picked position no longer holds a nozzle of the
+group's diameter and flow. The user requeues, and the new pick reads the new
+rack. Sending no choice would avoid this failure but give up the whole ranking,
+so the trade is accepted.
 
 ## 6. Code changes
 
@@ -267,7 +306,7 @@ fixtures (which use invented serials), or in commits.
 |---|---|---|---|
 | 1 | What do the `nozzle_type` codes say about material? | Compare each rack position's code with the hotend's own label or Bambu's hotend list. Record the table here | Material step treats every nozzle as unknown (not hardened), and the abrasive warning is always shown for CF/GF/Glow |
 | 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color |
-| 3 | Does an explicit pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Drop the explicit pick and keep only the warning |
+| 3 | Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
 
 ## 9. Testing
 
@@ -290,6 +329,14 @@ fixtures (which use invented serials), or in commits.
   - an archive with no `queue_item_id` is not counted.
 - A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
   and a raise from it queues the item without one.
+- `print_run.py` tests:
+  - two filaments sharing a `group_id` become one `RackGroup`;
+  - `test_print_run_choices.py` keeps "no choice when the rack is unreadable"
+    and gains "the ranked choice is sent".
+- A stale-pick test: a queue item that Bambuddy failed with "Nozzle rack pick no
+  longer fits the printer" shows that message in the print's progress and run
+  result, for a ranked pick and for a manual one.
+- A `/check` test that no serial appears in the response body.
 - Frontend tests: the Simple line, the warning, and the Advanced selects sending
-  an explicit pick.
+  a manual pick.
 - Live acceptance after deploy (unknown 3 above), recorded in §8.
