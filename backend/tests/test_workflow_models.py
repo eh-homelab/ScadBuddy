@@ -105,6 +105,16 @@ def test_a_piece_request_at_a_revision_takes_no_scope() -> None:
         )
 
 
+def test_a_piece_request_with_neither_a_revision_nor_a_scope_is_refused() -> None:
+    """#870: such a piece would be shared across jobs, the hazard #642 closed."""
+    with pytest.raises(ValidationError, match="needs a scope"):
+        PieceRequest(
+            slug="demo",
+            revision=None,
+            piece_key=piece_key("demo", None, "model.scad", {}),
+        )
+
+
 def test_a_piece_request_with_another_requests_key_is_refused() -> None:
     other = piece_key("demo", "abc1234", "model.scad", {"width": 9, "height": 2})
 

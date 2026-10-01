@@ -106,6 +106,10 @@ interface Props {
     onChange: (projectId: number | null) => void
     /** The page's project list, so the dialog does not fetch it a second time. */
     list?: ProjectList
+    /** #665 — frozen while the page's Generate is filing into the chosen project. */
+    disabled?: boolean
+    /** #665 — a "Create project" in this picker is in flight. */
+    onCreating?: (creating: boolean) => void
   }
 }
 
@@ -193,6 +197,19 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
    * Read on each open, as the picker was, and never when the page passes its project.
    */
   const ownProjects = useProjectList(setOwnProjectId, open && !project)
+
+  /**
+   * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
+   * reported up to `project.onCreating`) so `close()` can refuse to unmount the picker
+   * while its request is in flight. Unmounting mid-create would drop the guard the parent
+   * relies on without stopping the request, which still lands and moves the shared project
+   * once nothing is on screen to notice.
+   */
+  const [projectCreating, setProjectCreating] = useState(false)
+  function reportProjectCreating(creating: boolean) {
+    setProjectCreating(creating)
+    project?.onCreating?.(creating)
+  }
 
   const runPrint = useRunPrint({
     source,
@@ -397,7 +414,9 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
-    if (running) return
+    // Also ignored mid-create (#710 review): unmounting the picker would drop the
+    // creating guard while its request is still in flight.
+    if (running || projectCreating) return
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
@@ -443,7 +462,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
           </>
         ) : (
           <>
-            <Button onClick={close} disabled={running}>
+            <Button onClick={close} disabled={running || projectCreating}>
               Cancel
             </Button>
             <Button
@@ -452,7 +471,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
               // Held while the dialog's own project list loads, so a Simple-mode print
               // cannot go out before the last project has seeded it.
               disabled={
-                running || loading || !choices || refused || runRefuses || ownProjects.loading
+                running || loading || !choices || refused || runRefuses || ownProjects.loading || projectCreating
               }
               data-testid="run-print"
               {...USER_ONLY}
@@ -504,7 +523,11 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
 
           {choices && (
             <div className="space-y-3">
-              <AdvancedSwitch value={picker.advanced} onToggle={picker.toggleAdvanced} />
+              <AdvancedSwitch
+                value={picker.advanced}
+                onToggle={picker.toggleAdvanced}
+                disabled={projectCreating}
+              />
               {printers.length > 1 && (
                 <div>
                   <label htmlFor="print-printer" className="block text-[13px]">
@@ -658,9 +681,21 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
 
                   {/* #79 — a send to a project uploads into that project's folder. */}
                   {project ? (
-                    <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
+                    <ProjectPicker
+                      value={project.value}
+                      onChange={project.onChange}
+                      list={project.list}
+                      disabled={project.disabled || projectCreating}
+                      onCreating={reportProjectCreating}
+                    />
                   ) : (
-                    <ProjectPicker value={ownProjectId} onChange={setOwnProjectId} list={ownProjects} />
+                    <ProjectPicker
+                      value={ownProjectId}
+                      onChange={setOwnProjectId}
+                      list={ownProjects}
+                      disabled={projectCreating}
+                      onCreating={reportProjectCreating}
+                    />
                   )}
 
                   <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />

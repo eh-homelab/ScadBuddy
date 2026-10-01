@@ -54,9 +54,14 @@ def worker_deps(
 
 def piece_request(revision: str | None = REVISION) -> PieceRequest:
     params = {"width": 12}
+    # A piece with no revision is its job's own (#642, #870): it takes a scope.
+    scope = None if revision is not None else "job:test"
     return PieceRequest(
         slug="demo",
         revision=revision,
+        scope=scope,
         params=dict(params),
-        piece_key=piece_key("demo", revision, "model.scad", params),
+        piece_key=piece_key(
+            "demo", revision if revision is not None else scope, "model.scad", params
+        ),
     )

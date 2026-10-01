@@ -51,14 +51,20 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
+    _drain,
     _poll,
-    _wait_drained,
     make_current_until_polled,
     run_inprocess_worker,
     run_worker,
 )
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
+from scadbuddy.workflows.client import (
+    DEPLOYMENT_NAME,
+    connect_lazily,
+    drained,
+    is_current,
+    make_current,
+)
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import (
@@ -194,6 +200,10 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
 # ── the drain after stop ───────────────────────────────────────────────────────
 
 
+async def _never() -> bool:
+    return False
+
+
 async def test_the_drain_polls_until_the_version_is_drained() -> None:
     answers = iter([False, False, True])
     calls = 0
@@ -203,7 +213,7 @@ async def test_the_drain_polls_until_the_version_is_drained() -> None:
         calls += 1
         return next(answers)
 
-    assert await _wait_drained(drained, timeout=5, poll=0.01)
+    assert await _drain(_never, drained, timeout=5, poll=0.01, grace=0) == "drained"
     assert calls == 3
 
 
@@ -215,8 +225,40 @@ async def test_the_drain_gives_up_at_its_bound() -> None:
         calls += 1
         return False
 
-    assert not await asyncio.wait_for(_wait_drained(drained, timeout=0.1, poll=0.01), 5)
-    assert calls > 1
+    outcome = await asyncio.wait_for(_drain(_never, drained, timeout=0.1, poll=0.01, grace=0), 5)
+    assert outcome == "timed_out" and calls > 1
+
+
+async def _always() -> bool:
+    return True
+
+
+async def test_a_build_that_is_still_current_stops_after_the_grace() -> None:
+    """#874: a same-build restart: another pod of this build serves its pinned runs.
+    Until the grace has passed it keeps serving them itself, in case none comes."""
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    outcome = await asyncio.wait_for(_drain(_always, _never, timeout=5, poll=0.01, grace=0.2), 5)
+    assert outcome == "current"  # told apart from "drained" in the log
+    assert loop.time() - began >= 0.2
+
+
+async def test_a_still_current_build_whose_runs_finish_in_the_grace_is_drained() -> None:
+    answers = iter([False, True])
+
+    async def drained() -> bool:
+        return next(answers)
+
+    assert await _drain(_always, drained, timeout=5, poll=0.01, grace=5) == "drained"
+
+
+async def test_the_drain_ends_when_the_build_becomes_current_again() -> None:
+    answers = iter([False, False, True])
+
+    async def still_current() -> bool:
+        return next(answers)
+
+    assert await _drain(still_current, _never, timeout=5, poll=0.01, grace=0) == "current"
 
 
 @workflow.defn(name="BlocksUntilReleased")
@@ -279,6 +321,35 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
         await handle.signal(_BlocksUntilReleased.release)
         await asyncio.wait_for(handle.result(), 30)
         await _until_drained_is(True, client, build_id)
+
+
+@pytest.mark.requires_temporal
+async def test_is_current_names_the_deployments_current_build() -> None:
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    async with (
+        temporal_client() as client,
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[_BlocksUntilReleased],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        ),
+    ):
+        assert await make_current_until_polled(
+            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+            build_id=build_id,
+            backoff=(0.1,),
+            every=0.2,
+            deadline=30,
+        )
+        assert await is_current(client, namespace=client.namespace, build_id=build_id)
+        assert not await is_current(client, namespace=client.namespace, build_id="other")
 
 
 @pytest.mark.requires_temporal

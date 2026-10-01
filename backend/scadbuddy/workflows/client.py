@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
+    DescribeWorkerDeploymentRequest,
     SetWorkerDeploymentCurrentVersionRequest,
 )
 from temporalio.client import Client
@@ -90,6 +91,17 @@ async def make_current(client: Client, *, namespace: str, build_id: str) -> None
     )
 
 
+async def is_current(client: Client, *, namespace: str, build_id: str) -> bool:
+    """Whether `build_id` is the deployment's current version. Then any worker of this
+    build serves the runs pinned to it, so one that stops need not drain (#874)."""
+    response = await client.workflow_service.describe_worker_deployment(
+        DescribeWorkerDeploymentRequest(namespace=namespace, deployment_name=DEPLOYMENT_NAME),
+        timeout=RPC_TIMEOUT,
+    )
+    current = response.worker_deployment_info.routing_config.current_deployment_version
+    return current.build_id == build_id
+
+
 async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
     """Whether no workflow pinned to `build_id` is still running. A visibility count,
     not `DescribeWorkerDeploymentVersion`'s drainage status: that one is absent while
@@ -112,6 +124,7 @@ __all__ = [
     "RENDER_TASK_QUEUE_DEFAULT",
     "connect",
     "drained",
+    "is_current",
     "make_current",
     "pydantic_data_converter",
     "render_worker",

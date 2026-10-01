@@ -1,5 +1,5 @@
 """What a print is of (#313): an output ScadBuddy rendered, or a file already in
-Bambuddy's library. The run (`print_run.run_print`) reads everything that differs
+Bambuddy's library. The run (`print_run.execute_run`) reads everything that differs
 between the two through :class:`PrintSource`; the resolver, slicing and queueing are
 shared unchanged.
 

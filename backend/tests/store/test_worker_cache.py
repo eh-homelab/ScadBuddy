@@ -158,6 +158,58 @@ async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     assert a.local.exists("recent") and a.local.exists("rendering")
 
 
+async def test_a_publish_or_a_download_over_the_cap_trims_the_cache(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#689: the cap holds between the periodic passes, keeping what is in flight."""
+    a = worker(tmp_path / "a", content, max_bytes=25, min_age=60.0)
+    b = worker(tmp_path / "b", content, max_bytes=1 << 30, min_age=60.0)
+    (b.dir_for("k") / "m").write_bytes(b"x" * 10)
+    await b.publish("k", scope=SCOPE)
+    past = time.time() - 3600
+
+    def abandoned(key: str) -> None:
+        (a.dir_for(key) / "m").write_bytes(b"x" * 10)
+        os.utime(a.local.root / key, (past, past))
+
+    abandoned("old-1")
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # in flight, never published
+    (a.dir_for("new") / "m").write_bytes(b"x" * 10)
+    await a.publish("new", scope=SCOPE)
+    assert sorted(a.local.keys()) == ["new", "rendering"]
+
+    abandoned("old-2")
+    assert await a.fetch("k")  # a miss, downloaded
+    assert sorted(a.local.keys()) == ["k", "new", "rendering"]
+
+
+async def test_only_one_eviction_pass_runs_at_a_time(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write's trim and the periodic pass never scan and remove side by side."""
+    from scadbuddy.store import cache as cache_module
+
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("old") / "m").write_bytes(b"x" * 10)
+    past = time.time() - 3600
+    os.utime(a.local.root / "old", (past, past))
+    size = cache_module._size
+    scanning, release = threading.Event(), threading.Event()
+
+    def slow_size(directory: Path) -> int:
+        if not scanning.is_set():  # the first pass holds here; any later one does not
+            scanning.set()
+            release.wait(5)
+        return size(directory)
+
+    monkeypatch.setattr(cache_module, "_size", slow_size)
+    first = asyncio.create_task(asyncio.to_thread(a.evict))
+    assert await asyncio.to_thread(scanning.wait, 5)
+    assert a.evict() == []  # the second pass leaves it to the first
+    release.set()
+    assert await first == ["old"]
+
+
 async def test_eviction_skips_a_directory_touched_after_the_scan(
     tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
