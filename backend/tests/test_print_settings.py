@@ -43,6 +43,7 @@ def test_every_allowlisted_key_is_accepted() -> None:
         "support_type": "tree(auto)",
         "brim_width": "5",
         "brim_type": "outer_only",
+        "print_sequence": "by object",
     }
     assert tuple(raw) == PRINT_SETTING_KEYS
 
@@ -70,6 +71,8 @@ def test_every_allowlisted_key_is_accepted() -> None:
         ("brim_width", "0"),
         ("brim_width", "2.5"),
         ("brim_width", "10"),
+        ("print_sequence", "by layer"),
+        ("print_sequence", "by object"),
     ],
 )
 def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
@@ -84,6 +87,7 @@ def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
         ("enable_support", "", "must be one of '0', '1'"),
         ("support_type", "tree", "must be one of 'normal(auto)'"),
         ("brim_type", "outer", "must be one of 'auto_brim'"),
+        ("print_sequence", "by_object", "must be one of 'by layer', 'by object'"),
         ("brim_width", "-1", "non-negative number"),
         ("brim_width", "wide", "non-negative number"),
         ("brim_width", "nan", "non-negative number"),
