@@ -88,7 +88,7 @@ async def test_a_piece_in_a_subdirectory_takes_its_templates_title(tmp_path: Pat
     `parts/` (which has none, so the slug would name it)."""
     (tmp_path / "model.json").write_text('{"name": "Dollhouse"}')
     (tmp_path / "parts").mkdir()
-    req = _request().model_copy(update={"file": "parts/roof.scad"})
+    req = piece_request().model_copy(update={"file": "parts/roof.scad"})
     prepared = PrepareResult(
         version=REVISION, scad=str(tmp_path / "parts" / "roof.scad"), schema_cache=""
     )
