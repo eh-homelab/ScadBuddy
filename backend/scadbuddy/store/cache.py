@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import weakref
 from pathlib import Path
@@ -78,8 +79,9 @@ class CachedBlobStore:
         self._fetching: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        #: An eviction pass after a write is running: the next write skips its own.
-        self._trimming = False
+        #: Held by the one eviction pass that runs at a time, whatever started it (a
+        #: write's trim or the periodic pass): another finds it held and skips.
+        self._evicting = threading.Lock()
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
 
@@ -186,17 +188,12 @@ class CachedBlobStore:
         """After a write grew the cache: evict down to `max_bytes` now, in a thread and
         one pass at a time, so the cap holds between the periodic passes (#689), which
         stay as a backstop."""
-        if self._trimming:
-            return
-        self._trimming = True
         try:
             removed = await asyncio.to_thread(self.evict)
             if removed:
                 logger.info("evicted cached pieces", extra={"count": len(removed)})
         except Exception:
             logger.exception("could not evict the piece cache")
-        finally:
-            self._trimming = False
 
     def cached_bytes(self) -> int:
         cached = self.local.keys()  # a list of blob keys, not a dict view
@@ -206,7 +203,16 @@ class CachedBlobStore:
         """Least recently used first, down to `max_bytes`: any directory not touched
         within `min_age`. That includes one never published (a render that crashed) and a
         dot-named `unpack_dir` staging directory a crash left; one in use is recent, as
-        rendering and unpacking both touch it."""
+        rendering and unpacking both touch it. One pass at a time: a call while another
+        runs removes nothing."""
+        if not self._evicting.acquire(blocking=False):
+            return []
+        try:
+            return self._evict(now)
+        finally:
+            self._evicting.release()
+
+    def _evict(self, now: float | None) -> list[str]:
         cutoff = (time.time() if now is None else now) - self.min_age
         entries = []
         cached = self.local.keys()  # a list of blob keys, not a dict view
