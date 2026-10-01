@@ -803,6 +803,15 @@ def test_preset_inputs_are_checked_as_a_render_is(client: TestClient, model: str
     assert client.post(f"/api/v1/models/{model}/presets", json=clash).status_code == 422
 
 
+def test_a_patch_whose_inputs_name_an_unknown_parameter_is_refused(
+    client: TestClient, model: str
+) -> None:
+    saved = _save(client, model, "Mine", {"width": 20})
+    bad = client.patch(_url(model, saved["id"]), json={"inputs": {"params": {"nope": 1}}})
+    assert bad.status_code == 422, bad.text
+    assert client.get(_url(model)).json()[0]["inputs"] == {"params": {"width": 20}, "v": 0}
+
+
 def test_template_presets_carry_inputs_or_read_as_v0(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
