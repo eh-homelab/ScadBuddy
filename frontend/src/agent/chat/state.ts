@@ -38,7 +38,8 @@ export type FeedItem =
     }
   /**
    * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
-   * `sent` once the answer left the panel; `answered` or `cancelled` (its turn ended
+   * `sent` once the answer left the panel; `queued` when it waits for the connection to
+   * come back (sent first on reconnect); `answered` or `cancelled` (its turn ended
    * first, `reason`) from `question.resolved`, the server's confirmation.
    */
   | {
@@ -47,7 +48,7 @@ export type FeedItem =
       /** The AskUserQuestion `tool.call` id. */
       tool: string
       questions: Question[]
-      state: 'pending' | 'sent' | 'answered' | 'cancelled'
+      state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'
       answers?: string[]
       by?: Owner
       reason?: string
@@ -90,6 +91,8 @@ export interface SessionState {
    * not live buttons, until `approval.resolved`.
    */
   queuedDecisions?: string[]
+  /** #940 — the same for answers to questions: the replayed card shows `sent`. */
+  queuedAnswers?: string[]
 }
 
 export interface ChatState {
@@ -114,7 +117,7 @@ export type ChatAction =
   | { type: 'select'; sessionId: string | null }
   | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
   /** #940 — the user's answer to a question left the panel (or waits for the reconnect). */
-  | { type: 'answered'; sessionId: string; questionId: string }
+  | { type: 'answered'; sessionId: string; questionId: string; queued?: boolean }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -296,7 +299,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'question.asked':
       return patchSession(state, event.sessionId, (s) =>
-        push(s, { kind: 'question', id: event.id, tool: event.tool, questions: event.questions, state: 'pending' }),
+        push(s, {
+          kind: 'question',
+          id: event.id,
+          tool: event.tool,
+          questions: event.questions,
+          state: s.queuedAnswers?.includes(event.id) ? 'sent' : 'pending',
+        }),
       )
 
     case 'question.resolved':
@@ -420,6 +429,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             // Replayed from the log; the numbers stay for a log that has none.
             budgetSpent: false,
             queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
+            queuedAnswers: s.items.flatMap((i) => (i.kind === 'question' && i.state === 'queued' ? [i.id] : [])),
           }))
         : next
     }
@@ -431,7 +441,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'answered':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'question' && i.id === action.questionId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
+          i.kind === 'question' && i.id === action.questionId && i.state === 'pending'
+            ? { ...i, state: action.queued ? 'queued' : 'sent' }
+            : i,
         ),
       )
     case 'decided':

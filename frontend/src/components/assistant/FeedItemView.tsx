@@ -312,6 +312,8 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
           <p className="text-[12px] text-muted" role="status">
             {item.state === 'sent'
               ? 'Sending your answer…'
+              : item.state === 'queued'
+                ? 'Not connected: your answer goes first when the assistant reconnects.'
               : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
                 : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}

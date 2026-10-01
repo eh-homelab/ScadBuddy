@@ -118,6 +118,31 @@ describe('useAgentChat', () => {
     expect(question()).toMatchObject({ state: 'answered', answers: ['Blue'] })
   })
 
+  it('shows an answer given while disconnected as queued, until the server confirms it (#940)', () => {
+    const t = scripted(() => 'queued')
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 't' }))
+      t.h().onFrame(
+        frame({
+          type: 'question.asked',
+          sessionId: 's1',
+          id: 'q1',
+          tool: 't2',
+          questions: [{ question: 'Colour?', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] }],
+        }),
+      )
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.answer('s1', 'q1', ['Red']))
+    const question = () => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question')
+    expect(question()).toMatchObject({ state: 'queued' })
+    expect(t.sent).toContainEqual({ v: 1, type: 'question.answer', sessionId: 's1', id: 'q1', answers: ['Red'] })
+    act(() => t.h().onFrame(frame({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Red'], by: owner })))
+    expect(question()).toMatchObject({ state: 'answered' })
+  })
+
   it('shows a decision made while disconnected as queued, until the server confirms it after the reconnect', () => {
     let answer: SendResult = 'queued'
     const t = scripted(() => answer)

@@ -131,6 +131,15 @@ describe('chatReducer', () => {
     )
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
+
+    // Answered while offline: queued, and still not live after the reconnect's replay.
+    const queued = run([{ type: 'answered', sessionId: 's1', questionId: 'q1', queued: true }], waiting)
+    expect(queued.sessions.s1?.items[0]).toMatchObject({ state: 'queued' })
+    const replayed = run(
+      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
+      queued,
+    )
+    expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {

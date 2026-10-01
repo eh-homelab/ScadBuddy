@@ -124,7 +124,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const result = transport.current.send(clientMessage({ type: 'question.answer', sessionId, id: questionId, answers }))
     // A refused one leaves the card pending, to try again; a queued one goes first on reconnect.
     if (result === 'refused') dispatch({ type: 'not-sent', message: `Your answer was not sent. ${NOT_SENT}` })
-    else dispatch({ type: 'answered', sessionId, questionId })
+    else dispatch({ type: 'answered', sessionId, questionId, queued: result === 'queued' })
   }, [])
 
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */

@@ -1349,7 +1349,7 @@ export class SessionManager {
       // Accurate, not optimistic: a turn whose result is already in is
       // finishing by itself, so this interrupt stops nothing.
       if (local.settling) return false
-      // Its pending approvals are cancelled as it finishes (finish()).
+      // Its pending approvals and questions are cancelled as it finishes (finish()).
       local.controller.abort(new Error(`interrupted by ${publicLabel(principal)}`))
       return true
     }
