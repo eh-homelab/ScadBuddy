@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
@@ -46,6 +46,7 @@ BOM_NAME = "bom.json"
 RECORD_NAME = "record.json"
 MANIFEST_NAME = "manifest.json"
 ARRANGED_NAME = "arranged_from.json"
+_ID_LIST = TypeAdapter(list[str])
 #: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
 OUTPUT_HOLDER = "output"
 FILES_DIR = "files"
@@ -214,17 +215,20 @@ class OutputStore:
         index: int = 0,
         files_dir: Path | None = None,
         arranged_from: Sequence[str] = (),
+        output_id: str | None = None,
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
-        files (the caller's ``dir_for(files_key) / "files"``)."""
+        files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
+        that holds the output's Parts first name the output before it exists."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
         result = chosen.result if chosen is not None else job.result
         if result is None:
             raise ValueError("the job has no result to persist")
-        output_id = uuid.uuid4().hex
+        if output_id is None:
+            output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -319,8 +323,7 @@ class OutputStore:
             return []
         if not path.is_file():
             return []
-        loaded: list[str] = json.loads(path.read_text(encoding="utf-8"))
-        return loaded
+        return _ID_LIST.validate_json(path.read_text(encoding="utf-8"))
 
     def record(self, output_id: str) -> OutputRecord | None:
         path = self.directory(output_id) / RECORD_NAME

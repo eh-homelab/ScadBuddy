@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -215,18 +216,28 @@ async def create_output(
         await blobs.fetch(chosen.files_key)
         files_dir = blobs.dir_for(chosen.files_key) / "files"
     public_url = (await asyncio.to_thread(store.load)).public_url
-    meta = await asyncio.to_thread(
-        outputs.create,
-        job,
-        name=body.name,
-        public_url=public_url,
-        inputs=inputs,
-        index=body.index,
-        files_dir=files_dir,
-    )
-    # The Parts outlive the job that rendered them: Arrange reads them later (§7).
-    manifest = await asyncio.to_thread(outputs.manifest, meta.id)
-    await asyncio.to_thread(hold_parts, state.refs, meta.id, manifest)
+    # The Parts outlive the job that rendered them: Arrange reads them later (§7). They
+    # are held before the write, so a failed hold leaves nothing saved to retry over.
+    output_id = uuid.uuid4().hex
+    manifest = chosen.manifest if chosen is not None else []
+    await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
+    try:
+        meta = await asyncio.to_thread(
+            outputs.create,
+            job,
+            name=body.name,
+            public_url=public_url,
+            inputs=inputs,
+            index=body.index,
+            files_dir=files_dir,
+            output_id=output_id,
+        )
+    except BaseException:
+        try:
+            await asyncio.to_thread(release_parts, state.refs, output_id)
+        except psycopg.Error:
+            logger.exception("could not release a failed save's Parts", extra={"id": output_id})
+        raise
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])

@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -15,7 +16,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
-from scadbuddy.library.outputs import OUTPUT_HOLDER
+from scadbuddy.library.outputs import OUTPUT_HOLDER, OutputStore
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from tests.support.arrange import finished_job
@@ -99,4 +100,45 @@ def test_deleting_the_model_releases_every_output_s_parts(
     first, second = save(client, job_id), save(client, job_id)
     assert {holder for _, holder in held(pool)} == {first, second}
     assert client.delete("/api/v1/models/demo").status_code == 204
+    assert held(pool) == set()
+
+
+class _HoldFails(BlobRefs):
+    """`blob_refs` with Postgres gone while the save holds its Parts."""
+
+    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+        raise psycopg.OperationalError("the server closed the connection")
+
+
+def test_a_save_whose_hold_fails_saves_nothing(
+    app: FastAPI, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """Held first: a failed hold is a 500 with nothing on disk, so a retry is safe."""
+    job_id, _ = finished(app, tmp_path)
+    with (
+        TestClient(app, raise_server_exceptions=False) as client,
+        store_pool(pg_conninfo) as opened,
+    ):
+        state: AppState = getattr(app.state, STATE_ATTR)
+        state.refs = _HoldFails(opened)
+        response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+        assert response.status_code == 500
+        assert client.get("/api/v1/models/demo/outputs").json() == []
+
+
+def test_a_save_whose_write_fails_holds_nothing(
+    client: TestClient,
+    app: FastAPI,
+    pool: Pool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, _ = finished(app, tmp_path)
+
+    def full(*_: object, **__: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(OutputStore, "create", full)
+    with pytest.raises(OSError, match="No space left"):
+        client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
     assert held(pool) == set()

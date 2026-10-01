@@ -16,7 +16,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.models import Layout, OutputRequest
 from scadbuddy.workflows.outputs import manifest_of
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
-from tests.support.arrange import saved_output
+from tests.support.arrange import finished_job, saved_output
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
@@ -85,8 +85,19 @@ async def test_provenance_from_an_earlier_output_is_carried(tmp_path: Path) -> N
     assert obj.count == 1  # the count is this layout's, never the source's
 
 
-def test_an_output_saved_before_manifests_reads_as_none(tmp_path: Path) -> None:
+def test_an_unknown_output_reads_as_none(tmp_path: Path) -> None:
     assert OutputStore(DataPaths(tmp_path)).manifest("never-written") == []
+
+
+async def test_an_output_saved_before_manifests_reads_as_none(tmp_path: Path) -> None:
+    """A job without pipeline outputs (one saved before phase 5) writes no manifest.json."""
+    paths, job, _ = await finished_job(tmp_path)
+    legacy = job.model_copy(update={"outputs": []})
+    store = OutputStore(paths)
+    meta = store.create(legacy, name="old")
+    assert not (store.directory(meta.id) / "manifest.json").exists()
+    assert store.manifest(meta.id) == []
+    assert store.arranged_from(meta.id) == []
 
 
 @pytest.mark.requires_postgres
