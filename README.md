@@ -117,22 +117,17 @@ on shutdown.
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL` and
-  `SCADBUDDY_TEMPORAL_ADDRESS`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`,
-  `SCADBUDDY_BAMBUDDY_WEB_URLS` (comma-separated URLs browsers reach Bambuddy at, when
-  `SCADBUDDY_BAMBUDDY_URL` is one only the server can; the first is where links point),
-  `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
-  1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
-  from the UI it wins; a field the UI never saved keeps following the variable,
-  and one it cleared stays cleared (the upload limit instead goes back to the
-  variable). `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
-  (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
-  `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
-  `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
-  `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
-  `SCADBUDDY_ALLOWED_ORIGINS` (comma-separated origins the UI is also served
-  under, see "Realtime" below);
+  `SCADBUDDY_TEMPORAL_ADDRESS`): every variable is a field of `Settings` in `backend/scadbuddy/core/settings.py`, as
+  `SCADBUDDY_<FIELD>`, with what it does in the comment beside it. The full list,
+  with each type and default, is generated rather than kept here:
+  `cd backend && uv run python -m scadbuddy.tools.settings_reference`. A new
+  setting adds a field there, not a line here (#508). The notes below are the
+  ones that need more than a comment.
+  A variable whose "In Settings" column is `live` or `restart` only sets the
+  starting value (#322): once a value is saved from the UI it wins, taking effect
+  at once or at the next start; a field the UI never saved keeps following the
+  variable, and one it cleared stays cleared (the upload limit instead goes back
+  to the variable). `no` is read from the environment only.
   `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
@@ -180,8 +175,8 @@ on shutdown.
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
   `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default 1073741824, 1 GiB) is the largest
-  single upload. It is set only here (no Settings override); `GET /api/v1/settings`
-  reports it read-only as `media_upload_max_bytes`.
+  single upload. Settings can change it, and a change applies at once
+  (`media_upload_max_bytes`).
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.

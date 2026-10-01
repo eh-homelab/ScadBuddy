@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import threading
 import uuid
@@ -261,6 +262,29 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
     assert piece.result.source_version == prepared.version == REVISION
     assert piece.log_tail == main.log_tail
     assert main.returncode == 0
+    assert piece.result.libraries == []
+
+
+async def test_a_piece_records_the_library_pins_its_template_declares(tmp_path: Path) -> None:
+    """#169: the pins `prepare` resolved cross the activities and land on the result,
+    so the output saved from it names the exact library commits it was built from."""
+    paths = _paths(tmp_path)
+    checkout = _checkout(paths)
+    commit = checkout.name
+    pin = {"name": "bosl", "url": "https://example.invalid/bosl.git", "ref": "v2", "commit": commit}
+    paths.model_meta("demo").write_text(json.dumps({"libraries": [pin]}), encoding="utf-8")
+    acts = RenderActivities(_deps(tmp_path, paths))
+    env = ActivityEnvironment()
+    req = _request()
+
+    prepared = await env.run(acts.prepare, req)
+    assert prepared.library_path == [str(checkout)]
+    main = await env.run(acts.render_main, req, prepared)
+    await env.run(acts.render_solids, req, prepared, main)
+    piece = await env.run(acts.finish_piece, req, prepared, main)
+
+    assert [(p.name, p.ref, p.commit) for p in piece.result.libraries] == [("bosl", "v2", commit)]
+    assert await env.run(acts.cached_piece, req) == piece
 
 
 async def test_a_piece_without_a_revision_is_never_answered_from_its_blob(

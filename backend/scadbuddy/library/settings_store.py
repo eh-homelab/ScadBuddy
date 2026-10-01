@@ -250,6 +250,7 @@ class SettingsPatch(BaseModel):
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     log_level: str | None = None
+    temporal_ui_url: str | None = None
 
     #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
     #: change applies at the next one; a reset puts one back on the deployment's value.

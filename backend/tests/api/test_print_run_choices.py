@@ -1345,6 +1345,43 @@ def test_the_check_carries_the_high_flow_warning_when_high_flow_is_chosen(
 
 
 @respx.mock
+def test_the_check_does_not_carry_the_resolvers_high_flow_note(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#862: the resolver's own ``hf-unsupported`` note (Bambuddy always slices High
+    Flow as Standard) is left to the run and the nozzle step, not the pre-Print check —
+    with Standard nozzles mounted, the check says nothing even when High Flow is
+    chosen."""
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
+
+    assert check.status_code == 200, check.text
+    assert check.json() == {"errors": [], "warnings": []}
+
+
+@respx.mock
+def test_the_runs_result_still_carries_the_resolvers_high_flow_note(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#862: unlike the check above, the run itself still says it, from the resolver."""
+    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
+    response, _ = _two_colour_run(
+        client,
+        model,
+        paths,
+        BOTH_ON_RIGHT,
+        nozzles=[{"size": "0.4", "flow": "high_flow"}],
+        tier="standard",
+    )
+
+    assert response.status_code == 200, response.text
+    assert "hf-unsupported" in _kinds(response)
+
+
+@respx.mock
 def test_the_check_gives_no_high_flow_warning_when_the_status_is_unreadable(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

@@ -4,7 +4,7 @@ import { BrowserRouter, MemoryRouter, Link, Route, Routes, useNavigate } from 'r
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { restartMockBackend } from '../mocks/features/settings'
-import { setMockRemembered } from '../mocks/handlers'
+import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handlers'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
 
@@ -132,15 +132,18 @@ describe('SettingsPage sections (#322)', () => {
   it('shows a refused value beside its field', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    const field = screen.getByLabelText('Editor checks at once')
+    // Queried inside the section, not across the whole page, which is slow (#906).
+    const rendering = within(region('Rendering'))
+    const field = rendering.getByLabelText('Editor checks at once')
     await user.clear(field)
     await user.type(field, '0')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
-    expect(await within(region('Rendering')).findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
+    await user.click(rendering.getByRole('button', { name: 'Save Rendering' }))
+    expect(await rendering.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
       'SCADBUDDY_CHECK_CONCURRENCY must be at least 1',
     )
-    expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
-  })
+    expect(rendering.getByText('Unsaved')).toBeInTheDocument()
+    // The alert's own wait is 5 s, so the test needs more than vitest's default 5 s (#906).
+  }, 15_000)
 
   it('edits the upload limit in MB or GB and stores bytes', async () => {
     // The default is 1 GiB, shown as exactly that.
@@ -382,5 +385,43 @@ describe('SettingsPage connection and About (#322)', () => {
     expect(table).toHaveTextContent('SCADBUDDY_OPENSCAD')
     // Read-only: nothing here is an input.
     expect(within(table).queryByRole('textbox')).toBeNull()
+  })
+})
+
+describe('SettingsPage Administration (#668)', () => {
+  it('shows no Temporal UI link while its URL is empty', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const administration = region('Administration')
+    expect(within(administration).getByLabelText('Temporal UI URL')).toHaveValue('')
+    expect(within(administration).queryByRole('link', { name: /Temporal UI/ })).toBeNull()
+  })
+
+  it('links to the Temporal UI in a new tab once its URL is saved', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const administration = region('Administration')
+    await user.type(within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
+    await user.click(screen.getByRole('button', { name: 'Save Administration' }))
+    const link = await within(administration).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.lan')
+    // A page that is not ScadBuddy's: a new tab, which also escapes Bambuddy's sandbox.
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+    expect(mockSettings().temporal_ui_url).toBe('https://temporal.lan')
+    expect(mockSettings().sources?.['temporal_ui_url']).toBe('stored')
+  })
+
+  it('links to a Temporal UI the deployment set', async () => {
+    setMockSettings({
+      ...mockSettings(),
+      temporal_ui_url: 'https://temporal.env',
+      sources: { ...mockSettings().sources, temporal_ui_url: 'env' },
+    })
+    renderPage(<SettingsPage />)
+    await seeded()
+    const link = await within(region('Administration')).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.env')
+    expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
   })
 })
