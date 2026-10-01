@@ -31,6 +31,7 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import (
     INITIAL_RENDER_ESTIMATE,
@@ -132,6 +133,7 @@ class RenderService:
         *,
         model_version: str | None = None,
         supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
     ) -> Job:
         """Record the job (or join the waiting one it matches) and start its workflow."""
         if self.snapshots is not None:
@@ -148,7 +150,7 @@ class RenderService:
             id=uuid.uuid4().hex,
             slug=slug,
             params=dict(params),
-            inputs={"params": dict(params)},
+            inputs=dict(inputs) if inputs is not None else legacy_inputs(params),
             model_version=model_version,
             created_at=now(),
         )
