@@ -108,10 +108,15 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
 - **Agent chat.** Browsers cannot set headers on a WebSocket, so the client
   sends `traceparent` in the first frame of each turn. Each chat turn is its own
   trace. A session-long trace would run for hours and be unusable.
-- **Agent to backend.** The agent's `fetch` (undici) instrumentation injects
-  `traceparent`, so a tool call's backend request is a child of its
-  `agent.tool` span. `/mcp` requests continue the caller's context when one is
-  sent.
+- **Agent to backend.** The agent applies the same boundary as the backend.
+  Outgoing requests are not instrumented process-wide (§5.4). The backend
+  client (`src/api/backend.ts`, `openapi-fetch`) gets an openapi-fetch
+  middleware that opens a client span and injects `traceparent` itself, so a
+  tool call's backend request is a child of its `agent.tool` span. Nothing
+  else the agent calls gets trace context: the remote-plugin forwarder
+  (`src/plugins/forwarder.ts`, over `http/pinned.ts`), the `http_request`
+  tool, the headless browser, plugin package fetches, and Anthropic. `/mcp`
+  requests continue the caller's context when one is sent.
 
 ## 5. Per service
 
@@ -143,12 +148,38 @@ SPA's static fallback, so the path never serves `index.html`. Same origin, so
 it works inside the Bambuddy iframe. Clusters' HTTPRoute already sends every
 path except `/api/v1/ai/*` to the backend.
 
-- Accepts OTLP/JSON only (the web exporter's default).
-- Body ≤ 256 KiB and ≤ 512 spans, else 413.
-- Rate limits, in memory, else 429; the client drops the batch and does not
-  retry. A **global** bucket caps the relay's total rate whatever the client,
-  so no spoofing can raise what reaches the collector. A **per-client** bucket
-  sits under it. The client is the immediate peer's address unless that peer
+- **Browser, same origin only.** Every other browser-reachable backend route
+  is either a read or the realtime socket. The relay is the backend's first
+  unauthenticated POST meant for browser JS, so a page on another origin
+  must not be able to drive it (to spend its budget or inject spans).
+  - The request must carry an `Origin`, and `origin_allowed`
+    (`api/realtime.py`, the realtime socket's check against
+    `SCADBUDDY_PUBLIC_URL` and `SCADBUDDY_ALLOWED_ORIGINS`) must accept it.
+  - Unlike the socket, a missing `Origin` is refused, not let through: a
+    browser always sends one on a `fetch` POST, so its absence means the
+    caller is not this page.
+  - When `Sec-Fetch-Site` is present it must be `same-origin`.
+  - Anything else is 403, before the body is read.
+  - The CORS preflight a JSON POST triggers is not answered. No CORS headers
+    are ever sent, so a cross-origin page cannot get past the preflight.
+- Accepts OTLP/JSON only (the web exporter's default); any other
+  `Content-Type` is 415.
+- Body ≤ 256 KiB through the existing `BodySizeGate`: a `RouteLimit` for
+  `POST /telemetry/v1/traces` beside the media upload's in `main.py`, so an
+  oversized body is refused on its headers, or as it streams when it has no
+  `Content-Length`, before the handler runs. Without one the
+  `application/json` default (8 MiB) would apply. The 512-span cap is checked
+  after parsing; over it is also 413.
+- Rate limits, in memory with `RateLimit` (`api/realtime.py`'s token bucket),
+  else 429; the client drops the batch and does not
+  retry. A **per-process** bucket caps the relay's total rate whatever the
+  client, so no spoofing of the client's address raises what one pod sends
+  the collector. It is per pod, not cluster-wide: with N API replicas the
+  ceiling is N times the configured rate. The API runs one replica
+  (`replicas: 1`), and a shared bucket in Postgres would cost a write per
+  batch on a path whose only job is to be cheap. So this approximation is
+  accepted and documented beside the setting. Scaling the API means dividing
+  the rate by the replica count. A **per-client** bucket sits under it. The client is the immediate peer's address unless that peer
   is in a new `SCADBUDDY_TRUSTED_PROXIES` (CIDRs, default empty: trust no
   forwarding header). Only then is `X-Forwarded-For` read, from the right,
   taking the first hop not in the list. These are the same semantics as the
@@ -195,7 +226,14 @@ mocked e2e never export.
 `src/telemetry.ts`, loaded before the app with `node --import
 ./dist/telemetry.js dist/main.js` (ESM needs the loader hook for
 instrumentation to patch modules; the Dockerfile's agent `CMD` changes to
-match). `@opentelemetry/sdk-node` with the HTTP and undici instrumentations.
+match). `@opentelemetry/sdk-node` with the HTTP instrumentation for
+**incoming** requests only (`ignoreOutgoingRequestHook: () => true`, so no
+outgoing `node:http`/`https` request is touched, the pinned plugin
+forwarder's included). The undici instrumentation is not installed, so
+`fetch` is untouched too. The one outgoing call that carries context is the
+backend client's middleware (§4). Tests assert that a remote plugin request
+through the forwarder, an `http_request` call and a request to the fake
+Anthropic endpoint carry no `traceparent`, and that a backend request does.
 Porsager's `postgres` has no instrumentation; database work is not traced in
 this phase. Manual spans: `agent.turn` (one per chat turn, the trace root or
 the browser's child), `agent.tool/<name>`, `agent.mcp/<method>`.
@@ -225,6 +263,16 @@ the whole wait. That is the failure §4 rejects session-long traces for. So:
   names never nest (`.resume.resume`). Every segment carries
   `scadbuddy.turn_id` and `scadbuddy.segment` (0 for the turn, 1, 2, … for
   each resume), so one search on the turn id returns all of them, in order.
+- **Parks at the same time.** A parallel tool-use turn can park several calls
+  at once, and `ai_approvals` already holds several undecided rows per
+  session. The segment ends once, at the first park. Ending it is idempotent,
+  so a second park in the same segment ends only its own tool span. A call
+  from that segment that did not park keeps its span open until it finishes;
+  OTel allows a child to end after its parent. Each pending call gets its own
+  decision trace, and its tool execution is a child of that decision. The
+  next `agent.turn.resume` begins when the harness continues, which is after
+  the last of the segment's parked calls is decided. It is a child of that
+  last decision, with links to the other decisions of the same segment.
 
 Every span therefore ends within one interaction, and a parked turn shows up
 in Tempo as soon as it parks.
@@ -330,7 +378,10 @@ runner image.
   the workflow, every activity and every `openscad.export`. A coalesced second
   submit's span links to the `traceparent` stored on the row. A stale row the
   reconciler starts lands in that same trace. A row without one gets no link.
-  Relay tests: 413; 429 from the per-client bucket and from the global one;
+  Relay tests: 403 for a missing or foreign `Origin` and for a
+  `Sec-Fetch-Site` other than `same-origin`, with no CORS headers on any
+  response; 415; 413 from the `RouteLimit` with and without `Content-Length`
+  and past 512 spans; 429 from the per-client bucket and from the per-process one;
   `X-Forwarded-For` ignored from an untrusted peer and read right to left from
   a trusted one; resource rewrite; attribute caps; the `off` response; nothing
   forwarded when off; the path never serves `index.html`. A redaction test renders
@@ -344,7 +395,8 @@ runner image.
   decision's `agent.approval` links to the parked tool span through the
   `ai_approvals.traceparent` column, and `agent.turn.resume` is its child. A
   turn that parks twice yields segments 0, 1 and 2, each ending as the next
-  begins. An expired approval records `outcome=expired`. No prompt or tool input appears in any attribute.
+  begins. Two calls parked at once end segment 0 once and get a decision trace
+  each, and segment 1 is the last decision's child, linked to the other. An expired approval records `outcome=expired`. No prompt or tool input appears in any attribute.
 - **Frontend:** vitest for the exporter's off switch; mocked e2e asserting
   `traceparent` is on same-origin requests and absent on cross-origin ones.
 - **No collector in CI.** Nothing here needs network export.
