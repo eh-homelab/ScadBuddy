@@ -50,8 +50,9 @@ cluster does not run and which covers neither the browser nor Temporal context.
 - **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
   problem, not for "tracing off": it replaces the provider with the API's
   no-op one. No spans are created, so nothing propagates.
-  `render_jobs.traceparent` and `ai_approvals.traceparent` stay null, and the
-  relay still answers `off` (it keys only on the endpoint). Leaving the
+  `render_jobs.traceparent` and `ai_approvals.traceparent` stay null. The
+  relay answers `off` too (§5.2), so the switch silences browser spans as
+  well, not only the backend's own. Leaving the
   endpoint unset is the normal way to run without tracing. Clusters never
   sets this variable unless it is ruling the SDK out of an incident.
 - **Resource.** Each process sets `service.name`: `scadbuddy-api`,
@@ -215,8 +216,19 @@ path except `/api/v1/ai/*` to the backend.
   Clusters sets it to the gateway's range in clusters#1596 Phase 5.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
-  attribute dropped except `service.version` and `user_agent.original`; per-span
-  attribute count and value length capped. It then forwards to the configured
+  attribute dropped except `service.version` and `user_agent.original`. Then
+  per-span caps; beyond them the excess is dropped (truncated, for strings) and
+  the span counts it in `otel.dropped_attributes_count` (OTel's own field):
+  - 64 attributes;
+  - string values of 1024 characters;
+  - arrays of 32 items;
+  - 16 events with 16 attributes each;
+  - 8 links;
+  - a span name of 128 characters.
+
+  These match the SDK limits `RelayExporter`'s provider is configured with
+  (`spanLimits`), so a well-behaved page never hits them. It then forwards to
+  the configured
   endpoint with httpx in the background; the browser never waits on the
   collector. A forged span can still name any trace ID, but never claim to be
   the API or the worker.
@@ -243,7 +255,8 @@ path except `/api/v1/ai/*` to the backend.
   - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
   - A refusal's `detail` names the rule ("Origin not allowed", "the relay
     accepts application/json only"), never the request's own values.
-- **Tracing off** (no endpoint): `204` with `X-ScadBuddy-Tracing: off`. The
+- **Tracing off** (no endpoint, or `OTEL_SDK_DISABLED=true`): `204` with
+  `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
 
@@ -257,6 +270,19 @@ its caller, so it cannot see the relay's off signal.
 - `RelayExporter` serialises with `@opentelemetry/otlp-transformer`'s JSON
   trace serializer and POSTs to `/telemetry/v1/traces` with `fetch`
   (`keepalive` so a batch flushed on page hide still goes).
+- Browsers cap a page's in-flight `keepalive` bodies at 64 KiB in total. So:
+  - the provider batches at most 64 spans (`maxExportBatchSize`);
+  - `RelayExporter` splits any serialised batch over 48 KiB into several
+    requests;
+  - it sends one request at a time, so in-flight `keepalive` bytes stay
+    under the cap;
+  - a single span over 48 KiB after the SDK limits below is dropped and
+    counted.
+
+  The relay's 256 KiB ceiling only bounds non-browser callers; the browser
+  never comes near it. A `fetch` that rejects (offline, the page torn down
+  mid-send) drops its batch. Unit tests cover the split and the one-at-a-time
+  send.
 - On `X-ScadBuddy-Tracing: off` it switches itself off and returns success for
   every later batch without sending.
 - On 413 or 429 it drops the batch. Unit tests cover all three cases.
@@ -426,7 +452,8 @@ file that already exists. So the new step counts the anchored line first:
 
 - **Not configured:** the anchored pattern matches 0 lines and the file
   does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
-  unanchored, fixed-string `grep -F`). Post a `::notice::` that clusters has
+  unanchored, fixed-string, case-insensitive `grep -iF`, so a near-miss in
+  casing still counts as a mention). Post a `::notice::` that clusters has
   no dashboard pin yet, and pin the images only. This keeps deploys working
   until clusters#1596 Phase 5 adds the line.
 - **Malformed:** the anchored pattern matches 0 lines but the path does
@@ -476,7 +503,8 @@ The uid never changes after that, so the check is needed once.
   response; 415; 413 from the `RouteLimit` with and without `Content-Length`
   and past 512 spans; 429 from the per-client bucket and from the per-process one;
   `X-Forwarded-For` ignored from an untrusted peer and read right to left from
-  a trusted one; resource rewrite; attribute caps; the `off` response; nothing
+  a trusted one; resource rewrite; each attribute, event, link and name cap at
+  its limit and one past it, with the dropped count; the `off` response; nothing
   forwarded when off; the path never serves `index.html`. Redaction tests put a
   sentinel string in each forbidden place and assert it appears nowhere in any
   exported span: not in attributes, event attributes or status descriptions,
