@@ -256,9 +256,14 @@ keeps its `first_seen_at` and its print history, and the write updates
     would need the sliced 3MF's per-filament usage, which is out of scope here.
 - An archive linked by `content_hash` with no `queue_item_id` cannot be tied to
   a pick and is not counted.
-- A group's use is `count(*)`, `sum(print_seconds)` and `sum(grams)` over its
-  serial's `rack_nozzle_prints` rows, on whichever printer they were printed. "Least used" orders by `print_seconds`,
-  then prints.
+- A group's use is `count(*)`, `coalesce(sum(print_seconds), 0)` and
+  `coalesce(sum(grams), 0)` over its serial's `rack_nozzle_prints` rows, on
+  whichever printer they were printed. The `coalesce` is load-bearing: `sum`
+  over zero rows is NULL, and an ascending sort puts NULL last, so without it a
+  never-used hotend would rank behind a lightly used one. A serial with no rows
+  at all still gets a `Usage` of zeros, not a missing entry. "Least used" orders
+  by `print_seconds`, then prints. The plan's tests include an unused hotend
+  beside a used one and assert the unused one ranks first.
 - The serial is recorded when the pick is made, because a hotend can be moved to
   another position later.
 - Known limit: the queue item names a position, not a serial. If a hotend of the
