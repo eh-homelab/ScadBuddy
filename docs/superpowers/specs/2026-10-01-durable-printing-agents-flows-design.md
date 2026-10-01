@@ -260,7 +260,9 @@ The same for every kind:
   read by `GET /api/v1/operations/{id}` (and so a tool) and announced as `operation.*`
   events. Its pruning is a Postgres setting, `operation_retention_seconds`, like
   `print_run_retention_seconds`.
-- Temporal's namespace Archival (§5.4) covers history past 168h for every kind.
+- Temporal's namespace Archival (§5.4) covers history past 168h for every kind. A
+  durable session's and a flow run's payloads are encrypted with a key of their own
+  before they reach history (§6.5), so the archive holds ciphertext for them.
 
 **The client.**
 - One helper, `command()` in `frontend/src/api/client.ts`, sends a `request_id`. It takes
@@ -280,7 +282,7 @@ The template spec §9's containment rule, applied to every command:
 | `library` | `scadbuddy-library`, a container in the API pod (it needs `scadbuddy-data`, which is RWO) | model create/import/patch/duplicate/delete, source and file writes, thumbnail/readme/media writes, preset writes that need `openscad`, version restore, upstream merge/dismiss/detach, library pin/repin/unpin/remove, font install, the sweeps | the data volume and git; no Bambuddy key; runs no template code |
 | `bambuddy` | `scadbuddy-print` (§5.5) | prints, send, project file, create project, file into project, Bambuddy part of output delete, reprint, timelapse pull, sidebar registration, analyzer fix apply | full Bambuddy key |
 | `agent-tools`, `agent` | agent pod (§6) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
-| `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward |
+| `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward; the KEK, read-only, only to encrypt flow payloads (§6.5) |
 
 Git writes to one model's history still take the catalogue's existing lock inside the
 activity. Two commands on one model are therefore ordered as git requires, and nothing
@@ -587,6 +589,34 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`browser_*` tools** need a paired tab. With none, they fail at once with that
   message rather than wait.
 
+### 6.3a The `agent-durable` container
+
+It holds the Anthropic credential and runs a git-pinned, pre-release package, so it is
+the most constrained runtime in the system.
+
+- **Image.** The Dockerfile stage `agent-durable` runs as `USER 10001:10001`, like the
+  `agent` stage (`Dockerfile:509`, `:523`). There are no build tools in the final
+  stage, and its only writable path is `/srv/agent`, an `emptyDir`. The pod sets
+  `readOnlyRootFilesystem`, `runAsNonRoot`, drops all capabilities and uses
+  `seccompProfile: RuntimeDefault`.
+- **Secrets.** It mounts exactly what it needs, read-only:
+  - `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation),
+    from the same Secret the `agent` container mounts, as files rather than
+    environment variables;
+  - `SCADBUDDY_DATABASE_URL` for the `ai_*` tables;
+  - the Temporal address.
+
+  It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
+  `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
+  `ai_durable_entries` (or `ai_session_entries`) and the session counters. It can do
+  nothing else.
+- **Network.** A NetworkPolicy in `eh-homelab/clusters` allows egress only to Postgres,
+  the Temporal frontend, and the credential's endpoint: `api.anthropic.com`, or the
+  gateway's `base_url`. Nothing is fetched at run time: the pinned package is installed
+  at build.
+- **The credential** is decrypted per segment, passed to the runner's `env`, and never
+  logged, written to disk or put in history (§6.2).
+
 ### 6.4 Human-in-the-loop
 
 - An outward call waits in the workflow (`needs_approval`) until a decision.
@@ -598,6 +628,48 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - `approval_expiry_seconds` (`approvals/service.ts:115`) becomes a workflow timer per
   waiting call that decides *deny* when it fires.
 - Classic sessions keep `ai_approvals` unchanged.
+
+### 6.5 Deleting a durable session or a flow run
+
+Today deleting a session removes its content: `agent/src/sessions/store.ts:99` deletes
+its `ai_session_entries`. A durable session's prompts, tool calls and answers also
+reach Temporal: in its history, in Visibility, and past 168h in the Archival bucket.
+Deleting our rows alone would no longer make them unrecoverable. Temporal's documented
+mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredding:
+
+- **The codec.** `SubjectPayloadCodec`, implementing the SDK's
+  `WithSerializationContext`, which gives the codec each payload's `workflow_id`
+  (`temporalio.converter.WorkflowSerializationContext` /
+  `ActivitySerializationContext`, `temporalio` 1.33).
+  - It encrypts every payload of a workflow whose ID is `session-<id>` or `flow-<id>`.
+    It uses AES-256-GCM, the same sealed format as `agent/src/secrets.ts`, under that
+    subject's own data key.
+  - The data key is a row of `ai_payload_keys(subject, dek_sealed, kek_id, created_at)`,
+    sealed under the KEK and re-wrapped on rotation like `ai_credentials`.
+  - Other workflows' payloads (renders, prints, commands) pass through unencrypted. A
+    flow's child `PrintRun` has its own workflow ID and carries no conversation.
+- **Who runs it.** Every client and worker that encodes or decodes those payloads:
+  - the `agent` worker in `agent-durable`, and the `projects` worker;
+  - the agent service's TypeScript worker on `agent-tools`, since its activities receive
+    a session's tool arguments;
+  - the clients that start sessions and flow runs or send them Updates.
+
+  Each of them reads the KEK. Phase 4 starts by confirming that the TypeScript SDK
+  exposes the same serialization context to a codec. If it does not, the work stops
+  and the user decides (§9).
+- **Deleting.** `DELETE /api/v1/ai/sessions/{id}`, and the flow run's delete, do three
+  things:
+  1. delete the `ai_payload_keys` row, after which every copy of the payloads (history,
+     Visibility memo, Archival) is undecryptable;
+  2. terminate the workflow if it is open, then `DeleteWorkflowExecution`;
+  3. delete our rows, as today.
+
+  Postgres backups hold the key row for their 7-day window, the same window in which
+  they already hold `ai_session_entries` today. So the guarantee is the one deletion
+  gives now.
+- **Temporal UI** shows these workflows' payloads as ciphertext. No Codec Server is
+  deployed, by design: reading a session's content goes through ScadBuddy's own access
+  checks, not through the Temporal UI link (#668).
 
 ## 7. Flows
 
@@ -731,6 +803,7 @@ None. The ones considered, and how each was resolved:
 | `resume_from` (reusing earlier runs' results) | Dropped for Temporal Reset (§7.4). |
 | Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§7.2). |
 | Vendoring the unmerged `temporalio-claude-agent-sdk` | Not vendored, by the user's decision. The residual risk (an unreachable commit) is monitored by a scheduled `uv lock --check` (§6.2). This is not a deviation from Temporal. |
+| Encrypting session and flow payloads | Temporal's documented Payload Codec with serialization context (§6.5). Not a deviation. |
 | Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
