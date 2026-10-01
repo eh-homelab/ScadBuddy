@@ -199,6 +199,9 @@ export function ProjectPicker({
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
+            // A fresh form every time: a parent chosen in a cancelled one must not
+            // carry over into this project's nesting.
+            setParentId(null)
             setSuggestedParent(current?.id ?? null)
             setCreating(true)
             return
