@@ -728,6 +728,11 @@ export function setMockSettings(settings: Settings): void {
   state.settings = settings
 }
 
+/** #742 — a print run the mock accepted, which `GET /print/runs/:id` then answers. */
+export function recordMockPrintRun(run: PrintRun): void {
+  state.printRuns.set(run.id, run)
+}
+
 export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },

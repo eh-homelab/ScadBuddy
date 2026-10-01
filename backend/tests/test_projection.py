@@ -419,3 +419,18 @@ def test_a_result_stored_before_its_newer_fields_still_reads(
 
     assert stored is not None
     assert (stored.diagnostics, stored.source_version) == ([], "")
+
+
+def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjection) -> None:
+    """#606: prune's predicate, `coalesce(finished_at, created_at)` over every settled
+    state, has an index to use as settled rows accumulate."""
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("SET enable_seqscan = off")
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                "EXPLAIN DELETE FROM render_jobs WHERE state IN ('done', 'failed', 'cancelled')"
+                " AND coalesce(finished_at, created_at) < now()"
+            )
+        )
+    assert "render_jobs_settled_at" in plan

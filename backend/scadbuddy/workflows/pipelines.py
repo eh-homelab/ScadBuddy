@@ -57,7 +57,10 @@ PROJECT_RETRY = RetryPolicy(
 SHORT = timedelta(seconds=60)
 #: One piece up to or down from the store: the Bambuddy client's per-request budget
 #: (`bambuddy.client.DEFAULT_UPLOAD_TIMEOUT`, 180 s), written out here because a
-#: workflow module keeps its imports to the workflow's own models.
+#: workflow module keeps its imports to the workflow's own models. That client budget
+#: bounds each connect, read or write, not a whole transfer; this one assumes a piece
+#: moves within 180 s in total. A large piece over a slow link that takes longer is
+#: cut off by the activity's start-to-close on every attempt (#691).
 TRANSFER = timedelta(seconds=180)
 #: Every stage that moves a piece beats while it does (`activities._heartbeating`).
 HEARTBEAT = timedelta(seconds=30)
