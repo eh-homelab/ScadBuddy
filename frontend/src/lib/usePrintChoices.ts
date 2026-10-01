@@ -101,9 +101,8 @@ export function usePrintChoices(
       })
       .catch((cause: unknown) => {
         if (token !== attempt.current) return
-        // The arranged output's choices never arrived; its carry must not reach
-        // whatever the dialog shows next.
-        carry?.set(null)
+        // A carry survives a failed read: a Retry of the same output still applies it.
+        // A different output clears it (PrintPicker), and a stale read never lands here.
         setChoices(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
       })

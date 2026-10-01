@@ -121,7 +121,10 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   useEffect(() => () => arrangeRun.current?.abort(), [])
   const givenKey = sourceKey(given)
   useEffect(() => {
-    // A new source from the caller is not a re-arrange: nothing carries to it.
+    // A new source from the caller is not a re-arrange: nothing carries to it, and a
+    // re-arrange of the old one still in flight must not land on it.
+    arrangeRun.current?.abort()
+    arrangeRun.current = null
     carry.set(null)
     setArranged(null)
   }, [givenKey, carry])
@@ -349,6 +352,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     setOptions({})
     runPrint.reset()
     picker.reset()
+    // The choices it carried are reset with the rest.
+    carry.set(null)
     onClose()
   }
 

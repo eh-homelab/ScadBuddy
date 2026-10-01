@@ -371,9 +371,9 @@ describe('PrintPicker', () => {
     return { checked: radios.find((radio) => radio.checked)!, other: radios.find((radio) => !radio.checked)! }
   }
 
-  it('drops the carry when the arranged output\'s choices cannot be read', async () => {
-    // Read again later (a reopen), the arranged output opens on its own choices, not on
-    // a carry left behind by the failed read.
+  it('drops the carry when the dialog is closed', async () => {
+    // Closing resets the dialog's choices; a carry left behind by a failed read must not
+    // skip the seeding when it opens again.
     const originals = new Set(fixtures.outputs.map((entry) => entry.id))
     let failures = 1
     server.use(
@@ -391,9 +391,8 @@ describe('PrintPicker', () => {
       const [open, setOpen] = useState(true)
       return (
         <>
-          <button onClick={() => setOpen(false)}>Close it</button>
           <button onClick={() => setOpen(true)}>Open it</button>
-          <PrintPicker open={open} source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+          <PrintPicker open={open} source={{ kind: 'output', output: shown }} onClose={() => setOpen(false)} onRan={vi.fn()} />
         </>
       )
     }
@@ -403,12 +402,67 @@ describe('PrintPicker', () => {
     await user.click(other)
     await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
     expect(await screen.findByText('no choices')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await user.click(screen.getByRole('button', { name: 'Open it', hidden: true }))
     await loaded()
     await waitFor(() =>
       expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${checked.value}`)).toBeChecked(),
     )
+  })
+
+  it('keeps the spools across a failed read of the arranged output and a Retry', async () => {
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    let failures = 1
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ params }) => {
+        if (originals.has(String(params.id)) || failures === 0) return undefined
+        failures -= 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const { other } = slot1Radios()
+    const chosen = other.value
+    await user.click(other)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${chosen}`)).toBeChecked(),
+    )
+  })
+
+  it('carries nothing when the caller switches outputs while a re-arrange saves', async () => {
+    let saved!: (output: Output) => void
+    vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (saved = resolve)),
+    )
+    const choices = vi.spyOn(api, 'getChoices')
+    const other = fixtures.outputs[1] as Output
+    function Switching() {
+      const [shown, setShown] = useState<Output>(output)
+      return (
+        <>
+          <button onClick={() => setShown(other)}>Next output</button>
+          <PrintPicker open source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Switching />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(api.createOutput).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: 'Next output' }))
+    saved({ ...output, id: 'o-arranged' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await loaded()
+    expect(screen.queryByText(/Arranged onto/)).toBeNull()
+    expect(choices.mock.calls.map(([id]) => id)).not.toContain('o-arranged')
   })
 
   it('carries nothing to an output the caller passes in', async () => {
