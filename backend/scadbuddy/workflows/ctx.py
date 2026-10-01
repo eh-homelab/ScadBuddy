@@ -33,6 +33,11 @@ with workflow.unsafe.imports_passed_through():
 if TYPE_CHECKING:
     from scadbuddy.workflows.pipelines import TemplatePipeline
 
+#: `ctx.output`'s text `files`, all of them together (#899). They travel inline in the
+#: workflow history, so they are held to the template-activity result's cap; anything
+#: larger is a Blob from `scadbuddy.template.emit`.
+MAX_INLINE_FILES_BYTES = 1 << 20
+
 
 class PieceFailedError(Exception):
     """A `ctx.render` whose piece failed: the job fails with the piece's log unless
@@ -127,6 +132,14 @@ class Ctx:
             if layout.own
             else list(dict.fromkeys(p.piece_key for pl in layout.plates for p in pl.items))
         )
+        written_files = {k: _file(k, v) for k, v in (files or {}).items()}
+        inline = sum(len(v.encode("utf-8")) for v in written_files.values() if isinstance(v, str))
+        if inline > MAX_INLINE_FILES_BYTES:
+            raise ValueError(
+                f"files: {inline} bytes of inline text, over the {MAX_INLINE_FILES_BYTES}-byte"
+                " cap; return a large file from a template activity with"
+                " scadbuddy.template.emit"
+            )
         parts = [self._host.part_of(key) for key in used]
         index = len(self.outputs)
         loaded = self._loaded
@@ -138,7 +151,7 @@ class Ctx:
             parts=parts,
             name=name,
             bom=[b if isinstance(b, BomEntry) else BomEntry.model_validate(b) for b in bom or []],
-            files={k: _file(k, v) for k, v in (files or {}).items()},
+            files=written_files,
             record=OutputRecord(
                 revision=self._job.model_version,
                 ui_api=loaded.ui_api,

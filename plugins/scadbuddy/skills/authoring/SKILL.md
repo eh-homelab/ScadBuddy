@@ -546,7 +546,8 @@ Everything else goes through `ctx`:
 
 One part packed alone keeps the plates it laid out itself (`echo(plates = N)`, section 5).
 `bom` entries are `{"piece", "label", "count", "plates": [..], "part": part.piece_key}`.
-`files` values are text, or a `Blob` returned by an activity.
+`files` values are text (1 MiB in all per output; they travel in the workflow
+history, `backend/scadbuddy/workflows/ctx.py`), or a `Blob` returned by an activity.
 
 `activities.py` is plain Python on the render worker, with what the image ships
 (numpy, lxml, Pillow, the stdlib, `scadbuddy.render.*`, `scadbuddy.template`).

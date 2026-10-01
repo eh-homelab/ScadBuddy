@@ -144,6 +144,27 @@ async def test_a_restricted_call_fails_the_job_with_its_line(source: str, messag
     assert final.failure is not None and final.failure.error.startswith(message)
 
 
+async def test_inline_text_files_over_the_cap_fail_before_the_output_is_written() -> None:
+    """#899: they travel in the workflow history, so a large one points at `emit`."""
+    world = FakeWorld(
+        "async def run(ctx, inputs):\n"
+        "    part = await ctx.render('model.scad', w=1)\n"
+        "    await ctx.output(plates=await ctx.pack([part]),"
+        " files={'a.txt': 'x' * (1 << 19), 'b.txt': 'y' * ((1 << 19) + 1)})\n"
+    )
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed"
+    assert final.failure is not None
+    assert final.failure.error == (
+        "pipeline/pipeline.py:3: ValueError: files: 1048577 bytes of inline text, over"
+        " the 1048576-byte cap; return a large file from a template activity with"
+        " scadbuddy.template.emit"
+    )
+    assert world.outputs == []
+
+
 async def test_a_pipeline_that_writes_nothing_fails() -> None:
     world = FakeWorld("async def run(ctx, inputs):\n    return None\n")
     async with temporal_client() as client:
