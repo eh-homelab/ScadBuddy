@@ -265,10 +265,12 @@ async def check_print(
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
     slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
     the size, whatever flow is chosen, since the slice is always Standard flow (#723,
-    #797, #484). What needs the uploaded file is still found by the run. Only the run's
-    own refusals (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy
-    fails the check, as it would fail the run. With no printer chosen or configured there
-    is nothing to judge, and the run says why."""
+    #797, #484). It never carries the resolver's own ``hf-unsupported`` note for a
+    chosen High Flow nozzle (#862): that one is left to the run and the nozzle step.
+    What needs the uploaded file is still found by the run. Only the run's own refusals
+    (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
+    check, as it would fail the run. With no printer chosen or configured there is
+    nothing to judge, and the run says why."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
