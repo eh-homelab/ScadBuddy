@@ -58,7 +58,7 @@ from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import LibraryError, model_search_path
@@ -313,6 +313,21 @@ assert get_args(Goal) == GOALS
 #: Arrange's refusal of outputs saved before manifests (#902): the UI offers to
 #: re-render them (`output_ids`) and arranges once they have one.
 NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
+
+
+class NeedsBackfillProblem(BaseModel):
+    """Arrange's 409 for outputs saved before manifests (RFC 9457, #902)."""
+
+    type: str = Field(examples=[NEEDS_BACKFILL_PROBLEM])
+    title: str
+    status: int
+    detail: str
+    instance: str | None = None
+    code: Literal["needs_backfill"]
+    #: Every chosen output that needs POST /outputs/{id}/backfill, in request order.
+    output_ids: list[str]
+
+
 #: The most copies one arrange places, summed over its objects.
 MAX_ARRANGE_COPIES = 2000
 
@@ -433,6 +448,18 @@ def arrange_inputs(
     response_model=JobStatus,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Arrange objects onto plates",
+    responses={
+        status.HTTP_409_CONFLICT: {
+            # Named in components by main's `_name_in_openapi`.
+            "content": {
+                PROBLEM_MEDIA_TYPE: {
+                    "schema": {"$ref": "#/components/schemas/NeedsBackfillProblem"}
+                }
+            },
+            "description": "Outputs saved before Arrange existed: re-render each of"
+            " `output_ids` with POST /outputs/{id}/backfill, then arrange again",
+        }
+    },
     description="Lay out objects from saved outputs again for a goal, printer and spool plan"
     " (spec §7). No re-render. Poll the job with GET /jobs/{id}, then save it as an output.",
 )
