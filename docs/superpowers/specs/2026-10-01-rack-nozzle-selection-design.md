@@ -283,8 +283,9 @@ made per rack side, not per group:
   before anything is sliced when it does not fit the side's diameter and flow.
 - After the slice, `manual` is built from it: when the slice has one `on_rack`
   group, that group gets the manual position. When it has several, the lowest
-  `group_id` gets it and the others are ranked, and the run result carries a
-  `rack-left-to-bambuddy` warning saying which groups were ranked instead.
+  `group_id` gets it and the others are ranked by ScadBuddy, and the run result
+  carries a `rack-manual-partial` warning naming the group that got the manual
+  position and the groups that were ranked.
 - `manual` is `{group_id: position}`. Its positions are placed first and
   excluded for every other group, so a manual pick and a ranked one can never
   name the same position.
@@ -353,16 +354,20 @@ so the trade is accepted.
   the picks on `QueueOutcome`. The picks carry serials, so `print_run.py`'s
   `_queued` must keep building `PrintRunResult` from named fields and never
   `model_dump()` the outcome into an API response (§7).
-- `bambuddy/filaments.py`: two new `WarningKind` literals beside `hf-mounted`,
+- `bambuddy/filaments.py`: three new `WarningKind` literals beside `hf-mounted`,
   both carried on `PrintRunResult.warnings` and on `/check`'s warnings like the
   existing kinds:
   - `rack-unsafe-material`: the pick is not hardened for an abrasive group;
   - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
     unreadable", "requirements unreadable", "no eligible position for group N").
-    This is the message §5's failure table promises. It also carries the note
-    when a manual pick went to one of several groups and the rest were ranked.
+    This is the message §5's failure table promises. It means Bambuddy chose,
+    and is used only when ScadBuddy sent no pick for that group;
+  - `rack-manual-partial`: the slice split the rack side into several groups,
+    the manual position went to the lowest `group_id`, and ScadBuddy ranked the
+    rest. Picks were sent for every group, so this is not
+    `rack-left-to-bambuddy`.
 
-  Both carry `slot_id: null`, which the frontend reads as plate-wide
+  All three carry `slot_id: null`, which the frontend reads as plate-wide
   (`warningsFor` in `frontend/src/lib/filaments.ts`). That is deliberate: a rack
   pick is a choice for the whole plate's rack side, and the message names the
   group or side it is about.
@@ -416,7 +421,8 @@ fixtures (which use invented serials), or in commits.
   - a `PLA` group whose spool's subtype is `Glow` abrasive;
   - a manual pick reserved before the ranking, so no ranked group takes its
     position; a manual pick that does not fit the side refused with 422 before
-    slicing; with two `on_rack` groups the manual pick goes to the lower id;
+    slicing; with two `on_rack` groups the manual pick goes to the lower id and the
+    result carries `rack-manual-partial`, not `rack-left-to-bambuddy`;
   - `"#00B1B7"` on a group matching `"00B1B7FF"` on a slot;
   - a `used_in_plate: false` CF filament not making its group abrasive;
   - a group of PLA and PLA-CF counted as abrasive;
