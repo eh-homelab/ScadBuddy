@@ -413,6 +413,10 @@ This is the two-color rerun that the #538 acceptance was waiting on. It ran agai
 
 The run before it, queue item 159, was sliced before #840 and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." The slicer's "Auto For Flush" grouping had split the filaments across both sides. It was cancelled, and 160 is that print resliced. This closes the acceptance: the spool-first flow queues, slices and completes a two-color print on this printer.
 
+The user passed it with notes, from nine photos in the template's media on [`name-keychain`](https://scadbuddy.internal.nullreference.io/m/builtin:name-keychain). Colors and letter edges are correct, and nothing dragged across the letters, which was the defect in earlier runs. The underside and edges are clean. What remains is cosmetic and comes from slicer tuning, not from the flow:
+- a few fine strings in the counters of `e` and across the key-ring hole;
+- faint diagonal scuffs and small zits on the letters' top surface.
+
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
 - **Which AMS tray and which extruder each spool feeds.** Bambuddy's scheduler computes
