@@ -579,6 +579,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   })
 })
 
+describe('get_printer_camera (#796)', () => {
+  it("returns the printer's current frame as an image, marked untrusted", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/printers/7/camera`, () =>
+        new HttpResponse(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { headers: { 'content-type': 'image/jpeg' } }),
+      ),
+    )
+    const result = await runTool(tool('get_printer_camera'), { printer_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
+      untrusted_data: { tool: 'get_printer_camera', content_follows: { type: 'image', mime_type: 'image/jpeg' } },
+    })
+    expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+  })
+})
+
 describe('analyze_geometry', () => {
   it('is a read tool returning the backend analysis', async () => {
     const id = 'a'.repeat(32)

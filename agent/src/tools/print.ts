@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
@@ -22,7 +23,8 @@ import { page, PAGED, pageInput } from './pagination.js'
 //   (#312).
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
-//   per-slot remaining grams (get_print_filaments), and print progress. The
+//   per-slot remaining grams (get_print_filaments), print progress, and a
+//   printer's current camera frame (get_printer_camera, #796). The
 //   queue, the print archive and aggregate stats have no backend route yet, so
 //   they have no tool yet.
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
@@ -273,6 +275,29 @@ export const printTools: Tool[] = [
           backend.GET('/api/v1/print/outputs/{output_id}/progress', { params: { path: { output_id } } }),
           `get print progress of ${output_id}`,
         ),
+      ),
+  }),
+
+  defineTool({
+    name: 'get_printer_camera',
+    description:
+      "A printer's current camera frame as a JPEG: what is on the bed now, including prints ScadBuddy did " +
+      'not start. printer_id is a Bambuddy printer id, as get_print_targets lists them.',
+    input: z.object({ printer_id: z.number().int().nonnegative() }),
+    risk: 'read',
+    source: "a printer's camera: whatever is in view, including anything written on it",
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/print/printers/{printer_id}/camera'],
+    handler: async ({ printer_id }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/print/printers/{printer_id}/camera', {
+          params: { path: { printer_id } },
+          parseAs: 'stream',
+        }),
+        `capture the camera of printer ${printer_id}`,
+        ctx,
+        { path: `/api/v1/print/printers/${printer_id}/camera`, name: `printer-${printer_id}-camera.jpg`, fallbackType: 'image/jpeg' },
+        image,
       ),
   }),
 

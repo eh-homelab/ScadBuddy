@@ -204,6 +204,24 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(reads).toBe(2)
   })
 
+  it("follows a library file's run the same way (#742)", async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [8], warnings: [] }
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/library/89/run', () =>
+        HttpResponse.json({ ...started, output_id: 'library:89' }, { status: 202 }),
+      ),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        return HttpResponse.json(reads < 2 ? started : { ...started, status: 'succeeded', result })
+      }),
+    )
+
+    await expect(api.runLibraryPrint(89, body)).resolves.toEqual(result)
+    expect(reads).toBe(2)
+  })
+
   it("throws the failed run's problem, as the route used to answer it", async () => {
     printRunPoll.intervalMs = 1
     server.use(

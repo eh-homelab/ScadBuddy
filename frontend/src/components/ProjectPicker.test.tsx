@@ -146,6 +146,18 @@ describe('ProjectPicker', () => {
     expect(parent).toHaveValue('1')
   })
 
+  it('reopens the form on None after a cancelled one chose a parent (#930 review)', async () => {
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    await user.selectOptions(screen.getByTestId('new-project-parent'), '2')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.selectOptions(select(), 'new')
+
+    expect(screen.getByTestId('new-project-parent')).toHaveValue('')
+  })
+
   it('shows a child project under its parent as a breadcrumb (#930)', async () => {
     server.use(
       http.get('/api/v1/print/projects', () =>
@@ -163,6 +175,32 @@ describe('ProjectPicker', () => {
     expect(within(select()).getByRole('option', { name: /Tags/ })).toHaveTextContent(
       /^Reagan Keychain › Tags · /,
     )
+  })
+
+  it('disables the select while its own "Create project" is in flight (#710 review)', async () => {
+    // Its own `saving`, not the parent's `disabled`: a reselection here would be silently
+    // reverted once the pending create resolves and moves `value` again.
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/v1/print/projects', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(select()).toBeDisabled())
+
+    release()
+    await waitFor(() => expect(select()).toBeEnabled())
+    expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
   })
 
   it('opens on the project the last send went to', async () => {

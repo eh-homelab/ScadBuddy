@@ -127,8 +127,15 @@ def test_generate_with_a_project_uploads_once_into_its_folder(
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
 
     # The same project chosen twice: the route is idempotent per (folder, target).
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(
+            200, json={"id": 41, "filename": "renamed-in-bambuddy.3mf", "folder_id": FOLDER}
+        )
+    )
     again = file_into_project(client, output_id).json()
     assert (again["library_file_id"], again["created"]) == (41, False)
+    # The name is the one the existence read returned, not the one uploaded.
+    assert again["filename"] == "renamed-in-bambuddy.3mf"
     assert uploaded.call_count == 1
 
 

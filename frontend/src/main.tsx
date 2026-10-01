@@ -3,9 +3,11 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import { installAgentBridge } from './agent'
 import { App } from './App'
+import { installStaleChunkReload } from './lib/staleChunks'
 import './index.css'
 
 async function start() {
+  installStaleChunkReload()
   if (import.meta.env.VITE_MOCK_API === '1') {
     const { worker } = await import('./mocks/browser')
     await worker.start({
