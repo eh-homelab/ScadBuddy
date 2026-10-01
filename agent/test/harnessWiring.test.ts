@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createBackendClient } from '../src/api/backend.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
@@ -23,9 +24,9 @@ import { browser } from './support/sessions.js'
 
 // The harness as main.ts wires it (#255): the registry's in-process server and
 // tiers (tools/harness.ts), run through the real SDK and its bundled Claude
-// Code against the fake Anthropic endpoint. The backend is msw. ScadBuddy's
-// own plugin is not passed, as in main.ts: with `tools: []` there is no Skill
-// or Agent tool, so its skills and subagents would be listed but unusable.
+// Code against the fake Anthropic endpoint. The backend is msw. A run without
+// ScadBuddy's own plugin has no built-in tool; main.ts passes the plugin
+// (#896), which brings the Skill and Agent tools and nothing else.
 
 const BACKEND = 'http://backend.test'
 const GATEWAY_TOKEN = 'gw-wiring-test-token-777788889999'
@@ -195,4 +196,52 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(deletes).toBe(0)
     expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/needs a human approval in the ScadBuddy UI/)
   }, 60_000)
+
+  describe("ScadBuddy's own plugin (#896)", () => {
+    const registry = ALL_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`)
+
+    it('loads its skills and subagents, and offers Skill and Agent beside the registry tools', async () => {
+      script = (r) =>
+        lastContent(r).includes('tool_result')
+          ? { text: 'done' }
+          : { toolUse: { name: 'Skill', input: { skill: 'scadbuddy:customize' } } }
+      const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+      expect(result.subtype).toBe('success')
+      expect(init.plugins).toContainEqual(expect.objectContaining({ name: 'scadbuddy', path: OWN_PLUGIN_DIR }))
+      expect(init.plugin_errors ?? []).toEqual([])
+      expect(init.skills.filter((s) => s.startsWith('scadbuddy:')).sort()).toEqual(
+        ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
+      )
+      expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
+      // `Agent` is listed by its older name (measured on Claude Code 2.1.283).
+      expect([...init.tools].sort()).toEqual(['Skill', 'Task', ...registry].sort())
+      // No server of its own: its tools are the in-process `scadbuddy` server.
+      expect(init.mcp_servers.map((s) => s.name)).toEqual(['scadbuddy'])
+      // Claude Code asks no permission for Skill (the PreToolUse hook passes it
+      // at `read`), so canUseTool records nothing.
+      expect(decisions).toEqual([])
+      // The skill's body reached the model.
+      expect(lastContent(fake.messageCalls().at(-1)!)).toContain('get_schema')
+    }, 60_000)
+
+    it("runs a subagent whose calls go through the session's own permission seam", async () => {
+      script = (r) => {
+        const last = lastContent(r)
+        if (last.includes('tool_result')) return { text: 'done' }
+        if (last.includes('SUBAGENT-TASK')) return { toolUse: { name: 'mcp__scadbuddy__delete_model', input: { slug: 'keychain' } } }
+        return {
+          toolUse: {
+            name: 'Agent',
+            input: { subagent_type: 'scadbuddy:model-author', description: 'Delete it', prompt: 'SUBAGENT-TASK delete keychain' },
+          },
+        }
+      }
+      const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+      expect(result.subtype).toBe('success')
+      // The subagent ran (only it calls delete_model), and its outward call is
+      // no more allowed than the session's: no gate, so denied.
+      expect(decisions).toEqual([['mcp__scadbuddy__delete_model', 'needs_approval']])
+      expect(deletes).toBe(0)
+    }, 60_000)
+  })
 })

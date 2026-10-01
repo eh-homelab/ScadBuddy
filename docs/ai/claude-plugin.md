@@ -72,22 +72,27 @@ The subagents' `tools` field lists both `mcp__scadbuddy` and
 `mcp__plugin_scadbuddy_scadbuddy`, so the same files work inside ScadBuddy's own harness
 and in an external install.
 
-## Inside ScadBuddy (not loaded)
+## Inside ScadBuddy
 
-The spec (§10) has the agent service load this directory by path, through the Agent SDK
+The agent service loads the plugin by path, through the Agent SDK
 `plugins: [{ type: "local", path }]` option
-([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)). The harness can
-do this: `pluginPaths` in `runHarness()`
-([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)) vets and passes local
-plugins. But `main.ts` does not pass this one, on purpose (it does load the headless
-browser's vendored plugin when that is enabled, see
-[headless-browser.md](headless-browser.md), and any approved plugin packages): every query runs with
-`tools: []` ([`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)), so
-there is no `Skill` or `Agent` tool, and the plugin's skills and subagents would be
-listed but never usable. The harness's own tools reach the model directly as
-`mcp__scadbuddy__<tool>` ([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts));
-[`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) asserts that,
-with no other plugin enabled, they are the only tools offered.
+([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins); spec §10, #896).
+It loads [`agent/plugins/scadbuddy/`](../../agent/plugins/scadbuddy), not this
+directory, because the harness refuses two things an external install needs:
+
+- `userConfig`;
+- an `.mcp.json` whose `${user_config.*}` placeholders could expand to a secret.
+
+That copy has its own `plugin.json` and links `skills/` and `agents/` here, so there is
+one copy of each skill. The image replaces the links with the files (Dockerfile,
+`agent-build`). The harness serves the tools in-process as `mcp__scadbuddy__<tool>`
+([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)).
+
+A query that loads the plugin gets the `Skill` and `Agent` tools, both at the `read`
+tier, and no other built-in ([`agent/src/harness/ownPlugin.ts`](../../agent/src/harness/ownPlugin.ts)).
+A subagent's calls go through the same permission checks as the session's own.
+[`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) runs both
+against the bundled Claude Code.
 
 Vetting is described in [security.md](security.md#plugin-vetting).
 
@@ -114,8 +119,12 @@ claude plugin validate .
 
 ## Versioning
 
-The plugin README says `version` in `plugin.json` follows the app release and matches
-`backend/pyproject.toml` and `frontend/package.json`. Both are `0.1.0` today.
+`version` in `plugin.json` changes with every change to the plugin (plugin README,
+"Versioning"): Claude Code keeps an install at the version it has until the version
+changes. The repository's Claude Code hook (`.github/scripts/plugin-edited.sh`, wired in
+`.claude/settings.json`) patch-bumps it on a branch's first plugin edit, mirrors it into
+`agent/plugins/scadbuddy`, and runs the plugin checks. `lint-plugin.sh` fails when the two
+manifests' versions differ.
 
 The plugin's `license` is `Apache-2.0`, the repository's license since #301
 ([`LICENSE`](../../LICENSE)).

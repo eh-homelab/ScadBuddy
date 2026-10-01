@@ -505,11 +505,14 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
 `assertPluginAllowed()` for every `pluginPaths` entry.
 
-ScadBuddy's own plugin (`plugins/scadbuddy`) passes (PR #379, row 8), but `main.ts` does
-not load it: with `tools: []` there is no `Skill` or `Agent` tool to use its skills or
-subagents ([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)
-asserts that, with no other plugin enabled, the registry tools are the only ones
-offered). Plugin packages add the rules in the next section.
+ScadBuddy's own plugin passes (PR #379, row 8). `main.ts` loads its harness copy,
+`agent/plugins/scadbuddy` (#896), and that query gets the `Skill` and `Agent` tools, at
+`read`, and no other built-in. Claude Code asks no permission for either, so the
+PreToolUse hook is where their tier applies. A subagent's own calls go through
+`canUseTool` and the hook like any other call: an outward one still needs an approval
+([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)). A query
+without the plugin has no built-in tool at all. Plugin packages add the rules in the
+next section.
 
 **The one exception is the headless browser** (#349). Its plugin is not read from
 anyone's directory: `materializeHeadlessBrowser()` in
