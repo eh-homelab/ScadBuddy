@@ -587,6 +587,25 @@ jobs:
           echo "::error::Issue #${ISSUE_NUMBER} still carries needs-triage after intake ran — the agent reported success but changed nothing."
           exit 1
 
+      # The label means "needs re-driving", so a re-triage (re-adding
+      # needs-triage) that passes both checks above clears the stamp an earlier
+      # run left. Otherwise `gh issue list --label failed:issue-intake` keeps
+      # listing issues that were since triaged in full.
+      - name: Clear failed:issue-intake after a completed intake
+        if: |
+          always() &&
+          steps.verify.outcome == 'success' &&
+          steps.triage-check.outcome != 'failure' &&
+          steps.triage-check.outputs.stuck != 'true' &&
+          contains(github.event.issue.labels.*.name, 'failed:issue-intake')
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "failed:issue-intake" \
+            || echo "::warning::Failed to remove failed:issue-intake."
+
       # The execution file is never uploaded elsewhere and dies with the
       # runner, so a permission denial, abnormal exit, or silent no-op is
       # otherwise undebuggable after the fact — the summary only carries a
