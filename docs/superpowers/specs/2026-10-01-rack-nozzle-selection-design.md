@@ -94,8 +94,19 @@ on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
 Groups are allocated one at a time, the group with the fewest eligible positions
 first, then by `group_id`. Positions already picked for an earlier group are
 excluded. The order is fixed so the same plate on the same rack always gets the
-same picks, and so a group with one usable position is not starved by a group
-that had several. Among the eligible positions:
+same picks. Most-constrained-first is a heuristic, not an optimal assignment:
+it keeps a group with one usable position from losing it to a group that had
+several, and with the H2C's six positions and, in practice, one or two rack
+groups per plate, that is the case that matters. With three or more groups it
+can still leave a group with nothing eligible when a different assignment would
+have fitted every group; that group gets no pick and a `rack-left-to-bambuddy`
+warning, and Bambuddy assigns it. Among the eligible positions:
+
+Material ranks above color on purpose. A color match saves one purge; sending a
+non-abrasive filament through the rack's only hardened nozzle can leave the next
+CF print with no safe nozzle, and that costs a print. The trade is taken
+knowingly: on a plate with no abrasive filament anywhere, a brass nozzle holding
+the wrong color beats a hardened one holding the right color.
 
 1. **Material safe for the filament.** An abrasive filament needs a hardened
    nozzle. A filament is abrasive when either:
@@ -103,8 +114,8 @@ that had several. Among the eligible positions:
      `GF` token (case-insensitive). Measured 2026-10-01 on the deployed slicer's
      Bambu profiles: fiber filaments are always typed with a suffix, `PLA-CF`,
      `PETG-CF`, `PA6-CF`, `PA-GF`, `ABS-GF`, `PPA-GF` and so on; or
-   - the inventory spool ScadBuddy assigned to it has `Glow` in its `subtype` or
-     `material`. Glow cannot be read from `type`: `Bambu PLA Glow @base`
+   - the inventory spool ScadBuddy assigned to it has `glow` in its `subtype` or
+     `material`, compared case-insensitively like the `CF`/`GF` test. Glow cannot be read from `type`: `Bambu PLA Glow @base`
      inherits `fdm_filament_pla`, so its `type` is plain `PLA`. A group whose
      spool is unknown (no inventory spool assigned) is judged by `type` alone,
      and the dialog says Glow could not be checked.
@@ -120,8 +131,10 @@ that had several. Among the eligible positions:
 2. **Already holds this color.** The position's `filament_color` matches the
    group's color, both passed through `normalise_colour` (`filaments.py`) first.
    The rack gives `RRGGBBAA` with no `#` and the group gives `#RRGGBB` (§8
-   unknown 2), so a direct compare would never match. This saves a purge. It is Bambuddy's own
-   preference, kept.
+   unknown 2), so a direct compare would never match. A color that does not
+   normalise (empty, unparsable) never matches, not even another unknown one:
+   `None == None` is not "already holds this color". This saves a purge. It is
+   Bambuddy's own preference, kept.
 3. **The algorithm key** (§4).
 4. **Lowest position**, as the final tiebreak, matching Bambuddy.
 
@@ -136,9 +149,11 @@ that had several. Among the eligible positions:
 
 The algorithm is remembered per printer as `printer_rack_algorithms:
 dict[str, Algorithm]`, a new `StoredSettings` field stored in the existing
-jsonb `settings` row like `printer_print_options` (`library/settings_store.py`),
-so it needs no migration and is not added to `OWN_TABLES`. It is shown and
-cleared in Settings' remembered choices, like `printer_bed_types`.
+jsonb `settings` row, the way `printer_print_options` is stored
+(`library/settings_store.py`), so it needs no migration and is not added to
+`OWN_TABLES`. Only its storage follows `printer_print_options`; how it is shown
+and cleared in Settings' remembered choices follows `printer_bed_types`, which
+has its own table and is not a storage precedent here.
 
 **Usage counter.** Three new tables. Use is counted per Bambuddy archive, which
 is one physical print: a queue item with `quantity` N produces N archives, and
@@ -340,6 +355,7 @@ blocks Print.
 |---|---|
 | Status or requirements unreadable | Send no choice, so Bambuddy picks. The run result carries a `rack-left-to-bambuddy` warning: "rack pick left to Bambuddy: <reason>" |
 | No eligible position for a group | Send no choice for that group. Bambuddy fails or auto-assigns exactly as today |
+| A manual pick, but the slice puts no group on the rack (every filament on the fixed side) | Nothing to pick; send no choice. The run result carries `rack-left-to-bambuddy`: "manual rack pick unused: this plate does not print from the rack" |
 | A sent pick goes stale before dispatch | Bambuddy fails the item with its own message, which the run tracking already surfaces |
 
 That last row applies in Simple mode too, not only to manual picks: every sent
@@ -435,7 +451,13 @@ fixtures (which use invented serials), or in commits.
     position; a manual pick that does not fit the side refused with 422 before
     slicing; with two `on_rack` groups the manual pick goes to the lower id and the
     result carries `rack-manual-partial`, not `rack-left-to-bambuddy`;
-  - `"#00B1B7"` on a group matching `"00B1B7FF"` on a slot;
+  - `"#00B1B7"` on a group matching `"00B1B7FF"` on a slot; an empty color on
+    both never matching;
+  - three groups over two shared positions: deterministic picks, and the group
+    left with nothing gets no pick and a warning;
+  - a `Glow`, `glow` and `GLOW` spool subtype all abrasive;
+  - a manual pick on a plate whose slice has no `on_rack` group: no choice sent,
+    and the "manual rack pick unused" warning;
   - an unparsable group diameter giving no pick and a `rack-left-to-bambuddy`
     warning;
   - a serial seen on printer 2 after printer 1 keeping its `first_seen_at` and
