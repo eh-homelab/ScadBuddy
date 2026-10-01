@@ -136,6 +136,18 @@ async def test_a_pieces_scope_reads_model_json_off_the_event_loop(
     assert readers and loop_thread not in readers
 
 
+async def test_a_piece_in_a_subdirectory_takes_its_templates_title(tmp_path: Path) -> None:
+    """`parts/roof.scad`'s folder is named from the template's `model.json`, not from
+    `parts/` (which has none, so the slug would name it)."""
+    (tmp_path / "model.json").write_text('{"name": "Dollhouse"}')
+    (tmp_path / "parts").mkdir()
+    req = _request().model_copy(update={"file": "parts/roof.scad"})
+    prepared = PrepareResult(
+        version=REVISION, scad=str(tmp_path / "parts" / "roof.scad"), schema_cache=""
+    )
+    assert (await _scope(req, prepared)).title == "Dollhouse"
+
+
 # ── the library lease, per activity ────────────────────────────────────────────
 
 

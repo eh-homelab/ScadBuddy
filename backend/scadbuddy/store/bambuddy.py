@@ -10,6 +10,11 @@ deleted. No dot-named folders: Bambuddy shows them.
 Every folder ScadBuddy makes or adopts is recorded in `store_folders`, and a delete is
 refused unless the file sits in one recorded as `work`. What each file is lives in
 `store_blobs`, so a fetch is by file id, never a folder scan.
+
+Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
+titles clean to the same name share one folder pair, and a template titled "Shared"
+shares the fonts' folder. A retitled template keeps its old folder (rows are keyed by
+slug). Deletes stay safe: they are by file id and go through the `Work` check.
 """
 
 from __future__ import annotations
