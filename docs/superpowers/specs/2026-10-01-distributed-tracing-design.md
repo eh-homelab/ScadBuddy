@@ -108,8 +108,11 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   trace. The column is written whenever the submit span's context is valid
   and sampled. That includes a process with no exporter, which still creates
   and propagates spans (§3); persisting a context nobody exports is harmless.
-  A row gets no `traceparent`, and a coalesced request no link, only when the
-  row predates this change or the sampler dropped the first request.
+  A row gets no `traceparent`, and a coalesced request no link, only when:
+  - the row predates this change;
+  - the sampler dropped the first request;
+  - or the SDK was off when the row was written (`OTEL_SDK_DISABLED`, §3),
+    whose no-op provider produces no valid context.
 - **Piece dedupe (`piece_key`).** This happens inside the workflow
   (`TemplatePipeline._piece`): a second job's workflow signals the running
   piece (`wait_for_me`) instead of starting it. The interceptor already puts
@@ -174,8 +177,15 @@ path except `/api/v1/ai/*` to the backend.
     caller is not this page.
   - When `Sec-Fetch-Site` is present it must be `same-origin`.
   - Anything else is 403, before the body is read.
-  - The CORS preflight a JSON POST triggers is not answered. No CORS headers
-    are ever sent, so a cross-origin page cannot get past the preflight.
+  - The `Origin` check is the control that matters. A cross-origin page can
+    skip the preflight altogether (`mode: 'no-cors'` with a safelisted
+    `Content-Type` such as `text/plain`). The browser then still sends the
+    request, and only hides the response. That request carries the foreign
+    `Origin` and is refused with 403. Its `Content-Type` would be refused
+    with 415 anyway.
+  - The route sends no CORS headers and answers no preflight. That keeps a
+    cross-origin `fetch` in `cors` mode from ever reading a response, but it
+    is not relied on to stop a request.
 - Accepts OTLP/JSON only (the web exporter's default); any other
   `Content-Type` is 415.
 - Body ≤ 256 KiB through the existing `BodySizeGate`: a `RouteLimit` for
