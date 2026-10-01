@@ -337,6 +337,38 @@ def test_a_library_path_that_is_not_plain_is_refused(
     assert response.status_code == 422, (path, response.text)
 
 
+# Plain paths either side of the cap: ten 99-character directories and a file name.
+AT_PATH_CAP = ("d" * 99 + "/") * 10 + "x" * 19 + ".scad"
+OVER_PATH_CAP = "x" + AT_PATH_CAP
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/api/v1/models/{model}/files/{path}",
+        "/api/v1/models/{model}/libraries/BOSL2/files/{path}?commit=" + COMMIT,
+    ],
+)
+def test_a_path_over_the_length_cap_is_refused(
+    client: TestClient, model: str, library: Path, route: str
+) -> None:
+    over = client.get(route.format(model=model, path=OVER_PATH_CAP))
+    assert over.status_code == 422, over.text
+    # At the cap the path is looked up, and is merely missing.
+    at = client.get(route.format(model=model, path=AT_PATH_CAP))
+    assert at.status_code == 404, at.text
+
+
+def test_the_reader_refuses_a_path_over_the_length_cap_itself(tmp_path: Path) -> None:
+    """The route's own cap answers first, so the reader's is exercised directly."""
+    assert len(AT_PATH_CAP) == editor_files.MAX_PATH_LENGTH
+    with pytest.raises(editor_files.FilePathError, match="too long"):
+        editor_files._segments(OVER_PATH_CAP)
+    with pytest.raises(editor_files.FilePathError, match="too long"):
+        editor_files.read_text_file(tmp_path, OVER_PATH_CAP, limit=MAX_SOURCE_CHARS)
+    assert len(editor_files._segments(AT_PATH_CAP)) == 11
+
+
 def test_a_symlink_out_of_a_library_reads_as_missing(
     client: TestClient, model: str, library: Path, paths: DataPaths
 ) -> None:

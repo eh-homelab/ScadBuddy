@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,7 @@ def test_every_allowlisted_key_is_accepted() -> None:
         ],
         ("brim_width", "0"),
         ("brim_width", "2.5"),
+        ("brim_width", "10"),
     ],
 )
 def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
@@ -86,10 +88,18 @@ def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
         ("brim_width", "wide", "non-negative number"),
         ("brim_width", "nan", "non-negative number"),
         ("brim_width", "inf", "non-negative number"),
+        # float() takes these, but the file would carry them as typed (#851).
+        ("brim_width", "1e2", "in plain digits"),
+        ("brim_width", "5_0", "in plain digits"),
+        ("brim_width", " 5 ", "in plain digits"),
+        ("brim_width", "+5", "in plain digits"),
+        ("brim_width", "5.", "in plain digits"),
+        ("brim_width", ".5", "in plain digits"),
+        ("brim_width", "\u0665", "in plain digits"),
     ],
 )
 def test_a_value_the_key_does_not_take_is_refused(key: str, value: str, says: str) -> None:
-    with pytest.raises(ValidationError, match=f"{key} is {value!r}") as caught:
+    with pytest.raises(ValidationError, match=re.escape(f"{key} is {value!r}")) as caught:
         meta_from_raw({"print_settings": {key: value}}, "demo")
 
     assert says in str(caught.value)
