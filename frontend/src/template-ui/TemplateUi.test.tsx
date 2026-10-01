@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import type { HostDeps } from './host'
@@ -119,6 +119,91 @@ describe('TemplateUi', () => {
     expect(root.childNodes.length).toBe(0)
   })
 
+  it('leaves a mount that resolves after unmount no page and no working host', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const cleanup = vi.fn()
+    let started = false
+    let late: Host | undefined
+    withModule(async (root, host) => {
+      started = true
+      await gate
+      root.append(document.createElement('span'))
+      late = host
+      return cleanup
+    })
+    const d = deps()
+    const { container, unmount } = render(
+      <TemplateUi slug="s" ui={UI} version={undefined} deps={d} inputs={{ params: {} }} onFailure={vi.fn()} />,
+    )
+    await waitFor(() => expect(started).toBe(true))
+    const root = shadow(container)
+    unmount()
+    release()
+    await waitFor(() => expect(cleanup).toHaveBeenCalledOnce())
+    expect(root.host.isConnected).toBe(false)
+    expect(container.childNodes.length).toBe(0)
+    late?.inputs.set({ params: { name: 'late' } })
+    expect(d.setInputs).not.toHaveBeenCalled()
+    await expect(late!.generate()).rejects.toThrow(/unmounted/)
+    await expect(late!.presets.load('p')).rejects.toThrow(/unmounted/)
+    expect(d.presets.load).not.toHaveBeenCalled()
+  })
+
+  it('keeps a mount still in flight at a template switch out of the next one', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let started = false
+    const paragraph = (text: string) => Object.assign(document.createElement('p'), { textContent: text })
+    setUiModuleLoader(async (url) =>
+      url.includes('/models/a/')
+        ? {
+            mount: async (root: ShadowRoot) => {
+              started = true
+              await gate
+              root.append(paragraph('A'))
+            },
+          }
+        : { mount: (root: ShadowRoot) => root.append(paragraph('B')) },
+    )
+    const props = { ui: UI, version: undefined, deps: deps(), inputs: { params: {} }, onFailure: vi.fn() }
+    const { container, rerender } = render(<TemplateUi slug="a" {...props} />)
+    await waitFor(() => expect(started).toBe(true))
+    rerender(<TemplateUi slug="b" {...props} />)
+    await waitFor(() => expect(shadow(container).textContent).toBe('B'))
+    release()
+    await act(async () => {
+      await gate
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(shadow(container).textContent).toBe('B')
+  })
+
+  it('reports an import that rejects and still mounts the next module', async () => {
+    setUiModuleLoader(async () => {
+      throw new TypeError('Failed to fetch dynamically imported module')
+    })
+    const onFailure = vi.fn()
+    const props = { slug: 's', ui: UI, deps: deps(), inputs: { params: {} }, onFailure }
+    const { container, rerender } = render(<TemplateUi {...props} version={undefined} />)
+    await waitFor(() =>
+      expect(onFailure).toHaveBeenCalledWith({
+        file: 'ui/index.js',
+        message: 'Failed to fetch dynamically imported module',
+      }),
+    )
+    withModule((root) => {
+      root.append(document.createElement('span'))
+    })
+    rerender(<TemplateUi {...props} version="abc1234" />)
+    await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
+    expect(onFailure).toHaveBeenCalledOnce()
+  })
+
   it('gives a host kept after a template switch nothing of the next template', async () => {
     let kept: Host | undefined
     withModule((root, host) => {
@@ -141,36 +226,5 @@ describe('TemplateUi', () => {
     await expect(old.presets.load('x')).rejects.toThrow(/unmounted/)
     expect(b.presets.list).not.toHaveBeenCalled()
     expect(b.presets.save).not.toHaveBeenCalled()
-  })
-
-  it('keeps a slow mount of the previous template out of the next one\'s root', async () => {
-    let release: () => void = () => undefined
-    const gate = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    setUiModuleLoader(async (url) => ({
-      mount: url.includes('/models/old/')
-        ? async (root: ShadowRoot) => {
-            await gate
-            const p = document.createElement('p')
-            p.textContent = 'old'
-            root.append(p)
-          }
-        : (root: ShadowRoot) => {
-            const p = document.createElement('p')
-            p.textContent = 'new'
-            root.append(p)
-          },
-    }))
-    const props = { ui: UI, version: undefined, inputs: { params: {} }, onFailure: vi.fn() }
-    const { container, rerender } = render(<TemplateUi slug="old" deps={deps()} {...props} />)
-    await waitFor(() => expect(container.querySelector('[data-testid="template-ui"]')).not.toBeNull())
-    rerender(<TemplateUi slug="next" deps={deps()} {...props} />)
-    await waitFor(() => expect(shadow(container).textContent).toBe('new'))
-    release()
-    await gate
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(shadow(container).textContent).toBe('new')
-    expect(container.querySelectorAll('[data-testid="template-ui"]')).toHaveLength(1)
   })
 })

@@ -1,0 +1,73 @@
+import type { ReactNode } from 'react'
+import type { CustomizerSchema, FontFamily } from '../api/types'
+import { ParamWidget } from '../components/widgets/ParamWidget'
+import { setPath, type JsonObject } from '../lib/inputs'
+import { bindingOf } from './bindings'
+import type { HostElement } from './elements'
+import type { UiSlot } from './types'
+
+export interface ElementContext {
+  schema: CustomizerSchema
+  slug: string
+  version?: string
+  fonts: FontFamily[]
+  inputs: JsonObject
+  onInputs: (next: JsonObject) => void
+  slot: UiSlot
+  preview: ReactNode
+  generate: ReactNode
+}
+
+function Problem({ children }: { children: ReactNode }) {
+  return <p role="alert" className="px-3 py-2 text-[12px] text-warn">{children}</p>
+}
+
+function BoundParam({ element, context, extruders }: { element: HostElement; context: ElementContext; extruders: ReadonlyMap<string, number> }) {
+  const binding = bindingOf(element, context)
+  if (typeof binding === 'string') return <Problem>{binding}</Problem>
+  const { name, bind, param, value, mistyped } = binding
+  // `data-param`, as ParameterPanel's rows carry it: the agent's highlight (#254) finds
+  // the parameter it just changed by it (`findParamRow`).
+  return (
+    <div data-param={name}>
+      {mistyped && <Problem>{mistyped}</Problem>}
+      <ParamWidget
+        param={param}
+        value={value}
+        slug={context.slug}
+        version={context.version}
+        fonts={context.fonts}
+        extruder={extruders.get(name)}
+        onChange={(next) => context.onInputs(setPath(context.inputs, bind, next))}
+      />
+    </div>
+  )
+}
+
+export function HostElementContent({
+  element,
+  context,
+  extruders,
+  firstPreview,
+}: {
+  element: HostElement
+  context: ElementContext
+  /** Each colour parameter's extruder, from `effectiveValues` over every element: once per render. */
+  extruders: ReadonlyMap<string, number>
+  /** The one `<sb-preview>` the preview mounts into: one canvas, one capture ref. */
+  firstPreview: HostElement | undefined
+}) {
+  switch (element.localName) {
+    case 'sb-param':
+      return <BoundParam element={element} context={context} extruders={extruders} />
+    case 'sb-preview':
+      if (context.slot !== 'page') {
+        return <Problem>The preview is beside the panel in the panel slot; &lt;sb-preview&gt; shows it only in the page slot.</Problem>
+      }
+      return element === firstPreview ? context.preview : <Problem>Only the first &lt;sb-preview&gt; shows the preview.</Problem>
+    case 'sb-generate':
+      return context.generate
+    default:
+      return null
+  }
+}

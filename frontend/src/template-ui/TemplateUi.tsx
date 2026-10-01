@@ -1,11 +1,18 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api/client'
 import type { JsonObject } from '../lib/inputs'
+import { extrudersOf } from '../lib/params'
 import { useLatest } from '../lib/useLatest'
+import { defineHostElements, provideRegistry, type HostElement } from './elements'
 import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './host'
+import { effectiveValues } from './bindings'
+import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
 import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
+
+const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
 
 interface Props {
   slug: string
@@ -15,6 +22,20 @@ interface Props {
   deps: HostDeps
   inputs: JsonObject
   onFailure: (failure: TemplateUiFailure) => void
+  /** What the host renders into `<sb-*>` elements (spec §4.3); without it they stay empty. */
+  elementContext?: Omit<ElementContext, 'slot'>
+}
+
+const keys = new WeakMap<HostElement, number>()
+let nextKey = 0
+
+function keyOf(el: HostElement): string {
+  let key = keys.get(el)
+  if (key === undefined) {
+    key = nextKey++
+    keys.set(el, key)
+  }
+  return String(key)
 }
 
 function mountOf(module: unknown): Mount | undefined {
@@ -27,11 +48,22 @@ function theme(): 'light' | 'dark' {
 }
 
 /** A template's own interface (spec 2026-09-27 §4.2): not sandboxed, style-isolated. */
-export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props) {
+export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, elementContext }: Props) {
   const element = useRef<HTMLDivElement>(null)
   const handle = useRef<HostHandle | null>(null)
   const latest = useLatest({ deps, onFailure })
   const slot = ui.slot ?? 'panel'
+  const [elements, setElements] = useState<readonly HostElement[]>([])
+  const [, setRevision] = useState(0)
+  // Document order, not connect order: a template may insert a preview before one it
+  // appended earlier.
+  const firstPreview = elements
+    .filter((el) => el.localName === 'sb-preview')
+    .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))[0]
+  // Once per render, for every widget: an attribute change on any element re-renders all.
+  const extruders = elementContext
+    ? extrudersOf(elementContext.schema, effectiveValues(elements, elementContext))
+    : NO_EXTRUDERS
 
   useEffect(() => {
     const el = element.current
@@ -41,13 +73,13 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
       fail(`written for host API ${ui.api}; this ScadBuddy supports ${UI_API_SUPPORTED.join(', ')}`)
       return
     }
-    // One element and shadow root per mount: a slow `mount` of the template this
-    // replaces writes into its own detached root, never into the next one's.
-    const holder = document.createElement('div')
-    holder.dataset['testid'] = 'template-ui'
-    holder.className = 'h-full min-h-0'
-    el.append(holder)
-    const root = holder.attachShadow({ mode: 'open' })
+    defineHostElements()
+    provideRegistry(el, {
+      add: (added) => setElements((current) => (current.includes(added) ? current : [...current, added])),
+      remove: (removed) => setElements((current) => current.filter((candidate) => candidate !== removed)),
+      changed: () => setRevision((n) => n + 1),
+    })
+    const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     adoptAppStyles(root)
     // This mount's own deps: a host the template kept after its unmount never reaches
     // the next template's.
@@ -78,7 +110,8 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
         console.error(`${ui.module}: its cleanup threw`, cause)
       }
       root.replaceChildren()
-      holder.remove()
+      provideRegistry(el, undefined)
+      setElements([])
     }
   }, [slug, version, ui.module, ui.api, slot, latest])
 
@@ -86,5 +119,29 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
     handle.current?.notify(inputs)
   }, [inputs])
 
-  return <div ref={element} className="h-full min-h-0 overflow-auto" />
+  return (
+    <>
+      <div
+        // One element, and so one shadow root, per mount: an async mount still in flight
+        // when the template changes can only write into its own, detached root.
+        key={[slug, version ?? '', ui.module, ui.api, slot].join('\n')}
+        ref={element}
+        data-testid="template-ui"
+        className="h-full min-h-0 overflow-auto"
+      />
+      {elementContext &&
+        elements.map((el) =>
+          createPortal(
+            <HostElementContent
+              element={el}
+              context={{ ...elementContext, slot }}
+              extruders={extruders}
+              firstPreview={firstPreview}
+            />,
+            el,
+            keyOf(el),
+          ),
+        )}
+    </>
+  )
 }

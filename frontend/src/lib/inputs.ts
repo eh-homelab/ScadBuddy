@@ -13,7 +13,7 @@ export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isParamValue(value: unknown): value is ParamValue {
+export function isParamValue(value: unknown): value is ParamValue {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
 }
 

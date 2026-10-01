@@ -56,8 +56,8 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   }
 }
 
-function unmounted(): Error {
-  return new Error('the template UI is unmounted')
+function unmounted(): Promise<never> {
+  return Promise.reject(new Error('the template UI is unmounted'))
 }
 
 export function createHost(deps: HostDeps): HostHandle {
@@ -65,7 +65,7 @@ export function createHost(deps: HostDeps): HostHandle {
   let live = true
   /** Every call checks it: a disposed host never reads or acts on the page again. */
   function alive(): void {
-    if (!live) throw unmounted()
+    if (!live) throw new Error('the template UI is unmounted')
   }
   const host: Host = {
     api: UI_API_CURRENT,
@@ -100,14 +100,14 @@ export function createHost(deps: HostDeps): HostHandle {
       return deps.getSchema()
     },
     files: { url: (path) => api.uiFileUrl(deps.slug, deps.version, checkedUiPath(path)) },
-    generate: () => (live ? deps.generate() : Promise.reject(unmounted())),
+    generate: () => (live ? deps.generate() : unmounted()),
     openPrint: (outputId) => {
       if (live) deps.openPrint(outputId)
     },
     presets: {
-      list: () => (live ? deps.presets.list() : Promise.reject(unmounted())),
-      save: (name) => (live ? deps.presets.save(name) : Promise.reject(unmounted())),
-      load: (id) => (live ? deps.presets.load(id) : Promise.reject(unmounted())),
+      list: () => (live ? deps.presets.list() : unmounted()),
+      save: (name) => (live ? deps.presets.save(name) : unmounted()),
+      load: (id) => (live ? deps.presets.load(id) : unmounted()),
     },
     describe: (fn) => {
       if (live) deps.onDescribe(fn)
