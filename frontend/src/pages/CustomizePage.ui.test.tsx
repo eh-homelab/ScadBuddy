@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -213,6 +213,60 @@ describe('CustomizePage with a template UI', () => {
     expect(await screen.findByTestId('ui-origin', {}, { timeout: 5000 })).toHaveTextContent(
       'Custom interface · imported',
     )
+  })
+
+  it('tries the interface again from the banner after a transient failure', async () => {
+    let imports = 0
+    setUiModuleLoader(async () => {
+      imports += 1
+      if (imports === 1) throw new TypeError('Failed to fetch dynamically imported module')
+      return { mount: demo }
+    })
+    const { user } = open(UI_DEMO_SLUG)
+    const banner = await screen.findByRole('alert', { name: /template interface/i }, { timeout: 5000 })
+    await user.click(within(banner).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(shadowText()).toMatch(/^custom /), { timeout: 5000 })
+    expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
+  })
+
+  it('makes one output from two host.generate() calls at once', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/:slug/outputs', () => {
+        posts += 1
+        return undefined // on to the default handler
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        demo(root, given, { slot: 'panel', version: null, theme: 'light', api: 1 })
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const first = host!.generate()
+    const second = host!.generate()
+    expect(second).toBe(first)
+    const [a, b] = await Promise.all([first, second])
+    expect(b).toEqual(a)
+    expect(posts).toBe(1)
+  }, 20_000)
+
+  it('reports host.openPrint for an output not on screen in the banner, never as a throw', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        demo(root, given, { slot: 'panel', version: null, theme: 'light', api: 1 })
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    expect(() => host!.openPrint('not-on-screen')).not.toThrow()
+    const banner = await screen.findByRole('alert', { name: /template interface/i }, { timeout: 5000 })
+    expect(banner).toHaveTextContent('openPrint(not-on-screen): output is not the one on screen; call generate() first')
   })
 
   it('tries the interface again on another revision after one failed', async () => {
