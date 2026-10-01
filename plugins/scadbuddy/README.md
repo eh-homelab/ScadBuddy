@@ -63,12 +63,14 @@ ship, the skills and agents load, but the server has nothing to connect to.
 
 ## Inside ScadBuddy
 
-ScadBuddy's agent service loads this directory by path with the Claude Agent SDK
-(`plugins: [{ type: "local", path }]`), and serves its tools in-process as the
-`scadbuddy` server, so they are named `mcp__scadbuddy__<tool>` there
-([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins);
-AI spec §3.1 and §5.1). `.mcp.json` is only for external installs (issue #299).
-Loading the plugin in the harness is issue #261 and #255.
+ScadBuddy's agent service loads `agent/plugins/scadbuddy/` by path with the Claude
+Agent SDK (`plugins: [{ type: "local", path }]`;
+[Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)). That
+directory has its own `plugin.json`, with no `userConfig` and no `.mcp.json`, and
+its `skills/` and `agents/` are symlinks to this directory's, so edit the files
+here (#896). The agent serves the tools in-process as the `scadbuddy` server, so
+they are named `mcp__scadbuddy__<tool>` there (AI spec §3.1 and §5.1). `.mcp.json`
+is only for external installs (issue #299).
 
 The subagents' `tools` allow both server names, `mcp__scadbuddy` and
 `mcp__plugin_scadbuddy_scadbuddy`, so the same file works in both places and
@@ -77,9 +79,15 @@ nothing else is reachable
 
 ## Versioning
 
-The plugin version follows the app release (issue #299). `version` in
-`.claude-plugin/plugin.json` matches `backend/pyproject.toml` and
-`frontend/package.json`.
+`version` in `.claude-plugin/plugin.json` changes with every change to the
+plugin. Setting it "keeps users on that version until you change it"
+([plugin manifest reference](https://code.claude.com/docs/en/plugins-reference), "Fields"),
+so a change made at the same version never reaches an install. A Claude Code hook
+in the repository's `.claude/settings.json` (`.github/scripts/plugin-edited.sh`)
+patch-bumps it on a branch's first edit under `plugins/`, keeps
+`agent/plugins/scadbuddy` at the same version, and then runs the lint and
+`claude plugin validate`. Edits made outside Claude Code (or through Bash) need the
+bump by hand; `lint-plugin.sh` fails when the two manifests differ.
 
 ## Checking it
 
