@@ -11,6 +11,7 @@ import pytest
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
+from tests.conftest import PgPool
 
 
 def test_dir_for_creates_and_finds_a_key(tmp_path: Path) -> None:
@@ -28,6 +29,27 @@ def test_keys_are_confined_to_the_root(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             store.dir_for(key)
     assert not (tmp_path / "blobs").exists() or store.keys() == []
+
+
+def test_keys_skips_a_directory_no_key_names(tmp_path: Path) -> None:
+    """A stray directory under the root (`lost+found` on its own mount, an operator's
+    `mkdir`) is no blob: every other entry would refuse its name."""
+    store = LocalBlobStore(tmp_path / "blobs")
+    store.dir_for("piece-a")
+    (store.root / "lost+found").mkdir()
+    (store.root / "with space").mkdir()
+    assert store.keys() == ["piece-a"]
+
+
+@pytest.mark.requires_postgres
+def test_a_stray_directory_does_not_stop_the_sweep(tmp_path: Path, pg_pool: PgPool) -> None:
+    store = LocalBlobStore(tmp_path / "blobs")
+    old = time.time() - 7200
+    (store.root / "lost+found").mkdir(parents=True)
+    os.utime(store.root / "lost+found", (old, old))
+    os.utime(store.dir_for("stale"), (old, old))
+    assert sweep_blobs(store, BlobRefs(pg_pool), grace=3600) == ["stale"]
+    assert (store.root / "lost+found").is_dir()
 
 
 #: Keys that would name something other than one directory under the root. `.` and
