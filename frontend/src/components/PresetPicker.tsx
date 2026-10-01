@@ -1,9 +1,9 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
 import { sameValues, type ParamValues } from '../lib/params'
-import type { InputsExtra } from '../lib/inputs'
+import { isJsonObject, joinInputs, NO_EXTRA, type InputsExtra, type JsonObject } from '../lib/inputs'
 import { applyPreset, presetInputs } from '../lib/presets'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
@@ -18,6 +18,12 @@ interface Props {
   extra: InputsExtra
   /** Replaces every value on screen, and the UI state, as Reset to defaults does. */
   onApply: (values: ParamValues, extra: InputsExtra) => void
+  /**
+   * Brings a preset's stored inputs up to the template's INPUTS_VERSION (spec §8.2)
+   * before they are cut to the schema, so a renamed parameter is carried forward.
+   * Null means they could not be, and the caller has said so; nothing is applied.
+   */
+  migrate?: (inputs: JsonObject) => JsonObject | null | Promise<JsonObject | null>
 }
 
 interface Selection {
@@ -36,7 +42,7 @@ function message(caught: unknown): string {
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
+export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -56,15 +62,24 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const modified = selection !== null && !sameValues(values, selection.applied)
   const editable = selected?.origin === 'mine'
 
-  function pick(id: string) {
+  /** The latest pick: a migration answering after another pick is dropped. */
+  const picking = useRef(0)
+
+  async function pick(id: string) {
     setError(null)
+    const turn = ++picking.current
     const preset = presets.find((candidate) => candidate.id === id)
     if (!preset) {
       setSelection(null)
       setSkipped([])
       return
     }
-    const applied = applyPreset(schema, preset)
+    const stored = isJsonObject(preset.inputs)
+      ? (preset.inputs as JsonObject)
+      : joinInputs(preset.params ?? {}, NO_EXTRA)
+    const migrated = migrate ? await migrate(stored) : stored
+    if (migrated === null || turn !== picking.current) return
+    const applied = applyPreset(schema, { ...preset, inputs: migrated })
     setSelection({ preset, applied: applied.values })
     setSkipped(applied.skipped)
     onApply(applied.values, applied.extra)
@@ -178,7 +193,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
         <select
           id="preset-select"
           value={selected?.id ?? ''}
-          onChange={(event) => pick(event.target.value)}
+          onChange={(event) => void pick(event.target.value)}
           disabled={presetsState.loading && !presetsState.data}
           className="sb-field min-w-0 flex-1 cursor-pointer"
         >

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -7,7 +7,7 @@ import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/t
 import { triggerDownload } from '../lib/embed'
 import type { InputsExtra } from '../lib/inputs'
 import { fitLabel, fitMessages } from '../lib/plate'
-import { saveOutput } from '../lib/saveOutput'
+import { ExtraOutputsError, saveOutput, saveRemaining } from '../lib/saveOutput'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
@@ -64,6 +64,11 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** A job whose first output was saved but not the rest: Generate saves only those. */
+  const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
+  /** Stops a render Generate is waiting for when the page leaves this model. */
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => generation.current?.abort(), [slug])
 
   const ready = job?.status === 'done' && !rendering
   const stale = Boolean(output) && output?.id !== undefined && !ready
@@ -72,14 +77,29 @@ export function ActionBar({
 
   async function generate(): Promise<Output | null> {
     if (!job) return null
+    const controller = new AbortController()
+    generation.current?.abort()
+    generation.current = controller
     setGenerating(true)
     setError(null)
+    const resume = unfinished?.job.id === job.id ? unfinished : null
+    setUnfinished(null)
     try {
-      const created = await saveOutput({ slug, job, extra, capture })
-      onGenerated(created)
-      return created
+      if (resume) {
+        await saveRemaining(resume)
+        return resume.saved
+      }
+      // The first output shows as soon as it is saved, before a pipeline job's others.
+      return await saveOutput({ slug, job, extra, capture, onSaved: onGenerated, signal: controller.signal })
     } catch (cause) {
-      const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
+      if (controller.signal.aborted) return null // the page has moved on
+      if (cause instanceof ExtraOutputsError) setUnfinished(cause)
+      const message =
+        cause instanceof ExtraOutputsError
+          ? cause.message
+          : cause instanceof ApiError
+            ? cause.detail
+            : 'Could not save this output.'
       setError(message)
       throw new AgentToolError('failed', message)
     } finally {

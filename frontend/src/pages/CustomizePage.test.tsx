@@ -15,7 +15,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockPlates } from '../mocks/handlers'
+import { setMockJobOutputs, setMockPlates, setMockPresets } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -231,6 +231,42 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+  })
+
+  it('shows the first output once it is saved, and names the others that failed', async () => {
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    const indexes: unknown[] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { index?: number }
+        indexes.push(body.index)
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
+    expect(
+      await screen.findByText('Saved the first output; output 2 could not be saved: the disk is full'),
+    ).toBeInTheDocument()
+    // Generate again saves only the one that is missing.
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(indexes).toEqual([undefined, 1, 1]))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
   })
 
   it('sends a generated output and links to the Bambuddy queue', async () => {
@@ -1262,7 +1298,7 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Migrated'),
     )
-    expect(screen.queryByRole('alert', { name: /Saved inputs/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).not.toBeInTheDocument()
   })
 
   it('shows inputs it cannot migrate read-only and keeps the current values', async () => {
@@ -1274,6 +1310,41 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     )
     expect(await screen.findByText(/could not be brought up to this template version: defines no migrate/)).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
-    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).not.toHaveValue('Kai')
+    // The schema default, as before the output was reopened.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+
+  it('migrates a preset from its stored inputs before cutting them to the schema', async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Renamed',
+        origin: 'mine',
+        params: { old_name: 'x' },
+        inputs: { params: { old_name: 'x' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      // The template's migrate renames old_name to name.
+      http.post('/api/v1/models/name-keychain/inputs/migrate', async ({ request }) => {
+        const { inputs } = (await request.json()) as { inputs: { params: Record<string, unknown> } }
+        const { old_name: oldName, ...rest } = inputs.params
+        return HttpResponse.json({
+          inputs: { params: { ...rest, name: oldName }, v: 1 },
+          from_version: 0,
+          to_version: 1,
+        })
+      }),
+    )
+    const { user } = render('/m/name-keychain')
+    const select = await screen.findByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Renamed' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Renamed')
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('x'),
+    )
   })
 })

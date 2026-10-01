@@ -118,6 +118,8 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  /** A template pipeline's outputs on every finished render of a slug; none unless set. */
+  jobOutputs: {} as Record<string, NonNullable<Job['outputs']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
   catalogueOffline: false,
@@ -178,6 +180,7 @@ function runJob(jobId: string): void {
       job.bbox_mm = bboxOf(job.params ?? {})
       job.colors = colorsOf(job.slug, job.params ?? {})
       job.plates = state.plates[job.slug] ?? []
+      if (state.jobOutputs[job.slug]) job.outputs = state.jobOutputs[job.slug]
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
       job.notes =
@@ -222,6 +225,7 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.jobOutputs = {}
   state.mediaFiles.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
@@ -277,6 +281,11 @@ export function setMockMergeFiles(slug: string, files: MergeFiles): void {
  */
 export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
   state.plates[slug] = plates
+}
+
+/** Every finished render of `slug` reports these outputs, as a template's pipeline does. */
+export function setMockJobOutputs(slug: string, outputs: NonNullable<Job['outputs']>): void {
+  state.jobOutputs[slug] = outputs
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */

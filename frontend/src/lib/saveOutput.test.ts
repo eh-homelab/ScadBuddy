@@ -1,8 +1,8 @@
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { server } from '../mocks/server'
-import { saveOutput } from './saveOutput'
+import { ExtraOutputsError, saveOutput, saveRemaining } from './saveOutput'
 
 const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
 
@@ -18,7 +18,7 @@ function aJob(id: string, outputs: number): Job {
   }
 }
 
-function recordOutputs(refuse?: (body: Record<string, unknown>) => boolean) {
+function recordOutputs(refuse?: (body: Record<string, unknown>) => boolean, status = 422) {
   const bodies: Record<string, unknown>[] = []
   server.use(
     http.post('/api/v1/models/demo/outputs', async ({ request }) => {
@@ -27,7 +27,7 @@ function recordOutputs(refuse?: (body: Record<string, unknown>) => boolean) {
       if (refuse?.(body)) {
         return HttpResponse.json(
           { title: 'Unprocessable Content', status: 422, detail: `inputs are not the ones job ${String(body.job_id)} rendered` },
-          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          { status, headers: { 'Content-Type': 'application/problem+json' } },
         )
       }
       return HttpResponse.json({ id: `o-${bodies.length}`, slug: 'demo', job_id: body.job_id }, { status: 201 })
@@ -93,5 +93,72 @@ describe('saveOutput', () => {
     await expect(
       saveOutput({ slug: 'demo', job: aJob('j1', 1), extra: {}, capture: async () => null }),
     ).rejects.toThrow('Job not finished')
+  })
+
+  it('reports the first output as soon as it is saved, and the extras failing on their own', async () => {
+    let refuseExtras = true
+    const bodies = recordOutputs((body) => refuseExtras && body.index === 1, 500)
+    const shown: string[] = []
+    const failure = await saveOutput({
+      slug: 'demo',
+      job: aJob('j1', 3),
+      extra: { v: 1, house: { cols: 1 } },
+      capture: async () => null,
+      onSaved: (output) => shown.push(output.id),
+    }).catch((caught: unknown) => caught)
+    expect(shown).toEqual(['o-1'])
+    expect(failure).toBeInstanceOf(ExtraOutputsError)
+    expect((failure as ExtraOutputsError).saved.id).toBe('o-1')
+    expect((failure as Error).message).toMatch(/^Saved the first output; outputs 2 to 3 could not be saved/)
+    // A retry saves only what is missing: never output 0 again.
+    refuseExtras = false
+    await saveRemaining(failure as ExtraOutputsError)
+    expect(bodies.map((b) => b.index)).toEqual([undefined, 1, 1, 2])
+  })
+
+  function renderThatNeverEnds() {
+    recordOutputs((body) => body.job_id === 'j1')
+    let reads = 0
+    server.use(
+      http.post('/api/v1/models/demo/render', () =>
+        HttpResponse.json({ job_id: 'j2', status_url: '/api/v1/jobs/j2' }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/j2', () => {
+        reads += 1
+        return HttpResponse.json({ ...aJob('j2', 1), status: 'running' })
+      }),
+    )
+    return () => reads
+  }
+
+  it('stops reading the render once the caller aborts', async () => {
+    const reads = renderThatNeverEnds()
+    const controller = new AbortController()
+    const saving = saveOutput({
+      slug: 'demo',
+      job: aJob('j1', 1),
+      extra: { v: 1, house: { cols: 2 } },
+      capture: async () => null,
+      signal: controller.signal,
+    })
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(0))
+    controller.abort()
+    await expect(saving).rejects.toThrow()
+    const after = reads()
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    expect(reads()).toBe(after)
+  })
+
+  it('gives up on a render that does not finish in time', async () => {
+    renderThatNeverEnds()
+    await expect(
+      saveOutput({
+        slug: 'demo',
+        job: aJob('j1', 1),
+        extra: { v: 1, house: { cols: 2 } },
+        capture: async () => null,
+        renderWaitMs: 600,
+      }),
+    ).rejects.toThrow(/did not finish within/)
   })
 })

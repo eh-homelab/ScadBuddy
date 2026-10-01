@@ -14,6 +14,7 @@ import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
+import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
 function shortId(id: string): string {
@@ -372,7 +373,15 @@ function OutputRow({
         <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
           {(output.files ?? []).map((name) => (
             <li key={name}>
-              <a className="text-accent underline" href={api.outputFileUrl(output.id, name)} download>
+              {/* Bambuddy's iframe sandbox has no allow-downloads: there the file opens in
+                  a tab that escapes it (allow-popups-to-escape-sandbox), as lib/embed.ts does. */}
+              <a
+                className="text-accent underline"
+                href={api.outputFileUrl(output.id, name)}
+                download
+                rel="noopener"
+                target={isEmbedded() ? '_blank' : undefined}
+              >
                 {name}
               </a>
             </li>

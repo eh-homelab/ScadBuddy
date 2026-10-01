@@ -259,28 +259,29 @@ export function CustomizePage() {
 
   const onApplyPreset = useCallback(
     (next: ParamValues, nextExtra: InputsExtra) => {
-      const apply = (values: ParamValues, extra: InputsExtra) => {
-        setPresetFailure(null)
-        setDismissedReopen(reopenOutcome)
-        setEdits((current) => ({ of: current.of, values, extra }))
-      }
-      const saved = joinInputs(next, nextExtra)
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
+      setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
+    },
+    [reopenOutcome],
+  )
+
+  // A preset's stored inputs, brought up to the template version before the picker cuts
+  // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
+  // they are, at once; ones that cannot be migrated show read-only instead.
+  const migratePreset = useCallback(
+    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
       const v = typeof saved.v === 'number' ? saved.v : 0
-      // Current inputs apply at once, as before; only old ones wait for the migration.
-      if (inputsVersion === undefined || v === inputsVersion) {
-        apply(next, nextExtra)
-        return
-      }
-      void migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
+      if (inputsVersion === undefined || v === inputsVersion) return saved
+      return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
         if (outcome.kind === 'failed') {
           setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
-          return
+          return null
         }
-        const migrated = splitInputs(outcome.inputs, next)
-        apply({ ...next, ...migrated.params }, migrated.extra)
+        return outcome.inputs
       })
     },
-    [slug, version, inputsVersion, reopenOutcome],
+    [slug, version, inputsVersion],
   )
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
@@ -698,6 +699,7 @@ export function CustomizePage() {
                   values={values}
                   extra={extra}
                   onApply={onApplyPreset}
+                  migrate={migratePreset}
                 />
               </>
             }
