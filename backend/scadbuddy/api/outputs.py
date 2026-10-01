@@ -164,22 +164,17 @@ async def create_output(
         )
     inputs: dict[str, Any] | None = None
     if body.inputs is not None:
-        try:
-            inputs = normalize_inputs(body.inputs, None).data
-        except InputsError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         rendered = f"inputs.params are not the parameters job {job.id} rendered"
-        # Two checks, both needed. The equality is Python's, where 12.0 == 12 and
-        # True == 1, so it is only a cheap first answer (and the one that covers a job
-        # with no params, which the store's rule skips). The store's rule below
-        # compares type as well as value; it is the guarantee that nothing reaching
-        # the copy is refused there.
+        # One pass: the shape checks, then the typed comparison with what the job
+        # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
+        try:
+            inputs = normalize_inputs(body.inputs, job.params).data
+        except InputsError as error:
+            message = rendered if "disagree" in str(error) else str(error)
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, message) from None
+        # The job with no params: nothing was compared above, so compare here.
         if inputs["params"] != job.params:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
-        try:
-            normalize_inputs(inputs, job.params)
-        except InputsError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
     await materialize_result(state.store.blobs, job.result)
     # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not

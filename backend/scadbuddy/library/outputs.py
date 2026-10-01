@@ -230,8 +230,9 @@ class OutputStore:
     ) -> OutputMeta:
         if job.result is None:
             raise ValueError("the job has no result to persist")
-        # Checked before anything is written: inputs the job did not render leave no
-        # directory behind, whichever caller sent them.
+        # The store's own guarantee, kept even though the route checked the same
+        # thing: checked before anything is written, so inputs the job did not
+        # render leave no directory behind, whichever caller sent them.
         recorded = normalize_inputs(
             inputs if inputs is not None else (job.inputs or None), job.params
         ).data
