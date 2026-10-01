@@ -32,7 +32,8 @@ Out of scope:
   needs);
 - prints dispatched through Bambuddy's `run` (pipeline) path. `dispatch.py`'s
   module docstring says `filament_overrides` and `required_filament_types` exist
-  only on `QueueItemCreate`; `nozzle_rack_choice` is the same: Bambuddy's
+  only on `PrintQueueItemCreate` (Bambuddy's name for what ScadBuddy models as
+  `QueueItemCreate`); `nozzle_rack_choice` is the same: Bambuddy's
   `PipelineRunCreateRequest` has no rack field (read on the deployed image
   2026-10-01). Those prints keep Bambuddy's own pick, and this change adds
   `nozzle_rack_choice` to that docstring (§6).
@@ -150,6 +151,16 @@ the wrong color beats a hardened one holding the right color.
 | Oldest first | Earliest `first_seen_at` for the serial | |
 | Newest first | Latest `first_seen_at` | |
 | Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
+
+"Let Bambuddy pick" opts out of the ranking, and with it the material choice:
+Bambuddy's rule knows nothing about abrasive filaments. ScadBuddy still runs the
+material test, and when a group is abrasive and the rack holds no nozzle known
+to be hardened for it, the run carries `rack-unsafe-material` ("Bambuddy will
+pick the nozzle; none in the rack is known to be hardened for <material>"), as
+the ranked algorithms do. It cannot tell which position Bambuddy will take, so
+it warns on the rack, not on a pick. The trade is stated so it is chosen
+knowingly: this algorithm exists for a user who wants Bambuddy's behavior back,
+and it never sends a choice.
 
 The first three read one `Usage` per serial from `RackUsageStore.usage(serials)`:
 `prints`, `print_seconds`, `grams` and `first_seen_at` (`None` for a serial the
@@ -294,8 +305,10 @@ it builds the `RackChoice`. `slice_and_queue` puts the choice on
    of its filaments; `rank_rack` never sees a duplicate.
 3. Rank the rack for each `on_rack` group, and return the choice from the
    algorithm or the user's manual pick.
-4. After the enqueue, write the picks to `rack_nozzle_picks` against the
-   returned queue item id.
+
+After `slice_and_queue` returns, `print_run.py` (not the callback, which runs
+before the queue item exists) writes the picks it got back on `QueueOutcome` to
+`rack_nozzle_picks` against `QueueOutcome.queue_item_ids`.
 
 A raise or `None` from the callback means no choice: the item is queued without
 `nozzle_rack_choice`, and Bambuddy picks, as today.
@@ -476,6 +489,9 @@ fixtures (which use invented serials), or in commits.
   - an unknown code counted as not hardened, and with the empty table every
     code is unknown;
   - Least used breaking a `print_seconds` tie on `prints`;
+  - "Let Bambuddy pick" sending no choice, and still warning
+    `rack-unsafe-material` for an abrasive group on a rack with no known
+    hardened nozzle;
   - Oldest and Newest first ordering on `first_seen_at`, with an unseen serial
     last and first respectively;
   - `PLA-CF`, `PA6-CF` and `ABS-GF` abrasive, `PLA` and `PLA-AERO` not;
