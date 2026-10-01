@@ -24,6 +24,7 @@ from scadbuddy.store.content import (
     BlobMissingError,
     BlobRef,
     BlobScope,
+    ContentStore,
     RefusedDeleteError,
     ReuseLostError,
     StoreFullError,
@@ -136,6 +137,37 @@ def _age(pool: Pool, *keys: str) -> None:
             "UPDATE store_blobs SET touched_at = %s WHERE key = ANY(%s)",
             (datetime.now(UTC) - timedelta(hours=2), list(keys)),
         )
+
+
+class _ClaimedAfterSnapshot(BlobRefs):
+    """A claim of ``key`` that lands right after the sweep's `referenced()` snapshot:
+    the claimant's `touch` (when ``touch``), then its `add`."""
+
+    def __init__(self, pool: Pool, store: ContentStore, key: str, *, touch: bool) -> None:
+        super().__init__(pool)
+        self.store, self.key, self.touch = store, key, touch
+
+    def referenced(self) -> set[str]:
+        snapshot = super().referenced()
+        if self.touch:
+            self.store.index.touch(self.key)
+        self.add(self.key, "job", "late")
+        return snapshot
+
+
+@pytest.mark.parametrize("touch", [True, False], ids=["touched-first", "added-only"])
+async def test_a_claim_after_the_sweeps_snapshot_survives_only_when_touched_first(
+    tmp_path: Path, pool: Pool, touch: bool
+) -> None:
+    """The claim protocol end to end (#637): `ContentStore.touch` before `refs.add`
+    keeps a blob a sweep already decided was unreferenced; an `add` alone does not."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"claimed", name="c", scope=SCOPE, key="claimed")
+    _age(pool, "claimed")
+    refs = _ClaimedAfterSnapshot(pool, store, "claimed", touch=touch)
+    removed = await sweep_content(store, refs, grace=3600, now=time.time())
+    assert removed == ([] if touch else ["claimed"])
+    assert (store.index.get("claimed") is not None) is touch
 
 
 async def test_the_sweep_leaves_another_backends_rows_alone(
