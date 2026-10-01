@@ -14,10 +14,12 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
@@ -52,6 +54,7 @@ def test_persisting_a_job_writes_the_documented_layout(
 
     directory = paths.output_dir(model, body["id"])
     assert sorted(path.name for path in directory.iterdir()) == [
+        "inputs.json",
         "meta.json",
         "model.3mf",
         "params.json",
@@ -262,6 +265,7 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "slug": model,
         "name": "Reagan",
         "params": {"width": 12},
+        "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
     }
@@ -285,6 +289,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "slug": model,
         "name": None,
         "params": {"width": 12},
+        "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
     }
@@ -474,6 +479,150 @@ def test_an_old_records_upload_keys_are_ignored() -> None:
     )
     dumped = meta.model_dump()
     assert not {"library_file_id", "library_file_plate", "library_files"} & dumped.keys()
+
+
+def _rendered(client: TestClient, model: str, body: dict[str, object]) -> str:
+    accepted = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert accepted.status_code == 202, accepted.text
+    job = wait_for_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job
+    return str(job["id"])
+
+
+def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, model: str) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    sent = {"params": {"width": 12}, "ui": {"tab": "b"}}
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "inputs": sent}
+    )
+    assert created.status_code == 201, created.text
+    output = created.json()
+    assert output["inputs"] == {**sent, "v": 0}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == output["inputs"]
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == output["inputs"]
+
+
+@pytest.mark.parametrize(
+    ("rendered", "sent"),
+    [
+        ({"width": 12}, {"width": 13}),
+        # Type as well as value, as the store checks them: 12.0 is not 12, True is not 1.
+        ({"width": 12}, {"width": 12.0}),
+        ({"width": 1}, {"width": True}),
+        # A job that rendered the defaults did not render a width.
+        ({}, {"width": 12}),
+    ],
+)
+def test_an_output_refuses_inputs_the_job_did_not_render(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    rendered: dict[str, object],
+    sent: dict[str, object],
+) -> None:
+    job_id = _rendered(client, model, {"params": rendered})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": job_id, "inputs": {"params": sent}},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == f"inputs.params are not the parameters job {job_id} rendered"
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("inputs", "detail"),
+    [
+        ({"params": "not-an-object"}, "inputs.params must be an object of parameter values"),
+        ({"params": {"width": 12}, "ui": {"note": "x" * 70_000}}, "bytes; at most 65536"),
+    ],
+    ids=["malformed", "oversized"],
+)
+def test_an_output_refuses_inputs_that_are_not_inputs(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    inputs: dict[str, object],
+    detail: str,
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "inputs": inputs}
+    )
+    assert refused.status_code == 422, refused.text
+    assert detail in refused.json()["detail"]
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    job = state.render.store.read(job_id)
+    with pytest.raises(InputsError):
+        state.outputs.create(job, inputs={"params": {"width": "12"}})
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
+    inputs_path.write_text("{not json", encoding="utf-8")
+    expected = {"params": {"width": 12}, "v": 0}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
+
+
+def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    assert output["inputs"] == {"params": {"width": 12}, "ui": {"tab": "a"}, "v": 0}
+
+
+def test_an_output_from_before_inputs_reads_as_params_v0(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == {
+        "params": {"width": 12},
+        "v": 0,
+    }
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == {
+        "params": {"width": 12},
+        "v": 0,
+    }
+
+
+def test_an_output_from_before_inputs_reads_its_params_once_per_request(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    reads: list[str] = []
+    params = OutputStore.params
+
+    def counting(self: OutputStore, output_id: str) -> dict[str, ParamValue]:
+        reads.append(output_id)
+        return params(self, output_id)
+
+    monkeypatch.setattr(OutputStore, "params", counting)
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {"width": 12}
+    assert reads == [output["id"]]
+    reads.clear()
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"]["params"] == {
+        "width": 12
+    }
+    assert reads == [output["id"]]
 
 
 def test_saving_a_job_whose_result_is_gone_is_a_404(

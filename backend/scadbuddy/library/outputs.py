@@ -7,7 +7,7 @@ import shutil
 import threading
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +22,7 @@ from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 META_NAME = "meta.json"
 PARAMS_NAME = "params.json"
+INPUTS_NAME = "inputs.json"
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
@@ -185,6 +187,26 @@ class OutputStore:
         loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
         return loaded
 
+    def inputs(
+        self, output_id: str, params: Mapping[str, ParamValue] | None = None
+    ) -> dict[str, Any]:
+        """The output's inputs; one from before them reads as its params at ``v`` 0.
+        A caller that already read :meth:`params` passes them, so they are read once."""
+        path = self._find_dir(output_id) / INPUTS_NAME
+        if not path.is_file():
+            return legacy_inputs(self.params(output_id) if params is None else params)
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            # The record itself (meta, files, params) is intact: read it as one from
+            # before inputs rather than lose it to a damaged side file.
+            logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
+            return legacy_inputs(self.params(output_id) if params is None else params)
+        checked: dict[str, Any] = loaded
+        return checked
+
     def list_for(self, slug: str) -> list[OutputMeta]:
         directory = self.paths.outputs / slug
         if not directory.is_dir():
@@ -208,10 +230,21 @@ class OutputStore:
         ]
 
     def create(
-        self, job: Job, *, name: str | None = None, public_url: str | None = None
+        self,
+        job: Job,
+        *,
+        name: str | None = None,
+        public_url: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
     ) -> OutputMeta:
         if job.result is None:
             raise ValueError("the job has no result to persist")
+        # The store's own guarantee, kept even though the route checked the same
+        # thing: checked before anything is written, so inputs the job did not
+        # render leave no directory behind, whichever caller sent them.
+        recorded = normalize_inputs(
+            inputs if inputs is not None else (job.inputs or None), job.params
+        ).data
         output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -226,6 +259,9 @@ class OutputStore:
             raise
         (directory / PARAMS_NAME).write_text(
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (directory / INPUTS_NAME).write_text(
+            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
         # A job from before the hash existed has none to read back; the live tree is
