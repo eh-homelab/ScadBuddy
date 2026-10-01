@@ -158,7 +158,9 @@ class PrintEvent(BaseEvent):
 
 class PrintRunEvent(BaseEvent):
     """A print run (#470) was accepted or ended: re-read ``GET /print/runs/{run_id}``.
-    Published on the output's ``print:<output id>`` topic, beside ``print.progress``."""
+    An output's run is published on its ``print:<output id>`` topic, beside
+    ``print.progress``; a library file's run (#742) on ``print:library:<file id>``,
+    where ``output_id`` is ``library:<file id>``."""
 
     kind: Literal["print.run"] = "print.run"
     output_id: str
