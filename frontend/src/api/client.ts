@@ -353,6 +353,47 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
   }
 }
 
+/**
+ * A print run to its end (#470, #742): POST `path` (an output's or a library file's
+ * `/run`), then follow `GET /print/runs/{id}`. The server answers 202 with a run and
+ * slices and queues in the background, since that takes longer than the proxies in
+ * front wait. A repeat of the same request (the same `request_id`) is the same run, so
+ * re-sending it after an answer that never arrived re-attaches to that run and never
+ * queues a second print. `signal` stops following; the run itself goes on.
+ */
+async function followPrintRun(
+  path: string,
+  body: PrintRunRequest,
+  signal?: AbortSignal,
+): Promise<PrintRunResult> {
+  let run = await reattach(
+    () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
+    signal,
+  )
+  while (run.status === 'running') {
+    await wait(printRunPoll.intervalMs, signal)
+    const id = run.id
+    run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
+  }
+  if (run.status === 'failed' || !run.result) {
+    const error = run.error
+    const detail = error?.detail ?? 'The print run ended without a result.'
+    throw new ApiError({
+      ...error?.extensions,
+      // The problem's type, so the failure reads as a synchronous answer would have.
+      type: error?.type,
+      title: error?.title ?? 'Print failed',
+      status: error?.status ?? 500,
+      detail,
+      // Whether the run had already tried to queue (a queue call that timed out, a
+      // later plate failing after an earlier one was queued, or a run lost while
+      // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
+      may_have_queued: run.may_have_queued,
+    })
+  }
+  return run.result
+}
+
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
@@ -812,47 +853,8 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: async (
-    outputId: string,
-    body: PrintRunRequest,
-    signal?: AbortSignal,
-  ): Promise<PrintRunResult> => {
-    // #470: the server answers 202 with a run and slices and queues in the background,
-    // since that takes longer than the proxies in front wait. A repeat of the same
-    // request (the same `request_id`) is the same run, so re-sending it after an
-    // answer that never arrived re-attaches to that run and never queues a second print.
-    let run = await reattach(
-      () =>
-        request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
-          method: 'POST',
-          body: JSON.stringify(body),
-          signal,
-        }),
-      signal,
-    )
-    while (run.status === 'running') {
-      await wait(printRunPoll.intervalMs, signal)
-      const id = run.id
-      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
-    }
-    if (run.status === 'failed' || !run.result) {
-      const error = run.error
-      const detail = error?.detail ?? 'The print run ended without a result.'
-      throw new ApiError({
-        ...error?.extensions,
-        // The problem's type, so the failure reads as a synchronous answer would have.
-        type: error?.type,
-        title: error?.title ?? 'Print failed',
-        status: error?.status ?? 500,
-        detail,
-        // Whether the run had already tried to queue (a queue call that timed out, a
-        // later plate failing after an earlier one was queued, or a run lost while
-        // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
-        may_have_queued: run.may_have_queued,
-      })
-    }
-    return run.result
-  },
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -986,13 +988,9 @@ export const api = {
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },
 
-  /** Still answered in one request (#470 moved only an output's run to a 202). */
+  /** #742 — followed to its end like an output's run (`runPrint`). */
   runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    request<PrintRunResult>(`/print/library/${fileId}/run`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      signal,
-    }),
+    followPrintRun(`/print/library/${fileId}/run`, body, signal),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
