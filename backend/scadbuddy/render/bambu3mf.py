@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import re
 import uuid
 import zipfile
@@ -592,15 +593,22 @@ def write_plates_3mf(
                 zip(names, (images.plate, images.plate_small, images.top, images.pick), strict=True)
             )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in entries:
-            info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-            # PNG is already a deflate stream; re-deflating it is pure CPU for
-            # nothing, and Studio stores its own thumbnails uncompressed too.
-            info.compress_type = (
-                zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
-            )
-            archive.writestr(info, payload)
+    # Written aside and swapped in whole (#867): a timed-out attempt's thread that is
+    # still writing can never leave a half-written archive at `out_path`.
+    staging = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}")
+    try:
+        with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in entries:
+                info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
+                # PNG is already a deflate stream; re-deflating it is pure CPU for
+                # nothing, and Studio stores its own thumbnails uncompressed too.
+                info.compress_type = (
+                    zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
+                )
+                archive.writestr(info, payload)
+        os.replace(staging, out_path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def _plate_offset(
