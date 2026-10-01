@@ -71,11 +71,19 @@ pick** is one the user chose in Advanced mode.
 
 For each `on_rack` group, the eligible positions are those holding a nozzle of
 the group's diameter and flow type. This is the same test as Bambuddy's
-`_rack_slot_is_eligible`. Diameters are compared as decimals, never as strings:
-the rack reports `"0.2"` and `filament-requirements` reports `"0.20"` for the
-same nozzle (§2, §8), so a string compare would make every position ineligible
-and the feature would silently do nothing. A diameter that does not parse makes
-that position ineligible.
+`_rack_slot_is_eligible` (Bambuddy `backend/app/services/bambu_mqtt.py`, read
+on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
+
+- **Diameter** is compared as `round(float(x), 2)`, never as a string: the rack
+  reports `"0.2"` and `filament-requirements` reports `"0.20"` for the same
+  nozzle (§2, §8), so a string compare would make every position ineligible and
+  the feature would silently do nothing. A diameter that does not parse makes
+  that position ineligible.
+- **Flow**: the group's `volume_type` is a name (`"Standard"`, `"High Flow"`)
+  and the slot's `nozzle_type` is a code. The group wants High Flow when
+  `volume_type.strip().lower()` starts with `"high flow"`; the slot is High Flow
+  when its code starts with `HH`. They must agree, and are compared only when
+  both are present, so a missing code or name does not rule a position out.
 
 Groups are allocated one at a time, the group with the fewest eligible positions
 first, then by `group_id`. Positions already picked for an earlier group are
@@ -84,7 +92,10 @@ same picks, and so a group with one usable position is not starved by a group
 that had several. Among the eligible positions:
 
 1. **Material safe for the filament.** An abrasive filament needs a hardened
-   nozzle. A filament is abrasive when its material names `CF`, `GF` or `Glow`. A
+   nozzle. A filament is abrasive when its material names `CF`, `GF` or `Glow`.
+   A group is abrasive when **any** of its filaments is: several filaments can
+   share one hotend, and taking only the first (as the group's color does) could
+   send a CF filament through brass with no warning. A
    nozzle's material comes from its `nozzle_type` through a table (§8). A code not
    in the table counts as not hardened. For a non-abrasive filament the rule
    prefers a non-hardened nozzle, keeping hardened ones for filaments that need
@@ -155,7 +166,12 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
   publishes `print.settled`), the watcher takes every archive linked to the
   output (`PrintLinkStore.for_output`, #306) whose `queue_item_id` has picks,
   reads each with `GET /archives/{id}` (`ArchiveDetail`), and writes one row per
-  archive and picked group:
+  archive and picked group. This runs **after** `observe` has returned (so
+  `print.settled` is already published) and before `_done`. It is advisory:
+  every exception from it, Bambuddy's or the database's, is caught and logged
+  with the output id and archive id only (never a serial), and the watcher goes
+  on to `_done` exactly as today. A failed write is not retried; that print's
+  use is simply missing. Each row is written:
   - `print_seconds` is `actual_time_seconds`, else `print_time_seconds` (the
     slicer's estimate) when the print reported no actual time;
   - `grams` is `filament_used_grams`.
@@ -255,7 +271,7 @@ blocks Print.
 
 | Condition | Behavior |
 |---|---|
-| Status or requirements unreadable | Send no choice, so Bambuddy picks. The run result says "rack pick left to Bambuddy: <reason>" |
+| Status or requirements unreadable | Send no choice, so Bambuddy picks. The run result carries a `rack-left-to-bambuddy` warning: "rack pick left to Bambuddy: <reason>" |
 | No eligible position for a group | Send no choice for that group. Bambuddy fails or auto-assigns exactly as today |
 | A sent pick goes stale before dispatch | Bambuddy fails the item with its own message, which the run tracking already surfaces |
 
@@ -280,8 +296,13 @@ so the trade is accepted.
   the picks on `QueueOutcome`. The picks carry serials, so `print_run.py`'s
   `_queued` must keep building `PrintRunResult` from named fields and never
   `model_dump()` the outcome into an API response (§7).
-- `bambuddy/filaments.py`: a new `WarningKind` literal for the unsafe-material
-  pick, beside `hf-mounted`.
+- `bambuddy/filaments.py`: two new `WarningKind` literals beside `hf-mounted`,
+  both carried on `PrintRunResult.warnings` and on `/check`'s warnings like the
+  existing kinds:
+  - `rack-unsafe-material`: the pick is not hardened for an abrasive group;
+  - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
+    unreadable", "requirements unreadable", "no eligible position for group N").
+    This is the message §5's failure table promises.
 - `bambuddy/rack.py` (new): the material table, the abrasive test and `rank_rack`.
 - `bambuddy/print_run.py`: the `choose_rack` callback, and writing the picks to
   `rack_nozzle_picks` after the enqueue.
@@ -318,7 +339,10 @@ fixtures (which use invented serials), or in commits.
   - no eligible position;
   - two groups never sharing a position, with the more constrained group first;
   - `"0.2"` on the rack matching a `"0.20"` group;
-  - an unknown code counted as not hardened.
+  - an unknown code counted as not hardened;
+  - a group of PLA and PLA-CF counted as abrasive;
+  - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
+    missing code or name matching either.
 - API tests for `/check` rack options and for `nozzle_rack_choice` on the queued
   item, with Bambuddy mocked.
 - Usage tests:
@@ -326,7 +350,9 @@ fixtures (which use invented serials), or in commits.
   - a `quantity` 2 item with two archives counts two prints;
   - a second settle of the same print changes nothing;
   - `actual_time_seconds` is used, and `print_time_seconds` only when it is null;
-  - an archive with no `queue_item_id` is not counted.
+  - an archive with no `queue_item_id` is not counted;
+  - an archive read or database write that raises is logged, writes nothing, and
+    the print still settles and publishes `print.settled` once.
 - A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
   and a raise from it queues the item without one.
 - `print_run.py` tests:
