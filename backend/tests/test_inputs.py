@@ -8,7 +8,13 @@ from typing import assert_type
 import pytest
 
 from scadbuddy.api.jobs import _job_status
-from scadbuddy.render.inputs import MAX_INPUTS_BYTES, InputsError, legacy_inputs, normalize_inputs
+from scadbuddy.render.inputs import (
+    MAX_INPUTS_BYTES,
+    InputsDisagreeError,
+    InputsError,
+    legacy_inputs,
+    normalize_inputs,
+)
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.schema import ParamValue
 
@@ -37,6 +43,15 @@ def test_params_that_agree_with_inputs_are_accepted() -> None:
 def test_params_that_disagree_with_inputs_are_refused() -> None:
     with pytest.raises(InputsError, match="disagree"):
         normalize_inputs({"params": {"width": 1}}, {"width": 2})
+
+
+def test_a_disagreement_is_its_own_error_type() -> None:
+    """Callers choose their wording by type, never by the message's text."""
+    with pytest.raises(InputsDisagreeError):
+        normalize_inputs({"params": {"width": 1}}, {"width": 2})
+    with pytest.raises(InputsError) as refused:
+        normalize_inputs({"params": {"width": 1}, "v": -1}, None)
+    assert not isinstance(refused.value, InputsDisagreeError)
 
 
 def test_params_that_differ_only_in_type_disagree() -> None:

@@ -24,6 +24,10 @@ class InputsError(ValueError):
     """Inputs that are not a template's inputs; the message names the key."""
 
 
+class InputsDisagreeError(InputsError):
+    """``params`` sent beside ``inputs`` that are not ``inputs.params``."""
+
+
 @dataclass(frozen=True)
 class NormalizedInputs:
     """Checked inputs: the whole object, and its `params` with their type kept for
@@ -74,5 +78,5 @@ def normalize_inputs(
     # `inputs` is not a claim about them, so it is not checked. After the JSON
     # check: NaN never equals itself, and the message must say NaN, not disagree.
     if params and _typed(params) != _typed(checked):
-        raise InputsError("params and inputs.params disagree; send inputs only")
+        raise InputsDisagreeError("params and inputs.params disagree; send inputs only")
     return NormalizedInputs(data=result, params=checked)

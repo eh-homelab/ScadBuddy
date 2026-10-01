@@ -172,14 +172,9 @@ async def for_default_printer(
             extra={"output_id": meta.id, "reason": str(error)},
         )
         return None
-    try:
-        return await asyncio.to_thread(_rewrite, path, target.plate, presets, print_settings)
-    except (PlateFitError, ValueError) as error:
-        logger.info(
-            "download served as stored: it does not fit the default printer",
-            extra={"output_id": meta.id, "reason": str(error)},
-        )
-        return None
+    # A file that does not fit the plate is handled in `_rewrite`; a malformed one
+    # raises from there rather than being served as if nothing were wrong.
+    return await asyncio.to_thread(_rewrite, path, target.plate, presets, print_settings, meta.id)
 
 
 def _rewrite(
@@ -187,8 +182,23 @@ def _rewrite(
     plate: PlateGeometry,
     presets: ProjectPresets | None,
     print_settings: Mapping[str, str] | None,
-) -> bytes:
-    replated = replate_3mf(path.read_bytes(), plate)
+    output_id: str,
+) -> bytes | None:
+    """The stored file re-plated, with ``presets`` and ``print_settings``. One that
+    does not fit ``plate`` keeps its own plate and still gets ``print_settings``, from
+    the same read of the file (#852); with none, ``None``: it is served as stored."""
+    stored = path.read_bytes()
+    # Only PlateFitError: a plate that does not fit this printer's bed. A malformed
+    # stored 3MF (BadZipFile, or a JSONDecodeError from its project_settings.config)
+    # raises, so it is never served as a download with placeholders.
+    try:
+        replated = replate_3mf(stored, plate)
+    except PlateFitError as error:
+        logger.info(
+            "download not re-plated: it does not fit the default printer",
+            extra={"output_id": output_id, "reason": str(error)},
+        )
+        return with_presets(stored, None, print_settings) if print_settings else None
     if presets is None and not print_settings:
         return replated
     return with_presets(replated, presets, print_settings)
