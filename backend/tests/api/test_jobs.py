@@ -164,6 +164,26 @@ def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
     assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
 
 
+class _NoCommit:
+    """`SnapshotStore.pin` with no history, or a template with no commit yet."""
+
+    async def pin(self, slug: str, revision: str | None) -> str | None:
+        return None
+
+
+def test_a_render_the_store_cannot_snapshot_is_a_409(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: on the bambuddy store a render needs a commit to snapshot; none is a
+    conflict the author resolves by committing, not a 500."""
+    render = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+    monkeypatch.setattr(render, "snapshots", _NoCommit())
+    response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "never committed" in response.json()["detail"]
+
+
 # -- the customizer's range and options (#432) -------------------------------------
 
 RANGED_SOURCE = (

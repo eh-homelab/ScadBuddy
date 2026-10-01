@@ -156,8 +156,18 @@ async def create_output(
         )
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
     await materialize_result(state.store.blobs, job.result)
+    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
+    # fetched, and the copy would fail with a server path in its message: say so instead.
+    files = (job.result.model_3mf, job.result.preview_glb)
+    if not all((outputs.paths.root / name).is_file() for name in files):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
     public_url = (await asyncio.to_thread(store.load)).public_url
-    meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
+    try:
+        meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
+    except OSError:
+        # Evicted or swept after the check above, or unreadable: the same answer, not
+        # the copy's path.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])
