@@ -134,6 +134,28 @@ Non-goals
     Bedrock/Vertex/Foundry, or `CLAUDE_CODE_OAUTH_TOKEN`; an app login cannot
     refresh on resume.
   - Subagents run in the foreground and cannot call durable tools.
+  - The PR is a draft by an external contributor (GitHub author association `NONE`), in
+    Temporal's repository. It stays a draft until two known limitations are solved:
+    - **Built-in tools run inside the model segment.** Claude Code's own tools (Bash,
+      Edit and the rest) are not activities, so a segment that runs again can run them
+      again.
+      - This does not reach ScadBuddy. The plugin enables built-in tools only when
+        `builtin_tools` is passed, and ScadBuddy passes none, as every classic query
+        already passes `tools: []` (`agent/src/harness/options.ts:59`).
+      - Every tool a durable session has is a durable tool (§6.3).
+      - Phase 5 asserts in a test that a durable session's engine is started with no
+        built-in tools.
+    - **One durable tool call at a time.** The engine keeps one paused call per run. When
+      Claude asks for several in one message, the first pauses, and each of the others
+      is told to call again after its result.
+      - A durable session's tool calls are therefore serial within a turn. That is
+        correct but slower for a turn that would have read several things at once.
+      - §6 designs to it rather than around it: the system prompt asks for one tool call
+        per message, as the plugin's runner already does.
+      - Parallel work belongs in a flow. A flow's host calls run in Code Mode (§7.2),
+        not through this plugin, so `asyncio.gather` there is real parallelism.
+    - Phase 5 re-reads the PR's limitation list at its start. A limitation that is still
+      open and that this design relies on stops the work, and the user decides (§9).
 - Code Mode (harness README, "Code Mode"; `examples/agent_dag`). `code_mode_tool(tools)`
   gives a model one tool that runs a Python script over host functions. The script is
   type-checked against their signatures before it runs (`code_mode_type_check`) and runs
@@ -208,6 +230,15 @@ The same for every kind:
    - **`accepted`**, for commands that take long (a print, a pin's clone, a URL import,
      a font install, a send). The route answers **202** with the record once step 3
      is done.
+   - **Both waits are bounded by `command_answer_deadline`.** Step 3's activity has
+     `start_to_close_timeout` 8 s, and its retries continue in the workflow.
+     - If the `accepted` Update has not returned by the deadline, there is no record
+       yet to return. The route answers **503** with `Retry-After: 2` and the problem
+       type `command-still-accepting`.
+     - The client re-sends the same `request_id`, which `USE_EXISTING` attaches to the
+       same execution, until it gets the record or the refusal.
+     - So no command, of either kind, holds a request open past the deadline, and a
+       slow validation (a sluggish Bambuddy status read, say) cannot reproduce §1's 504.
 5. **Then** the workflow carries on with its activities. Each transition is a guarded
    write to our record plus an event in the same transaction, the `render/projection.py`
    pattern. Search Attributes `ScadbuddyKind`, `ScadbuddySubject` and `ScadbuddyStatus`
@@ -432,7 +463,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 ### 5.6 The frontend and the agent
 
 - Nothing changes for clients. #945 already made `runPrint` and `runLibraryPrint`
-  (`frontend/src/api/client.ts:854`, `:989`) share `followPrintRun` (`:362`), with its
+  (`frontend/src/api/client.ts:854`, `:989-990`) share `followPrintRun` (`:362`), with its
   202, follow loop, `reattach` and `mayHaveRun` (`:273`).
 - The route's answers (202 / 200 `repeated` / 422) and `GET /print/runs/{id}` keep their
   shapes, so the client and `agent/src/tools/print.ts` need no change beyond §4.2's
@@ -476,7 +507,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     resolved through `repos/temporalio/ai-integrations/commits/<sha>`), so the pin
     never names the contributor's fork, and a force-push there cannot change what is
     built.
-  - Phase 3's first task checks that `uv lock` resolves that SHA from
+  - Phase 5's first task checks that `uv lock` resolves that SHA from
     `temporalio/ai-integrations`. If it does not, the work stops and the user decides
     (§9).
   - **Every bump is reviewed.** A pin change is its own PR, carrying the diff of
@@ -584,7 +615,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   streams and continue-as-new use the harness defaults.
 - Type checking (`code_mode_type_check`) runs when a flow is registered, and again before
   each run. A script that fails is refused with its errors, by line.
-- Phase 4 starts by verifying what the harness needs around `ProjectWorkflow` (its
+- Phase 6 starts by verifying what the harness needs around `ProjectWorkflow` (its
   `SessionManagerWorkflow`, the `code-mode` extra) and how `execute` behaves across a
   Reset (§7.4). Anything that would mean departing from the harness is brought to the
   user (§9).
@@ -622,10 +653,17 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - Every host call after the reset point runs again.
   - Before resetting, `POST /api/v1/workflow-runs/{id}/reset {event_id}` lists the host
     calls between that event and now that had outward effects. Those are `print`, an
-    outward `tool`, and `agent`/`ask_session` turns that made outward calls. The route
-    resets only once the person has confirmed that list (`confirm: true`).
+    outward `tool`, and `agent`/`ask_session` turns that made outward calls.
+  - **The list is pinned to the run's history at the moment it is shown.** The answer
+    carries `as_of_event_id`, the last event of the history the list was computed from.
+    - Confirming sends `{event_id, confirm: true, as_of_event_id}`. The route recomputes
+      the list. If the history has moved past `as_of_event_id` and added an outward
+      call, it refuses with 409 and the new list, and the person confirms again.
+    - The run is not paused while the person decides. A flow waiting on a printer may
+      sit for hours, and pausing it would hold up work they did not ask to stop. The
+      check at confirm time is what makes the approved list the true one.
   - It has a tool and the audit trail, like every route.
-  - Phase 4's plan states what Reset does to child workflows and activities that were
+  - Phase 6's plan states what Reset does to child workflows and activities that were
     in flight past the reset point. A child `PrintRun` already past its enqueue keeps its
     own history and outcome, and the replayed flow does not re-attach to it.
 - `print_enqueue`'s `maximum_attempts = 1` (§5.3) is set explicitly on that activity and
