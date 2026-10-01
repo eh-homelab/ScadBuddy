@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import shutil
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -41,6 +44,7 @@ from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
     PreviewScheduler,
@@ -64,12 +68,44 @@ RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 #: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
 #: N x this. As many as the resolver has threads. Library installs share those
 #: threads; an import that finds none free is the same retryable 503.
-IMPORT_CONCURRENCY = 2
+IMPORT_CONCURRENCY = RESOLVER_THREADS
 #: `POST /models/{slug}/dependencies` reports worked out at once per replica (#253,
 #: review of #740). Each reads the model's files and every model.json in a worker
 #: thread; uncapped, a burst of them holds the default executor every other
 #: `to_thread` route shares. A report past it waits on the loop, not in a thread.
 DEPENDENCY_CHECK_CONCURRENCY = 2
+
+
+class ImportPermits:
+    """The import fetch budget (#178): at most `limit` fetches at once, each
+    remembered by when it started, so a refusal can say when the oldest must end
+    (#631). Used on the event loop only; a fetch finds it full or takes a permit with
+    no await in between."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        #: When each held permit was taken, by a token of its own.
+        self._taken: dict[object, float] = {}
+
+    def full(self) -> bool:
+        return len(self._taken) >= self.limit
+
+    @contextmanager
+    def hold(self) -> Iterator[None]:
+        token = object()
+        self._taken[token] = time.monotonic()
+        try:
+            yield
+        finally:
+            del self._taken[token]
+
+    def retry_after(self) -> int:
+        """Seconds until the oldest held fetch reaches `IMPORT_TIMEOUT` and must have
+        given its permit back; at least 1."""
+        if not self._taken:
+            return 1
+        left = min(self._taken.values()) + IMPORT_TIMEOUT - time.monotonic()
+        return max(1, math.ceil(left))
 
 
 @dataclass
@@ -129,9 +165,7 @@ class AppState:
     #: replica. Held for the fetch only -- the parse check after it takes `checks`
     #: like any create -- and an import that finds it full is refused at once, not
     #: queued.
-    imports: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
-    )
+    imports: ImportPermits = field(default_factory=lambda: ImportPermits(IMPORT_CONCURRENCY))
     #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
     dependency_checks: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(DEPENDENCY_CHECK_CONCURRENCY)
@@ -484,7 +518,7 @@ def get_dependency_checks(state: StateDep) -> asyncio.Semaphore:
     return state.dependency_checks
 
 
-def get_imports(state: StateDep) -> asyncio.Semaphore:
+def get_imports(state: StateDep) -> ImportPermits:
     return state.imports
 
 
@@ -512,7 +546,7 @@ PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
-ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
+ImportsDep = Annotated[ImportPermits, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 

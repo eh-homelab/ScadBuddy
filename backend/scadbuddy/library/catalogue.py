@@ -277,13 +277,16 @@ def _print_setting_problem(key: str, value: str) -> str | None:
         if value in allowed:
             return None
         return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
-    try:
-        width = float(value)
-    except ValueError:
-        width = -1.0
-    if 0 <= width < float("inf"):
+    # Plain digits only ("5", "2.5"), as the file stores it and a download writes it:
+    # float() would also take "1e2", "5_0" and " 5 " (#851).
+    whole, point, fraction = value.partition(".")
+    parts = (whole, fraction) if point else (whole,)
+    if all(part.isascii() and part.isdigit() for part in parts):
         return None
-    return f"{key} is {value!r}; it must be a non-negative number of millimetres"
+    return (
+        f"{key} is {value!r}; it must be a non-negative number of millimetres "
+        "in plain digits, like '5' or '2.5'"
+    )
 
 
 class ModelMeta(BaseModel):
@@ -339,7 +342,15 @@ class ModelMeta(BaseModel):
     #: The template's default slicer settings (#770): process overrides on the print
     #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
     #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
-    print_settings: dict[str, StrictStr] = Field(default_factory=dict)
+    print_settings: dict[str, StrictStr] = Field(
+        default_factory=dict,
+        description=(
+            "The template's own default slicer settings, as Bambu Studio process keys "
+            "and values from its model.json. The server applies them to every slice and "
+            "every downloaded 3MF; for clients they are informational, and no request "
+            "sets them."
+        ),
+    )
 
     @field_validator("print_settings")
     @classmethod
@@ -708,15 +719,18 @@ class Catalogue:
         except RecursionError:
             raise InvalidModelMetaError(slug, "nested too deeply") from None
 
-    def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
+    def write_raw_meta(self, slug: str, meta: dict[str, Any], *, presets: bool = False) -> None:
+        """Write ``model.json``. With ``presets`` (the write sets them), the presets are
+        written as :func:`for_model_json` keeps them; otherwise they are left exactly as
+        the file had them, so an unrelated edit never rewrites a hand-edited list."""
         # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
         # Dropping it here retires the key from volumes written before that was
         # true, rather than leaving a cache blob in the versioned tree forever.
         meta.pop("schema", None)
-        presets = meta.get("presets")
-        if isinstance(presets, list):
+        written = meta.get("presets")
+        if presets and isinstance(written, list):
             meta["presets"] = [
-                for_model_json(preset) if isinstance(preset, dict) else preset for preset in presets
+                for_model_json(preset) if isinstance(preset, dict) else preset for preset in written
             ]
         # No `mkdir`: the model directory must already exist (`create` makes it).
         # A write racing a delete then fails instead of recreating a directory
@@ -930,7 +944,7 @@ class Catalogue:
             raw = meta.model_dump(exclude=excluded)
             if meta.unread_ui is not None:
                 raw["ui"] = meta.unread_ui
-            self.write_raw_meta(slug, raw)
+            self.write_raw_meta(slug, raw, presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
@@ -1104,7 +1118,7 @@ class Catalogue:
         def change() -> None:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
-            self.write_raw_meta(slug, raw)
+            self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
                 # The list written is the template's presets whole: a legacy file left
                 # beside it would add its entries back (they are read below model.json),
