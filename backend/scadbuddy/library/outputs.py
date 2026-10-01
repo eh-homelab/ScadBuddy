@@ -234,7 +234,7 @@ class OutputStore:
         # directory behind, whichever caller sent them.
         recorded = normalize_inputs(
             inputs if inputs is not None else (job.inputs or None), job.params
-        )
+        ).data
         output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)

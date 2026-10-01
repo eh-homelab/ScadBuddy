@@ -162,10 +162,10 @@ async def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    inputs = None
+    inputs: dict[str, Any] | None = None
     if body.inputs is not None:
         try:
-            inputs = normalize_inputs(body.inputs, None)
+            inputs = normalize_inputs(body.inputs, None).data
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         rendered = f"inputs.params are not the parameters job {job.id} rendered"
