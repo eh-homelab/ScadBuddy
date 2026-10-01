@@ -173,4 +173,12 @@ describe('the designer', () => {
     expect(floor.textContent).toBe('Showing')
     expect(floor.getAttribute('aria-pressed')).toBe('true')
   })
+
+  it('names each Show button after its piece', async () => {
+    const { button } = await mounted({ params: {} })
+    const floor = button('floor_tile')
+    expect(floor.getAttribute('aria-label')).toBe('Show Floor tile')
+    floor.click()
+    expect(button('floor_tile').getAttribute('aria-label')).toBe('Showing Floor tile')
+  })
 })

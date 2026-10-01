@@ -118,6 +118,8 @@ export async function mount(root, host) {
       text.textContent = `${entry.count} × ${entry.label}`
       // Pressed, not disabled: a disabled button would lose the focus it has.
       show.textContent = current ? 'Showing' : 'Show'
+      // The name says which piece: a list of buttons that all read "Show" does not.
+      show.setAttribute('aria-label', `${current ? 'Showing' : 'Show'} ${entry.label}`)
       show.setAttribute('aria-pressed', String(current))
       if (list.children[index] !== li) list.insertBefore(li, list.children[index] ?? null)
     })
