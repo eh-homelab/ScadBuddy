@@ -7,6 +7,7 @@ than about an output, and only some of them are output-scoped at all. ``POST
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -27,7 +28,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.print_run import (
@@ -40,7 +41,7 @@ from scadbuddy.bambuddy.print_run import (
     filament_options_for_output,
     prepare_run,
 )
-from scadbuddy.bambuddy.print_source import OutputSource
+from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -51,9 +52,9 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
 )
-from scadbuddy.bambuddy.runs import BeforeEnqueue, PrintRun, run_key
+from scadbuddy.bambuddy.runs import BeforeEnqueue, PrintRun, PrintRuns, run_key
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -171,30 +172,69 @@ async def post_run(
     (same id) its run.
     """
     meta = require_output(outputs, output_id)
-    key = run_key(meta.id, body)
+    settings = store.load()
+
+    async def source_for(_: BambuddyClient) -> PrintSource:
+        # A copy uploaded into a project's folder is named like the one Generate files (#317).
+        stem = (
+            await output_stem(meta, outputs, catalogue)
+            if chosen_project(body, settings) is not None
+            else None
+        )
+        # Read before the 202, so a model.json that refuses them fails the request (#770).
+        return OutputSource(
+            outputs,
+            uploads,
+            meta,
+            settings,
+            stem=stem,
+            print_settings=catalogue.print_settings(meta.slug),
+        )
+
+    async def started() -> None:
+        observer.started(meta)
+        await watcher.started(meta.id)
+
+    return await accept_run(
+        runs,
+        response,
+        subject=meta.id,
+        slug=meta.slug,
+        settings=settings,
+        request=body,
+        source_for=source_for,
+        started=started,
+    )
+
+
+async def accept_run(
+    runs: PrintRuns,
+    response: Response,
+    *,
+    subject: str,
+    slug: str,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+    source_for: Callable[[BambuddyClient], Awaitable[PrintSource]],
+    started: Callable[[], Awaitable[None]] | None = None,
+) -> PrintRun:
+    """The 202-and-follow model every print run shares (#470, #742).
+
+    ``subject`` is what the run is keyed and recorded under: an output's id, or
+    ``library:<file id>``. A repeat of ``request`` answers 200 with its run. Otherwise
+    ``source_for`` and :func:`prepare_run` make the refusals that come before the 202,
+    a run is claimed and the rest happens in the background. ``started`` is awaited
+    once the print is queued.
+    """
+    key = run_key(subject, request)
     repeated = await runs.store.find(key)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
-    settings = store.load()
-    # A copy uploaded into a project's folder is named like the one Generate files (#317).
-    stem = (
-        await output_stem(meta, outputs, catalogue)
-        if chosen_project(body, settings) is not None
-        else None
-    )
-    # Read before the 202, so a model.json that refuses them fails the request (#770).
-    source = OutputSource(
-        outputs,
-        uploads,
-        meta,
-        settings,
-        stem=stem,
-        print_settings=catalogue.print_settings(meta.slug),
-    )
     try:
         async with client_for(settings) as client:
-            prepared = await prepare_run(client, source, settings, body)
+            source = await source_for(client)
+            prepared = await prepare_run(client, source, settings, request)
     except ApiError:
         # A racer with the same key may have claimed its run while this one was
         # checking; its caller gets that run, not a refusal from a separate read.
@@ -203,7 +243,7 @@ async def post_run(
             raise
         response.status_code = status.HTTP_200_OK
         return raced.model_copy(update={"repeated": True})
-    run, created = await runs.store.claim(meta.id, key)
+    run, created = await runs.store.claim(subject, key)
     if not created:
         # Another request for the same print claimed it while this one was checking.
         response.status_code = status.HTTP_200_OK
@@ -211,13 +251,13 @@ async def post_run(
 
     async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:
-            result = await execute_run(client, source, settings, body, prepared, before_enqueue)
-        observer.started(meta)
-        await watcher.started(meta.id)
+            result = await execute_run(client, source, settings, request, prepared, before_enqueue)
+        if started is not None:
+            await started()
         return result
 
-    runs.start(run, meta.slug, work)
-    runs.announce(run, meta.slug)
+    runs.start(run, slug, work)
+    runs.announce(run, slug)
     return run
 
 
