@@ -160,7 +160,7 @@ async def test_a_piece_renders_another_file_of_the_template(tmp_path: Path) -> N
     req = _request("parts/roof.scad", {"width": 3})
     prepared = await ActivityEnvironment().run(RenderActivities(deps).prepare, req)
     assert prepared.scad.endswith("parts/roof.scad")
-    assert _scope(req, prepared).title == "Demo"  # the template's folder, not parts/
+    assert (await _scope(req, prepared)).title == "Demo"  # the template's folder, not parts/
 
 
 @pytest.mark.parametrize(

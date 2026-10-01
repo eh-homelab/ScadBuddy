@@ -18,6 +18,14 @@ function model(slug: string, ...parts: string[]): string[] {
   return parts.map((p) => u(`scadbuddy://models/{slug}${p}`, { slug }))
 }
 
+/**
+ * Resources announced by NOTIFY-only kinds (the agent's `session.*`, not in
+ * the backend's replay log: sessions/busEvents.ts). After the LISTEN
+ * connection comes back, every subscription under these is told to re-read
+ * (hub.ts `onReconnect`).
+ */
+export const NOTIFY_ONLY_PREFIXES: readonly string[] = ['scadbuddy://sessions']
+
 export function affectedBy(event: BusEvent): Affected {
   const { slug } = event
   const none: Affected = { uris: [], listChanged: false }
@@ -78,6 +86,19 @@ export function affectedBy(event: BusEvent): Affected {
       return { uris: ['scadbuddy://fonts'], listChanged: false }
     case 'settings.changed':
       return { uris: ['scadbuddy://settings'], listChanged: false }
+    // The agent's own (sessions/busEvents.ts, #300). The list resource is told
+    // only of changes that move a session in it (created, owner, status), not
+    // of every streamed message.
+    case 'session.started':
+    case 'session.owner':
+    case 'session.waiting':
+    case 'session.done':
+    case 'session.message': {
+      const id = event.session_id
+      if (!id) return none
+      const one = u('scadbuddy://sessions/{session_id}', { session_id: id })
+      return { uris: event.kind === 'session.message' ? [one] : [one, 'scadbuddy://sessions'], listChanged: false }
+    }
     default:
       return none
   }

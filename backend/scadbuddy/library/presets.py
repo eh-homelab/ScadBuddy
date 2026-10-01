@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     StringConstraints,
     TypeAdapter,
@@ -99,12 +100,90 @@ def _clean_name(name: str) -> str:
     return cleaned
 
 
+def _clean_tags(value: object) -> object:
+    """Tags trimmed (inner whitespace collapsed), blanks dropped, and each kept once,
+    ignoring case, in the order given: a tag is a label to filter by, not text."""
+    if not isinstance(value, list):
+        return value
+    seen: set[str] = set()
+    cleaned: list[object] = []
+    for tag in value:
+        if not isinstance(tag, str):
+            cleaned.append(tag)  # refused by the item type, with its own message
+            continue
+        tag = " ".join(tag.split())
+        if tag and tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            cleaned.append(tag)
+    return cleaned
+
+
+#: A preset's tags (#327): cleaned before the bounds are checked, so padding and
+#: repeats never count against them. A tag holds no comma: the UI edits tags as one
+#: comma-separated line, which would split such a tag in two. That is a rule for what
+#: is written from now on; a template's file written before it is read as
+#: :func:`_details_as_written` reads it.
+PresetTags = Annotated[
+    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
+    BeforeValidator(_clean_tags),
+    Field(max_length=MAX_PRESET_TAGS),
+]
+
+
+def _details_as_written(raw: Any) -> Any:
+    """``raw``, a preset list read from a template's file, with details written by hand
+    or before #327 read as what they mean.
+
+    The list is validated whole, so refusing one entry's detail would cost the template
+    every preset it defines. So a ``null`` description or ``tags`` -- what a file
+    written by hand, or by a tool that writes every key, says for "none" -- reads as
+    none (``""``, ``[]``). And until #327 a tag could hold a comma, and a template of
+    mine may still have one in its ``model.json``; such a tag is split at its commas
+    (as the UI's tag line would split it) and cleaned, and a list that grew past
+    ``MAX_PRESET_TAGS`` is cut there. Entries without such a detail, and anything that
+    is not a preset list, are left for the validator to judge as they are; a save still
+    refuses a comma (422) and, in its body, a null.
+    """
+    if not isinstance(raw, list):
+        return raw
+    read: list[Any] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            read.append(entry)
+            continue
+        details: dict[str, Any] = {}
+        if "description" in entry and entry["description"] is None:
+            details["description"] = ""
+        tags = entry.get("tags")
+        if "tags" in entry and tags is None:
+            details["tags"] = []
+        elif isinstance(tags, list) and any(isinstance(t, str) and "," in t for t in tags):
+            split = [
+                part for tag in tags for part in (tag.split(",") if isinstance(tag, str) else [tag])
+            ]
+            cleaned = _clean_tags(split)
+            assert isinstance(cleaned, list)
+            details["tags"] = cleaned[:MAX_PRESET_TAGS]
+        read.append({**entry, **details} if details else entry)
+    return read
+
+
+#: A preset's description (#327): short Markdown, trimmed.
+PresetDescription = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION)
+]
+
+
 class _PresetBody(BaseModel):
-    """What a preset is, wherever it is written: in a template's ``presets.json`` or
+    """What a preset is, wherever it is written: in a template's ``model.json`` or
     in the body of a save."""
 
     name: str = Field(min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    # Factories, not `= ""`: a literal default makes the generated TypeScript type
+    # require the field, which a client has no reason to send.
+    description: PresetDescription = Field(default_factory=str)
+    tags: PresetTags = Field(default_factory=list)
     #: Template inputs (spec 2026-09-27 §4.3). Given, they win and ``params`` is read
     #: from them; left out, ``params`` is read as ``{"params": …, "v": 0}``.
     inputs: dict[str, Any] | None = None
@@ -117,10 +196,10 @@ class _PresetBody(BaseModel):
     @model_validator(mode="after")
     def _one_state(self) -> _PresetBody:
         try:
-            self.inputs = normalize_inputs(self.inputs, self.params)
+            normalized = normalize_inputs(self.inputs, self.params)
         except InputsError as error:
             raise ValueError(str(error)) from None
-        self.params = self.inputs["params"]
+        self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -129,12 +208,16 @@ class ParamPresetCreate(_PresetBody):
 
 
 class ParamPresetUpdate(BaseModel):
-    """A rename, a new set of values, or both. ``params`` or ``inputs`` replaces the
-    old ones whole; ``params`` alone keeps the preset's other inputs keys."""
+    """What changes: a rename, new values, new details, or any of them. Each field
+    given replaces the old one whole -- an empty description or tag list clears it.
+    ``inputs`` replaces the old ones whole, except that inputs without ``params`` keep
+    the preset's current values; ``params`` alone keeps the preset's other inputs keys."""
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] | None = None
     inputs: dict[str, Any] | None = None
+    description: PresetDescription | None = None
+    tags: PresetTags | None = None
 
     @field_validator("name")
     @classmethod
@@ -143,12 +226,14 @@ class ParamPresetUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _one_state(self) -> ParamPresetUpdate:
-        if self.inputs is not None:
+        # Inputs without `params` keep the preset's values: `PresetStore.update` adds
+        # them and checks the whole then, so they are left as sent here.
+        if self.inputs is not None and ("params" in self.inputs or self.params is not None):
             try:
-                self.inputs = normalize_inputs(self.inputs, self.params)
+                normalized = normalize_inputs(self.inputs, self.params)
             except InputsError as error:
                 raise ValueError(str(error)) from None
-            self.params = self.inputs["params"]
+            self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -168,16 +253,9 @@ class TemplatePreset(_PresetBody):
 
     ``id`` is what keeps it the same preset when the list is reordered or it is
     renamed; without one, the key is derived from the name (:func:`template_preset_keys`).
-    ``description`` and ``tags`` are carried for #327, which puts them in the API.
     """
 
     id: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=MAX_SLUG_LENGTH)
-    # A factory, not `= ""`: a literal default makes the generated TypeScript type
-    # require the field, which a client editing presets has no reason to send.
-    description: str = Field(default_factory=str, max_length=MAX_PRESET_DESCRIPTION)
-    tags: list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]] = Field(
-        default_factory=list, max_length=MAX_PRESET_TAGS
-    )
 
     @model_validator(mode="after")
     def _one_state(self, info: ValidationInfo) -> TemplatePreset:
@@ -191,10 +269,10 @@ class TemplatePreset(_PresetBody):
         if stored and inputs is not None and "params" in self.model_fields_set:
             inputs, params = {**inputs, "params": params}, None
         try:
-            self.inputs = normalize_inputs(inputs, params)
+            normalized = normalize_inputs(inputs, params)
         except InputsError as error:
             raise ValueError(str(error)) from None
-        self.params = self.inputs["params"]
+        self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -286,6 +364,8 @@ class ParamPreset(BaseModel):
         description="`template`: defined by the template in its model.json, read-only. "
         "`mine`: saved here, editable -- on built-ins too."
     )
+    description: str = Field(description="Short Markdown; empty when there is none.")
+    tags: list[str]
     updated_at: datetime | None = None
 
 
@@ -342,7 +422,9 @@ class PresetStore:
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
         try:
-            return _checked(_PRESET_LIST.validate_python(raw, context={STORED: True}))
+            return _checked(
+                _PRESET_LIST.validate_python(_details_as_written(raw), context={STORED: True})
+            )
         except (ValidationError, ValueError, RecursionError) as error:
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
@@ -391,6 +473,8 @@ class PresetStore:
                 params=preset.params,
                 inputs=preset.inputs or legacy_inputs(preset.params),
                 origin="template",
+                description=preset.description,
+                tags=preset.tags,
             )
             for preset, key in zip(defined, template_preset_keys(defined), strict=True)
         ]
@@ -426,6 +510,8 @@ class PresetStore:
             params=row["params"],
             inputs=cls._inputs(row),
             origin="mine",
+            description=row["description"],
+            tags=row["tags"],
             updated_at=row["updated_at"],
         )
 
@@ -492,14 +578,16 @@ class PresetStore:
             now = datetime.now(UTC)
             row = conn.execute(
                 "INSERT INTO saved_presets"
-                " (model_id, id, name, params, inputs, created_at, updated_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " (model_id, id, name, params, inputs, description, tags, created_at, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     model_id,
                     uuid.uuid4().hex,
                     body.name,
                     Jsonb(body.params),
                     Jsonb(body.inputs),
+                    body.description,
+                    body.tags,
                     now,
                     now,
                 ),
@@ -516,20 +604,28 @@ class PresetStore:
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
             current_inputs = self._inputs(current)
-            if patch.inputs is not None:
+            if patch.inputs is not None and "params" not in patch.inputs:
+                inputs = normalize_inputs(
+                    {**patch.inputs, "params": current_inputs["params"]}, None
+                ).data
+            elif patch.inputs is not None:
                 inputs = patch.inputs
             elif patch.params is not None:
                 # Checked as a whole again: the new values count toward the size cap.
-                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None)
+                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None).data
             else:
                 inputs = current_inputs
             row = conn.execute(
-                "UPDATE saved_presets SET name = %s, params = %s, inputs = %s, updated_at = %s"
+                "UPDATE saved_presets"
+                " SET name = %s, params = %s, inputs = %s, description = %s, tags = %s,"
+                " updated_at = %s"
                 " WHERE model_id = %s AND id = %s RETURNING *",
                 (
                     patch.name if patch.name is not None else current["name"],
                     Jsonb(inputs["params"]),
                     Jsonb(inputs),
+                    patch.description if patch.description is not None else current["description"],
+                    patch.tags if patch.tags is not None else current["tags"],
                     datetime.now(UTC),
                     model_id,
                     preset_id,
@@ -560,14 +656,17 @@ class PresetStore:
             for row in self._saved(conn, source_id):
                 conn.execute(
                     "INSERT INTO saved_presets"
-                    " (model_id, id, name, params, inputs, created_at, updated_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    " (model_id, id, name, params, inputs, description, tags,"
+                    " created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         target_id,
                         uuid.uuid4().hex,
                         row["name"],
                         Jsonb(row["params"]),
                         Jsonb(self._inputs(row)),
+                        row["description"],
+                        row["tags"],
                         row["created_at"],
                         row["updated_at"],
                     ),

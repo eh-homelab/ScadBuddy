@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import psycopg
 from fastapi import APIRouter, Response
 
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.core.metrics import CONTENT_TYPE_LATEST
+from scadbuddy.library.assets import AssetStoreUnavailableError
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import store_health, store_usage
 
@@ -17,10 +19,11 @@ router = APIRouter(tags=["health"])
 
 def refresh_asset_metrics(state: AppState) -> None:
     """The upload store's usage gauges (#296), read per scrape. A failed read keeps
-    the last values rather than failing the scrape."""
+    the last values rather than failing the scrape, as the render queue's gauges do
+    when their store is unavailable -- a database error, or no database at all."""
     try:
         usage = state.assets.usage()
-    except OSError:
+    except (OSError, psycopg.Error, AssetStoreUnavailableError):
         logger.exception("could not read the upload store's usage")
         return
     state.metrics.assets_stored.set(usage.count)
@@ -29,8 +32,15 @@ def refresh_asset_metrics(state: AppState) -> None:
     state.metrics.assets_max_bytes.set(usage.max_total_bytes)
 
 
+#: Seconds a local store walk answers the scraper for.
+STORE_USAGE_MAX_AGE = 60.0
+
+
 async def refresh_store_metrics(state: AppState) -> None:
-    usage = await asyncio.to_thread(store_usage, state.store, state.config)
+    # A scrape every 15-30s would otherwise walk the whole local store each time.
+    usage = await asyncio.to_thread(
+        store_usage, state.store, state.config, max_age=STORE_USAGE_MAX_AGE
+    )
     state.metrics.store_blobs.set(usage.count)
     for kind, size in usage.by_kind.items():
         state.metrics.store_bytes.labels(kind).set(size)

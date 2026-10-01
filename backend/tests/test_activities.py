@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import shutil
+import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
@@ -15,6 +17,7 @@ from typing import Any
 import psycopg
 import pytest
 import trimesh
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -42,6 +45,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.worker import make_current_until_polled
 from scadbuddy.workflows import activities
 from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
@@ -51,6 +55,7 @@ from scadbuddy.workflows.activities import (
     _heartbeating,
     _main_result,
     _process_output,
+    _scope,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -65,7 +70,7 @@ from scadbuddy.workflows.models import (
 )
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import write_openscad_3mf
+from tests.conftest import PgPool, write_openscad_3mf
 from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
@@ -116,6 +121,24 @@ def _request(revision: str | None = REVISION) -> PieceRequest:
         params=dict(params),
         piece_key=piece_key("demo", revision, "model.scad", params),
     )
+
+
+async def test_a_pieces_scope_reads_model_json_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`template_title` reads the template's `model.json`: a file read, so not on the loop."""
+    loop_thread = threading.get_ident()
+    readers: list[int] = []
+
+    def title(model_dir: Path, slug: str) -> str:
+        readers.append(threading.get_ident())
+        return "Demo"
+
+    monkeypatch.setattr(activities, "template_title", title)
+    prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
+    scope = await _scope(_request(), prepared)
+    assert (scope.slug, scope.title) == ("demo", "Demo")
+    assert readers and loop_thread not in readers
 
 
 # ── the library lease, per activity ────────────────────────────────────────────
@@ -249,6 +272,29 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
     assert piece.result.source_version == prepared.version == REVISION
     assert piece.log_tail == main.log_tail
     assert main.returncode == 0
+    assert piece.result.libraries == []
+
+
+async def test_a_piece_records_the_library_pins_its_template_declares(tmp_path: Path) -> None:
+    """#169: the pins `prepare` resolved cross the activities and land on the result,
+    so the output saved from it names the exact library commits it was built from."""
+    paths = _paths(tmp_path)
+    checkout = _checkout(paths)
+    commit = checkout.name
+    pin = {"name": "bosl", "url": "https://example.invalid/bosl.git", "ref": "v2", "commit": commit}
+    paths.model_meta("demo").write_text(json.dumps({"libraries": [pin]}), encoding="utf-8")
+    acts = RenderActivities(_deps(tmp_path, paths))
+    env = ActivityEnvironment()
+    req = _request()
+
+    prepared = await env.run(acts.prepare, req)
+    assert prepared.library_path == [str(checkout)]
+    main = await env.run(acts.render_main, req, prepared)
+    await env.run(acts.render_solids, req, prepared, main)
+    piece = await env.run(acts.finish_piece, req, prepared, main)
+
+    assert [(p.name, p.ref, p.commit) for p in piece.result.libraries] == [("bosl", "v2", commit)]
+    assert await env.run(acts.cached_piece, req) == piece
 
 
 async def test_a_piece_without_a_revision_is_never_answered_from_its_blob(
@@ -346,6 +392,42 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     with pytest.raises(asyncio.CancelledError):
         await outer
     assert inner is not None and inner.cancelled()
+
+
+class _StoppedError(Exception):
+    """Ends `render_main` once the checkout has been watched."""
+
+
+async def test_render_main_heartbeats_while_its_checkout_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: `checkout_fresh` waits on the key's lock, which another fetch of the
+    same key may hold for a whole transfer; the activity heartbeats through it."""
+    paths = _paths(tmp_path)
+    deps = _deps(tmp_path, paths)
+    beat = asyncio.Event()
+    beats_in_checkout: list[bool] = []
+    real = activities._heartbeating
+
+    async def quick[T](work: asyncio.Task[T], every: float = 5.0) -> T:
+        return await real(work, every=0.01)
+
+    async def checkout_fresh(key: str) -> str | None:
+        try:
+            await asyncio.wait_for(beat.wait(), 5)
+            beats_in_checkout.append(True)
+        except TimeoutError:
+            beats_in_checkout.append(False)
+        raise _StoppedError
+
+    monkeypatch.setattr(activities, "_heartbeating", quick)
+    monkeypatch.setattr(deps.blobs, "checkout_fresh", checkout_fresh)
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beat.set()
+    prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
+    with pytest.raises(_StoppedError):
+        await env.run(RenderActivities(deps).render_main, _request(), prepared)
+    assert beats_in_checkout == [True]
 
 
 # ── project ────────────────────────────────────────────────────────────────────
@@ -573,6 +655,17 @@ async def test_project_for_an_unknown_job_returns(
 # ── the real workflows over the real activities ────────────────────────────────
 
 
+async def _make_current(client: Client) -> None:
+    """As the worker does: Temporal 1.28 takes the build only once it polls."""
+    assert await make_current_until_polled(
+        lambda: make_current(client, namespace=client.namespace, build_id="test"),
+        build_id="test",
+        backoff=(0.1,),
+        every=0.2,
+        deadline=30,
+    )
+
+
 @pytest.mark.requires_postgres
 @pytest.mark.requires_temporal
 async def test_a_job_renders_end_to_end_on_the_render_worker(
@@ -597,7 +690,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
@@ -649,7 +742,7 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             build_id="test",
             max_concurrent_activities=2,
         ):
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
 
             async def rendered(job: Job) -> Path:
                 projection.submit(job, render_key("demo", {"width": 1}, None))
@@ -681,7 +774,11 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
 
 @pytest.mark.parametrize("stage", ["render_main", "render_solids"])
 async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch, stage: str
+    tmp_path: Path,
+    pg_conninfo: str,
+    pg_pool: PgPool,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
 ) -> None:
     missing = "f" * 64
 
@@ -692,7 +789,7 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
                 parameters=[Parameter(name="label", type="file", initial="", accept=["svg"])]
             ),
             {"label": missing},
-            AssetStore(tmp_path / "empty"),
+            AssetStore(tmp_path / "empty", pg_pool),
             tmp_path,
         )
 
@@ -704,6 +801,7 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
             _deps(tmp_path, paths),
+            assets=AssetStore(paths.assets, pg_pool),
             remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
         )
         acts = RenderActivities(deps)

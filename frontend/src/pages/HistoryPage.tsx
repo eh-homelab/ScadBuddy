@@ -14,6 +14,7 @@ import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
+import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
@@ -31,7 +32,7 @@ export function HistoryPage() {
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
   const settings = useAsync(() => api.getSettings(), []).data
-  const bambuddyUrl = settings?.bambuddy_url ?? undefined
+  const bambuddyUrl = bambuddyBase(webUrls(settings)) ?? undefined
   const [sendFor, setSendFor] = useState<Output | undefined>(undefined)
   const [deleting, setDeleting] = useState<string | null>(null)
   // #316 — an output with copies in Bambuddy asks first, and offers the inbox ones.
@@ -245,10 +246,9 @@ function DeleteOutputDialog({
 }
 
 /**
- * A recorded Bambuddy id, linked to the page it means something on (#89). Bambuddy has
- * no page per pipeline run — its copies land in the queue — so a run links to the queue
- * itself rather than to an invented path. `target=_blank` because ScadBuddy renders
- * inside Bambuddy's sandboxed iframe (spec §1).
+ * A recorded Bambuddy id, linked to the page it means something on (#89). A queue item
+ * links to its own page, and a library file to the library. `target=_blank` because
+ * ScadBuddy renders inside Bambuddy's sandboxed iframe (spec §1).
  */
 function BambuddyId({
   href,
@@ -321,12 +321,7 @@ function OutputRow({
                 queued #{output.queue_item_id}
               </BambuddyId>
             )}
-            {!output.queue_item_id && output.pipeline_run_id && (
-              <BambuddyId className="ml-2 text-ok" href={bambuddyUrl && `${bambuddyUrl}/queue`}>
-                pipeline run #{output.pipeline_run_id}
-              </BambuddyId>
-            )}
-            {!output.queue_item_id && !output.pipeline_run_id && lastCopy(output) && (
+            {!output.queue_item_id && lastCopy(output) && (
               <BambuddyId className="ml-2 text-muted" href={bambuddyUrl && `${bambuddyUrl}/library`}>
                 in library #{lastCopy(output)?.id}
               </BambuddyId>

@@ -4,16 +4,22 @@ import json
 import re
 import shutil
 import zipfile
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import trimesh
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library import outputs as outputs_module
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
@@ -43,7 +49,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
     assert body["library_files"] == []
-    assert body["pipeline_run_id"] is None
+    assert "pipeline_run_id" not in body
     assert body["queue_item_id"] is None
 
     directory = paths.output_dir(model, body["id"])
@@ -410,6 +416,53 @@ def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
     assert client.get(url, params={"plate": 0}).status_code == 422
 
 
+def test_an_output_records_the_library_commits_it_was_rendered_with(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#169: not only the model revision, but the exact commit of each library it pins."""
+    commit = "d" * 40
+    pin = {
+        "name": "BOSL2",
+        "url": "https://example.invalid/BOSL2.git",
+        "ref": "v2",
+        "commit": commit,
+    }
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    paths.model_meta(model).write_text(json.dumps({**meta, "libraries": [pin]}), encoding="utf-8")
+    (paths.libraries / "BOSL2" / commit / "BOSL2").mkdir(parents=True)
+
+    job_id = _finished_job(client, model)
+    body = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+
+    assert body["libraries"] == [pin]
+    assert client.get(f"/api/v1/outputs/{body['id']}").json()["libraries"] == [pin]
+    stored = json.loads(
+        (paths.output_dir(model, body["id"]) / "meta.json").read_text(encoding="utf-8")
+    )
+    assert stored["libraries"] == [pin]
+
+
+def test_an_output_of_a_model_with_no_libraries_records_none(
+    client: TestClient, model: str
+) -> None:
+    job_id = _finished_job(client, model)
+    body = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    assert body["libraries"] == []
+
+
+def test_a_record_from_before_the_library_pins_loads_with_none() -> None:
+    meta = OutputMeta.model_validate(
+        {
+            "id": "a" * 32,
+            "slug": "demo",
+            "job_id": "b" * 32,
+            "created_at": "2026-09-22T10:00:00Z",
+            "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
+        }
+    )
+    assert meta.libraries == []
+
+
 def test_an_old_records_upload_keys_are_ignored() -> None:
     """The keys a ``meta.json`` carried for its Bambuddy uploads before they moved to
     Postgres (#455) still load, and mean nothing: no data is migrated."""
@@ -479,6 +532,55 @@ def test_an_output_refuses_inputs_the_job_did_not_render(
     assert not output_dir.exists() or not any(output_dir.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("inputs", "detail"),
+    [
+        ({"params": "not-an-object"}, "inputs.params must be an object of parameter values"),
+        ({"params": {"width": 12}, "ui": {"note": "x" * 70_000}}, "bytes; at most 65536"),
+    ],
+    ids=["malformed", "oversized"],
+)
+def test_an_output_refuses_inputs_that_are_not_inputs(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    inputs: dict[str, object],
+    detail: str,
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "inputs": inputs}
+    )
+    assert refused.status_code == 422, refused.text
+    assert detail in refused.json()["detail"]
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    job = state.render.store.read(job_id)
+    with pytest.raises(InputsError):
+        state.outputs.create(job, inputs={"params": {"width": "12"}})
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
+
+
+def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
+    inputs_path.write_text("{not json", encoding="utf-8")
+    expected = {"params": {"width": 12}, "v": 0}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
+
+
 def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
     job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
     output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
@@ -499,3 +601,92 @@ def test_an_output_from_before_inputs_reads_as_params_v0(
         "params": {"width": 12},
         "v": 0,
     }
+
+
+def test_an_output_from_before_inputs_reads_its_params_once_per_request(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    reads: list[str] = []
+    params = OutputStore.params
+
+    def counting(self: OutputStore, output_id: str) -> dict[str, ParamValue]:
+        reads.append(output_id)
+        return params(self, output_id)
+
+    monkeypatch.setattr(OutputStore, "params", counting)
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {"width": 12}
+    assert reads == [output["id"]]
+    reads.clear()
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"]["params"] == {
+        "width": 12
+    }
+    assert reads == [output["id"]]
+
+
+def test_saving_a_job_whose_result_is_gone_is_a_404(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Not a 500 carrying a server path: the store no longer has the piece's files."""
+    job_id = _finished_job(client, model)
+    result = getattr(client.app.state, STATE_ATTR).render.store.read(job_id).result  # type: ignore[attr-defined]
+    (paths.root / result.model_3mf).unlink()
+    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "is gone" in response.json()["detail"]
+    assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())
+
+
+@pytest.mark.parametrize("swept", ["model_3mf", "preview_glb"])
+def test_a_result_swept_while_it_is_copied_is_a_404(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    swept: str,
+) -> None:
+    """#672 gate: eviction or the sweep can take the files after the route's check. The
+    output's directory goes too, whichever file was taken, so nothing is left behind."""
+    job_id = _finished_job(client, model)
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    result = state.render.store.read(job_id).result
+    create = state.outputs.create
+
+    def swept_first(*args: Any, **kwargs: Any) -> Any:
+        (paths.root / getattr(result, swept)).unlink()
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(state.outputs, "create", swept_first)
+    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    assert response.status_code == 404
+    assert "is gone" in response.json()["detail"]
+    assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())
+
+
+def test_a_copy_that_fails_otherwise_is_the_same_404_without_a_path(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any copy failure, not only a missing file, is the result being gone: the problem
+    names no server path, and no partial output is left behind."""
+    job_id = _finished_job(client, model)
+    denied = str(paths.root / "blobs" / "denied")
+
+    def copyfile(*args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(13, "Permission denied", denied)
+
+    monkeypatch.setattr(
+        outputs_module, "shutil", SimpleNamespace(copyfile=copyfile, rmtree=shutil.rmtree)
+    )
+    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == f"the result of job {job_id!r} is gone"
+    assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import replace
@@ -24,6 +25,7 @@ from scadbuddy.render.jobs import prune_revision_exports, resolve_source
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store import snapshots as snapshots_module
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
 from scadbuddy.store.index import Pool
@@ -309,6 +311,44 @@ async def test_an_export_a_worker_uses_again_is_not_pruned_within_the_ttl(
     assert await worker.materialize("demo", rev)  # a hit
     assert prune_revision_exports(worker_paths, 86400) == []
     assert (export / "model.scad").is_file()
+
+
+def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
+    """The prune takes the export between `materialize`'s `is_dir` and its touch."""
+    left = [times]
+
+    def touch(directory: Path) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            shutil.rmtree(directory)
+
+    monkeypatch.setattr(snapshots_module, "touch_export", touch)
+
+
+async def test_an_export_pruned_as_it_is_used_is_not_reported_present(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: a hit the prune took is no hit, so `_materialize` fails clearly."""
+    worker_paths = DataPaths(tmp_path / "worker")
+    export = worker_paths.model_revision_dir("demo", "7" * 40)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    _pruned_on_touch(monkeypatch)
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", "7" * 40) is False
+
+
+async def test_an_export_pruned_as_it_is_used_comes_back_from_the_store(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rev = "6" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", rev)
+    _pruned_on_touch(monkeypatch)
+    assert await worker.materialize("demo", rev)
+    assert (worker_paths.model_revision_dir("demo", rev) / "model.scad").read_text() == "cube(4);"
 
 
 async def test_an_export_lost_to_the_prune_on_a_worker_without_git_fails_clearly(

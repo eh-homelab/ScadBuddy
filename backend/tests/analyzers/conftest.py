@@ -36,11 +36,23 @@ def cube(size: float = 10.0, at: tuple[float, float, float] = (0, 0, 0)) -> trim
 
 
 def tee() -> trimesh.Trimesh:
-    """A T: a 10 mm stem with a 30 mm bar on top, whose underside is a flat ceiling."""
+    """A T: a 10 mm stem with a 30 mm bar on top, whose underside is a flat ceiling
+    resting on the stem for its middle third and overhanging 10 mm on each side.
+
+    The bar is built from three 10 mm segments rather than one box so the middle
+    segment's triangles sit entirely over the stem and the outer two entirely off
+    it -- a single 30 mm box's bottom is just two triangles spanning the whole
+    length, too coarse for #756's support-from-below test to resolve per-region.
+    A microscopic gap between segments keeps them from welding into one mesh
+    with a shared, non-manifold edge where they touch.
+    """
+    gap = 1e-6
     stem = trimesh.creation.box(extents=(10, 10, 20))
     stem.apply_translation((15, 5, 10))
-    bar = trimesh.creation.box(extents=(30, 10, 5))
-    bar.apply_translation((15, 5, 22.5))
+    segments = [trimesh.creation.box(extents=(10 - gap, 10, 5)) for _ in range(3)]
+    for segment, x in zip(segments, (5, 15, 25), strict=True):
+        segment.apply_translation((x, 5, 22.5))
+    bar = cast(trimesh.Trimesh, trimesh.util.concatenate(segments))
     return cast(trimesh.Trimesh, trimesh.util.concatenate([stem, bar]))
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -41,6 +43,8 @@ class StoreBundle:
     fonts: FontMirror | None
     source: RenderSettingsSource
     remote: BambuddyContentBackend | None = None
+    #: The local backend's last walk, `(monotonic time, usage)`, for `store_usage`'s max age.
+    local_usage: tuple[float, StoreUsage] | None = field(default=None, repr=False)
 
     async def aclose(self) -> None:
         if self.remote is not None:
@@ -100,16 +104,19 @@ def build_store(
     )
 
 
-def store_usage(bundle: StoreBundle, config: Config) -> StoreUsage:
+def store_usage(bundle: StoreBundle, config: Config, *, max_age: float = 0) -> StoreUsage:
+    """The store's totals. The local backend's are a walk of its tree, so a caller that
+    asks often (the `/metrics` scrape) passes `max_age` to reuse a walk that recent."""
     if bundle.content is not None:
         return bundle.content.usage()
+    now = monotonic()
+    if max_age and bundle.local_usage is not None and now - bundle.local_usage[0] < max_age:
+        return bundle.local_usage[1]
     blobs = bundle.blobs
     assert isinstance(blobs, LocalBlobStore)
     keys = blobs.keys()  # a list of blob keys, not a dict view
-    total = sum(
-        p.stat().st_size for key in keys for p in (blobs.root / key).rglob("*") if p.is_file()
-    )
-    return StoreUsage(
+    total = sum(_tree_bytes(blobs.root / key) for key in keys)
+    usage = StoreUsage(
         backend="local",
         count=len(keys),
         bytes=total,
@@ -117,6 +124,8 @@ def store_usage(bundle: StoreBundle, config: Config) -> StoreUsage:
         max_total_bytes=config.store_max_total_bytes,
         by_kind={"piece": total},
     )
+    bundle.local_usage = (now, usage)
+    return usage
 
 
 class StoreHealth(BaseModel):
@@ -138,3 +147,19 @@ async def store_health(bundle: StoreBundle) -> StoreHealth:
         render_key_fallback=current.key_is_fallback and bool(current.api_key),
         multi_worker=bundle.backend != "local",
     )
+
+
+def _tree_bytes(root: Path) -> int:
+    """The bytes under ``root``. The local sweep may remove a piece mid-walk: what is
+    gone by the time it is read counts for nothing, rather than failing the caller."""
+    total = 0
+    try:
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except FileNotFoundError:
+                continue
+    except FileNotFoundError:
+        pass
+    return total

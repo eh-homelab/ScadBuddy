@@ -34,6 +34,35 @@ def test_settings_refuse_to_start_without_a_database_url(
         Settings()
 
 
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "SCADBUDDY_TEMPORAL_ADDRESS",
+        "SCADBUDDY_TEMPORAL_NAMESPACE",
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER",
+    ],
+)
+@pytest.mark.parametrize("value", ["  ", " temporal:7233", "temporal:7233\n"])
+def test_a_temporal_setting_with_whitespace_is_refused_by_name(
+    variable: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-only would read as "set" (the Temporal path) with a garbage value."""
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match=variable):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "variable", ["SCADBUDDY_TEMPORAL_NAMESPACE", "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER"]
+)
+def test_an_empty_temporal_namespace_or_queue_is_refused_by_name(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(variable, "")
+    with pytest.raises(ValueError, match=variable):
+        Settings()
+
+
 @pytest.mark.parametrize("value", ["0", "-1"])
 def test_a_render_concurrency_below_one_is_refused_by_name(value: str) -> None:
     with pytest.raises(ValueError, match="SCADBUDDY_RENDER_CONCURRENCY must be at least 1"):
@@ -275,3 +304,26 @@ def test_the_store_caps_reach_the_config_from_either_source(tmp_path: Path) -> N
     for config in (loaded, settings):
         assert (config.store_max_total_bytes, config.store_max_count) == (0, 5)
         assert config.worker_cache_max_bytes == 1024
+
+
+def test_the_temporal_ui_url_is_empty_by_default_and_seeded_by_its_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().temporal_ui_url is None
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", "")
+    assert Settings().temporal_ui_url is None
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", "https://temporal.lan")
+    assert Settings().temporal_ui_url == "https://temporal.lan"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["javascript:alert(1)", "temporal.lan", "ftp://temporal.lan", "https://", "http:// x"],
+)
+def test_a_temporal_ui_url_that_is_not_http_is_refused_by_name(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It becomes a link on the Settings page, so only an http(s) URL is one."""
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_TEMPORAL_UI_URL"):
+        Settings()

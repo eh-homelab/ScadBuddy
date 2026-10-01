@@ -37,8 +37,9 @@ changes what a reading means:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -72,6 +73,7 @@ WarningKind = Literal[
     "not-installed",
     "plate-differs",
     "hf-unsupported",
+    "hf-mounted",
 ]
 
 
@@ -106,6 +108,11 @@ class SpoolOption(BaseModel):
     remaining_g: float | None = None
     storage_location: str | None = None
     loaded: LoadedAt | None = None
+    #: The physical extruder this spool feeds on the chosen printer — 0 right, 1 left —
+    #: and the letter for it (#469). ``None`` when the spool is not loaded there or the
+    #: printer does not say. A label only: the run checks no spool against a nozzle (#768).
+    extruder: int | None = None
+    side: Literal["L", "R"] | None = None
 
 
 class SlotNeed(BaseModel):
@@ -163,6 +170,9 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
     #: printer: a class target nobody has narrowed yet has no hardware to read.
     nozzles: list[NozzleInfo] = Field(default_factory=list)
+    #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
+    #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
+    track_switch: bool = False
 
 
 class QueueFilaments(BaseModel):
@@ -526,11 +536,48 @@ async def gather_options(
     ``own_colours`` replace the colors the file reports, slot by slot: the file was
     recolored for a run's spools (#457), and the step shows the model's.
     """
+    (options,) = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=[plate_id],
+        fallback_colours=fallback_colours,
+        own_colours=own_colours,
+    )
+    return options
+
+
+async def gather_plate_options(
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    printer_id: int | None = None,
+    plate_ids: Sequence[int | None],
+    fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
+) -> list[FilamentOptions]:
+    """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
+
+    The spools, assignments and printer are the same for every plate, so they are read
+    once (#480); only each plate's slots are read per plate, concurrently. The reads
+    keep the single-plate order, spools, assignments, the plates, then the printer and
+    its inventory-remain, so the same failure surfaces either way: a plate's error beats
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
     spools = await client.spools()
     assignments = await client.spool_assignments()
-    requirements = await _requirements(
-        client, library_file_id, plate_id, fallback_colours, own_colours
+
+    answers = await asyncio.gather(
+        *(
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            for plate in plate_ids
+        ),
+        return_exceptions=True,
     )
+    per_plate: list[list[SlotNeed]] = []
+    for answer in answers:
+        if isinstance(answer, BaseException):
+            raise answer
+        per_plate.append(answer)
 
     printer = None
     slot_materials: list[SlotMaterial] = []
@@ -538,14 +585,17 @@ async def gather_options(
         printer = await client.printer(printer_id)
         slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
-    return build_options(
-        library_file_id=library_file_id,
-        spools=spools,
-        assignments=assignments,
-        requirements=requirements,
-        printer=printer,
-        slot_materials=slot_materials,
-    )
+    return [
+        build_options(
+            library_file_id=library_file_id,
+            spools=spools,
+            assignments=assignments,
+            requirements=requirements,
+            printer=printer,
+            slot_materials=slot_materials,
+        )
+        for requirements in per_plate
+    ]
 
 
 async def _requirements(

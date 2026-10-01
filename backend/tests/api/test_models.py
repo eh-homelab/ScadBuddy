@@ -4,11 +4,13 @@ import json
 import os
 import shutil
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from typing import NoReturn
+from unittest.mock import create_autospec, patch
 
 import httpx
 import pytest
@@ -19,9 +21,11 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.presets import PresetStore
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES, set_fake_env
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -287,6 +291,53 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     assert (paths.outputs / "unknown").exists()
     assert "could not check a model for orphans" in caplog.text
     assert "could not list for orphans" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        ("is_dir",),
+        ("iterdir",),
+        ("exists",),
+        ("rmtree", "unlink"),
+        ("is_dir", "iterdir", "exists", "rmtree", "unlink"),
+    ],
+    ids=["roots", "listings", "liveness", "removals", "everything"],
+)
+def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...]) -> None:
+    """#176: `main.lifespan` and `Catalogue.delete` call `sweep_orphans` unguarded, so
+    it must swallow every filesystem error itself: a root it cannot check, a listing,
+    a slug's liveness and a removal, and the saved presets' pass."""
+    (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
+    paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+
+    def sweep_presets(is_live: Callable[[str], bool]) -> list[str]:
+        is_live("gone")
+        raise OSError("EIO")
+
+    presets = create_autospec(PresetStore, instance=True)
+    presets.sweep_orphans.side_effect = sweep_presets
+    catalogue = Catalogue(paths, presets=presets, wrapper_prefix=WRAPPER_PREFIX)
+
+    def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError("EIO")
+
+    targets = {
+        "is_dir": patch.object(Path, "is_dir", fail),
+        "iterdir": patch.object(Path, "iterdir", fail),
+        "exists": patch.object(Path, "exists", fail),
+        "rmtree": patch("scadbuddy.library.catalogue.shutil.rmtree", fail),
+        "unlink": patch.object(Path, "unlink", fail),
+    }
+    with ExitStack() as stack:
+        for name in failing:
+            stack.enter_context(targets[name])
+        removed = catalogue.sweep_orphans()
+
+    assert removed == []
+    presets.sweep_orphans.assert_called_once()
 
 
 def test_a_new_model_does_not_inherit_a_gone_models_leftovers(

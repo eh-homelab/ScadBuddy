@@ -6,12 +6,14 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Response, status
+from pydantic import ValidationError
 
 from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
     FetcherDep,
+    FontsDep,
     HistoryDep,
     PathsDep,
     PresetsDep,
@@ -23,10 +25,14 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
+    MAX_PRESET_DESCRIPTION,
     MAX_PRESET_NAME,
+    MAX_PRESET_TAG,
+    MAX_PRESET_TAGS,
     TEMPLATE_ID_PREFIX,
     ParamPreset,
     ParamPresetCreate,
@@ -57,6 +63,7 @@ async def _require_valid(
     config: Config,
     assets: AssetStore,
     fetcher: CheckoutFetcher,
+    fonts: FontService,
 ) -> None:
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
@@ -68,6 +75,7 @@ async def _require_valid(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
 
 
@@ -114,7 +122,10 @@ def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -
         "Saves a named set of parameter values on any template, built-in or mine. The "
         "values are checked as a render checks them (422 naming an unknown parameter "
         f"or a wrong type). Names are at most {MAX_PRESET_NAME} characters and unique "
-        "per template, ignoring case (409)."
+        "per template, ignoring case (409). An optional `description` (short Markdown, "
+        f"at most {MAX_PRESET_DESCRIPTION} characters) and `tags` (at most "
+        f"{MAX_PRESET_TAGS}, each at most {MAX_PRESET_TAG} characters; trimmed, and "
+        "each kept once ignoring case) describe it (422 past a limit)."
     ),
 )
 async def create_preset(
@@ -127,6 +138,7 @@ async def create_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     await _require_valid(
@@ -137,6 +149,7 @@ async def create_preset(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
     try:
         return await asyncio.to_thread(presets.create, slug, body)
@@ -170,6 +183,7 @@ async def duplicate_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     try:
@@ -184,8 +198,21 @@ async def duplicate_preset(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
-    copy = ParamPresetCreate(name=body.name, inputs=source.inputs or legacy_inputs(source.params))
+    # The original's details come along too (#327): only the name is the copy's own.
+    # Every write path checks inputs before storing them, so this should not fail; a
+    # stored value that slipped past those checks is a 422 here, never a 500.
+    try:
+        copy = ParamPresetCreate(
+            name=body.name,
+            inputs=source.inputs or legacy_inputs(source.params),
+            description=source.description,
+            tags=source.tags,
+        )
+    except (InputsError, ValidationError) as error:
+        detail = str(error.errors()[0]["msg"]) if isinstance(error, ValidationError) else str(error)
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
     try:
         return await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError:
@@ -197,10 +224,11 @@ async def duplicate_preset(
 @router.patch(
     "/models/{slug}/presets/{preset_id}",
     response_model=ParamPreset,
-    summary="Rename a preset or replace its values",
+    summary="Change a preset's name, values or details",
     description=(
-        "`params`, when given, replaces the preset's values whole. A template's own "
-        "presets are read-only (403)."
+        "Each field given replaces the old one whole: `params` its values, "
+        "`description` and `tags` its details (an empty string or list clears them). "
+        "A template's own presets are read-only (403)."
     ),
 )
 async def update_preset(
@@ -214,6 +242,7 @@ async def update_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
@@ -226,6 +255,7 @@ async def update_preset(
             config=config,
             assets=assets,
             fetcher=fetcher,
+            fonts=fonts,
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)

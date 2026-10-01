@@ -3,33 +3,41 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import assert_type
 
 import pytest
 
 from scadbuddy.api.jobs import _job_status
-from scadbuddy.render.inputs import MAX_INPUTS_BYTES, InputsError, legacy_inputs, normalize_inputs
+from scadbuddy.render.inputs import (
+    MAX_INPUTS_BYTES,
+    InputsDisagreeError,
+    InputsError,
+    legacy_inputs,
+    normalize_inputs,
+)
 from scadbuddy.render.job_models import Job, now
+from scadbuddy.render.schema import ParamValue
 
 
 def test_bare_params_are_read_as_version_zero_inputs() -> None:
-    assert normalize_inputs(None, {"width": 12}) == {"params": {"width": 12}, "v": 0}
+    assert normalize_inputs(None, {"width": 12}).data == {"params": {"width": 12}, "v": 0}
 
 
 def test_nothing_at_all_is_empty_params() -> None:
-    assert normalize_inputs(None, None) == {"params": {}, "v": 0}
+    assert normalize_inputs(None, None).data == {"params": {}, "v": 0}
 
 
 def test_ui_keys_are_kept_beside_params() -> None:
     raw = {"params": {"width": 12}, "house": {"storeys": 2}, "v": 3}
-    assert normalize_inputs(raw, None) == raw
+    assert normalize_inputs(raw, None).data == raw
 
 
 def test_inputs_without_params_get_empty_params() -> None:
-    assert normalize_inputs({"tab": "lid"}, None) == {"tab": "lid", "params": {}, "v": 0}
+    assert normalize_inputs({"tab": "lid"}, None).data == {"tab": "lid", "params": {}, "v": 0}
 
 
 def test_params_that_agree_with_inputs_are_accepted() -> None:
-    assert normalize_inputs({"params": {"width": 1}}, {"width": 1})["params"] == {"width": 1}
+    assert normalize_inputs({"params": {"width": 1}}, {"width": 1}).params == {"width": 1}
 
 
 def test_params_that_disagree_with_inputs_are_refused() -> None:
@@ -37,9 +45,23 @@ def test_params_that_disagree_with_inputs_are_refused() -> None:
         normalize_inputs({"params": {"width": 1}}, {"width": 2})
 
 
+def test_a_disagreement_is_its_own_error_type() -> None:
+    """Callers choose their wording by type, never by the message's text."""
+    with pytest.raises(InputsDisagreeError):
+        normalize_inputs({"params": {"width": 1}}, {"width": 2})
+    with pytest.raises(InputsError) as refused:
+        normalize_inputs({"params": {"width": 1}, "v": -1}, None)
+    assert not isinstance(refused.value, InputsDisagreeError)
+
+
 def test_params_that_differ_only_in_type_disagree() -> None:
     with pytest.raises(InputsError, match="disagree"):
         normalize_inputs({"params": {"flag": True}}, {"flag": 1})
+
+
+def test_the_same_nan_in_params_and_inputs_is_named_as_nan_not_disagreement() -> None:
+    with pytest.raises(InputsError, match="NaN"):
+        normalize_inputs({"params": {"width": float("nan")}}, {"width": float("nan")})
 
 
 @pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
@@ -85,3 +107,22 @@ def test_oversized_inputs_are_refused() -> None:
 
 def test_legacy_inputs() -> None:
     assert legacy_inputs({"width": 3}) == {"params": {"width": 3}, "v": 0}
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_bare_params_that_are_not_json_are_refused(value: float) -> None:
+    with pytest.raises(InputsError, match="no NaN or Infinity"):
+        normalize_inputs(None, {"width": value})
+
+
+def test_bare_params_past_the_size_cap_are_refused() -> None:
+    with pytest.raises(InputsError, match=f"at most {MAX_INPUTS_BYTES}"):
+        normalize_inputs(None, {"label": "x" * MAX_INPUTS_BYTES})
+
+
+def test_normalised_params_keep_their_type() -> None:
+    """#706 gate: the route hands `params` to checks typed `Mapping[str, ParamValue]`;
+    mypy checks this test, so `Any` here fails the type check."""
+    normalized = normalize_inputs({"params": {"width": 1}, "ui": {}}, None)
+    assert_type(normalized.params, dict[str, ParamValue])
+    assert normalized.data["params"] is normalized.params

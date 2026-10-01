@@ -9,8 +9,16 @@ export class HostInputError extends Error {
   override name = 'HostInputError'
 }
 
+/**
+ * Every member must be stable for the life of a mount: closures over refs, as
+ * `CustomizePage` builds them, never over one render's state. `TemplateUi` hands each
+ * mount the `deps` it mounted with (so a host a template keeps after its unmount never
+ * reaches the next one's) and does not rewire a mounted host when the `deps` prop alone
+ * changes.
+ */
 export interface HostDeps {
   slug: string
+  /** The revision the module's files come from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
   version: string | undefined
   getSchema(): CustomizerSchema
   getInputs(): JsonObject
@@ -43,10 +51,31 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   const names = new Set(allParams(schema).map((param) => param.name))
   for (const [name, value] of Object.entries(params)) {
     if (!names.has(name)) throw new HostInputError(`inputs.params.${name}: model.scad has no parameter "${name}"`)
-    if (!['string', 'number', 'boolean'].includes(typeof value)) {
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
       throw new HostInputError(`inputs.params.${name} must be a number, string or boolean`)
     }
   }
+}
+
+/** The backend's cap on saved inputs (``render/inputs.py`` ``MAX_INPUTS_BYTES``). */
+const MAX_INPUTS_BYTES = 65536
+
+function finite(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(finite)
+  if (isJsonObject(value)) return Object.values(value).every(finite)
+  return true
+}
+
+/** What ``normalize_inputs`` would refuse, refused here, before it is on screen. */
+function checkedInputs(inputs: JsonObject): void {
+  const v = inputs['v']
+  if (v !== undefined && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) {
+    throw new HostInputError('inputs.v must be a non-negative integer')
+  }
+  if (!finite(inputs)) throw new HostInputError('inputs must be JSON: no NaN or Infinity')
+  const size = new TextEncoder().encode(JSON.stringify(inputs)).length
+  if (size > MAX_INPUTS_BYTES) throw new HostInputError(`inputs are ${size} bytes; at most ${MAX_INPUTS_BYTES}`)
 }
 
 function unmounted(): Promise<never> {
@@ -56,10 +85,17 @@ function unmounted(): Promise<never> {
 export function createHost(deps: HostDeps): HostHandle {
   const listeners = new Set<(inputs: JsonObject) => void>()
   let live = true
+  /** Every call checks it: a disposed host never reads or acts on the page again. */
+  function alive(): void {
+    if (!live) throw new Error('the template UI is unmounted')
+  }
   const host: Host = {
     api: UI_API_CURRENT,
     inputs: {
-      get: () => structuredClone(deps.getInputs()),
+      get: () => {
+        alive()
+        return structuredClone(deps.getInputs())
+      },
       set: (patch) => {
         if (!live) {
           console.warn('ScadBuddy: a template UI wrote its inputs after it was unmounted; ignored')
@@ -68,9 +104,11 @@ export function createHost(deps: HostDeps): HostHandle {
         checkedParams(deps.getSchema(), patch)
         const next = mergePatch(deps.getInputs(), structuredClone(patch))
         if (!isJsonObject(next)) throw new HostInputError('inputs must stay a JSON object')
+        checkedInputs(next)
         deps.setInputs(next)
       },
       subscribe: (fn) => {
+        if (!live) return () => undefined
         listeners.add(fn)
         return () => {
           listeners.delete(fn)
@@ -78,6 +116,7 @@ export function createHost(deps: HostDeps): HostHandle {
       },
     },
     schema: async (file = 'model.scad') => {
+      alive()
       if (file !== 'model.scad') {
         throw new Error(`only model.scad has a customizer schema in host API v1, not ${file}`)
       }

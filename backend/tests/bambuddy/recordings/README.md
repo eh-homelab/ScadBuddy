@@ -15,7 +15,6 @@ Every request was a `GET`. Access codes are nulled and serials/IPs replaced.
 | `printers.json` | `GET /api/v1/printers/` |
 | `printers-no-trailing-slash-404.json` | `GET /api/v1/printers` — **404**, see below |
 | `library-folders.json` | `GET /api/v1/library/folders` |
-| `slicer-pipelines.json` | `GET /api/v1/slicer-pipelines/` |
 | `slicer-presets.json` | `GET /api/v1/slicer/presets`, truncated to 3 rows per tier |
 | `external-links.json` | `GET /api/v1/external-links/` |
 | `queue-item.json` | one row of `GET /api/v1/queue/` |
@@ -32,8 +31,6 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
 | `local-presets.json` | `GET /api/v1/local-presets/` |
 | `projects.json` | `GET /api/v1/projects/` |
 | `folders-by-project.json` | `GET /api/v1/library/folders/by-project/1` |
-| `slicer-pipelines-configured.json` | `GET /api/v1/slicer-pipelines/`, now that one exists |
-| `pipeline-runs.json` | `GET /api/v1/slicer-pipelines/1/runs` |
 
 Added for #87, over the ingress on 2026-09-24 (still every request a `GET`):
 
@@ -49,17 +46,10 @@ Added for #89 and #79, same day and the same way:
 
 | File | Source |
 |---|---|
-| `pipeline-run.json` | `GET /api/v1/pipeline-runs/1` — a **real** run, and a failed one |
 | `library-folders-nested.json` | `GET /api/v1/library/folders`, re-read once a folder had children |
 
 `tag_uid` and `tray_uuid` are replaced in the two inventory files: they are the RFID
 identities of physical spools and nothing in ScadBuddy reads them.
-
-Added for #88 on 2026-09-24 (a `GET`):
-
-| File | Source |
-|---|---|
-| `slicer-pipeline.json` | `GET /api/v1/slicer-pipelines/1` |
 
 Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit `serial_number` values, tray `tag_uid` (RFID identifier), and `tray_uuid` are redacted (see Step 1 command):
 
@@ -69,13 +59,23 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
 | `printer-status-rack.json` | `GET /api/v1/printers/1/status` |
 | `slicer-presets-h2c.json` | `GET /api/v1/slicer/presets` |
 
+Added for #469 on 2026-09-28, over the ingress (a `GET`, no auth). AMS and nozzle-rack
+`serial_number`, tray `tag_uid` and `tray_uuid` are replaced with `REDACTED`:
+
+| File | Source |
+|---|---|
+| `printer-status-fts.json` | `GET /api/v1/printers/1/status` — the Filament Track Switch fitted, right 0.2 HS00, left 0.4 HH01 |
+
+- **With the switch fitted, `ams_extruder_map` is `{}`** and `ams_switch_inlet` names each
+  AMS's inlet instead (`{"0":"B","1":"B","128":"A","2":"A"}`). Inlet A feeds the left
+  extruder and B the right, and `nozzles[0]` is the right extruder, `nozzles[1]` the left.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
   first `/settings/test` implementation both used the slashless form.
 - **Ids are integers** everywhere — folders, files, printers, pipelines, links, jobs.
-- **`printers/`, `library/folders` and `external-links/` answer with a bare list**, while
-  `slicer-pipelines/` wraps its rows in `{"pipelines": [...]}`.
+- **`printers/`, `library/folders` and `external-links/` answer with a bare list.**
 - **`bed_levelling` and `flow_cali` on `POST /queue/` are `"off" | "on" | "auto"`**, not
   booleans. `layer_inspect` and `timelapse` default to `false`, not `true`.
 - **`POST /library/files/{id}/slice` spells the plate `plate`**; `POST /queue/` spells it
@@ -112,11 +112,6 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
 - **`local-presets` is not the `local` tier of `/slicer/presets`.** It is grouped by type
   rather than source, its ids are integers, and `compatible_printers` /
   `default_filament_colour` are JSON-encoded **strings** there, not lists.
-- **`SlicerPipelineCreate` carries no target or fanout fields** even though
-  `SlicerPipelineResponse` returns them, so a pipeline cannot be created pre-targeted.
-- **`check-eligibility` answers 200 with the report**; only `run` turns the same report
-  into a 409. Under `target_kind: "printer_class"` its `ok` means *at least one* printer
-  passes, and the per-printer reasons are in `printer_reports`, not `issues`.
 - **`POST /api/v1/library/folders/` needs the trailing slash**, while `folders()` reads
   the slashless `GET /api/v1/library/folders`. Both are real routes here, unlike
   `/printers`.
@@ -153,18 +148,6 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
 - **`/inventory/assignments` is unfiltered across every printer** while
   `/printers/{id}/inventory-remain` covers one. Joining them on `(ams_id, tray_id)`
   alone gives a spool in printer B's AMS 0 slot 1 printer A's remaining weight.
-- **A failed pipeline run keeps reporting `status: "in_progress"`.** `pipeline-run.json`
-  is a real run whose slice failed: `status: "in_progress"`, `copies_in_progress: 1`,
-  `copies_failed: 0` — *and* `completed_at` set, `sliced_library_file_id: null` and
-  `error_message: "Slice failed: The selected printer is not compatible with the process
-  preset in the 3mf."`. Neither the status nor the copy counters ever move, so a poll
-  built on either never terminates. **`completed_at` is the terminal signal.**
-- **`GET /api/v1/pipeline-runs/{run_id}` exists** — a single-run read that needs no
-  pipeline id, which is what makes following a recorded run id possible. The
-  `/slicer-pipelines/{id}/runs` list is not needed for it.
-- **`jobs[].queue_entry_id` is null until the background task has created the entry.**
-  The recorded run's one job is still `status: "pending"` with no printer and no queue
-  entry, minutes after the run finished — because nothing was sliced to queue.
 - **`GET /api/v1/library/folders` answers with a tree, not a flat list.** A sub-folder
   arrives inside its parent's `children` rather than alongside it —
   `library-folders-nested.json` has `Supplies` carrying two. The older
@@ -185,10 +168,6 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
   `/app/backend/app/api/routes/pipeline_runs.py` in the running 1.2.5.5 pod on
   2026-09-24, not inferred from the spec. This is why a send carrying print options
   slices and queues itself from the pipeline's own presets instead of running it.
-- **`GET /slicer-pipelines/{id}` returns the same shape as a row of the list route**,
-  so one model covers both — including `target_kind`, `target_printer_id` and
-  `target_model_class`, which is what lets a slice-and-queue send aim at whatever the
-  pipeline aims at.
 
 ## What could not be recorded
 
@@ -199,16 +178,6 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
 - **Slice-job and enqueue responses.** Both need a `POST` against the live instance, which
   was out of bounds. `queue-item.json` is a real `PrintQueueItemResponse` read back from
   `GET /api/v1/queue/` — the same schema `POST /api/v1/queue/` returns.
-- **A `PipelineRunResponse` with `jobs[]`, and an eligibility report.** Same reason: both
-  need a `POST`. `pipeline-runs.json` is genuinely `{"runs": [], "total": 0}` — no run has
-  ever been made against this pipeline — so the run-shape tests build their bodies from
-  Bambuddy's `openapi.json` inline instead.
-- **Which API-key scope guards `/slicer-pipelines/`.** This instance runs with
-  authentication disabled, so a key's `can_*` flags are never consulted. The authoritative
-  scope list is `APIKeyCreate` in Bambuddy's `openapi.json` (`can_read_status`,
-  `can_manage_library`, `can_queue`, `can_manage_projects`, …); the pipeline routes are
-  mapped to `Manage Queue` on the reasoning that running one queues prints, and that
-  mapping is the one thing here that is inferred rather than measured.
 
 ## Where an "Edit in ScadBuddy" link can live (#80)
 
@@ -242,6 +211,35 @@ every request a `GET`):
 `GET /archives/35/timelapse` and `/photos/{name}` with `Range: bytes=100-199` answered
 `206` with `Content-Range: bytes 100-199/<size>` and `Accept-Ranges: bytes`: Bambuddy's
 `FileResponse` serves ranges itself, so the proxy passes the header through.
+
+Added for #313 on 2026-09-28, from Bambuddy 1.2.5.6 over the ingress (every request a
+`GET` except the one probe slice below; `created_by_username` nulled):
+
+| File | Source |
+|---|---|
+| `library-files-root.json` | `GET /api/v1/library/files/` (the root: `include_root` defaults to true) |
+| `library-files-folder.json` | `GET /api/v1/library/files/?folder_id=4` (3MF, sliced 3MF and STL) |
+| `library-plates-single.json` | `GET /api/v1/library/files/89/plates` |
+| `library-plates-multi.json` | `GET /api/v1/library/files/67/plates` |
+| `library-plates-stl.json` | `GET /api/v1/library/files/46/plates` |
+| `filament-requirements-stl.json` | `GET /api/v1/library/files/46/filament-requirements` |
+| `filament-requirements-rgba.json` | `GET /api/v1/library/files/67/filament-requirements` (colors as `#RRGGBBAA`) |
+| `filament-requirements-plate-unsliced.json` | `GET /api/v1/library/files/89/filament-requirements?plate_id=1` |
+
+- **`GET /library/files/` answers a bare list of `FileListResponse`** and is filtered by
+  `folder_id`; without one it lists the root only. There is no pagination.
+- **`/library/files/{id}/plates` declares no schema** (its 200 is `{}`). The body is
+  `{file_id, filename, plates: [{index, name, objects, object_count, has_thumbnail,
+  thumbnail_url, print_time_seconds, filament_used_grams, filaments}], is_multi_plate,
+  ...}`. An STL answers `plates: []`.
+- **An STL's `filament-requirements` is `filaments: []`.**
+- **A plate-scoped read of an unsliced 3MF marks every slot `used_in_plate: true`**
+  (file 89), so it cannot narrow the slots a plate uses. **Over the ingress, the first
+  plate-scoped read of a large file can 504 after 15 s** (Envoy's route timeout) while
+  Bambuddy parses it (file 67, 2026-09-28); it answers in under a second after that.
+  ScadBuddy reaches Bambuddy by its Service URL, which has no such limit.
+- **Slicing a raw STL (#313 probe, the only write):** PASS: job 24 completed, sliced file
+  177 left in the library. STL_PRINTABLE = yes.
 
 ## Blob store (#426): not yet measured against a live instance
 

@@ -1,4 +1,10 @@
-import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
+import type {
+  FilamentOptions,
+  FilamentWarning,
+  SlotChoice,
+  SlotNeed,
+  SpoolOption,
+} from '../api/types'
 
 /**
  * View-model helpers for the filament picker (#87). No React and no fetching: the
