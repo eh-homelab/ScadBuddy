@@ -131,3 +131,8 @@ async def test_an_identical_arrange_coalesces(
     assert first.id == second.id != third.id
     assert first.kind == "arrange"
     assert client.start_workflow.await_count == 2
+    # Counted as arranges, not renders (final review M4).
+    sample = svc.metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_jobs_submitted_total", {"kind": "arrange"}) == 2
+    assert sample("scadbuddy_render_jobs_coalesced_total", {"kind": "arrange"}) == 1
+    assert sample("scadbuddy_render_jobs_submitted_total", {"kind": "render"}) == 0

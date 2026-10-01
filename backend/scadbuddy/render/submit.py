@@ -170,15 +170,15 @@ class RenderService:
                 max_pending=self.config.render_queue_max,
             )
         except QueueFullError as error:
-            self.metrics.render_rejected.inc()
+            self.metrics.render_rejected.labels("render").inc()
             raise QueueFullError(error.depth, self.retry_after()) from None
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
             await self._cancel_workflow(submitted.superseded)
         if submitted.coalesced:
-            self.metrics.render_coalesced.inc()
+            self.metrics.render_coalesced.labels("render").inc()
             return submitted.job
-        self.metrics.render_submitted.inc()
+        self.metrics.render_submitted.labels("render").inc()
         try:
             await self._start(submitted.job)
         except Exception as error:
@@ -215,12 +215,12 @@ class RenderService:
                 max_pending=self.config.render_queue_max,
             )
         except QueueFullError as error:
-            self.metrics.render_rejected.inc()
+            self.metrics.render_rejected.labels("arrange").inc()
             raise QueueFullError(error.depth, self.retry_after()) from None
         if submitted.coalesced:
-            self.metrics.render_coalesced.inc()
+            self.metrics.render_coalesced.labels("arrange").inc()
             return submitted.job
-        self.metrics.render_submitted.inc()
+        self.metrics.render_submitted.labels("arrange").inc()
         try:
             await self._start(submitted.job)
         except Exception as error:
