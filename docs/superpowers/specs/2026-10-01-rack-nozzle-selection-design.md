@@ -92,7 +92,17 @@ same picks, and so a group with one usable position is not starved by a group
 that had several. Among the eligible positions:
 
 1. **Material safe for the filament.** An abrasive filament needs a hardened
-   nozzle. A filament is abrasive when its material names `CF`, `GF` or `Glow`.
+   nozzle. A filament is abrasive when either:
+   - its `filament-requirements` `type`, split on `-` and spaces, has a `CF` or
+     `GF` token (case-insensitive). Measured 2026-10-01 on the deployed slicer's
+     Bambu profiles: fiber filaments are always typed with a suffix, `PLA-CF`,
+     `PETG-CF`, `PA6-CF`, `PA-GF`, `ABS-GF`, `PPA-GF` and so on; or
+   - the inventory spool ScadBuddy assigned to it has `Glow` in its `subtype` or
+     `material`. Glow cannot be read from `type`: `Bambu PLA Glow @base`
+     inherits `fdm_filament_pla`, so its `type` is plain `PLA`. A group whose
+     spool is unknown (no inventory spool assigned) is judged by `type` alone,
+     and the dialog says Glow could not be checked.
+
    A group is abrasive when **any** of its filaments is: several filaments can
    share one hotend, and taking only the first (as the group's color does) could
    send a CF filament through brass with no warning. A
@@ -154,8 +164,11 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
 | `print_seconds` | bigint | null when the archive has no time |
 | `grams` | numeric | null when the archive has no weight |
 
-- Every status read that ScadBuddy already makes for the print dialog inserts
-  `rack_nozzle_seen` for each serial it sees.
+- `rack_nozzle_seen` is written from exactly two status reads, both on the
+  print path: `choices.py`'s (the dialog's choices read) and `choose_rack`'s.
+  Not from `BambuddyClient.printer_status` itself: `download.py` and
+  `project_file.py` read status for other reasons, and "first seen" means first
+  seen by the print flow, which is what Oldest and Newest first rank on.
 - The pick writes its `rack_nozzle_picks` rows right after `POST /queue/` returns
   the item id.
 - The settle writes `rack_nozzle_prints`. `runs.py` cannot: a run finishes at
@@ -167,7 +180,11 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
   output (`PrintLinkStore.for_output`, #306) whose `queue_item_id` has picks,
   reads each with `GET /archives/{id}` (`ArchiveDetail`), and writes one row per
   archive and picked group. This runs **after** `observe` has returned (so
-  `print.settled` is already published) and before `_done`. It is advisory:
+  `print.settled` is already published) and before `_done`, and only on the
+  `progress is not None and progress.settled` branch. Today's
+  `if progress is None or progress.settled` also covers `progress is None` (an
+  output never printed through `slice_queue`, see `progress_for`), which has no
+  picks and must not reach the write. It is advisory:
   every exception from it, Bambuddy's or the database's, is caught and logged
   with the output id and archive id only (never a serial), and the watcher goes
   on to `_done` exactly as today. A failed write is not retried; that print's
@@ -218,7 +235,11 @@ it builds the `RackChoice`. `slice_and_queue` puts the choice on
 
 `print_run.py`, its only caller, builds the callback:
 
-1. Read `filament-requirements` for the sliced file and the live `nozzle_rack`.
+1. Read `filament-requirements` for the sliced file, and re-read printer status
+   for the live `nozzle_rack`. This is a fresh read on every call, once per
+   plate, never `PreparedRun.printer_status`: on an all-plates print each plate
+   slices in turn, and a rack read before the first slice can be stale by the
+   last.
 2. Collapse the requirements into groups. Several filaments can share one
    `group_id` (two colors on one hotend, §8), so `print_run.py` keeps one
    `RackGroup` per `group_id`, with that group's `group` fields and the material
@@ -235,8 +256,17 @@ The pure ranking lives in `bambuddy/rack.py`, with no I/O:
 
 ```python
 rank_rack(groups: list[RackGroup], rack: list[NozzleRackSlot],
-          algorithm: Algorithm, usage: Mapping[str, Usage]) -> dict[int, Pick]
+          algorithm: Algorithm, usage: Mapping[str, Usage],
+          manual: Mapping[int, int]) -> dict[int, Pick]
 ```
+
+`manual` is the user's manual picks, `{group_id: position}`. They are placed
+first and their positions are excluded for every other group, so a manual pick
+and a ranked one can never name the same position. A manual pick that is not
+eligible for its group, or two manual picks on one position, are refused before
+anything is sliced: `/run` answers 422 naming the group. The Advanced select
+lists only eligible positions and disables one already taken by another group,
+so the refusal is a guard, not a path the UI offers.
 
 `Pick` is internal and carries the serial: `group_id`, `position`, `serial`,
 `reason`, `unsafe_material: bool` and the ranked `candidates`. `usage` is keyed
@@ -309,6 +339,10 @@ so the trade is accepted.
 - `bambuddy/watcher.py`: on the first settled read, write the print's
   `rack_nozzle_prints` rows from its linked archives.
 - Migration: `rack_nozzle_seen`, `rack_nozzle_picks` and `rack_nozzle_prints`.
+- `bambuddy/rack_usage.py` (new): `RackUsageStore`, the one store that owns all
+  three tables, on the `PrintLinkStore` pattern (`print_links.py`): `seen()`,
+  `record_picks()`, `record_prints()` and `usage(printer_id)`. `print_run.py`,
+  `choices.py` and `watcher.py` call it; none of them holds SQL.
 - `api/printing.py` / `/check`: rack options and picks per side.
 - Settings: `printer_rack_algorithms`, remembered and cleared like
   `printer_bed_types`.
@@ -340,6 +374,10 @@ fixtures (which use invented serials), or in commits.
   - two groups never sharing a position, with the more constrained group first;
   - `"0.2"` on the rack matching a `"0.20"` group;
   - an unknown code counted as not hardened;
+  - `PLA-CF`, `PA6-CF` and `ABS-GF` abrasive, `PLA` and `PLA-AERO` not;
+  - a `PLA` group whose spool's subtype is `Glow` abrasive;
+  - a manual pick reserved before the ranking, so no ranked group takes its
+    position; an ineligible or duplicated manual pick refused with 422;
   - a group of PLA and PLA-CF counted as abrasive;
   - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
     missing code or name matching either.
@@ -352,7 +390,10 @@ fixtures (which use invented serials), or in commits.
   - `actual_time_seconds` is used, and `print_time_seconds` only when it is null;
   - an archive with no `queue_item_id` is not counted;
   - an archive read or database write that raises is logged, writes nothing, and
-    the print still settles and publishes `print.settled` once.
+    the print still settles and publishes `print.settled` once;
+  - an output whose progress is `None` never reaches the write.
+- A `choose_rack` test: on a two-plate print the second plate's pick uses a
+  rack read after the first plate sliced.
 - A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
   and a raise from it queues the item without one.
 - `print_run.py` tests:
