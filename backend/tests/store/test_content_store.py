@@ -547,6 +547,46 @@ async def test_a_release_cancelled_midway_keeps_the_row(tmp_path: Path, pool: Po
     assert store.index.get("k") is not None
 
 
+class _SlowRemove(LocalContentBackend):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.removing = asyncio.Event()
+
+    async def remove(self, backend_id: str) -> None:
+        self.removing.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_release_cancelled_twice_still_puts_the_row_back(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case the shield is for: a second cancellation lands while the row is going
+    back. The re-insert finishes on its own, and `aclose` waits for it."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"p", name="p", scope=SCOPE, key="k")
+    backend = _SlowRemove(tmp_path / "remote")
+    store.backend = backend
+    swapping, go = threading.Event(), threading.Event()
+    swap = store.index.swap
+
+    def slow_swap(*args: Any, **kwargs: Any) -> Any:
+        swapping.set()
+        go.wait(10)
+        return swap(*args, **kwargs)
+
+    monkeypatch.setattr(store.index, "swap", slow_swap)
+    delete = asyncio.create_task(store.delete("k"))
+    await backend.removing.wait()
+    delete.cancel()  # mid-remove: the row starts going back
+    assert await asyncio.to_thread(swapping.wait, 10)
+    delete.cancel()  # mid-re-insert
+    with pytest.raises(asyncio.CancelledError):
+        await delete
+    go.set()
+    await store.aclose()
+    assert store.index.get("k") is not None
+
+
 async def test_a_failed_release_that_loses_to_a_put_releases_the_old_object(
     tmp_path: Path, pool: Pool
 ) -> None:
