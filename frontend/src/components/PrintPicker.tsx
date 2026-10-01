@@ -392,7 +392,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
 
           {choices && (
             <div className="space-y-3">
-              <AdvancedSwitch value={picker.advanced} onToggle={picker.toggleAdvanced} />
+              <AdvancedSwitch
+                value={picker.advanced}
+                onToggle={picker.toggleAdvanced}
+                disabled={projectCreating}
+              />
               {printers.length > 1 && (
                 <div>
                   <label htmlFor="print-printer" className="block text-[13px]">
@@ -499,7 +503,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                       value={project.value}
                       onChange={project.onChange}
                       list={project.list}
-                      disabled={project.disabled}
+                      disabled={project.disabled || projectCreating}
                       onCreating={reportProjectCreating}
                     />
                   ) : (
@@ -507,6 +511,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                       value={ownProjectId}
                       onChange={setOwnProjectId}
                       list={ownProjects}
+                      disabled={projectCreating}
                       onCreating={reportProjectCreating}
                     />
                   )}

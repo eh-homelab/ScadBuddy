@@ -1040,7 +1040,7 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
   })
 
-  it('keeps refusing to close when Advanced is switched off mid-create (#710 review)', async () => {
+  it('holds the Advanced switch, and a picker behind it, mid-create (#710 review)', async () => {
     function Harness() {
       const [open, setOpen] = useState(true)
       return (
@@ -1062,15 +1062,22 @@ describe('PrintPicker · Projects', () => {
     await user.click(screen.getByTestId('create-project'))
     await waitFor(() => expect(screen.getByTestId('project-select')).toBeDisabled())
 
-    // Simple mode unmounts the picker; the create is still outstanding.
-    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
-    await waitFor(() => expect(screen.queryByTestId('project-select')).toBeNull())
+    // Switching modes would unmount the picker running the create, so it is held.
+    const advanced = screen.getByRole('switch', { name: 'Advanced' })
+    expect(advanced).toBeDisabled()
+    await user.click(advanced)
+    expect(screen.getByTestId('project-select')).toBeDisabled()
     expect(screen.getByTestId('run-print')).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!)
     expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
 
     release()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    expect(advanced).toBeEnabled()
+    // Remounted by a mode round-trip once the create has settled, the picker is usable again.
+    await user.click(advanced)
+    await user.click(advanced)
+    expect(screen.getByTestId('project-select')).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
   })
