@@ -1,6 +1,4 @@
 const KEY = 'scadbuddy:stale-chunk-reload'
-/** A second failure this soon after a reload is not a stale page; reloading again would loop. */
-const LOOP_WINDOW_MS = 10_000
 
 /**
  * Reloads the page when a lazy chunk fails to load (#395).
@@ -8,21 +6,27 @@ const LOOP_WINDOW_MS = 10_000
  * A page loaded before a deploy (Bambuddy's sidebar frame stays open for days) still
  * names the old build's chunk hashes, which the server no longer has. Vite fires
  * `vite:preloadError` for a failed dynamic import; a reload fetches the current
- * `index.html` and with it the current chunk names. The last reload's time is kept in
- * sessionStorage so a chunk that is missing from the *new* build too surfaces its error
- * instead of reloading forever, while a later deploy in the same tab still recovers.
+ * `index.html` and with it the current chunk names.
+ *
+ * The guard is the build, not the clock. Before reloading, the build that failed is
+ * kept in sessionStorage; a failure in that same build again means the reload brought
+ * nothing new, so the error surfaces instead. However long a reload takes, a deploy
+ * costs at most two reloads (the stale build, then a broken new one), and a later
+ * deploy in the same tab still recovers.
+ *
+ * `build` names the running build. In a production bundle this module's URL is the
+ * hashed entry chunk, which changes whenever any chunk it can load changes.
  *
  * Returns a function that removes the listener.
  */
 export function installStaleChunkReload(
   target: Window = window,
   reload: () => void = () => target.location.reload(),
-  now: () => number = Date.now,
+  build: string = import.meta.url,
 ): () => void {
   const onPreloadError = (event: Event) => {
-    const last = read(target)
-    if (last !== null && now() - last < LOOP_WINDOW_MS) return
-    if (!write(target, now())) return
+    if (read(target) === build) return
+    if (!write(target, build)) return
     event.preventDefault()
     reload()
   }
@@ -30,19 +34,18 @@ export function installStaleChunkReload(
   return () => target.removeEventListener('vite:preloadError', onPreloadError)
 }
 
-function read(target: Window): number | null {
+function read(target: Window): string | null {
   try {
-    const value = Number(target.sessionStorage.getItem(KEY))
-    return value > 0 ? value : null
+    return target.sessionStorage.getItem(KEY)
   } catch {
     return null
   }
 }
 
 /** Without storage there is no loop guard, so a reload is not risked at all. */
-function write(target: Window, time: number): boolean {
+function write(target: Window, build: string): boolean {
   try {
-    target.sessionStorage.setItem(KEY, String(time))
+    target.sessionStorage.setItem(KEY, build)
     return true
   } catch {
     return false

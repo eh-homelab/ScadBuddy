@@ -10,9 +10,10 @@ function preloadError(): Event {
 describe('installStaleChunkReload', () => {
   const installed: Array<() => void> = []
 
-  function install(now: () => number) {
-    const reload = vi.fn()
-    installed.push(installStaleChunkReload(window, reload, now))
+  /** One page load of `build`; a reload is a fresh install, as in the browser. */
+  function load(build: string, reload = vi.fn()) {
+    installed.splice(0).forEach((remove) => remove())
+    installed.push(installStaleChunkReload(window, reload, build))
     return reload
   }
 
@@ -23,27 +24,37 @@ describe('installStaleChunkReload', () => {
   })
 
   it('reloads once when a chunk from an older build is missing', () => {
-    const reload = install(() => 1_000_000)
+    const reload = load('old')
     const event = preloadError()
     expect(reload).toHaveBeenCalledTimes(1)
     expect(event.defaultPrevented).toBe(true)
   })
 
-  it('does not loop when the reloaded page fails again straight away', () => {
-    let time = 1_000_000
-    const reload = install(() => time)
+  it('does not loop when the reload brings back the same build', () => {
+    const reload = load('old')
     preloadError()
-    time += 2_000
+    load('old', reload)
     const event = preloadError()
     expect(reload).toHaveBeenCalledTimes(1)
     expect(event.defaultPrevented).toBe(false)
   })
 
-  it('recovers again after a later deploy in the same tab', () => {
-    let time = 1_000_000
-    const reload = install(() => time)
+  it('stops after the new build fails too, however slow the reloads are', () => {
+    const reload = load('old')
     preloadError()
-    time += 60 * 60 * 1000
+    load('new', reload)
+    preloadError()
+    load('new', reload)
+    const event = preloadError()
+    expect(reload).toHaveBeenCalledTimes(2)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('recovers again after a later deploy in the same tab', () => {
+    const reload = load('old')
+    preloadError()
+    load('new', reload)
+    load('newer', reload)
     preloadError()
     expect(reload).toHaveBeenCalledTimes(2)
   })
@@ -52,7 +63,7 @@ describe('installStaleChunkReload', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new DOMException('blocked', 'SecurityError')
     })
-    const reload = install(() => 1_000_000)
+    const reload = load('old')
     const event = preloadError()
     expect(reload).not.toHaveBeenCalled()
     expect(event.defaultPrevented).toBe(false)

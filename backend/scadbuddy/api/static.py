@@ -11,6 +11,8 @@ INDEX_NAME = "index.html"
 ASSETS_DIR = "assets"
 
 #: Vite content-hashes every file under ``assets/``, so a URL there never changes meaning.
+#: Nothing else may land there: ``frontend/public/assets/<name>`` would be copied to the
+#: same path unhashed and cached for a year. Put un-hashed files at the root of ``public/``.
 IMMUTABLE = "public, max-age=31536000, immutable"
 #: Everything else, ``index.html`` above all, is revalidated on every load. Without it a
 #: browser caches ``index.html`` heuristically and, after a deploy, keeps asking for
