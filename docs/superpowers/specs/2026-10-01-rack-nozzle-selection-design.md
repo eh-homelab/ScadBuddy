@@ -78,24 +78,45 @@ The algorithm is remembered per printer, like `printer_bed_types`
 (`printer_rack_algorithms: dict[str, Algorithm]` in stored settings). It is shown
 and cleared in Settings' remembered choices.
 
-**Usage counter.** This is a new table, `rack_nozzle_usage`:
+**Usage counter.** Two new tables. Use is summed from one row per print, so a
+settle seen twice (two replicas, a restart) cannot count a print twice.
+
+`rack_nozzle_seen`, primary key `(printer_id, serial)`:
 
 | Column | Type | Notes |
 |---|---|---|
 | `printer_id` | int | |
 | `serial` | text | |
 | `first_seen_at` | timestamptz | |
-| `last_used_at` | timestamptz | |
-| `prints` | int | |
-| `print_seconds` | bigint | |
-| `grams` | numeric | |
 
-The primary key is `(printer_id, serial)`.
+`rack_nozzle_prints`, primary key `(queue_item_id, group_id)`:
 
-- Every status read that ScadBuddy already makes for the print dialog upserts
-  `first_seen_at` for each serial it sees.
-- When a run completes (`runs.py` already follows each run to the end), ScadBuddy
-  adds the run's duration and grams to the serial that was picked for it.
+| Column | Type | Notes |
+|---|---|---|
+| `queue_item_id` | int | |
+| `group_id` | int | |
+| `printer_id` | int | |
+| `serial` | text | the hotend picked for this group |
+| `picked_at` | timestamptz | |
+| `settled_at` | timestamptz | null until the print settles |
+| `print_seconds` | bigint | null when no archive was linked |
+| `grams` | numeric | null when no archive was linked |
+
+- Every status read that ScadBuddy already makes for the print dialog inserts
+  `rack_nozzle_seen` for each serial it sees (`ON CONFLICT DO NOTHING`).
+- The pick writes its `rack_nozzle_prints` rows right after `POST /queue/` returns
+  the item id.
+- The settle fills them. `runs.py` cannot: a run finishes at queue time, with no
+  duration or grams. The hook is `PrintWatcher` (`bambuddy/watcher.py`), which
+  follows every print server side until it settles, whether or not anyone is
+  looking. On the read where `ProgressObserver.observe` first sees the print
+  settled (the same point it publishes `print.settled`), the watcher reads the
+  queue item's linked archive (`PrintLinkStore`, #306) for `duration_seconds`
+  and `filament_used_grams`, and sets `settled_at`, `print_seconds` and `grams`
+  `WHERE settled_at IS NULL`. With no archive linked yet it sets `settled_at`
+  only: the print still counts, and its time and grams stay unknown.
+- A group's use is `count(*)`, `sum(print_seconds)` and `sum(grams)` over its
+  serial's settled rows. "Least used" orders by `print_seconds`, then prints.
 - The serial is recorded when the pick is made, because a hotend can be moved to
   another position later.
 - Until history builds up every count is 0, so color and then position decide. If
@@ -104,13 +125,28 @@ The primary key is `(printer_id, serial)`.
 
 ## 5. Where it runs and what the user sees
 
-**Backend.** In `print_run.py`, between the slice and the enqueue
-(`slice_and_queue` already has the sliced file id before `POST /queue/`):
+**Backend.** The seam is `slice_and_queue` (`bambuddy/dispatch.py`), the only
+place that holds the sliced file id (`sliced`) and builds the `QueueItemCreate`.
+Its existing `before_enqueue` hook takes no arguments and cannot set a queue
+field, so it gains a parameter:
+
+```python
+choose_rack: Callable[[int], Awaitable[RackChoice | None]] | None = None
+```
+
+It is called with `sliced` after the slice succeeds and before `before_enqueue`.
+A `RackChoice` carries `nozzle_rack_choice` (`{group_id: position}`) and the
+picks' serials. `slice_and_queue` puts the former on `QueueItemCreate` and returns
+the latter on `QueueOutcome`. `print_run.py`, its only caller, builds the callback:
 
 1. Read `filament-requirements` for the sliced file and the live `nozzle_rack`.
-2. Rank the rack for each `on_rack` group, and set `nozzle_rack_choice` from the
+2. Rank the rack for each `on_rack` group, and return the choice from the
    algorithm or the user's override.
-3. Record each pick's serial on the run, for the usage counter.
+3. After the enqueue, write the picks to `rack_nozzle_prints` against the
+   returned queue item id.
+
+A raise or `None` from the callback means no choice: the item is queued without
+`nozzle_rack_choice`, and Bambuddy picks, as today.
 
 The pure ranking lives in `bambuddy/rack.py` (`rank_rack(groups, rack,
 algorithm, usage) -> {group_id: Pick}`), with no I/O.
@@ -144,14 +180,22 @@ blocks Print.
 
 ## 6. Code changes
 
-- `bambuddy/models.py`: correct the `nozzle_rack_choice` comment to say group ids.
-  Add `serial_number` to `NozzleRackSlot`.
+- `bambuddy/models.py`:
+  - correct the `nozzle_rack_choice` comment to say group ids;
+  - add `serial_number` to `NozzleRackSlot`;
+  - add `group_id: int | None` and `group: FilamentGroup | None` to
+    `FilamentRequirement`, with a new `FilamentGroup` model (`on_rack`,
+    `nozzle_diameter`, `volume_type`, `filament_color`). Today the model parses
+    only `slot_id`, `type`, `color` and the usage fields, so `rank_rack` has no
+    input without this.
+- `bambuddy/dispatch.py`: the `choose_rack` parameter on `slice_and_queue`, and
+  the picks on `QueueOutcome`.
 - `bambuddy/rack.py` (new): the material table, the abrasive test and `rank_rack`.
-- `bambuddy/print_run.py`: the rank-and-choose step, and the pick's serial on the
-  run record.
-- `bambuddy/runs.py`: add the completed run's duration and grams to
-  `rack_nozzle_usage`.
-- Migration: `rack_nozzle_usage`.
+- `bambuddy/print_run.py`: the `choose_rack` callback, and writing the picks to
+  `rack_nozzle_prints` after the enqueue.
+- `bambuddy/watcher.py`: on the first settled read, fill the print's
+  `rack_nozzle_prints` rows from its linked archive.
+- Migration: `rack_nozzle_seen` and `rack_nozzle_prints`.
 - `api/printing.py` / `/check`: rack options and picks per side.
 - Settings: `printer_rack_algorithms`, remembered and cleared like
   `printer_bed_types`.
@@ -160,7 +204,7 @@ blocks Print.
 
 ## 7. Serials
 
-Serials go into the `rack_nozzle_usage` table and nowhere else. They never appear
+Serials go into the `rack_nozzle_seen` and `rack_nozzle_prints` tables and nowhere else. They never appear
 in logs, in API errors, in the print dialog (which shows positions), in test
 fixtures (which use invented serials), or in commits.
 
@@ -184,8 +228,12 @@ fixtures (which use invented serials), or in commits.
   - an unknown code counted as not hardened.
 - API tests for `/check` rack options and for `nozzle_rack_choice` on the queued
   item, with Bambuddy mocked.
-- A usage counter test: a completed run adds its time and grams to the picked
-  serial.
+- Usage tests:
+  - a settled print fills its row from the linked archive;
+  - a second settle of the same print changes nothing;
+  - a settle with no linked archive counts the print with null time and grams.
+- A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
+  and a raise from it queues the item without one.
 - Frontend tests: the Simple line, the warning, and the Advanced selects sending
   an explicit pick.
 - Live acceptance after deploy (unknown 3 above), recorded in §8.
