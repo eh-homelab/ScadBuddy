@@ -69,3 +69,11 @@ describe('installStaleChunkReload', () => {
     expect(event.defaultPrevented).toBe(false)
   })
 })
+
+describe('public/', () => {
+  // The server caches everything under assets/ for a year as immutable, because Vite
+  // content-hashes what it writes there. A public/assets/ file would land there unhashed.
+  it('has no assets/ folder', () => {
+    expect(Object.keys(import.meta.glob('/public/assets/**'))).toEqual([])
+  })
+})

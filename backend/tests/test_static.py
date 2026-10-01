@@ -82,6 +82,16 @@ def test_a_route_without_index_html_is_a_problem_document(
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
+def test_missing_asset_is_never_a_404_page(client: TestClient, tmp_path: Path) -> None:
+    # With a 404.html, StaticFiles returns the 404 instead of raising it.
+    (tmp_path / "dist" / "404.html").write_text("<!doctype html><p>gone</p>", encoding="utf-8")
+    response = client.get("/assets/Preview-fDSm7oxk.js")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["cache-control"] == REVALIDATE
+    assert "content-security-policy" not in response.headers
+
+
 def test_other_root_files_are_revalidated(client: TestClient) -> None:
     response = client.get("/favicon.svg")
     assert response.status_code == 200

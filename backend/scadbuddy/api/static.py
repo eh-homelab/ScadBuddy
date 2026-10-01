@@ -42,6 +42,13 @@ PAGE_CSP = (
 )
 
 
+def _missing_asset() -> Response:
+    """Returned, not raised: the app's problem handler would answer it without
+    get_response's Cache-Control. Plain text and no CSP, never a 404.html: not a document,
+    so nothing runs in it."""
+    return PlainTextResponse("Not Found", 404)
+
+
 class SPAStaticFiles(StaticFiles):
     """Serve the built bundle, falling back to ``index.html`` for client-side routes.
 
@@ -60,20 +67,22 @@ class SPAStaticFiles(StaticFiles):
         return response
 
     async def _response_or_fallback(self, path: str, scope: Scope) -> Response:
-        fallback = self.index.is_file() and not _is_asset(path)
-        # A missing file is *raised* as a 404, not returned, so both shapes are handled.
+        asset = _is_asset(path)
+        fallback = self.index.is_file() and not asset
+        # A missing file is usually *raised* as a 404, but returned when a 404.html exists,
+        # so both shapes are handled.
         try:
             response = await super().get_response(path, scope)
         except HTTPException as error:
-            if error.status_code == 404 and _is_asset(path):
-                # Returned, not raised: the app's problem handler would answer it without
-                # get_response's Cache-Control. Plain text and no CSP, as before: not a
-                # document, so nothing runs in it.
-                return PlainTextResponse("Not Found", 404)
-            if error.status_code != 404 or not fallback:
+            if error.status_code != 404 or not (asset or fallback):
                 raise
+            if asset:
+                return _missing_asset()
             response = FileResponse(self.index)
-        if response.status_code == 404 and fallback:
-            response = FileResponse(self.index)
+        if response.status_code == 404:
+            if asset:
+                return _missing_asset()
+            if fallback:
+                response = FileResponse(self.index)
         response.headers["Content-Security-Policy"] = PAGE_CSP
         return response
