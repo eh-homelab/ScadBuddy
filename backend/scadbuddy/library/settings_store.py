@@ -435,6 +435,15 @@ class SettingsStore:
         for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
+        if changes.get("store_backend") == "bambuddy":
+            current = self.load()
+            url = changes.get("bambuddy_url", current.bambuddy_url)
+            inbox = changes.get("library_folder_id", current.library_folder_id)
+            if not url or inbox is None:
+                raise StoreNotReadyError(
+                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
+                    " saved first"
+                )
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)
