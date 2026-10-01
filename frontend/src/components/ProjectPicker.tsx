@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { ProjectRequest, ProjectView } from '../api/types'
@@ -32,29 +32,35 @@ const NEW = 'new'
  * room for secondary text, so it goes in the label. The folder is named first because it
  * is the part that decides whether the send has anywhere to go.
  */
-function optionLabel(project: ProjectView, projects: ProjectView[]): string {
+function optionLabel(project: ProjectView, path: string): string {
   const parts = [project.folder_name ?? 'no folder yet']
   if (project.archive_count > 0) parts.push(`${project.archive_count} archived`)
   if (project.queue_count > 0) parts.push(`${project.queue_count} queued`)
-  return `${breadcrumb(project, projects)} · ${parts.join(' · ')}`
+  return `${path} · ${parts.join(' · ')}`
 }
 
 /**
- * #930 — a nested project named by its path, `Parent › Child`, since a native `<option>`
- * cannot indent. A parent missing from the list (or a cycle) ends the path there.
+ * #930 — each project named by its path, `Parent › Child`, since a native `<option>`
+ * cannot indent; keyed by id, built once per list. A parent missing from the list (or a
+ * cycle) ends the path there.
  */
-function breadcrumb(project: ProjectView, projects: ProjectView[]): string {
-  const names = [project.name]
-  const seen = new Set([project.id])
-  let parentId = project.parent_id ?? null
-  while (parentId !== null && !seen.has(parentId)) {
-    seen.add(parentId)
-    const parent = projects.find((row) => row.id === parentId)
-    if (!parent) break
-    names.unshift(parent.name)
-    parentId = parent.parent_id ?? null
+function breadcrumbs(projects: ProjectView[]): Map<number, string> {
+  const byId = new Map(projects.map((project) => [project.id, project]))
+  const paths = new Map<number, string>()
+  for (const project of projects) {
+    const names = [project.name]
+    const seen = new Set([project.id])
+    let parentId = project.parent_id ?? null
+    while (parentId !== null && !seen.has(parentId)) {
+      seen.add(parentId)
+      const parent = byId.get(parentId)
+      if (!parent) break
+      names.unshift(parent.name)
+      parentId = parent.parent_id ?? null
+    }
+    paths.set(project.id, names.join(' › '))
   }
-  return names.join(' › ')
+  return paths
 }
 
 interface Props {
@@ -130,7 +136,8 @@ export function ProjectPicker({
     reportCreating.current = onCreating
   })
 
-  const projects = choices?.projects ?? []
+  const projects = useMemo(() => choices?.projects ?? [], [choices])
+  const paths = useMemo(() => breadcrumbs(projects), [projects])
   const current = projects.find((project) => project.id === value)
   const suggested = projects.find((project) => project.id === suggestedParent)
 
@@ -214,7 +221,7 @@ export function ProjectPicker({
         <option value="">No project</option>
         {projects.map((project) => (
           <option key={project.id} value={project.id}>
-            {optionLabel(project, projects)}
+            {optionLabel(project, paths.get(project.id) ?? project.name)}
           </option>
         ))}
         <option value={NEW} data-testid="new-project">
@@ -262,7 +269,7 @@ export function ProjectPicker({
               <option value="">None</option>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {breadcrumb(project, projects)}
+                  {paths.get(project.id) ?? project.name}
                 </option>
               ))}
             </select>
@@ -273,7 +280,7 @@ export function ProjectPicker({
                 onClick={() => setParentId(suggested.id)}
                 className="mt-1 text-[12px] text-accent hover:underline"
               >
-                Put it under {breadcrumb(suggested, projects)}
+                Put it under {paths.get(suggested.id) ?? suggested.name}
               </button>
             )}
           </div>
