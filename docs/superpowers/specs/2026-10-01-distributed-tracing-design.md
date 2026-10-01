@@ -56,10 +56,14 @@ cluster does not run and which covers neither the browser nor Temporal context.
   sets this variable unless it is ruling the SDK out of an incident.
 - **Resource.** Each process sets `service.name`: `scadbuddy-api`,
   `scadbuddy-worker`, `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
-  the build's version, and `service.instance.id` the pod's own, with the build's
+  the build's version, and `service.instance.id` the process's host name
+  (Python `socket.gethostname()`, Node `os.hostname()`), with the build's
   `SCADBUDDY_REVISION` as `scadbuddy.revision`. The in-process worker
   (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) keeps `scadbuddy-api`, with
-  `scadbuddy.worker.inprocess=true` on its spans. Clusters adds
+  `scadbuddy.worker.inprocess=true` on its spans. In the cluster the host name
+  is the pod's name, because Kubernetes sets it so, not because the app asks.
+  Elsewhere it is whatever the host is called. No Kubernetes API or downward
+  API is read. Clusters adds
   `deployment.environment` and the k8s attributes via `OTEL_RESOURCE_ATTRIBUTES`;
   the apps know nothing about Kubernetes.
 
@@ -326,9 +330,38 @@ starts a row).
 homelab volume. `OTEL_TRACES_SAMPLER` changes it from clusters. The backend
 and agent honour the browser's decision.
 
-**Errors:** `ERROR` status with `record_exception`. A failed render's
-`scadbuddy.failure_class` matches the outcome recorded on its job, so a trace
-and the `render_jobs` row agree.
+**Errors:** `ERROR` status, with the exception's type and where it was raised,
+**never its message**. A failed render's `scadbuddy.failure_class` matches the
+outcome recorded on its job, so a trace and the `render_jobs` row agree.
+
+Exception messages carry exactly what the list above forbids:
+- `ParameterValueError` and the other checks in `render/runner.py` interpolate
+  the raw value (`got {value!r}`);
+- `map_response` in `bambuddy/errors.py` puts Bambuddy's own `detail` into the
+  `ApiError` message.
+
+Our code is not the only caller of `record_exception`. The FastAPI/ASGI
+instrumentation records unhandled exceptions, and Temporal's
+`TracingInterceptor` records failures and sets the status description to
+`str(error)`. So the rule is enforced **once, in front of every exporter**, not
+at each call site. A `ScrubbingSpanExporter` wraps the OTLP exporter in each
+service (and `RelayExporter` in the browser), and every span passes through it
+before it leaves the process. It:
+
+- drops `exception.message` from every `exception` event;
+- replaces `exception.stacktrace` with its frame lines only (Python: the
+  `File "…", line N, in f` lines; Node: the `at …` lines). A formatted
+  traceback otherwise ends with, and for chained exceptions repeats, the
+  messages;
+- keeps `exception.type`;
+- replaces a non-empty status description with the exception type, or with
+  `error` when there is none.
+
+The relay applies the same scrub to browser spans before forwarding. Our own
+spans set `scadbuddy.failure_class` (the problem `type_` for an `ApiError`,
+plus the client's `Scope` for a Bambuddy call) as the readable cause. Where
+the message is needed, it is already in the job row or the response the user
+saw.
 
 ## 7. Dashboard and how it deploys
 
@@ -423,9 +456,20 @@ The uid never changes after that, so the check is needed once.
   and past 512 spans; 429 from the per-client bucket and from the per-process one;
   `X-Forwarded-For` ignored from an untrusted peer and read right to left from
   a trusted one; resource rewrite; attribute caps; the `off` response; nothing
-  forwarded when off; the path never serves `index.html`. A redaction test renders
-  with a sentinel parameter value and a sentinel Bambuddy key and asserts
-  neither appears in any exported span. Tests in which the endpoint is unset
+  forwarded when off; the path never serves `index.html`. Redaction tests put a
+  sentinel string in each forbidden place and assert it appears nowhere in any
+  exported span: not in attributes, event attributes or status descriptions,
+  on success or on failure. The places are:
+  - a parameter value on a successful render;
+  - the same value made invalid, so `ParameterValueError` fires;
+  - the Bambuddy API key;
+  - a Bambuddy 409 whose `detail` is the sentinel;
+  - an unhandled exception in a route, raised with the sentinel as its message;
+  - an activity that fails with it;
+  - a browser span whose exception event carries it, sent through the relay.
+
+  `ScrubbingSpanExporter` has unit tests of its own for chained exceptions and
+  for both stack formats. Tests in which the endpoint is unset
   assert no export is attempted.
 - **Agent:** vitest with an in-memory exporter. A turn against the fake
   Anthropic endpoint yields `agent.turn` → `agent.tool/*`, and the backend
@@ -435,7 +479,10 @@ The uid never changes after that, so the check is needed once.
   `ai_approvals.traceparent` column, and `agent.turn.resume` is its child. A
   turn that parks twice yields segments 0, 1 and 2, each ending as the next
   begins. Two calls parked at once end segment 0 once and get a decision trace
-  each, and segment 1 is the last decision's child, linked to the other. An expired approval records `outcome=expired`. No prompt or tool input appears in any attribute.
+  each, and segment 1 is the last decision's child, linked to the other. An
+  expired approval records `outcome=expired`. No prompt, tool input or tool
+  result appears in any attribute, and a tool that throws with a sentinel
+  message leaves no trace of it after `ScrubbingSpanExporter`.
 - **Frontend:** vitest for the exporter's off switch; mocked e2e asserting
   `traceparent` is on same-origin requests and absent on cross-origin ones.
 - **No collector in CI.** Nothing here needs network export.
