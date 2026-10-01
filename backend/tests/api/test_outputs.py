@@ -415,6 +415,53 @@ def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
     assert client.get(url, params={"plate": 0}).status_code == 422
 
 
+def test_an_output_records_the_library_commits_it_was_rendered_with(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#169: not only the model revision, but the exact commit of each library it pins."""
+    commit = "d" * 40
+    pin = {
+        "name": "BOSL2",
+        "url": "https://example.invalid/BOSL2.git",
+        "ref": "v2",
+        "commit": commit,
+    }
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    paths.model_meta(model).write_text(json.dumps({**meta, "libraries": [pin]}), encoding="utf-8")
+    (paths.libraries / "BOSL2" / commit / "BOSL2").mkdir(parents=True)
+
+    job_id = _finished_job(client, model)
+    body = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+
+    assert body["libraries"] == [pin]
+    assert client.get(f"/api/v1/outputs/{body['id']}").json()["libraries"] == [pin]
+    stored = json.loads(
+        (paths.output_dir(model, body["id"]) / "meta.json").read_text(encoding="utf-8")
+    )
+    assert stored["libraries"] == [pin]
+
+
+def test_an_output_of_a_model_with_no_libraries_records_none(
+    client: TestClient, model: str
+) -> None:
+    job_id = _finished_job(client, model)
+    body = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    assert body["libraries"] == []
+
+
+def test_a_record_from_before_the_library_pins_loads_with_none() -> None:
+    meta = OutputMeta.model_validate(
+        {
+            "id": "a" * 32,
+            "slug": "demo",
+            "job_id": "b" * 32,
+            "created_at": "2026-09-22T10:00:00Z",
+            "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
+        }
+    )
+    assert meta.libraries == []
+
+
 def test_an_old_records_upload_keys_are_ignored() -> None:
     """The keys a ``meta.json`` carried for its Bambuddy uploads before they moved to
     Postgres (#455) still load, and mean nothing: no data is migrated."""
