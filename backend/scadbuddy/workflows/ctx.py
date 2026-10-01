@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.job_models import BomEntry, Job, OutputRecord, PipelineOutput, StepInfo
     from scadbuddy.render.schema import ParamValue
     from scadbuddy.template import Blob, Part
+    from scadbuddy.workflows.arrange import GOALS
     from scadbuddy.workflows.models import (
         Failure,
         Layout,
@@ -94,6 +95,9 @@ class Ctx:
     ) -> Layout:
         """Arrange's packing activity (spec §5.2, §7): the same goals and plan the Print
         dialog's Arrange uses. A 3-tuple names a `keep_together` group."""
+        # Refused here, on the pipeline's own line, before an activity is scheduled.
+        if goal not in GOALS:
+            raise ValueError(f"ctx.pack goal {goal!r} is not one of {', '.join(GOALS)}")
         packed = [
             PackItem(part=i)
             if isinstance(i, Part)

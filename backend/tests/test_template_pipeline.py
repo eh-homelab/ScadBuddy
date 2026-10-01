@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from temporalio.client import WorkflowFailureError
@@ -16,10 +17,13 @@ from temporalio.worker import Worker
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.projection import workflow_id_for
 from scadbuddy.workflows import pipelines
+from scadbuddy.workflows.ctx import Ctx
 from scadbuddy.workflows.models import (
+    LoadedPipeline,
     OutputRequest,
     PieceRequest,
     PieceResult,
+    PlateSize,
     Projection,
     piece_key,
 )
@@ -449,3 +453,30 @@ async def test_a_pipeline_packs_for_a_goal_with_a_plan_and_groups() -> None:
     assert len(out.layout.plates) == 2
     assert [len(p.items) for p in out.layout.plates] == [2, 1]
     assert world.projections[-1].state == "done"
+
+
+class _Recorder:
+    """A host that records the activities a `Ctx` schedules, and schedules none."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def activity_call(self, name: str, arg: object, *, result_type: type) -> object:
+        self.calls.append(name)
+        raise AssertionError(f"{name} was scheduled")
+
+
+async def test_an_unknown_pack_goal_is_refused_before_anything_is_scheduled() -> None:
+    host = _Recorder()
+    loaded = LoadedPipeline(
+        source="",
+        file="pipeline/pipeline.py",
+        api=1,
+        version="v",
+        inputs_version=1,
+        plate=PlateSize(key="default", width=256, depth=256),
+    )
+    ctx = Ctx(cast(TemplatePipeline, host), a_job(params={}), loaded, {})
+    with pytest.raises(ValueError, match="'prettiest' is not one of fewest_plates, fewest_swaps"):
+        await ctx.pack([], goal="prettiest")
+    assert host.calls == []
