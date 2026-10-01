@@ -539,9 +539,9 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # The render worker (#424) is this same image run as `python -m scadbuddy.worker`: it
 # serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
 # is the API's 8080). Phase 1 runs one replica, sharing /data with the API.
-# SIGTERM starts its drain (tini forwards it; no preStop needed): unless its build is
-# still the current one (a restart of the same build skips it), it polls until no
-# workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
+# SIGTERM starts its drain (tini forwards it; no preStop needed): it polls until no
+# workflow pinned to its build is running (or, after 30 s, until it sees its build is
+# still current: a restart of the same build), for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
 # + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
 # terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
 # plus a little slack for teardown (e.g. 30 s): 690 s at the default.

@@ -51,9 +51,8 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
-    _drain_done,
+    _drain,
     _poll,
-    _wait_drained,
     make_current_until_polled,
     run_inprocess_worker,
     run_worker,
@@ -200,6 +199,10 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
 # ── the drain after stop ───────────────────────────────────────────────────────
 
 
+async def _never() -> bool:
+    return False
+
+
 async def test_the_drain_polls_until_the_version_is_drained() -> None:
     answers = iter([False, False, True])
     calls = 0
@@ -209,7 +212,7 @@ async def test_the_drain_polls_until_the_version_is_drained() -> None:
         calls += 1
         return next(answers)
 
-    assert await _wait_drained(drained, timeout=5, poll=0.01)
+    assert await _drain(_never, drained, timeout=5, poll=0.01, grace=0) == "drained"
     assert calls == 3
 
 
@@ -221,26 +224,31 @@ async def test_the_drain_gives_up_at_its_bound() -> None:
         calls += 1
         return False
 
-    assert not await asyncio.wait_for(_wait_drained(drained, timeout=0.1, poll=0.01), 5)
-    assert calls > 1
+    outcome = await asyncio.wait_for(_drain(_never, drained, timeout=0.1, poll=0.01, grace=0), 5)
+    assert outcome == "timed_out" and calls > 1
 
 
-async def test_a_build_that_is_still_current_does_not_drain() -> None:
-    """#874: a same-build restart: another pod of this build serves its pinned runs."""
-    counted = 0
+async def _always() -> bool:
+    return True
 
-    async def still_current() -> bool:
-        return True
+
+async def test_a_build_that_is_still_current_stops_after_the_grace() -> None:
+    """#874: a same-build restart: another pod of this build serves its pinned runs.
+    Until the grace has passed it keeps serving them itself, in case none comes."""
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    outcome = await asyncio.wait_for(_drain(_always, _never, timeout=5, poll=0.01, grace=0.2), 5)
+    assert outcome == "current"  # told apart from "drained" in the log
+    assert loop.time() - began >= 0.2
+
+
+async def test_a_still_current_build_whose_runs_finish_in_the_grace_is_drained() -> None:
+    answers = iter([False, True])
 
     async def drained() -> bool:
-        nonlocal counted
-        counted += 1
-        return False
+        return next(answers)
 
-    done = await asyncio.wait_for(
-        _wait_drained(lambda: _drain_done(still_current, drained), timeout=5, poll=0.01), 5
-    )
-    assert done and counted == 0
+    assert await _drain(_always, drained, timeout=5, poll=0.01, grace=5) == "drained"
 
 
 async def test_the_drain_ends_when_the_build_becomes_current_again() -> None:
@@ -249,10 +257,7 @@ async def test_the_drain_ends_when_the_build_becomes_current_again() -> None:
     async def still_current() -> bool:
         return next(answers)
 
-    async def drained() -> bool:
-        return False
-
-    assert await _wait_drained(lambda: _drain_done(still_current, drained), timeout=5, poll=0.01)
+    assert await _drain(still_current, _never, timeout=5, poll=0.01, grace=0) == "current"
 
 
 @workflow.defn(name="BlocksUntilReleased")
