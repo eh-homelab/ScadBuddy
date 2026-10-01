@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from scadbuddy.library.history import ModelHistory
     from scadbuddy.library.libraries import CheckoutGate
     from scadbuddy.library.outputs import OutputStore
-    from scadbuddy.render.jobs import RenderQueue
+    from scadbuddy.render.submit import RenderService
 
 #: The module a feature package names its component in, and what it exports.
 COMPONENT_MODULE = "component"
@@ -52,7 +52,7 @@ class Core(Protocol):
     catalogue: Catalogue
     outputs: OutputStore
     events: EventBus
-    queue: RenderQueue
+    render: RenderService
     metrics: Metrics
     checkouts: CheckoutGate
     installs: asyncio.Semaphore

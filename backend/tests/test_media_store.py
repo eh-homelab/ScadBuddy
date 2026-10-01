@@ -37,7 +37,7 @@ from scadbuddy.library.media import (
     sniff_kind,
 )
 from scadbuddy.library.media_store import PostgresMediaStore
-from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -147,8 +147,8 @@ def data(tmp_path: Path) -> DataPaths:
 
 @pytest.fixture
 def store(pg_conninfo: str, data: DataPaths) -> Iterator[PostgresMediaStore]:
-    """Opened as the app opens it: through the job store, which runs the migrations."""
-    jobs = PostgresJobStore(pg_conninfo, data, pool_size=2)
+    """Opened as the app opens it: through the projection, which runs the migrations."""
+    jobs = JobProjection(pg_conninfo, pool_size=2)
     jobs.open()
     try:
         yield PostgresMediaStore(jobs.pool)

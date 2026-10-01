@@ -138,6 +138,26 @@ so that is the one used. Where the spool names none, or names one Bambuddy's pre
 catalogue cannot look up, the **pipeline's own** filament preset stays — sending an id
 Bambuddy cannot resolve fails the slice naming a preset nobody chose.
 
+**A template's own print settings (#770).** A template may declare `print_settings` in
+its `model.json`: a few Bambu Studio process keys and their values (prime tower, support,
+brim), allowlisted by `PRINT_SETTING_VALUES` in `backend/scadbuddy/library/catalogue.py`
+and refused at load when a key or value is not one Bambu Studio takes. They are read as
+the template's `model.json` has them *now*, not as they were at render time, and they go
+two places:
+
+- **Every slice.** They become `SlicePlan.process_overrides`
+  (`bambuddy/dispatch.py`) and so `SliceRequest.process_overrides`, which Bambuddy
+  writes over the chosen process preset for that slice. They are part of
+  `SliceRequest.preset_key`, so a sliced copy made before the template changed them is
+  not reused for one after; a template without any keeps the key it always had.
+- **Every downloaded 3MF** (`bambuddy/download.py`). They are written into
+  `project_settings.config` over the process, and their keys are listed, `;`-joined, in
+  the process entry (the first) of `different_settings_to_system`, so Bambu Studio shows
+  them as edits to the system process instead of a new preset. This happens on each path
+  a download takes: re-plated for the default printer, no default printer, Bambuddy
+  unreachable, and a file too big for the default printer's plate (kept on its own plate,
+  still with the settings). Only a template with none is served as the stored file.
+
 ### The two warnings
 
 There is no compatibility rules engine, and no material table. Whether two filaments
