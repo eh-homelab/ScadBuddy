@@ -6,13 +6,14 @@ from fastapi import APIRouter, status
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep
+from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
+from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
@@ -197,6 +198,8 @@ class RememberedChoices(BaseModel):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+    #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
+    project_print_targets: dict[str, ProjectTarget] = Field(default_factory=dict)
 
 
 class BambuddyStatus(BaseModel):
@@ -307,8 +310,11 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
     return _view(snapshot, state)
 
 
-def _remembered(settings: StoredSettings) -> RememberedChoices:
+def _remembered(
+    settings: StoredSettings, project_targets: dict[int, ProjectTarget]
+) -> RememberedChoices:
     return RememberedChoices(
+        project_print_targets={str(pid): target for pid, target in project_targets.items()},
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
         print_options=settings.print_options,
@@ -323,12 +329,13 @@ def _remembered(settings: StoredSettings) -> RememberedChoices:
     response_model_exclude_none=True,
     summary="What the print dialog remembers",
 )
-def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
+async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
-    whole map back."""
-    return _remembered(store.load())
+    whole map back; a project's printer and nozzle go through
+    ``DELETE /settings/remembered/projects/{project_id}``."""
+    return _remembered(store.load(), await uploads.project_targets())
 
 
 @router.delete(
@@ -337,8 +344,22 @@ def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
     response_model_exclude_none=True,
     summary="Forget every remembered choice",
 )
-def delete_remembered(store: SettingsStoreDep) -> RememberedChoices:
-    return _remembered(store.forget_remembered())
+async def delete_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
+    await uploads.forget_all_project_targets()
+    return _remembered(store.forget_remembered(), {})
+
+
+@router.delete(
+    "/settings/remembered/projects/{project_id}",
+    response_model=RememberedChoices,
+    response_model_exclude_none=True,
+    summary="Forget one project's remembered printer and nozzle",
+)
+async def delete_remembered_project(
+    project_id: int, store: SettingsStoreDep, uploads: UploadsDep
+) -> RememberedChoices:
+    await uploads.forget_project_target(project_id)
+    return _remembered(store.load(), await uploads.project_targets())
 
 
 def _options_view(settings: StoredSettings) -> PrintOptionsView:

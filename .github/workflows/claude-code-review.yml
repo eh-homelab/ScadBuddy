@@ -350,6 +350,10 @@ jobs:
           turns="$(printf '%s' "$result" | jq -r '.num_turns // 0')"
           cost="$(printf '%s' "$result" | jq -r '.total_cost_usd // 0')"
           echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
+          # A refused tool call can stop the review posting its summary while the
+          # run still ends "success" (#918). Name each one, with the start of its input.
+          printf '%s' "$result" | jq -r '(.permission_denials // [])[]
+            | "permission denied: \(.tool_name // "?"): \(.tool_input | tostring | .[0:300])"' 2>/dev/null || true
 
           if [ "$is_error" != "true" ] && [ "$subtype" = "success" ]; then
             # Claude itself was fine. If the step still failed anyway, the

@@ -111,6 +111,65 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('keeps an edit typed while its section is saving (#767)', async () => {
+    // Held open so the edit lands mid-save; the save's seed must not take it back.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      await held
+      return saved
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    await user.clear(timeout)
+    await user.type(timeout, '50')
+
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+    expect(timeout).toHaveValue(50)
+    expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
+    put.mockRestore()
+  })
+
+  it('keeps that edit when another section saves while the first is in flight (#767)', async () => {
+    // Rendering's save is held; Preview's goes straight through. Preview's request must
+    // not erase the edit Rendering's answer has to leave alone.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if ('render_timeout' in body) await held
+      return saved
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    await user.clear(timeout)
+    await user.type(timeout, '50')
+    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
+
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+    expect(timeout).toHaveValue(50)
+    put.mockRestore()
+  })
+
   it('discards one section’s edits', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
@@ -341,6 +400,23 @@ describe('SettingsPage remembered choices (#322)', () => {
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(2))
     expect((await api.getRemembered()).model_print_choices).toEqual({})
     expect((await api.getRemembered()).printer_bed_types).toEqual({ '1': 'Textured PEI Plate' })
+  })
+
+  it('shows each project\'s printer and nozzle and forgets one (#599)', async () => {
+    setMockRemembered({
+      projectTargets: { '1': { printer_id: 1, nozzle_diameter: '0.4' }, '99': { printer_id: 42 } },
+    })
+    const { user } = renderPage(<SettingsPage />)
+    const table = await screen.findByRole('table', { name: 'Remembered choices' })
+    const projectRow = within(table).getByText('Reagan Keychain').closest('tr') as HTMLElement
+    expect(within(projectRow).getByText(/0\.4 mm/)).toBeInTheDocument()
+    const unknownRow = within(table).getByText('Project 99').closest('tr') as HTMLElement
+    expect(within(unknownRow).getByText('Printer 42')).toBeInTheDocument()
+
+    await user.click(within(table).getByRole('button', { name: 'Forget project printer and nozzle for Reagan Keychain' }))
+    await waitFor(() => expect(within(table).queryByText('Reagan Keychain')).toBeNull())
+    expect(within(table).getByText('Project 99')).toBeInTheDocument()
+    expect(Object.keys((await api.getRemembered()).project_print_targets ?? {})).toEqual(['99'])
   })
 
   it('forgets everything after a confirmation', async () => {
