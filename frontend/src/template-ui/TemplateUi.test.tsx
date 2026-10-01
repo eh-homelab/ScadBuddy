@@ -72,6 +72,34 @@ describe('TemplateUi', () => {
     expect(urls).toEqual([])
   })
 
+  it('refuses a module path outside ui/ without loading it', async () => {
+    const urls = withModule(vi.fn())
+    const onFailure = vi.fn()
+    render(
+      <TemplateUi slug="s" ui={{ ...UI, module: 'ui/../model.scad' }} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />,
+    )
+    await waitFor(() => expect(onFailure).toHaveBeenCalledWith({ file: 'ui/../model.scad', message: expect.stringContaining('not a file under ui/') }))
+    expect(urls).toEqual([])
+  })
+
+  it('keeps the deps it mounted with when only the deps prop changes (HostDeps members are stable)', async () => {
+    let kept: Host | undefined
+    const mount = vi.fn<Mount>((_root, host) => {
+      kept = host
+    })
+    withModule(mount)
+    const a = deps()
+    const b = { ...deps(), getInputs: vi.fn(() => ({ params: { name: 'B' } })) }
+    const props = { slug: 's', ui: UI, version: undefined, inputs: { params: {} }, onFailure: vi.fn() }
+    const { rerender } = render(<TemplateUi {...props} deps={a} />)
+    await waitFor(() => expect(kept).toBeDefined())
+    rerender(<TemplateUi {...props} deps={b} />)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(mount).toHaveBeenCalledOnce()
+    expect((kept as Host).inputs.get()).toEqual({ params: { name: 'Hi' } })
+    expect(b.getInputs).not.toHaveBeenCalled()
+  })
+
   it('runs the cleanup and empties the root on unmount, and notifies input changes', async () => {
     const cleanup = vi.fn()
     const seen: unknown[] = []

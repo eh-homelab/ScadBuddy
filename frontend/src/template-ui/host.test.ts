@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import type { JsonObject } from '../lib/inputs'
 import { createHost, HostInputError, type HostDeps } from './host'
+import { supportedMajors, UI_API_SUPPORTED } from './types'
 
 function deps(overrides: Partial<HostDeps> = {}): HostDeps & { state: { inputs: JsonObject } } {
   const state = { inputs: { params: { name: 'Hi' }, tab: 'a' } as JsonObject }
@@ -48,6 +49,13 @@ describe('createHost', () => {
     const { host } = createHost(d)
     expect(() => host.inputs.set({ params: null })).toThrow(HostInputError)
     expect(() => host.inputs.set({ params: { name: ['a'] } })).toThrow(/name/)
+  })
+
+  it('deletes one parameter override with null, as a merge patch does', () => {
+    const d = deps()
+    createHost(d).host.inputs.set({ params: { name: null } })
+    expect(d.state.inputs).toEqual({ params: {}, tab: 'a' })
+    expect(() => createHost(d).host.inputs.set({ params: { nope: null } })).toThrow(/nope/)
   })
 
   it('notifies subscribers until they unsubscribe', () => {
@@ -101,5 +109,13 @@ describe('createHost', () => {
       '/api/v1/models/name-keychain/versions/abc1234/ui/a.css',
     )
     expect(() => createHost(deps()).host.files.url('../model.scad')).toThrow()
+  })
+})
+
+describe('supportedMajors', () => {
+  it('is the current host-API major and the one before it', () => {
+    expect(supportedMajors(1)).toEqual([1])
+    expect(supportedMajors(2)).toEqual([2, 1])
+    expect(UI_API_SUPPORTED).toEqual([1])
   })
 })
