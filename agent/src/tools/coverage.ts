@@ -90,6 +90,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   // #185: the source editor's go-to-definition opens the file a definition is in. The
   // model-directory reader is also get_source_file's route (#252), so only the library one stays here.
+  // #951: a model README's relative images, for the browser's Markdown view.
+  {
+    operation: 'GET /api/v1/models/{slug}/images/{path}',
+    reason:
+      "Serves the image files beside a model to the browser, so a README's relative `![](thumbnail.png)` " +
+      'shows (#951). The bytes are only useful to an <img>; an agent reads the README itself through ' +
+      'get_source_file and sees the image path in it.',
+  },
   {
     operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
     reason:

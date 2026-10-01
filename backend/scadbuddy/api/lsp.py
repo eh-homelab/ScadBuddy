@@ -14,6 +14,7 @@ from fastapi import APIRouter, Header, Query, Response, WebSocket, status
 from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
 
+from scadbuddy.api.assets import INERT_IMAGE_HEADERS
 from scadbuddy.api.deps import (
     STATE_ATTR,
     AppState,
@@ -44,7 +45,12 @@ from scadbuddy.library.editor_files import (
     read_file,
     read_text_file,
 )
-from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
+from scadbuddy.library.history import (
+    COMMIT_ID_PATTERN,
+    GitError,
+    ModelHistory,
+    RevisionNotFoundError,
+)
 from scadbuddy.library.libraries import (
     COMMIT_PATTERN,
     CheckoutFetcher,
@@ -208,13 +214,6 @@ IMAGE_MEDIA_TYPES = {
 #: thumbnail takes, which is already far above any image a README shows.
 MAX_MODEL_IMAGE_BYTES = MAX_THUMBNAIL_BYTES
 
-#: An SVG opened at its own URL would otherwise be a document in this origin; these
-#: keep it an inert image there too, as an uploaded asset is (`api/assets.py`).
-IMAGE_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-    "X-Content-Type-Options": "nosniff",
-}
-
 #: A revision's bytes never change under its id.
 REVISION_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
@@ -236,7 +235,7 @@ def _too_large(path: str) -> ApiError:
     )
 
 
-def _revision_image(history: HistoryDep, slug: str, path: str, commit: str) -> bytes:
+def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) -> bytes:
     require_history(history)
     try:
         data = history.show(commit, f"{model_path(slug)}/{path}")
@@ -301,7 +300,7 @@ def get_model_image(
             raise _too_large(path) from None
         cache_control = THUMBNAIL_CACHE_CONTROL
     etag = f'"{hashlib.sha256(data).hexdigest()}"'
-    headers = {**IMAGE_HEADERS, "ETag": etag, "Cache-Control": cache_control}
+    headers = {**INERT_IMAGE_HEADERS, "ETag": etag, "Cache-Control": cache_control}
     if _etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(data, media_type=media_type, headers=headers)

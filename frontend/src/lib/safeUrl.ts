@@ -41,7 +41,10 @@ export interface ImageBase {
  */
 export const MAX_DATA_IMAGE_CHARS = 512 * 1024
 
-// An `<img>` never runs script, even an SVG's, so these are inert as an image source.
+// Inert as an `<img>` source. An SVG loaded as an image is processed in the HTML
+// spec's secure mode: no script, and no external resource of any kind (an
+// `<image href>`, a CSS `url()` or `@import`, a font). So an SVG data: image cannot
+// make the browser fetch another host either.
 const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp|svg\+xml)(?:;[^,;]+)*,/i
 
 // What `GET /models/{slug}/images/{path}` serves.
