@@ -1,15 +1,11 @@
 import type { CustomizerSchema, Param, ParamValue } from '../api/types'
-import { getPath, splitInputs, type JsonObject } from '../lib/inputs'
+import { getPath, isParamValue, splitInputs, type JsonObject } from '../lib/inputs'
 import { allParams, type ParamValues } from '../lib/params'
 import type { HostElement } from './elements'
 
 interface BindingContext {
   schema: CustomizerSchema
   inputs: JsonObject
-}
-
-function isParamValue(value: unknown): value is ParamValue {
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
 }
 
 interface Binding {

@@ -9,6 +9,13 @@ export class HostInputError extends Error {
   override name = 'HostInputError'
 }
 
+/**
+ * Every member must be stable for the life of a mount: closures over refs, as
+ * `CustomizePage` builds them, never over one render's state. `TemplateUi` hands each
+ * mount the `deps` it mounted with (so a host a template keeps after its unmount never
+ * reaches the next one's) and does not rewire a mounted host when the `deps` prop alone
+ * changes.
+ */
 export interface HostDeps {
   slug: string
   /** The revision the module's files come from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
@@ -44,7 +51,7 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   const names = new Set(allParams(schema).map((param) => param.name))
   for (const [name, value] of Object.entries(params)) {
     if (!names.has(name)) throw new HostInputError(`inputs.params.${name}: model.scad has no parameter "${name}"`)
-    if (!['string', 'number', 'boolean'].includes(typeof value)) {
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
       throw new HostInputError(`inputs.params.${name} must be a number, string or boolean`)
     }
   }

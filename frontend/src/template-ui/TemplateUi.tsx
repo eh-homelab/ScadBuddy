@@ -5,7 +5,7 @@ import type { JsonObject } from '../lib/inputs'
 import { extrudersOf } from '../lib/params'
 import { useLatest } from '../lib/useLatest'
 import { defineHostElements, provideRegistry, type HostElement } from './elements'
-import { createHost, type HostDeps, type HostHandle } from './host'
+import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './host'
 import { effectiveValues } from './bindings'
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
@@ -55,7 +55,11 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
   const slot = ui.slot ?? 'panel'
   const [elements, setElements] = useState<readonly HostElement[]>([])
   const [, setRevision] = useState(0)
-  const firstPreview = elements.find((el) => el.localName === 'sb-preview')
+  // Document order, not connect order: a template may insert a preview before one it
+  // appended earlier.
+  const firstPreview = elements
+    .filter((el) => el.localName === 'sb-preview')
+    .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))[0]
   // Once per render, for every widget: an attribute change on any element re-renders all.
   const extruders = elementContext
     ? extrudersOf(elementContext.schema, effectiveValues(elements, elementContext))
@@ -85,7 +89,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     let cleanup: (() => void) | void
     void (async () => {
       try {
-        const module = await loadUiModule(api.uiFileUrl(slug, version, ui.module.replace(/^ui\//, '')))
+        const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
         const mount = mountOf(module)
         if (!mount) throw new Error(`${ui.module} does not export a mount function`)
         if (!active) return
