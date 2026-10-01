@@ -1,6 +1,8 @@
 # Rack nozzle selection (#836)
 
-Status: design approved in conversation 2026-10-01; this spec awaits review.
+Status: the ranking and the Advanced controls were agreed with the owner in
+conversation on 2026-10-01. This written spec is not yet approved; its review
+gates the implementation plan.
 Part of epic #84.
 
 ## 1. What this changes
@@ -14,9 +16,17 @@ ScadBuddy now ranks the rack itself and sends its pick on the queue item. Simple
 mode shows the pick and the reason for it. Advanced mode lets the user change the
 ranking algorithm or pick a position by hand.
 
-Out of scope: the non-rack extruder (one fixed hotend, nothing to choose), the
-slice itself (#840 already decides which side prints), and full per-print
-telemetry (#912; this spec takes only the usage counter it needs).
+Out of scope:
+
+- the non-rack extruder (one fixed hotend, nothing to choose);
+- the slice itself (#840 already decides which side prints);
+- full per-print telemetry (#912; this spec takes only the usage counter it
+  needs);
+- prints dispatched through Bambuddy's `run` (pipeline) path. Like
+  `filament_overrides`, `nozzle_rack_choice` exists only on `QueueItemCreate`
+  (see `dispatch.py`'s module docstring), so those prints keep Bambuddy's own
+  pick. Covering them needs a rack field on the pipeline request, which
+  Bambuddy does not have.
 
 ## 2. What the printer and Bambuddy give us (measured 2026-10-01)
 
@@ -148,6 +158,13 @@ each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
   then prints.
 - The serial is recorded when the pick is made, because a hotend can be moved to
   another position later.
+- Known limit: the queue item names a position, not a serial. If a hotend of the
+  same diameter and flow is swapped into that position while the item waits,
+  the pick still fits, Bambuddy prints through the new hotend, and its use is
+  credited to the old serial. Re-reading the serial at settle would not fix
+  this, because the rack may have changed again by then; the hotend actually
+  mounted during the print is not something §2 has measured. Accepted here;
+  tracking the hotend actually mounted belongs to the telemetry work in #912.
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.
@@ -164,9 +181,12 @@ choose_rack: Callable[[int], Awaitable[RackChoice | None]] | None = None
 ```
 
 It is called with `sliced` after the slice succeeds and before `before_enqueue`.
-A `RackChoice` carries `nozzle_rack_choice` (`{group_id: position}`) and the
-picks' serials. `slice_and_queue` puts the former on `QueueItemCreate` and returns
-the latter on `QueueOutcome`. `print_run.py`, its only caller, builds the callback:
+A `RackChoice` carries `nozzle_rack_choice` and the picks' serials.
+`nozzle_rack_choice` is `dict[str, int]`, keyed by `str(group_id)`, the type
+`QueueItemCreate.nozzle_rack_choice` already has and the JSON shape Bambuddy
+expects; `rank_rack` returns int group ids and `print_run.py` converts them when
+it builds the `RackChoice`. `slice_and_queue` puts the choice on
+`QueueItemCreate` and returns the serials on `QueueOutcome`. `print_run.py`, its only caller, builds the callback:
 
 1. Read `filament-requirements` for the sliced file and the live `nozzle_rack`.
 2. Rank the rack for each `on_rack` group, and return the choice from the
