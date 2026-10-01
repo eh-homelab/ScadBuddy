@@ -237,6 +237,9 @@ class OutputRequest(BaseModel):
     record: OutputRecord
     #: Arrange's objects keep where they came from; keyed by part.
     provenance: dict[str, ManifestObject] = Field(default_factory=dict)
+    #: The filament order to keep (slot N = colours[N-1]); Arrange passes the order the
+    #: plan was chosen against. Empty: first appearance, as phase 4 wrote it.
+    colours: list[str] = Field(default_factory=list)
 
 
 class OutputRef(BaseModel):

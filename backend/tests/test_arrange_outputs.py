@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
+from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
+from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.workflows.models import Layout, OutputRequest
-from scadbuddy.workflows.outputs import manifest_of
-from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from scadbuddy.workflows.models import (
+    Layout,
+    LayoutPlate,
+    OutputRequest,
+    PackItem,
+    PackRequest,
+    Placed,
+    PlateSize,
+)
+from scadbuddy.workflows.outputs import manifest_of, placement_matrix
+from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
 from tests.support.arrange import finished_job, saved_output
 from tests.test_packing_and_outputs import _deps, _record, _render
 
@@ -118,3 +131,84 @@ async def test_a_saved_output_keeps_its_parts_after_the_job_is_pruned(
         assert blobs.exists(key)
         release_parts(refs, meta.id)
         assert key in sweep_blobs(blobs, refs, grace=0, now=10**12)
+
+
+def test_a_quarter_turn_lands_the_turned_box_where_it_was_placed() -> None:
+    box = BoundingBox(min=(-5, -10, 2), max=(5, 10, 7), size=(10, 20, 5))
+    corners = np.array([[x, y, z, 1] for x in (-5, 5) for y in (-10, 10) for z in (2, 7)]).T
+    moved = (placement_matrix(box, 30.0, 40.0, 90.0) @ corners)[:3]
+    assert np.allclose(moved.min(axis=1), (30, 40, 0))
+    assert np.allclose(moved.max(axis=1), (50, 50, 5))  # 20 wide, 10 deep once turned
+    still = (placement_matrix(box, 30.0, 40.0, 0.0) @ corners)[:3]
+    assert np.allclose(still.min(axis=1), (30, 40, 0)) and np.allclose(
+        still.max(axis=1), (40, 60, 5)
+    )
+
+
+async def test_an_arranged_output_keeps_the_filament_order_it_was_planned_against(
+    tmp_path: Path,
+) -> None:
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    own = part.colours[0]
+    planned = ["#123456", own]  # the output the plan was made for had own colour in slot 2
+    req = OutputRequest(
+        job_id="j3",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(
+                    items=[
+                        Placed(piece_key=part.piece_key, x=0, y=0, rot=90.0),
+                        Placed(piece_key=part.piece_key, x=40, y=0),
+                    ]
+                )
+            ]
+        ),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+        colours=planned,
+    )
+    out = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert out.result.colors[:2] == [c.upper() for c in planned]
+    with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    assert [c.upper() for c in settings["filament_colour"][:2]] == [c.upper() for c in planned]
+
+
+async def test_one_object_arranged_alone_still_takes_the_planned_order(tmp_path: Path) -> None:
+    # Review Focus 4 through the pack step: one object, one copy, as the Arrange workflow
+    # packs it (allow_own=False), then written with the colours the plan was made for.
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    planned = ["#123456", part.colours[0].upper()]
+    layout = pack_layout(
+        PackRequest(
+            items=[PackItem(part=part)],
+            plate=PlateSize(key="default", width=256.0, depth=256.0),
+            colours=planned,
+            allow_own=False,
+        )
+    )
+    assert layout.own is None
+    req = OutputRequest(
+        job_id="j4",
+        index=0,
+        slug="demo",
+        layout=layout,
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+        colours=planned,
+    )
+    out = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert out.result.colors[:2] == planned
+    with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    assert [c.upper() for c in settings["filament_colour"][:2]] == planned
