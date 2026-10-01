@@ -20,15 +20,19 @@ from temporalio.exceptions import (
 )
 
 with workflow.unsafe.imports_passed_through():
-    from scadbuddy.render.job_models import Job, StepInfo, StepState
+    from scadbuddy.render.job_models import Job, OutputRecord, PipelineOutput, StepInfo, StepState
     from scadbuddy.template import Blob, Part
     from scadbuddy.workflows.models import (
+        ARRANGE_VERSION,
+        ArrangeInputs,
         Failure,
+        Layout,
         LoadedPipeline,
         LoadRequest,
         MigrateRequest,
         MigrateResult,
         OutputRequest,
+        PackRequest,
         PieceOutcome,
         PieceRequest,
         PieceResult,
@@ -527,6 +531,110 @@ def _output_timeout(req: OutputRequest) -> timedelta:
     store move: each piece and each `Blob` it fetches, and the output it publishes."""
     moves = len(req.parts) + sum(isinstance(v, Blob) for v in req.files.values()) + 1
     return _openscad_timeout() + moves * TRANSFER
+
+
+@workflow.defn(name="Arrange")
+class Arrange:
+    """Objects from saved outputs onto plates for a goal, then one 3MF (spec §7). No
+    piece is rendered: the Parts are in the store already."""
+
+    @workflow.run
+    async def run(self, job: Job) -> None:
+        inputs = ArrangeInputs.model_validate(job.inputs)
+
+        async def project(**fields: object) -> None:
+            await workflow.execute_activity(
+                "project",
+                Projection.model_validate(
+                    {
+                        "job_id": job.id,
+                        "slug": job.slug,
+                        "pipeline_version": ARRANGE_VERSION,
+                        **fields,
+                    }
+                ),
+                start_to_close_timeout=SHORT,
+                retry_policy=PROJECT_RETRY,
+            )
+
+        steps = [StepInfo(name="arrange", state="running", done=0, total=2)]
+        try:
+            await project(state="running", steps=steps)
+            layout = await workflow.execute_activity(
+                "pack",
+                # Always plates, never the piece as rendered: only the writer applies
+                # the pinned colour order (Review Focus 4).
+                PackRequest(
+                    items=inputs.items,
+                    plate=inputs.plate,
+                    goal=inputs.goal,
+                    filament_plan=inputs.filament_plan,
+                    colours=inputs.colours,
+                    allow_own=False,
+                ),
+                result_type=Layout,
+                start_to_close_timeout=SHORT,
+                retry_policy=RETRY,
+            )
+            steps[0].done = 1
+            await project(steps=steps)
+            parts = list({item.part.piece_key: item.part for item in inputs.items}.values())
+            keys = [p.piece_key for p in parts]
+            req = OutputRequest(
+                job_id=job.id,
+                index=0,
+                slug=job.slug,
+                layout=layout,
+                parts=parts,
+                name=inputs.name,
+                bom=[],
+                files={},
+                plate_model=inputs.plate_model,
+                colours=inputs.colours,
+                provenance=inputs.provenance,
+                record=OutputRecord(
+                    revision=None,
+                    ui_api=None,
+                    pipeline_api=0,
+                    pipeline_version=ARRANGE_VERSION,
+                    inputs_v=0,
+                    plate_key=inputs.plate.key,
+                    parts=keys,
+                ),
+            )
+            written = await workflow.execute_activity(
+                "write_output",
+                req,
+                result_type=PipelineOutput,
+                # Every Part is fetched from the store: the writer's bound, as a
+                # pipeline's `ctx.output` gets it, and it heartbeats.
+                start_to_close_timeout=_output_timeout(req),
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=RETRY,
+            )
+            steps[0].state, steps[0].done = "done", 2
+            await project(
+                state="done",
+                result=written.result,
+                outputs=[written],
+                blob_keys=list(dict.fromkeys([*keys, *written.blob_keys])),
+                steps=steps,
+            )
+        except (asyncio.CancelledError, ActivityError) as error:
+            if is_cancelled_exception(error) and workflow.cancellation_reason() is not None:
+                await project(
+                    state="cancelled",
+                    failure=Failure(error="cancelled"),
+                    steps=_settled(steps, "cancelled"),
+                )
+                raise
+            if not isinstance(error, ActivityError):
+                raise
+            cause = error.cause
+            message = cause.message if isinstance(cause, ApplicationError) else str(error)
+            await project(
+                state="failed", failure=Failure(error=message), steps=_settled(steps, "failed")
+            )
 
 
 #: `migrate_inputs`' retries: two attempts, a second after the first.

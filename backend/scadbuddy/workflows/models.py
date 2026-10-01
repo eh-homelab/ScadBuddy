@@ -242,6 +242,26 @@ class OutputRequest(BaseModel):
     colours: list[str] = Field(default_factory=list)
 
 
+#: `pipeline_version` of an arranged output's record: no template code ran.
+ARRANGE_VERSION = "arrange"
+
+
+class ArrangeInputs(BaseModel):
+    """An arrange job's `render_jobs.inputs` (spec §7): objects, goal, plate and plan."""
+
+    items: list[PackItem]
+    goal: str = "fewest_plates"
+    plate: PlateSize
+    #: The printer model the 3MF is laid out for (`plate_for`); None is the default plate.
+    plate_model: str | None = None
+    filament_plan: SlotPlan | None = None
+    colours: list[str] = Field(default_factory=list)
+    name: str | None = None
+    provenance: dict[str, ManifestObject] = Field(default_factory=dict)
+    #: The outputs the objects came from.
+    sources: list[str] = Field(default_factory=list)
+
+
 class OutputRef(BaseModel):
     index: int
     name: str | None
