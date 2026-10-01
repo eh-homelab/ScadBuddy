@@ -134,6 +134,31 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert content.index.get(font_key(family.name)) is not None
 
 
+async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#687: `install(force=True)` republishes a family under the same key; a worker
+    holding the old files fetches the new ones, and the API's own install (no marker,
+    the source of what was published) is never overwritten by a sync."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v1")
+    api = FontMirror(content, api_fonts)
+    await api.publish("Lobster Two")
+    worker_fonts = FontService(tmp_path / "worker")
+    worker = FontMirror(content, worker_fonts)
+    assert await worker.sync() == [family.name]
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v2")
+    await api.publish("Lobster Two")
+    assert await worker.sync() == [family.name]
+    assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"v2"
+    assert await worker.sync() == []
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v3, not yet published")
+    assert await api.sync() == []
+    assert (family / "LobsterTwo-Regular.ttf").read_bytes() == b"v3, not yet published"
+
+
 def _worker_deps(tmp_path: Path, pool: Pool, snapshots: SnapshotStore) -> WorkerDeps:
     return WorkerDeps(
         config=Config(data_dir=tmp_path / "worker"),
