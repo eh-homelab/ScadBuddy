@@ -27,10 +27,10 @@ file="$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"
 dir="$(dirname "$file")"
 while [ ! -d "$dir" ]; do dir="$(dirname "$dir")"; done
 root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || exit 0
-case "$file" in
-  /*) rel="${file#"$root"/}" ;;
-  *) rel="$file" ;;
-esac
+# Both sides with every symlink resolved, as git resolves the root: a path
+# under a symlinked ancestor would otherwise not start with it. An edit through
+# agent/plugins/scadbuddy's links resolves to plugins/scadbuddy, the same plugin.
+rel="$(realpath -m --relative-to="$root" "$file")"
 
 plugin=""
 case "$rel" in
@@ -90,8 +90,11 @@ fi
 if [ "${PLUGIN_EDITED_SKIP_VALIDATE:-}" != 1 ] && command -v claude >/dev/null; then
   targets=(.)
   [ -z "$plugin" ] || targets+=("plugins/$plugin")
+  # The agent copy has a manifest of its own; its links are validated as
+  # plugins/scadbuddy (validate does not follow them).
+  [ "$plugin" != scadbuddy ] || [ ! -d "$root/agent/plugins/scadbuddy" ] || targets+=(agent/plugins/scadbuddy)
   for target in "${targets[@]}"; do
-    if ! out="$(cd "$root" && claude plugin validate "$target" 2>&1)"; then
+    if ! out="$(cd "$root" && claude plugin validate "$target" 2>&1)" || grep -q 'Validation failed' <<<"$out"; then
       problems+="claude plugin validate $target:"$'\n'"$out"$'\n'
     fi
   done

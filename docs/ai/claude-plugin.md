@@ -7,8 +7,8 @@ The plugin's own README, [`plugins/scadbuddy/README.md`](../../plugins/scadbuddy
 is the primary reference. This page is the user-facing summary, and says what works
 today.
 
-> **Status.** The skills and subagents load in your Claude Code. ScadBuddy's own
-> harness does not load them ([Inside ScadBuddy](#inside-scadbuddy-not-loaded)). The MCP server the plugin connects to,
+> **Status.** The skills and subagents load in your Claude Code, and in ScadBuddy's own
+> harness through its copy of the plugin ([Inside ScadBuddy](#inside-scadbuddy), #896). The MCP server the plugin connects to,
 > `<your ScadBuddy>/mcp`, is on `main` (#368), but nothing deploys the agent sidecar or
 > routes `/mcp` to it yet, and tokens cannot be minted in Settings yet (#251).
 

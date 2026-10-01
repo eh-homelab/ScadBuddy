@@ -70,6 +70,13 @@ check 'an edit through the agent copy link bumps too' '0|0.1.1 0.1.1' \
   "$(edited agent/plugins/scadbuddy/skills/one/SKILL.md)"
 
 repo
+echo more >>"$r/plugins/scadbuddy/skills/one/SKILL.md"
+ln -s "$r" "$tmp/linked"
+check 'an edit through a symlinked ancestor of the repo bumps too' '0|0.1.1 0.1.1' \
+  "$(edited ../linked/plugins/scadbuddy/skills/one/SKILL.md)"
+rm "$tmp/linked"
+
+repo
 jq '.version = "0.3.0"' "$r/plugins/scadbuddy/.claude-plugin/plugin.json" >"$tmp/j" && mv "$tmp/j" "$r/plugins/scadbuddy/.claude-plugin/plugin.json"
 check 'a version set by hand is kept and mirrored' '0|0.3.0 0.3.0' "$(edited plugins/scadbuddy/.claude-plugin/plugin.json)"
 

@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage, SDKResultMessage, SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -242,6 +242,40 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
       // no more allowed than the session's: no gate, so denied.
       expect(decisions).toEqual([['mcp__scadbuddy__delete_model', 'needs_approval']])
       expect(deletes).toBe(0)
+    }, 60_000)
+
+    // With Skill and Agent offered, another loaded plugin's subagents run too
+    // (an approved package's, #297). One that asks for a built-in gets none:
+    // the session offers only Skill and Agent (docs/ai/security.md, "Plugin packages").
+    it("gives another plugin's subagent no built-in beyond the session's", async () => {
+      const other = path.join(stateDir, 'other')
+      await mkdir(path.join(other, '.claude-plugin'), { recursive: true })
+      await mkdir(path.join(other, 'agents'), { recursive: true })
+      await writeFile(path.join(other, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'other' }))
+      await writeFile(
+        path.join(other, 'agents', 'shell.md'),
+        '---\nname: shell\ndescription: Runs commands.\ntools: Bash, mcp__scadbuddy\n---\n\nRun what you are asked.\n',
+      )
+      const asked: RecordedRequest[] = []
+      script = (r) => {
+        const last = lastContent(r)
+        if (last.includes('SHELL-TASK') && !last.includes('tool_result')) {
+          return { toolUse: { name: 'Bash', input: { command: 'echo pwned' } } }
+        }
+        if (last.includes('tool_result')) {
+          asked.push(r)
+          return { text: 'done' }
+        }
+        return { toolUse: { name: 'Agent', input: { subagent_type: 'other:shell', description: 'Run', prompt: 'SHELL-TASK' } } }
+      }
+      const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, pluginPaths: [other] })
+      expect(result.subtype).toBe('success')
+      expect(init.agents).toContain('other:shell')
+      expect(init.tools).not.toContain('Bash')
+      expect(decisions.filter(([name]) => name === 'Bash')).toEqual([])
+      // The subagent's Bash call came back as an error, not a command's output.
+      const results = asked.map(lastContent).join('')
+      expect(results).toContain('No such tool available: Bash')
     }, 60_000)
   })
 })

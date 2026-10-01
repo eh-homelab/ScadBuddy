@@ -527,7 +527,17 @@ only, so the credential never reaches it or Chromium (measured from
 
 Packages (#297) are Claude plugins that ScadBuddy fetches from a git URL or a marketplace
 entry. They are someone else's code from the network, so they get more checks than the
-harness's own rules above. The code is in
+harness's own rules above.
+
+**Skills and subagents are reachable (#896).** Since the harness loads ScadBuddy's own
+plugin, every turn has the `Skill` and `Agent` tools, so the model can run an enabled
+package's skills and subagents too, not only a user typing its slash command. The
+vetting bounds what they get: a package skill's `allowed-tools` and a subagent's `tools`
+may name MCP tools only (`isAllowlistedTool()`, `vet.ts`), and a subagent has no
+built-in beyond the session's own two. Its calls go through the same tiers and
+approvals as the session's
+([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) runs a
+package-style subagent that asks for `Bash` and does not get it). The code is in
 [`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
 [operating.md](operating.md#9-plugin-packages-297) describes the flow.
 
@@ -990,8 +1000,8 @@ From the merged code and PR bodies:
    `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
    packages and the headless browser's vendored plugin (when enabled, see
    [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
-   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin
-   (`plugins/scadbuddy`) is not loaded (see [Plugin vetting](#plugin-vetting)).
+   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
+   loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
