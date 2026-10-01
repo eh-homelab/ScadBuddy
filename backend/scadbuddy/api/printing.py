@@ -152,8 +152,8 @@ async def post_run(
     Answers **202** with a ``running`` run once the request is accepted, and uploads,
     slices and queues in the background (#470): the slices alone can take minutes,
     longer than the proxies in front wait. Follow ``GET /print/runs/{id}`` (or the
-    ``print.run`` event on the ``print:<output id>`` topic) to ``succeeded``, whose
-    ``result`` is what this route used to answer, or ``failed``, whose ``error`` is
+    ``print.run`` event on the ``print:<output id>`` topic, or ``print:library:<file id>``
+    for a library file's) to ``succeeded``, whose ``result`` is what this route used to answer, or ``failed``, whose ``error`` is
     the problem it used to answer with.
 
     Refused before any run starts, with nothing uploaded: an output with no plates, no
@@ -267,13 +267,15 @@ async def accept_run(
     summary="How a print run is going",
 )
 async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
-    """A run ``POST /print/outputs/{id}/run`` accepted, from any replica (#470).
+    """A run ``POST /print/outputs/{id}/run`` or ``/print/library/{file_id}/run`` accepted,
+    from any replica (#470, #742).
 
     ``running`` until it ends as ``succeeded`` (with ``result``) or ``failed`` (with
     ``error``). A ``failed`` run with ``may_have_queued`` had tried to queue the print,
     so it may be on Bambuddy's queue anyway. A run whose process went away reads as
     ``failed``, and its message says whether it could have queued.
-    Once ``succeeded``, the print itself is followed by ``/outputs/{id}/progress``.
+    Once ``succeeded``, an output's print is followed by ``/outputs/{id}/progress``; a
+    library file's has no ScadBuddy progress, and its result links to Bambuddy's queue.
     """
     run = await runs.store.get(run_id)
     if run is None:
