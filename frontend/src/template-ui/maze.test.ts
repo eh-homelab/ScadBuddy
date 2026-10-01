@@ -20,6 +20,7 @@ const ui = import.meta.glob('../../../models/maze-puzzle/ui/*.js')
 function fakeHost(initial: JsonObject) {
   let inputs = initial
   const listeners: ((i: JsonObject) => void)[] = []
+  let describe: (() => string) | null = null
   const host = {
     api: 1,
     inputs: {
@@ -31,10 +32,13 @@ function fakeHost(initial: JsonObject) {
       },
     },
     schema: async () => SCHEMA,
-    describe: () => undefined,
+    describe: (fn: () => string) => {
+      describe = fn
+    },
   } as unknown as Host
   return {
     host,
+    describe: () => describe?.() ?? null,
     change(next: JsonObject) {
       inputs = next
       for (const fn of listeners) fn(next)
@@ -50,7 +54,7 @@ async function mountMaze(initial: JsonObject) {
   const fake = fakeHost(initial)
   const cleanup = await mount(root, fake.host, { slot: 'panel', version: null, theme: 'light', api: 1 })
   const lid = () => root.querySelector('sb-param[name="lid_color"]') as HTMLElement
-  return { root, lid, change: fake.change, cleanup }
+  return { root, lid, change: fake.change, describe: fake.describe, cleanup }
 }
 
 describe('maze-puzzle ui', () => {
@@ -69,6 +73,13 @@ describe('maze-puzzle ui', () => {
     expect(lid().hidden).toBe(false)
     change({ params: { mode: 'open_tray' } })
     expect(lid().hidden).toBe(true)
+  })
+
+  it('describes the model in the mode it is in, for the assistant', async () => {
+    const { change, describe } = await mountMaze({ params: { mode: 'open_tray' } })
+    expect(describe()).toBe('Open-tray ball maze; lid_color is hidden because there is no lid.')
+    change({ params: { mode: 'ball_lid' } })
+    expect(describe()).toBe('Ball maze with a snap-on lid; lid_color is shown.')
   })
 
   it('reads the default mode when the inputs leave it out', async () => {
