@@ -21,7 +21,8 @@ CREATE TABLE ai_questions (
   -- Why it was cancelled.
   reason            text,
   CHECK ((outcome IS NULL) = (resolved_at IS NULL)),
-  CHECK ((outcome = 'answered') = (answers IS NOT NULL))
+  CHECK ((outcome = 'answered') = (answers IS NOT NULL)),
+  CHECK ((outcome = 'answered') = (answered_by_kind IS NOT NULL AND answered_by_id IS NOT NULL AND answered_by_label IS NOT NULL))
 );
 CREATE INDEX ai_questions_session ON ai_questions (session_id, created_at);
 CREATE INDEX ai_questions_pending ON ai_questions (session_id) WHERE outcome IS NULL;

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
-import type { Question as AskedQuestion } from '../../agent/chat/protocol'
+import { ANSWER_MAX, type Question as AskedQuestion } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { Button } from '../ui/Button'
@@ -289,6 +289,7 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                 {choice.other && (
                   <textarea
                     aria-label="Your answer"
+                    maxLength={ANSWER_MAX}
                     rows={preview === undefined ? 2 : 6}
                     className="w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]"
                     value={choice.text}

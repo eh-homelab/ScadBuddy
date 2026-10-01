@@ -158,6 +158,39 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
+  it('a question and an approval pending together: deciding the approval leaves the session waiting for the answer', async () => {
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const asked = run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+        await run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
+        verdicts.push(await asked)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask and print' })
+    let approvalId: string | undefined
+    await expect.poll(async () => {
+      approvalId = (await m.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id
+      return approvalId
+    }).toBeDefined()
+    expect((await m.get(session.id, browser)).status).toBe('waiting_approval')
+
+    await m.approvals.decide(browser, approvalId!, true)
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
+    const [q] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id}`
+    await m.questions.answer(browser, answer(session.id, q!.id, ['Red', 'Approve']))
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
+    const statuses = (await events(m, session.id)).flatMap((e) => (e.type === 'session.status' ? [e.status] : []))
+    // The approval's resolution hands back to the question, never straight to running.
+    const resolved = statuses.lastIndexOf('waiting_approval')
+    expect(statuses[resolved + 1]).toBe('waiting_input')
+    expect(statuses.at(-1)).toBe('idle')
+  })
+
   it('an answer given through another replica reaches the parked turn', async () => {
     const paths = await tempPaths()
     const a = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })

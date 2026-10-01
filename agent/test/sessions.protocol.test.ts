@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest'
 import { HTTP_TOOL_NAME, httpTierOf } from '../src/harness/httpRequest.js'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
 import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
-import { expectPanelAccepts, frontendParseServerEvent } from './support/frontendProtocol.js'
+import { ANSWER_MAX } from '../src/harness/questions.js'
+import { expectPanelAccepts, frontendClientMessages, frontendParseServerEvent } from './support/frontendProtocol.js'
 
 const S = '11111111-2222-4333-8444-555555555555'
 const tiers = (name: string) => (name === 'mcp__scadbuddy__catalogue_list' ? ('read' as const) : undefined)
@@ -200,6 +201,11 @@ describe('the agent’s protocol mirror', () => {
     // …and that schema is really in force: a bad status is dropped.
     const parse = await frontendParseServerEvent()
     expect(parse({ v: 1, type: 'session.status', sessionId: S, status: 'paused' }).ok).toBe(false)
+  })
+
+  it('caps a question answer in the panel exactly where the socket does (#940)', async () => {
+    const panel = (await frontendClientMessages()) as unknown as { ANSWER_MAX: number }
+    expect(panel.ANSWER_MAX).toBe(ANSWER_MAX)
   })
 
   it('covers every server event type the panel declares', async () => {

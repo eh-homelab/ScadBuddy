@@ -94,6 +94,13 @@ export type VersionLink = z.infer<typeof VersionLinkSchema>
  * picks an option (several when `multiSelect`) or types their own answer. An option's
  * `preview` is Markdown it shows, e.g. a draft to approve.
  */
+/**
+ * The longest answer the agent takes (agent `src/harness/questions.ts` `ANSWER_MAX`). A
+ * longer one is refused as a malformed frame and never reaches the question, so the
+ * panel stops the user typing past it.
+ */
+export const ANSWER_MAX = 20_000
+
 export const QuestionSchema = z.object({
   question: z.string().min(1),
   header: z.string(),
@@ -322,7 +329,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('question.answer'),
     sessionId,
     id: z.string().min(1),
-    answers: z.array(z.string().min(1)).min(1),
+    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),

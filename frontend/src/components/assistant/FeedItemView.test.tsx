@@ -193,6 +193,8 @@ describe('the question card (#940)', () => {
     const { onAnswer } = ask([colour])
     await user.click(screen.getByRole('radio', { name: 'Other…' }))
     expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled()
+    // No longer than the agent takes: a longer answer would be refused before reaching the question.
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveAttribute('maxlength', '20000')
     await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'Green, please')
     await user.click(screen.getByRole('button', { name: 'Send answer' }))
     expect(onAnswer).toHaveBeenCalledWith('q1', ['Green, please'])
