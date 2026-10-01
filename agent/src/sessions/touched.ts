@@ -8,7 +8,8 @@ import { unwrapUntrusted } from '../safety/untrusted.js'
 // (db/migrations/20261001T1824Z_session_resources.sql).
 //
 // Derived inline, per tool call, from the call's parsed input and its result
-// (tools/projections.ts createHarnessServer), by the per-tool extractors in
+// (tools/registry.ts runToolWithOutcome, for any call that carries a
+// session), by the per-tool extractors in
 // EXTRACTORS below. Only calls that succeeded are recorded; a refused, denied
 // or failed call changed nothing. A `write` or `outward` tool with no
 // extractor is recorded as one `unclassified` row naming the tool, so a gap

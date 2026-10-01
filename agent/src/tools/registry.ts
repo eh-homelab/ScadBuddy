@@ -301,7 +301,7 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   if (ctx.session !== undefined && done.outcome === 'ok' && ctx.touched) {
     await ctx.touched.record({
       sessionId: ctx.session,
-      tool: (done.ran && ctx.lookup?.(done.ran.tool)) || tool,
+      tool: ranTool(tool, done, ctx),
       input: done.ran?.input ?? parsedOrRaw(tool, args),
       result: done.result,
     })
@@ -309,8 +309,18 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   return done
 }
 
+/**
+ * The tool a run executed: the tool called, or the one confirm_action ran.
+ * Without `lookup` the ran tool's name is still the one recorded (its tier
+ * unknown, so `outward`), never confirm_action's.
+ */
+function ranTool(tool: Tool, run: ToolRun, ctx: ToolContext): { name: string; risk: Risk } {
+  if (!run.ran) return tool
+  return ctx.lookup?.(run.ran.tool) ?? { name: run.ran.tool, risk: 'outward' }
+}
+
 /** The arguments as the handler saw them (defaults applied), or as sent when they do not parse. */
-function parsedOrRaw(tool: Tool, args: unknown): Record<string, unknown> {
+export function parsedOrRaw(tool: Tool, args: unknown): Record<string, unknown> {
   try {
     return tool.parse(args)
   } catch {

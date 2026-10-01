@@ -9,7 +9,8 @@ import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
-import { json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
+import { z } from 'zod'
+import { defineTool, json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // What a session touched (#931, src/sessions/touched.ts): the per-tool
@@ -192,5 +193,33 @@ describe('the harness projection', () => {
     // Over /mcp there is no session: nothing to record against.
     await runToolWithOutcome(tool, { slug: 'box', source: '' }, ctx)
     expect(seen.map((c) => [c.sessionId, c.tool.name])).toEqual([['sess-2', 'update_source']])
+  })
+
+  it('records the tool confirm_action ran, by name, even without a lookup', async () => {
+    const seen: TouchedCall[] = []
+    // Stands in for confirm_action: reports the approved call it ran.
+    const confirm = defineTool({
+      name: 'confirm_action',
+      description: 'test',
+      input: z.object({}),
+      risk: 'outward',
+      approval: 'none',
+      routes: [],
+      handler: async (_args, ctx) => {
+        ctx.report?.({ ran: { tool: 'delete_model', input: { slug: 'box' } } })
+        return json({ deleted: 'box' })
+      },
+    })
+    await runToolWithOutcome(confirm, {}, {
+      ...services({ touched: { record: async (call: TouchedCall) => void seen.push(call) } }),
+      principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+      progress: async () => {},
+      signal: new AbortController().signal,
+      session: 'sess-3',
+    })
+    expect(seen.map((c) => c.tool.name)).toEqual(['delete_model'])
+    expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result)).toEqual([
+      { type: 'model', id: 'box', action: 'deleted', model: 'box' },
+    ])
   })
 })
