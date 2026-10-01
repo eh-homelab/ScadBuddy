@@ -121,9 +121,13 @@ stage (OpenSCAD plus the image's fonts):
 
 ```bash
 docker build --target base -t scadbuddy-verify:ci .
+docker build --target test -t scadbuddy:test .   # for templates with a pipeline/ (#427)
 SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  SCADBUDDY_PIPELINE_IMAGE=scadbuddy:test \
   bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
 ```
+
+Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 
 ## Layout
 

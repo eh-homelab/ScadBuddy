@@ -14,17 +14,20 @@ import tempfile
 import uuid
 import zipfile
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from temporalio import activity
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.render.inputs import InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
@@ -94,21 +97,41 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
                 workflows=[TemplatePipeline, RenderPiece],
                 activities=acts,
             ):
-                for number, inputs in enumerate(cases, start=1):
+                # Production's bound on every pipeline (`RenderService`), so a `run` that
+                # never yields is that case's failure, not a hang.
+                bound = deps.config.pipeline_timeout
+                for number, case in enumerate(cases, start=1):
+                    try:
+                        # Exactly as the API takes inputs: `v` stamped, params checked.
+                        inputs = normalize_inputs(case, None)
+                    except InputsError as refused:
+                        failures.append(f"case {number}: {refused}")
+                        continue
                     job = Job(
                         id=uuid.uuid4().hex,
                         slug=slug,
-                        params=inputs.get("params", {}),
+                        params=inputs["params"],
                         inputs=inputs,
                         created_at=datetime.now(UTC),
                     )
-                    await env.client.execute_workflow(
-                        TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=TASK_QUEUE
-                    )
+                    try:
+                        await env.client.execute_workflow(
+                            TemplatePipeline.run,
+                            job,
+                            id=f"render-{job.id}",
+                            task_queue=TASK_QUEUE,
+                            execution_timeout=timedelta(seconds=bound),
+                        )
+                    except WorkflowFailureError as failed:
+                        if isinstance(failed.cause, TemporalTimeoutError):
+                            failures.append(f"case {number}: timed out after {bound:g} s")
+                        else:
+                            failures.append(f"case {number}: {failed.cause or failed}")
+                        continue
                     final = finals.get(job.id)
                     if final is None or final.state != "done":
-                        error = final.failure.error if final and final.failure else "no final state"
-                        failures.append(f"case {number}: {error}")
+                        why = final.failure.error if final and final.failure else "no final state"
+                        failures.append(f"case {number}: {why}")
                         continue
                     if not final.outputs:
                         failures.append(f"case {number}: no output")
