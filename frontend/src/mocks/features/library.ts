@@ -8,12 +8,20 @@ import type {
   LibraryListing,
   ModelPrintChoices,
   OutputPlate,
+  PrintRun,
   PrintRunRequest,
   PrintRunResult,
 } from '../../api/types'
 import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
-import { mockLibraryChoices, mockSettings, nextNumber, problem, setMockLibraryChoices } from '../handlers'
+import {
+  mockLibraryChoices,
+  mockSettings,
+  nextNumber,
+  problem,
+  recordMockPrintRun,
+  setMockLibraryChoices,
+} from '../handlers'
 
 /**
  * #313 — printing a file already in Bambuddy's library: the listing, a file's plates and
@@ -168,7 +176,7 @@ export const handlers = [
     if (refused) return refused
     const body = (await request.json()) as PrintRunRequest
     await delay(200)
-    return HttpResponse.json({
+    const result = {
       route: 'slice_queue',
       library_file_id: fileId,
       printer_id: body.printer_id ?? null,
@@ -180,6 +188,21 @@ export const handlers = [
       project_id: body.project_id ?? null,
       folder_id: null,
       bambuddy_url: `${mockSettings().bambuddy_url}/queue`,
-    } satisfies PrintRunResult)
+    } satisfies PrintRunResult
+    // #742: a 202 with a run, like an output's; this one has already finished.
+    const now = new Date().toISOString()
+    const run: PrintRun = {
+      id: `run-${nextNumber()}`,
+      output_id: `library:${fileId}`,
+      status: 'succeeded',
+      created_at: now,
+      finished_at: now,
+      result,
+      error: null,
+      may_have_queued: false,
+      repeated: false,
+    }
+    recordMockPrintRun(run)
+    return HttpResponse.json(run, { status: 202 })
   }),
 ]

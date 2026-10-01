@@ -315,18 +315,6 @@ class PreparedRun:
     printer_status: PrinterStatus | None
 
 
-async def run_print(
-    client: BambuddyClient,
-    source: PrintSource,
-    settings: StoredSettings,
-    request: PrintRunRequest,
-) -> PrintRunResult:
-    """:func:`prepare_run` then :func:`execute_run`, in one request: a library file's
-    run (#313), which is not yet answered 202 (#470 moved only an output's)."""
-    prepared = await prepare_run(client, source, settings, request)
-    return await execute_run(client, source, settings, request, prepared)
-
-
 async def prepare_run(
     client: BambuddyClient,
     source: PrintSource,
@@ -598,13 +586,6 @@ def _queued(
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
     )
-
-
-async def run_for_library(
-    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
-) -> PrintRunResult:
-    """Resolve, slice and queue a file already in Bambuddy's library (#313)."""
-    return await run_print(client, await LibrarySource.load(client, file_id), settings, request)
 
 
 async def filament_options_for_library(

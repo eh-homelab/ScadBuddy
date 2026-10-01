@@ -109,6 +109,32 @@ describe('ProjectPicker', () => {
     expect(posted).toEqual([{ name: 'Workshop Bins', description: null, colour: '#ef4444' }])
   })
 
+  it('disables the select while its own "Create project" is in flight (#710 review)', async () => {
+    // Its own `saving`, not the parent's `disabled`: a reselection here would be silently
+    // reverted once the pending create resolves and moves `value` again.
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/v1/print/projects', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(select()).toBeDisabled())
+
+    release()
+    await waitFor(() => expect(select()).toBeEnabled())
+    expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+  })
+
   it('opens on the project the last send went to', async () => {
     withLastProject(1)
     mount()

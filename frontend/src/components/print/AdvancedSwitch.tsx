@@ -1,6 +1,8 @@
 type Props = {
   value: boolean
   onToggle: () => void
+  /** A project create is in flight; switching would unmount the picker running it. */
+  disabled?: boolean
 }
 
 /**
@@ -9,7 +11,7 @@ type Props = {
  * process list, the plate type, the print options, the project, copies and a per-slot
  * filament preset override; Simple sends their defaults.
  */
-export function AdvancedSwitch({ value, onToggle }: Props) {
+export function AdvancedSwitch({ value, onToggle, disabled }: Props) {
   return (
     <div className="flex items-center gap-3">
       <span id="print-advanced" className="text-[13px] text-ink">
@@ -22,7 +24,8 @@ export function AdvancedSwitch({ value, onToggle }: Props) {
         aria-labelledby="print-advanced"
         aria-describedby="print-advanced-help"
         onClick={onToggle}
-        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
+        disabled={disabled}
+        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:opacity-50 ${
           value ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
         }`}
       >
