@@ -84,6 +84,28 @@ async def test_the_local_walk_is_reused_within_max_age_for_the_scraper(
     await bundle.aclose()
 
 
+async def test_a_piece_the_sweep_removes_mid_walk_counts_for_nothing(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#672 gate: the local sweep deletes pieces while `/store/usage` walks them."""
+    config, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    (bundle.blobs.dir_for("kept") / "m").write_bytes(b"12345")
+    swept = bundle.blobs.dir_for("swept")
+    (swept / "m").write_bytes(b"1")
+    is_file = Path.is_file
+
+    def racing(self: Path) -> bool:
+        found = is_file(self)
+        if found and self == swept / "m":
+            self.unlink()  # found, then gone before its stat
+        return found
+
+    monkeypatch.setattr(Path, "is_file", racing)
+    usage = store_usage(bundle, config)
+    assert (usage.count, usage.bytes) == (2, 5)
+    await bundle.aclose()
+
+
 async def test_bambuddy_puts_a_cache_in_front_of_the_remote(tmp_path: Path, pool: Pool) -> None:
     config, bundle = _build(tmp_path, pool, "bambuddy")
     assert isinstance(bundle.blobs, CachedBlobStore)

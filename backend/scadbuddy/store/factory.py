@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -114,9 +115,7 @@ def store_usage(bundle: StoreBundle, config: Config, *, max_age: float = 0) -> S
     blobs = bundle.blobs
     assert isinstance(blobs, LocalBlobStore)
     keys = blobs.keys()  # a list of blob keys, not a dict view
-    total = sum(
-        p.stat().st_size for key in keys for p in (blobs.root / key).rglob("*") if p.is_file()
-    )
+    total = sum(_tree_bytes(blobs.root / key) for key in keys)
     usage = StoreUsage(
         backend="local",
         count=len(keys),
@@ -148,3 +147,19 @@ async def store_health(bundle: StoreBundle) -> StoreHealth:
         render_key_fallback=current.key_is_fallback and bool(current.api_key),
         multi_worker=bundle.backend != "local",
     )
+
+
+def _tree_bytes(root: Path) -> int:
+    """The bytes under ``root``. The local sweep may remove a piece mid-walk: what is
+    gone by the time it is read counts for nothing, rather than failing the caller."""
+    total = 0
+    try:
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except FileNotFoundError:
+                continue
+    except FileNotFoundError:
+        pass
+    return total
