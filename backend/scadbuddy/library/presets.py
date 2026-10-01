@@ -210,8 +210,8 @@ class ParamPresetCreate(_PresetBody):
 class ParamPresetUpdate(BaseModel):
     """What changes: a rename, new values, new details, or any of them. Each field
     given replaces the old one whole -- an empty description or tag list clears it.
-    ``params`` or ``inputs`` replaces the old values whole; ``params`` alone keeps the
-    preset's other inputs keys."""
+    ``inputs`` replaces the old ones whole, except that inputs without ``params`` keep
+    the preset's current values; ``params`` alone keeps the preset's other inputs keys."""
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] | None = None
@@ -226,7 +226,9 @@ class ParamPresetUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _one_state(self) -> ParamPresetUpdate:
-        if self.inputs is not None:
+        # Inputs without `params` keep the preset's values: `PresetStore.update` adds
+        # them and checks the whole then, so they are left as sent here.
+        if self.inputs is not None and ("params" in self.inputs or self.params is not None):
             try:
                 normalized = normalize_inputs(self.inputs, self.params)
             except InputsError as error:
@@ -602,7 +604,11 @@ class PresetStore:
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
             current_inputs = self._inputs(current)
-            if patch.inputs is not None:
+            if patch.inputs is not None and "params" not in patch.inputs:
+                inputs = normalize_inputs(
+                    {**patch.inputs, "params": current_inputs["params"]}, None
+                ).data
+            elif patch.inputs is not None:
                 inputs = patch.inputs
             elif patch.params is not None:
                 # Checked as a whole again: the new values count toward the size cap.
