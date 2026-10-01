@@ -16,8 +16,9 @@ Base design: `2026-09-22-scadbuddy-design.md`. Renders on Temporal, the blob sto
 the trust model (§9): `2026-09-27-template-pipelines-design.md` (the "template spec"
 below). Print flow: `2026-09-24-print-flow-design.md`,
 `2026-09-27-spool-first-print-design.md`, `2026-09-28-print-library-file-design.md`.
-AI agent: `2026-09-27-ai-integration-design.md`. Issues: #742 (the library run is
-synchronous), #470 (the output run's 202, implemented in PR #567), #305 / #912 (print history).
+AI agent: `2026-09-27-ai-integration-design.md`. Issues: #470 (the output run's 202,
+implemented in PR #567), #742 (the library run's 202, implemented in PR #945, merged
+2026-10-01 18:22 UTC after this spec's incident), #305 / #912 (print history).
 
 ## 1. Why
 
@@ -31,17 +32,24 @@ The 15 s is the Envoy Gateway's default route timeout on `scadbuddy.internal`:
 
 `2026-09-27-spool-first-print-design.md` records "the 60 s ingress timeout" for #470,
 measured on a different path into ScadBuddy. Both numbers are real, so a request must fit
-the shortest proxy in front of it, which today is 15 s. The backend carried on regardless. Bambuddy's
-log shows one `POST /library/files/68/slice` and one `POST /queue/`, and its pending queue
-went from 8 to 9. The dialog said "may still have been queued", which was true.
+the shortest proxy in front of it, which today is 15 s.
 
-- `POST /print/library/{id}/run` (`api/library_print.py:149`) still uploads, slices
-  and queues inside one request. #470 (PR #567) moved only an output's run to a 202, and
-  the comment at `frontend/src/api/client.ts:986` says so.
-- An output's run is an `asyncio` task in the API process (`bambuddy/runs.py:378`
-  `PrintRuns.start`). It dies with the pod. Run `3c241a88` (07:29 UTC the same day)
-  is still `running` with `enqueue_attempted = false`, and its heartbeat never moved.
-  Only the `LOST` expiry would ever end it.
+The backend carried on regardless. Bambuddy's log shows one
+`POST /library/files/68/slice` and one `POST /queue/`, and its pending queue went from 8
+to 9. The dialog said "may still have been queued", which was true.
+
+- At the time, `POST /print/library/{id}/run` uploaded, sliced and queued inside one
+  request (#742). PR #945 has since fixed that.
+  - The route now answers 202 through the same `accept_run` as an output's run
+    (`api/printing.py:210`), keyed and recorded as `library:<file id>`.
+  - The frontend follows both kinds with one `followPrintRun`
+    (`frontend/src/api/client.ts:362`).
+- **What remains is the same for both kinds.** A run is an `asyncio` task in the API
+  process (`bambuddy/runs.py:378` `PrintRuns.start`), and it dies with the pod.
+  - Run `3c241a88` (07:29 UTC the same day) is still `running` with
+    `enqueue_attempted = false`, and its heartbeat never moved.
+  - Only the `LOST` expiry would ever end it, and then the dialog tells the person to
+    check Bambuddy's queue by hand.
 - Renders have run on Temporal since #424. Printing, the step with a physical effect,
   is the part that is not durable.
 
@@ -219,8 +227,8 @@ The same for every kind:
 - One helper, `command()` in `frontend/src/api/client.ts`, sends a `request_id`. It takes
   either answer, follows a 202 (event or `GET /operations/{id}`) to its result, and
   re-sends the same `request_id` after an answer that never arrived.
-- This generalises today's `runPrint` loop with its `reattach` and `mayHaveRun`
-  (`client.ts:812`, `:273`).
+- This generalises today's `followPrintRun` loop with its `reattach` and `mayHaveRun`
+  (`client.ts:362`, `:273`).
 - The agent's tools get the same behaviour from one wrapper in `agent/src/api/`.
 
 ### 4.3 Queues follow what a worker holds
@@ -247,14 +255,14 @@ new serialises across models.
 | print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
 | print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by `PrintRun`'s record step as an abandoned child. It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
 | asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
-| preview scheduler (`PreviewScheduler.start`, `render/previews.py:160`) and its boot pass over every model (`request_all`, `:184`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
+| preview scheduler (`PreviewScheduler.start`, `render/previews.py:155`) and its boot pass over every model (`request_all`, `:184`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
 | PgNotify bus, settings follower, in-process dev worker, openscad version probe, git reaper thread, LSP subprocesses | stay. They are the process's own plumbing, not operations |
 
 ### 4.5 Renders join the shape
 
 `POST /models/{slug}/render` becomes §4.2 with answer `accepted`:
 - the first activity resolves the revision and schema (today's `history.resolve`, a
-  `git rev-parse`, at `api/jobs.py:172`, and `schema_of` at `:216`) and inserts the
+  `git rev-parse`, at `api/jobs.py:173`, and `schema_of` at `:216`) and inserts the
   `render_jobs` row;
 - `TemplatePipeline` continues;
 - `RenderService`'s insert-then-start and `reconcile_once` are deleted.
@@ -307,7 +315,8 @@ The rest:
 
 Today the API inserts and then starts. `RenderService.submit` commits the `render_jobs`
 row, then starts `TemplatePipeline`, and `reconcile_once` starts any row whose start was
-lost. The print route `claim`s a `print_runs` row, then starts a task. Both need repair
+lost. Both print routes go through `accept_run` (`api/printing.py:210`), which `claim`s a
+`print_runs` row and then starts an in-process task. Both need repair
 work because the row can exist without its execution.
 
 From here on a create is one call to Temporal:
@@ -332,9 +341,9 @@ shape with answer `accepted`; renders take the same shape (§4.5).
 
 ### 5.2 Identity and repeats
 
-- `run_key` is `bambuddy/runs.py:167`. Its first argument becomes a source key,
-  `output:<id>` or `library:<file id>`, followed by the canonical request body including
-  `request_id`.
+- `run_key` is `bambuddy/runs.py:167`. Its first argument is already the run's subject,
+  an output id or `library:<file id>` (#945). It is followed by the canonical request
+  body, including `request_id`. The workflow ID is `print-` + that key.
 - **While the run is in flight**, `USE_EXISTING` attaches a repeat to it.
 - **After it ends:** a run that succeeded, or failed with `may_have_queued`, keeps its
   workflow open for `REPEAT_WINDOW` (10 min, `runs.py:89`) on a timer. While open, the
@@ -346,7 +355,7 @@ shape with answer `accepted`; renders take the same shape (§4.5).
 ### 5.3 The workflow
 
 `backend/scadbuddy/workflows/printing.py`, `PrintRun`, on `bambuddy`. The activities are
-today's `execute_run` (`bambuddy/print_run.py:378`) and `slice_and_queue`
+today's `execute_run` (`bambuddy/print_run.py:366`) and `slice_and_queue`
 (`bambuddy/dispatch.py:60`), cut at each Bambuddy call:
 
 | Activity | Does | Retry |
@@ -382,12 +391,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
   - drops `heartbeat_at`;
-  - adds `source_kind text not null default 'output' check (source_kind in ('output','library'))`
-    and `file_id integer`;
   - adds `workflow_id text`.
 
-  For a library run, `output_id` is null (made nullable), and the event topic is
-  `print:library:<file id>`.
+  `output_id` keeps holding the run's subject as #945 records it: an output id, or
+  `library:<file id>`, whose event topic is `print:library:<file id>`.
 - **Retention** becomes a Postgres setting, `print_run_retention_days` (the
   `core/settings.py` pattern, shown in Settings → Printing). Empty, the default, keeps
   every row: the rows become the start of print history (#305, #912). A number prunes
@@ -424,10 +431,12 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 ### 5.6 The frontend and the agent
 
-- `runLibraryPrint` (`frontend/src/api/client.ts:987`) follows the run exactly like
-  `runPrint` (`:812`). The 202, the follow loop, `reattach` and `mayHaveRun` are shared.
-- `agent/src/tools/print.ts`: the library print tool re-attaches with the same
-  `request_id`, like the output one.
+- Nothing changes for clients. #945 already made `runPrint` and `runLibraryPrint`
+  (`frontend/src/api/client.ts:854`, `:989`) share `followPrintRun` (`:362`), with its
+  202, follow loop, `reattach` and `mayHaveRun` (`:273`).
+- The route's answers (202 / 200 `repeated` / 422) and `GET /print/runs/{id}` keep their
+  shapes, so the client and `agent/src/tools/print.ts` need no change beyond §4.2's
+  shared `command()` helper.
 
 ## 6. Durable agent sessions
 
@@ -627,7 +636,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
   - the 422 through update-with-start;
   - a repeat while running, within the window, and after it;
-  - the library route's 202;
+  - both routes (output and `library:<file id>`) on the same workflow;
   - a worker killed mid-slice (resumes) and mid-enqueue (`may_have_queued`);
   - the projection's guarded transitions and the event in the same transaction;
   - the retention setting.
@@ -676,10 +685,12 @@ Each phase is its own implementation plan and ships alone.
 1. **The command shape and PrintRun** (§4.2, §5).
    - The shared pieces: the update-with-start helper, the `operations` table and route,
      the Search Attributes, the frontend `command()` and the agent wrapper.
-   - `PrintRun` is their first user: its activities, the `print_runs` migration and
-     retention setting, the library route's 202, `scadbuddy.worker --queue`.
+   - `PrintRun` is their first user, for both kinds of run: its activities, the
+     `print_runs` migration and retention setting, `accept_run` replaced by
+     update-with-start, `scadbuddy.worker --queue`.
    - The clusters manifests: `scadbuddy-print`, Search Attributes, Archival.
-   - Fixes #742 and the lost run.
+   - Fixes the lost run (a print run that dies with the API pod). #742, the library
+     route's 202, is already done (#945).
 2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
    join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
    sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
