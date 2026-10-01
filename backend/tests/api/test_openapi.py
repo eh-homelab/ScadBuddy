@@ -1,131 +1,39 @@
 from __future__ import annotations
 
+import importlib
 import json
+import pkgutil
+import re
 from pathlib import Path
 
+from fastapi import APIRouter
+from fastapi.routing import APIRoute
+
+import scadbuddy.api
+from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES
 from scadbuddy.tools.export_openapi import export
 
-EXPECTED_PATHS = {
-    "/healthz",
-    "/api/v1/models",
-    "/api/v1/models/check",
-    "/api/v1/models/import",
-    "/api/v1/models/{slug}",
-    "/api/v1/models/{slug}/duplicate",
-    "/api/v1/models/{slug}/upstream",
-    "/api/v1/models/{slug}/upstream/merge",
-    "/api/v1/models/{slug}/upstream/dismiss",
-    "/api/v1/models/{slug}/upstream/detach",
-    "/api/v1/models/{slug}/source",
-    "/api/v1/models/{slug}/files",
-    "/api/v1/models/{slug}/files/{name}",
-    "/api/v1/models/{slug}/source/patch",
-    "/api/v1/lsp/diagnostics",
-    "/api/v1/models/{slug}/schema",
-    "/api/v1/models/{slug}/thumbnail",
-    "/api/v1/models/{slug}/media",
-    "/api/v1/models/{slug}/media/order",
-    "/api/v1/models/{slug}/media/cover",
-    "/api/v1/models/{slug}/media/{item_id}",
-    "/api/v1/models/{slug}/media/{item_id}/poster",
-    "/api/v1/models/{slug}/readme",
-    "/api/v1/models/{slug}/ui/{path}",
-    "/api/v1/models/{slug}/presets",
-    "/api/v1/models/{slug}/presets/{preset_id}",
-    "/api/v1/models/{slug}/presets/{preset_id}/duplicate",
-    "/api/v1/models/{slug}/render",
-    "/api/v1/models/{slug}/versions",
-    "/api/v1/models/{slug}/versions/{commit}/source",
-    "/api/v1/models/{slug}/versions/{commit}/schema",
-    "/api/v1/models/{slug}/versions/{commit}/diff",
-    "/api/v1/models/{slug}/versions/{commit}/restore",
-    "/api/v1/models/{slug}/versions/{commit}/ui/{path}",
-    "/api/v1/models/{slug}/outputs",
-    "/api/v1/jobs/{job_id}",
-    "/api/v1/jobs/{job_id}/preview.glb",
-    "/api/v1/outputs/{output_id}",
-    "/api/v1/outputs/{output_id}/edit",
-    "/api/v1/outputs/{output_id}/geometry",
-    "/api/v1/outputs/{output_id}/model.3mf",
-    "/api/v1/outputs/{output_id}/preview.glb",
-    "/api/v1/outputs/{output_id}/thumbnail",
-    "/api/v1/outputs/{output_id}/plates",
-    "/api/v1/outputs/{output_id}/plates/{index}/thumbnail",
-    "/api/v1/outputs/{output_id}/send",
-    "/api/v1/outputs/{output_id}/project-file",
-    "/api/v1/print/projects",
-    "/api/v1/print/projects/last",
-    "/api/v1/print/outputs/{output_id}/project",
-    "/api/v1/print/models/{slug}/choices",
-    "/api/v1/print/printers/{printer_id}/bed-type",
-    "/api/v1/print/outputs/{output_id}/filaments",
-    "/api/v1/print/outputs/{output_id}/choices",
-    "/api/v1/print/outputs/{output_id}/progress",
-    "/api/v1/print/outputs/{output_id}/run",
-    "/api/v1/print/outputs/{output_id}/check",
-    "/api/v1/print/runs/{run_id}",
-    "/api/v1/analyzers",
-    "/api/v1/analyzers/run",
-    "/api/v1/analyzers/fixes/preview",
-    "/api/v1/analyzers/fixes/apply",
-    "/api/v1/analyzers/decisions",
-    "/api/v1/analyzers/decisions/{decision_id}",
-    "/api/v1/settings",
-    "/api/v1/settings/print-options",
-    "/api/v1/settings/test",
-    "/api/v1/store/usage",
-    "/api/v1/settings/targets",
-    "/api/v1/settings/register-sidebar",
-    "/api/v1/settings/bambuddy",
-    "/api/v1/settings/remembered",
-    "/api/v1/fonts",
-    "/api/v1/fonts/catalogue",
-    "/api/v1/fonts/install",
-    "/api/v1/plate",
-    "/api/v1/plate/fit",
-    "/api/v1/plates",
-    "/api/v1/libraries",
-    "/api/v1/assets/usage",
-    "/api/v1/models/{slug}/assets",
-    "/api/v1/models/{slug}/assets/{asset_id}",
-    "/api/v1/models/{slug}/assets/{asset_id}/content",
-    "/api/v1/models/{slug}/samples/{name}",
-    "/api/v1/models/{slug}/libraries/{name}",
-    "/api/v1/models/{slug}/libraries/{name}/files/{path}",
-    "/api/v1/models/{slug}/files/{path}",
-    "/api/v1/libraries/installed",
-    "/api/v1/libraries/{name}",
-    "/api/v1/libraries/{name}/users",
-    "/api/v1/models/{slug}/libraries/{name}/check",
-    "/api/v1/models/{slug}/dependencies",
-    "/api/v1/models/{slug}/diagnostics",
-    "/api/v1/jobs/{job_id}/views/{view}.png",
-    "/api/v1/jobs/{job_id}/colours.png",
-    "/api/v1/outputs/{output_id}/views/{view}.png",
-    "/api/v1/prints",
-    "/api/v1/prints/{archive_id}",
-    "/api/v1/prints/{archive_id}/timelapse",
-    "/api/v1/prints/{archive_id}/photos/{filename}",
-    "/api/v1/prints/{archive_id}/thumbnail",
-    "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
-    "/api/v1/prints/{archive_id}/files/sliced",
-    "/api/v1/prints/{archive_id}/files/source",
-    "/api/v1/prints/{archive_id}/reprint",
-    "/api/v1/prints/{archive_id}/timelapse/pull",
-    "/api/v1/print/library",
-    "/api/v1/print/library/{file_id}/plates",
-    "/api/v1/print/library/{file_id}/thumbnail",
-    "/api/v1/print/library/{file_id}/plates/{index}/thumbnail",
-    "/api/v1/print/library/{file_id}/choices",
-    "/api/v1/print/library/{file_id}/filaments",
-    "/api/v1/print/library/{file_id}/run",
-    "/api/v1/print/library/{file_id}/check",
-}
 
-
-def test_every_route_in_the_spec_is_published(tmp_path: Path) -> None:
+def test_the_spec_publishes_every_http_route_and_nothing_else(tmp_path: Path) -> None:
+    """Shape, not a list (#508): a new route module is mounted by discovery
+    (`test_routes.py`), so a path list here was one more tail every feature appended to."""
     schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
-    assert set(schema["paths"]) == EXPECTED_PATHS
+    paths = set(schema["paths"])
+    assert {"/healthz", f"{API_PREFIX}/models"} <= paths
+    assert all(path == "/healthz" or path.startswith(f"{API_PREFIX}/") for path in paths)
+    routes = set()
+    for info in pkgutil.iter_modules(scadbuddy.api.__path__):
+        router = getattr(importlib.import_module(f"scadbuddy.api.{info.name}"), "router", None)
+        if isinstance(router, APIRouter):
+            prefix = "" if info.name in ROOT_ROUTE_MODULES else API_PREFIX
+            routes |= {
+                prefix + re.sub(r":[^}]+}", "}", route.path)
+                for route in router.routes
+                if isinstance(route, APIRoute) and route.include_in_schema
+            }
+    assert paths == routes
+    operation_ids = [op["operationId"] for item in schema["paths"].values() for op in item.values()]
+    assert len(operation_ids) == len(set(operation_ids))
 
 
 def test_the_export_is_deterministic(tmp_path: Path) -> None:
