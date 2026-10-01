@@ -30,6 +30,7 @@ import {
   diffFromDefaults,
   type ParamValues,
 } from '../lib/params'
+import { NO_EXTRA, splitInputs, type InputsExtra } from '../lib/inputs'
 import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
@@ -79,10 +80,12 @@ export function CustomizePage() {
   // `edited` is what the user has changed; `seed` is what the page opened on. Keeping
   // them apart is what lets the first paint already carry the right values — seeding
   // through an effect runs after that paint, which is one frame of the wrong numbers.
-  const [edits, setEdits] = useState<{ of: ParamValues | null; values: ParamValues | null }>({
-    of: null,
-    values: null,
-  })
+  // `extra` is a template UI's state (spec 2026-09-27 §4.3), kept beside the values.
+  const [edits, setEdits] = useState<{
+    of: ParamValues | null
+    values: ParamValues | null
+    extra: InputsExtra | null
+  }>({ of: null, values: null, extra: null })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
 
@@ -115,20 +118,25 @@ export function CustomizePage() {
   // in hand — long enough to paint the schema defaults and snap off them.
   const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
 
+  const reopenedInputs = useMemo(
+    () => (reopened ? splitInputs(reopened.inputs, reopened.params) : null),
+    [reopened],
+  )
   const seed = useMemo(
     // Null until there is something to show: the schema has to be here, and a deep
     // link's values have to have arrived, before the defaults are the right answer.
     () =>
       schema && !resolving && !leaving
-        ? reopened
-          ? { ...defaultValues(schema), ...reopened.params }
+        ? reopenedInputs
+          ? { ...defaultValues(schema), ...reopenedInputs.params }
           : defaultValues(schema)
         : null,
-    [schema, reopened, resolving, leaving],
+    [schema, reopenedInputs, resolving, leaving],
   )
   // A different model, or a different output, discards edits made against the old one.
-  if (edits.of !== seed) setEdits({ of: seed, values: null })
+  if (edits.of !== seed) setEdits({ of: seed, values: null, extra: null })
   const values = edits.values ?? seed ?? NOTHING
+  const extra = edits.extra ?? reopenedInputs?.extra ?? NO_EXTRA
 
   // #269 — the source changed elsewhere (another tab, an agent). With no edits the
   // parameters follow it at once; with edits they are the user's, so the page asks.
@@ -154,7 +162,7 @@ export function CustomizePage() {
   })
   const reloadSchema = () => {
     setSourceChangedFor(null)
-    setEdits({ of: seed, values: null })
+    setEdits({ of: seed, values: null, extra: null })
     schemaState.refresh()
   }
 
@@ -174,7 +182,7 @@ export function CustomizePage() {
     busy: renderBusy,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled ? debounced : undefined, version)
+  } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering
@@ -201,15 +209,18 @@ export function CustomizePage() {
     setEdits((current) => ({
       of: current.of,
       values: { ...(current.values ?? current.of ?? NOTHING), [name]: value },
+      extra: current.extra,
     }))
   }, [])
 
   const onReset = useCallback(() => {
-    if (schema) setEdits((current) => ({ of: current.of, values: defaultValues(schema) }))
+    if (schema) {
+      setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+    }
   }, [schema])
 
-  const onApplyPreset = useCallback((next: ParamValues) => {
-    setEdits((current) => ({ of: current.of, values: next }))
+  const onApplyPreset = useCallback((next: ParamValues, nextExtra: InputsExtra) => {
+    setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
   }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
@@ -334,6 +345,7 @@ export function CustomizePage() {
         setEdits((current) => ({
           of: current.of,
           values: { ...(current.values ?? current.of ?? NOTHING), ...next },
+          extra: current.extra,
         }))
         showTouched(Object.keys(next)[0] ?? '')
         await committed(() => Object.entries(next).every(([name, value]) => live.current.values[name] === value))
@@ -640,6 +652,7 @@ export function CustomizePage() {
                   slug={slug}
                   schema={schema}
                   values={values}
+                  extra={extra}
                   onApply={onApplyPreset}
                 />
               </>
@@ -716,6 +729,7 @@ export function CustomizePage() {
               cameraView={cameraView}
               model={modelState.data}
               onModelChanged={modelState.setData}
+              extra={extra}
               fit={fit}
               fitProblems={misfit}
               onPrinterModel={setPrinterModel}

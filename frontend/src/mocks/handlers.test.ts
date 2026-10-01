@@ -1214,3 +1214,49 @@ describe('library print', () => {
     await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
   })
 })
+
+describe('mock inputs, as the backend keeps them (spec 2026-09-27 §4.3)', () => {
+  beforeEach(() => resetMockState())
+
+  it('keeps a preset’s UI keys on a params-only update', async () => {
+    const created = await api.createPreset('name-keychain', {
+      name: 'Lid',
+      inputs: { params: { name: 'Kai' }, tab: 'lid' },
+    })
+    const updated = await api.updatePreset('name-keychain', created.id, { params: { name: 'Ada' } })
+    expect(updated.inputs).toEqual({ params: { name: 'Ada' }, tab: 'lid', v: 0 })
+  })
+
+  it('refuses a preset whose params and inputs.params disagree', async () => {
+    const clash = { name: 'Clash', params: { name: 'Kai' }, inputs: { params: { name: 'Ada' } } }
+    await expect(api.createPreset('name-keychain', clash)).rejects.toMatchObject({ status: 422 })
+    const created = await api.createPreset('name-keychain', { name: 'Ok', params: { name: 'Kai' } })
+    await expect(
+      api.updatePreset('name-keychain', created.id, {
+        params: { name: 'Kai' },
+        inputs: { params: { name: 'Ada' } },
+      }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('keeps a given v on a render and on the output made from it', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const job = await vi.waitFor(
+      async () => {
+        const current = await api.getJob(accepted.job_id)
+        if (current.status !== 'done') throw new Error(current.status)
+        return current
+      },
+      { timeout: 5000 },
+    )
+    expect(job.inputs).toEqual({ params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const fromJob = await api.createOutput('name-keychain', job.id)
+    expect(fromJob.inputs).toEqual({ params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const given = await api.createOutput('name-keychain', job.id, undefined, {
+      params: { name: 'Kai' },
+      tab: 'b',
+      v: 2,
+    })
+    expect(given.inputs).toEqual({ params: { name: 'Kai' }, tab: 'b', v: 2 })
+  })
+})
