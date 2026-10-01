@@ -258,7 +258,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - `ai_sessions.mode text not null default 'classic' check (mode in ('classic','durable'))`,
   in a new agent migration. It is set at insert and never updated.
 - `mode` is accepted only when a session is created: the chat socket's `user.message`
-  without `sessionId` (`agent/src/routes/chat.ts:313`), `POST /api/v1/ai/sessions`
+  without `sessionId` (`agent/src/routes/chat.ts:317`), `POST /api/v1/ai/sessions`
   (`StartBody`, `sessions.ts:108`) and the `sessions_start` tool. When it is omitted, the
   `ai_settings` key `session_mode` applies (default `classic`). On an existing session
   it is refused.
@@ -281,9 +281,20 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     `live_output=True`.
   - Each user message is an Update, `send_message`. Between messages it calls
     `agent.continue_as_new()` when suggested, as the README prescribes for chats.
-- **The dependency** is `temporalio-claude-agent-sdk @ git+https://github.com/osamastro7-droid/ai-integrations@<commit>#subdirectory=python/claude_agent_sdk`,
-  pinned to a commit in `uv.lock`. It is **not vendored**; it moves to the PyPI release
-  once one exists.
+- **The dependency** is `temporalio-claude-agent-sdk @ git+https://github.com/temporalio/ai-integrations@<sha>#subdirectory=python/claude_agent_sdk`,
+  pinned to one full commit SHA in `uv.lock`. It is **not vendored**; it moves to the
+  PyPI release once one exists.
+  - **The source is Temporal's own repository.** #33's head commit is fetchable from
+    `temporalio/ai-integrations` by SHA (as of 2026-10-01 the head is `766c6479c40eadbe5300c1133bcf064725540df6`,
+    resolved through `repos/temporalio/ai-integrations/commits/<sha>`), so the pin
+    never names the contributor's fork, and a force-push there cannot change what is
+    built.
+  - Phase 3's first task checks that `uv lock` resolves that SHA from
+    `temporalio/ai-integrations`. If it does not, the work stops and the user decides
+    (§8).
+  - **Every bump is reviewed.** A pin change is its own PR, carrying the diff of
+    `python/claude_agent_sdk` between the old and new SHAs. It is a supply-chain change:
+    this package runs in the container that holds the Anthropic credential.
   - The Dockerfile asserts the Claude Code version the Python `claude-agent-sdk` bundles,
     as it does `CLAUDE_CODE_VERSION` for the TypeScript SDK.
   - The two are bumped together.
@@ -298,10 +309,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     `dek:` + that for the data key;
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
-  One test vector, sealed by the TypeScript code and committed, is opened by both test
-  suites. The result goes to the runner's `env` as `ANTHROPIC_API_KEY`, or
+  **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`
+  holds one envelope per credential kind (`anthropic_api_key`, `gateway`) and per
+  version. A TypeScript script writes it with `seal` under a fixed KEK, data key and IV.
+  - The agent's test suite regenerates it and fails if the committed file differs. So a
+    change to `secrets.ts`'s format or AAD cannot land without new vectors.
+  - The Python suite opens every vector in the file. So new vectors cannot land without
+    the port opening them.
+  - The `agent-durable` CI job runs whenever `agent/src/secrets.ts`,
+    `agent/src/credentials.ts` or the vectors change.
+
+  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`, or
   `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
-  `agent/src/harness/run.ts:176`). It never enters history.
+  `agent/src/harness/run.ts:185`). It never enters history.
 - **Limits.** `max_turns` and `budget_usd` are the session row's. Each segment gets the
   remaining budget as `max_budget_usd`, and the row's `cost_usd` and `turns` are updated
   by an activity after each segment.
@@ -409,8 +429,20 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   you reset it to the last good event with Temporal Reset. The run replays to there and
   continues on the current code, with the same inputs.
 - A changed script is a new run of a new version, because the script is the run's input.
-- `POST /api/v1/workflow-runs/{id}/reset {event_id}` wraps the reset, with a tool and the
-  audit trail.
+- **Reset does not undo side effects.**
+  - Everything already done in the world stays done: a sliced file, a queued or finished
+    print, a committed template, a tool's outward effect.
+  - Every host call after the reset point runs again.
+  - Before resetting, `POST /api/v1/workflow-runs/{id}/reset {event_id}` lists the host
+    calls between that event and now that had outward effects. Those are `print`, an
+    outward `tool`, and `agent`/`ask_session` turns that made outward calls. The route
+    resets only once the person has confirmed that list (`confirm: true`).
+  - It has a tool and the audit trail, like every route.
+  - Phase 4's plan states what Reset does to child workflows and activities that were
+    in flight past the reset point. A child `PrintRun` already past its enqueue keeps its
+    own history and outcome, and the replayed flow does not re-attach to it.
+- `print_enqueue`'s `maximum_attempts = 1` (§4.3) is set explicitly on that activity and
+  asserted by a test, never inherited from a default retry policy.
 
 ## 7. Errors and testing
 
@@ -428,7 +460,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - `agent-durable/` tests run the bundled Claude CLI against
     `agent/test/support/fakeAnthropic.ts` as a gateway; tests never call Anthropic;
   - the `agent-tools` activities use `@temporalio/testing`;
-  - the credential test vector on both sides;
+  - the shared credential vectors (regenerated and compared in TypeScript, all opened in Python);
   - `review` approve, deny, and expiry;
   - `mode` refused on an existing session;
   - an end-to-end test from the chat socket to a durable turn.
