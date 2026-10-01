@@ -108,11 +108,14 @@ export function CustomizePage() {
   // spreading another model's values onto this schema is a silent wrong answer.
   const foreign = resolved && resolved.slug !== slug ? resolved : undefined
   const reopened = foreign ? undefined : resolved
+  // spec 2026-09-27 §7: an arranged output has no one set of inputs to reopen; /edit/{id}
+  // says so, as it does for a dead link.
+  const arranged = (reopened?.arranged_from ?? []).length > 0
   // Every hook below runs before the redirects further down, so a page this one is
   // only passing through must not seed any values: with none there is nothing to
   // debounce, and no render — an OpenSCAD process and a concurrency slot — is started
   // for a model the reader is not going to see.
-  const leaving = foreign !== undefined || Boolean(reopenId && reopenState.error)
+  const leaving = foreign !== undefined || arranged || Boolean(reopenId && reopenState.error)
 
   // useAsync reports loading whether or not it has anything to fetch, so reading it
   // directly would hold the values back for a render even when the target is already
@@ -474,9 +477,10 @@ export function CustomizePage() {
     flyoutButton.current?.focus()
   }, [])
 
-  if (reopenId && reopenState.error) {
-    // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
-    // that message; sending the reader there keeps one copy of it.
+  if (reopenId && (reopenState.error || arranged)) {
+    // The deep link is dead (no record and no 3MF to read it from), or names an
+    // arranged output. /edit/{id} owns both messages; sending the reader there keeps
+    // one copy of each.
     return <Navigate to={editPath(reopenId)} replace />
   }
 
