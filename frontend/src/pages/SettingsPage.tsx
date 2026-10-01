@@ -943,7 +943,7 @@ export function SettingsPage() {
             title={sectionTitle('remembered')}
             description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults."
           >
-            <RememberedChoicesPanel targets={targetsState.data} />
+            <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">

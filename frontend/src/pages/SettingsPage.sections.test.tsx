@@ -340,6 +340,23 @@ describe('SettingsPage remembered choices (#322)', () => {
     expect((await api.getRemembered()).printer_bed_types).toEqual({ '1': 'Textured PEI Plate' })
   })
 
+  it('shows each project\'s printer and nozzle and forgets one (#599)', async () => {
+    setMockRemembered({
+      projectTargets: { '1': { printer_id: 1, nozzle_diameter: '0.4' }, '99': { printer_id: 42 } },
+    })
+    const { user } = renderPage(<SettingsPage />)
+    const table = await screen.findByRole('table', { name: 'Remembered choices' })
+    const projectRow = within(table).getByText('Reagan Keychain').closest('tr') as HTMLElement
+    expect(within(projectRow).getByText(/0\.4 mm/)).toBeInTheDocument()
+    const unknownRow = within(table).getByText('Project 99').closest('tr') as HTMLElement
+    expect(within(unknownRow).getByText('Printer 42')).toBeInTheDocument()
+
+    await user.click(within(table).getByRole('button', { name: 'Forget project printer and nozzle for Reagan Keychain' }))
+    await waitFor(() => expect(within(table).queryByText('Reagan Keychain')).toBeNull())
+    expect(within(table).getByText('Project 99')).toBeInTheDocument()
+    expect(Object.keys((await api.getRemembered()).project_print_targets ?? {})).toEqual(['99'])
+  })
+
   it('forgets everything after a confirmation', async () => {
     setMockRemembered({ printerBedTypes: { '1': 'Textured PEI Plate' }, modelChoices: { gear: { tier: 'draft' } } })
     const { user } = renderPage(<SettingsPage />)
