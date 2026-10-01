@@ -104,6 +104,13 @@ export function ActionBar({
     null,
   )
   const [fileError, setFileError] = useState<string | null>(null)
+  /**
+   * #665 — a "Create project" in flight on either picker. Its completion switches the
+   * project, so Generate waits for it rather than filing into a project the picker leaves.
+   */
+  const [pageCreating, setPageCreating] = useState(false)
+  const [dialogCreating, setDialogCreating] = useState(false)
+  const creatingProject = pageCreating || dialogCreating
 
   function chooseProject(next: number | null) {
     setProjectId(next)
@@ -156,7 +163,14 @@ export function ActionBar({
     }
   }
 
-  const live = useLatest({ ready, generating, output, sendOpen, printOpen })
+  const live = useLatest({
+    ready,
+    generating,
+    creatingProject,
+    output,
+    sendOpen,
+    printOpen,
+  })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
   useAgentHandlers('actions', {
@@ -166,6 +180,9 @@ export function ActionBar({
         what: 'the preview render to finish',
       })
       if (live.current.generating) throw new AgentToolError('invalid_args', 'Generate is already running.')
+      if (live.current.creatingProject) {
+        throw new AgentToolError('invalid_args', 'A project is still being created; wait for it first.')
+      }
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
       const created = await generate()
       if (!created) return null
@@ -181,6 +198,9 @@ export function ActionBar({
       }
       if (kind !== 'send' && live.current.generating) {
         throw new AgentToolError('invalid_args', 'Generate is still filing the project file.')
+      }
+      if (kind !== 'send' && live.current.creatingProject) {
+        throw new AgentToolError('invalid_args', 'A project is still being created.')
       }
       if (kind === 'send') setSendOpen(true)
       else setPrintOpen(true)
@@ -264,12 +284,14 @@ export function ActionBar({
             onChange={chooseProject}
             list={projects}
             onProject={setProject}
+            disabled={generating}
+            onCreating={setPageCreating}
           />
           <div className="flex">
             <Button
               variant="primary"
               onClick={() => void generate().catch(() => undefined)}
-              disabled={!ready || generating}
+              disabled={!ready || generating || creatingProject}
               data-testid="generate"
               className="rounded-r-none"
             >
@@ -289,7 +311,7 @@ export function ActionBar({
             variant={misfit ? 'danger' : 'default'}
             onClick={() => setPrintOpen(true)}
             // #317 — Generate is still filing the project file, which the print reuses.
-            disabled={!output || generating}
+            disabled={!output || generating || creatingProject}
             data-testid="print"
             title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >
@@ -323,7 +345,13 @@ export function ActionBar({
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
-        project={{ value: projectId, onChange: chooseProject, list: projects }}
+        project={{
+          value: projectId,
+          onChange: chooseProject,
+          list: projects,
+          disabled: generating || creatingProject,
+          onCreating: setDialogCreating,
+        }}
       />
     </>
   )
