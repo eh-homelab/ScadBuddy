@@ -238,10 +238,10 @@ async def render_model(
         fetcher=fetcher,
     )
     try:
-        inputs = normalize_inputs(body.inputs, body.params)
+        normalized = normalize_inputs(body.inputs, body.params)
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    params = inputs["params"]
+    params, inputs = normalized.params, normalized.data
     require_valid_params(schema, params)
     # A family that is not installed is a 422 here, not a render in the default font.
     await require_installed_fonts(schema, params, fonts)

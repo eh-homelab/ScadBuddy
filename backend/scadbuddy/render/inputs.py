@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from scadbuddy.render.schema import ParamValue
@@ -23,6 +24,16 @@ class InputsError(ValueError):
     """Inputs that are not a template's inputs; the message names the key."""
 
 
+@dataclass(frozen=True)
+class NormalizedInputs:
+    """Checked inputs: the whole object, and its `params` with their type kept for
+    the checks and the render that take `Mapping[str, ParamValue]`."""
+
+    #: The JSON object to store and echo; ``data["params"]`` is ``params``.
+    data: dict[str, Any]
+    params: dict[str, ParamValue]
+
+
 def legacy_inputs(params: Mapping[str, ParamValue]) -> dict[str, Any]:
     """What a params-only record (a pre-inputs preset, output or request) reads as."""
     return {"params": dict(params), "v": 0}
@@ -34,7 +45,7 @@ def _typed(params: Mapping[str, ParamValue]) -> dict[str, tuple[type, ParamValue
 
 def normalize_inputs(
     inputs: Mapping[str, Any] | None, params: Mapping[str, ParamValue] | None
-) -> dict[str, Any]:
+) -> NormalizedInputs:
     if inputs is None:
         # The params-only body is these inputs, and takes the same checks: an
         # integer parameter at Infinity would otherwise reach `int()` downstream.
@@ -63,4 +74,4 @@ def normalize_inputs(
     size = len(encoded.encode("utf-8"))
     if size > MAX_INPUTS_BYTES:
         raise InputsError(f"inputs are {size} bytes; at most {MAX_INPUTS_BYTES}")
-    return result
+    return NormalizedInputs(data=result, params=checked)
