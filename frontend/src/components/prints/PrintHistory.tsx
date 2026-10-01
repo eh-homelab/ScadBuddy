@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
-import type { Output, PrintPage, PrintSummary } from '../../api/types'
+import type { Output, PrintPage, PrintStage, PrintSummary } from '../../api/types'
 import {
   apiFilters,
   clearPrintFilters,
@@ -342,17 +342,39 @@ function Waiting({ slug, prints, complete }: { slug: string; prints: PrintSummar
   return (
     <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
       {waiting.map((output) => (
-        <li
-          key={output.id}
-          className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]"
-        >
-          <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>
-          <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
-            <Spinner /> Waiting for Bambuddy
-          </span>
-          <span className="ml-auto text-[12px] text-faint">Generated {timeAgo(output.created_at)}</span>
-        </li>
+        <WaitingRow key={output.id} output={output} />
       ))}
     </ul>
+  )
+}
+
+/** What a settled print with no print linked to it says instead of waiting (#898). */
+const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
+  failed: 'Failed in Bambuddy',
+  cancelled: 'Cancelled in Bambuddy',
+}
+
+/**
+ * #898 — a row asks the progress read whether anything is still coming. Bambuddy expires
+ * slice jobs and drops queue items, and once the read has settled no print will be linked
+ * to this output, so a spinner there would wait forever.
+ */
+function WaitingRow({ output }: { output: Output }) {
+  const progress = useAsync(() => api.getPrintProgress(output.id), [output.id])
+  const settled = progress.data?.settled ? progress.data : null
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
+      <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>
+      {settled ? (
+        <span className="text-[12px] text-muted" title={settled.error_message ?? undefined}>
+          {SETTLED_LABEL[settled.stage] ?? 'No longer in Bambuddy'}
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+          <Spinner /> Waiting for Bambuddy
+        </span>
+      )}
+      <span className="ml-auto text-[12px] text-faint">Generated {timeAgo(output.created_at)}</span>
+    </li>
   )
 }
