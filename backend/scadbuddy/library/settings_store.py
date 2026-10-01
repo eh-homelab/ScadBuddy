@@ -192,6 +192,23 @@ class StoredSettings(BambuddyIds):
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
 
+    @field_validator("asset_fetch_domains")
+    @classmethod
+    def _normalised_domains(cls, domains: list[str] | None) -> list[str] | None:
+        """`host_allowed` compares against normalised entries. A save already
+        normalises them (`SettingsPatch`); a row written any other way is normalised
+        here, and an entry that is not a domain is dropped rather than failing the
+        load of every setting."""
+        if domains is None:
+            return None
+        kept: list[str] = []
+        for domain in domains:
+            try:
+                kept.append(normalise_domain(domain))
+            except ValueError:
+                logger.warning("ignoring a stored asset domain that is not a domain")
+        return list(dict.fromkeys(kept))
+
     def allowed_asset_domains(self) -> tuple[str, ...]:
         if self.asset_fetch_domains is None:
             return DEFAULT_ASSET_FETCH_DOMAINS

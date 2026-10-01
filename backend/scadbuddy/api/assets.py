@@ -191,6 +191,9 @@ async def fetch_asset(
     state: StateDep,
 ) -> FetchedAsset:
     require_model_exists(catalogue, slug)
+    # Off the loop, like the store's own work below: `load` is blocking psycopg I/O,
+    # and this route is async (it awaits the fetch). The sync routes that call it
+    # inline already run on FastAPI's threadpool.
     domains = (await asyncio.to_thread(settings.load)).allowed_asset_domains()
     # As the import: no await between the check and the hold.
     if imports.full():

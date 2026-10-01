@@ -628,11 +628,11 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
   })
 
   it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
-    const url = 'https://www.svgrepo.com/download/1/unicorn.svg'
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
     const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())
     expect(firstText(pending)).toMatchObject({
       status: 'pending_approval',
-      summary: `Fetch ${url} (www.svgrepo.com) into model "box" as a file asset`,
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset`,
     })
     expect(tool('fetch_asset').risk).toBe('outward')
 

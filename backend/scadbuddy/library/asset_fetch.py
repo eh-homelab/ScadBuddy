@@ -34,17 +34,18 @@ from scadbuddy.library.url_import import (
     unreachable,
 )
 
-#: Where the allowlist starts (the issue's suggested starters): open icon catalogues,
-#: GitHub's raw files, and the two model sites' direct file URLs. Each also allows its
-#: subdomains.
+#: Where the allowlist starts: the issue's suggested starters that answer a direct
+#: file URL with the file. Measured 2026-10-01 with an httpx user agent:
+#: game-icons.net, openmoji.org and raw.githubusercontent.com answer 200 with
+#: ``image/svg+xml``; a github.com ``/raw/`` link 302s to raw.githubusercontent.com.
+#: Left out: svgrepo.com answers 429 with a "Vercel Security Checkpoint" page,
+#: printables.com 403s, and printables.com and thingiverse.com serve meshes, which the
+#: asset store does not take yet (#959). Each entry also allows its subdomains.
 DEFAULT_ASSET_FETCH_DOMAINS: Final = (
-    "svgrepo.com",
     "game-icons.net",
     "github.com",
     "raw.githubusercontent.com",
     "openmoji.org",
-    "printables.com",
-    "thingiverse.com",
 )
 
 #: A host name of at least two labels, each a letter-digit-hyphen label. No scheme,
@@ -59,7 +60,7 @@ def normalise_domain(entry: str) -> str:
     domain = entry.strip().lower().rstrip(".")
     if not DOMAIN_RE.match(domain):
         raise ValueError(
-            f"{entry!r} is not a domain name (like svgrepo.com; it also allows its subdomains)"
+            f"{entry!r} is not a domain name (like openmoji.org; it also allows its subdomains)"
         )
     return domain
 

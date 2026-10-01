@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
+from scadbuddy.api.models import RESOLVER_RETRY_AFTER
+from scadbuddy.library import url_import
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from tests.conftest import MODEL_SLUG
 
-ICON_URL = "https://www.svgrepo.com/download/12345/unicorn.svg"
+ICON_URL = "https://openmoji.org/data/color/svg/1F984.svg"
 UNICORN_SVG = (
     b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
     b'<path d="M2 2 L22 2 L12 22 Z" onclick="steal()"/><script>alert(1)</script></svg>'
@@ -34,7 +41,7 @@ def test_an_allowlisted_svg_is_stored_sanitised_like_an_upload(client: TestClien
 
     assert response.status_code == 201, response.text
     asset = response.json()
-    assert (asset["kind"], asset["name"]) == ("svg", "unicorn.svg")
+    assert (asset["kind"], asset["name"]) == ("svg", "1F984.svg")
     assert asset["source_url"] == ICON_URL
     # The id is a stored upload's: the same metadata and bytes routes serve it.
     meta = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset['id']}").json()
@@ -58,7 +65,7 @@ def test_a_host_off_the_allowlist_is_refused_before_anything_is_fetched(
     with respx.mock(assert_all_called=False) as mock:
         route = mock.get(url__regex=r".*").mock(return_value=httpx.Response(200))
         # A suffix match on the name, not on the label, would let this one through.
-        for url in ("https://example.com/a.svg", "https://notsvgrepo.com/a.svg"):
+        for url in ("https://example.com/a.svg", "https://notopenmoji.org/a.svg"):
             response = _fetch(client, url)
             assert response.status_code == 422, url
             assert "allowlist" in response.json()["detail"]
@@ -83,7 +90,7 @@ def test_a_redirect_off_the_allowlist_is_refused(client: TestClient) -> None:
 
 
 def test_a_plain_http_url_is_refused(client: TestClient) -> None:
-    response = _fetch(client, "http://www.svgrepo.com/download/1/a.svg")
+    response = _fetch(client, "http://openmoji.org/data/color/svg/1F984.svg")
     assert response.status_code == 422
     assert "https" in response.json()["detail"]
 
@@ -138,3 +145,51 @@ def test_an_allowlist_entry_that_is_not_a_domain_is_refused(
 ) -> None:
     response = client.put("/api/v1/settings", json={"asset_fetch_domains": [domain]})
     assert response.status_code == 422, response.text
+
+
+def test_a_fetch_over_the_shared_fetch_budget_is_a_503_with_retry_after(
+    client: TestClient,
+) -> None:
+    """Imports and asset fetches share one budget per replica."""
+    imports: ImportPermits = getattr(client.app.state, STATE_ATTR).imports  # type: ignore[attr-defined]
+    with ExitStack() as held:
+        for _ in range(IMPORT_CONCURRENCY):
+            held.enter_context(imports.hold())
+        oldest = next(iter(imports._taken))
+        imports._taken[oldest] -= url_import.IMPORT_TIMEOUT - 10
+        with respx.mock(assert_all_called=False) as mock:
+            response = _fetch(client, ICON_URL)
+
+    assert response.status_code == 503
+    retry_after = response.json()["retry_after"]
+    assert 5 <= retry_after <= 10
+    assert response.headers["retry-after"] == str(retry_after)
+    assert not mock.calls
+
+
+def test_a_fetch_with_every_resolver_thread_busy_is_a_503_not_the_refusal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(url_import, "resolve_host", real_resolve_host)
+    taken = 0
+    while url_import._RESOLVER_SLOTS.acquire(blocking=False):
+        taken += 1
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            response = _fetch(client, ICON_URL)
+    finally:
+        url_import._RESOLVER_SLOTS.release(taken)
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == str(RESOLVER_RETRY_AFTER)
+    assert "resolver" in response.json()["detail"]
+    assert not mock.calls
+
+
+def test_a_stored_allowlist_is_normalised_on_load() -> None:
+    """`host_allowed` compares against normalised entries, so a row written by hand
+    (or by an older version) is normalised when read, and a bad entry dropped."""
+    stored = StoredSettings.model_validate(
+        {"asset_fetch_domains": ["Example.COM.", "not a domain", "example.com"]}
+    )
+    assert stored.allowed_asset_domains() == ("example.com",)
