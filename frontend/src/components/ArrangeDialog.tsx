@@ -56,7 +56,11 @@ export function ArrangeDialog({ open, slug, outputs, onClose, onArranged }: Prop
     const controller = new AbortController()
     running.current = controller
     try {
-      onArranged(await runArrange(slug, body, { onProgress: setProgress, signal: controller.signal }))
+      const arranged = await runArrange(slug, body, { onProgress: setProgress, signal: controller.signal })
+      // Closed while the output was being saved: it is saved, a normal output in
+      // History, but this dialog no longer acts on it.
+      if (controller.signal.aborted) return
+      onArranged(arranged)
     } catch (cause) {
       if (controller.signal.aborted) return
       setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)

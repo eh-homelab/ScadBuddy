@@ -291,6 +291,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         colours: target.colors ?? [],
         name: arrangedName(target.name),
       }, { signal: controller.signal })
+      // Closed while the output was being saved: it is saved, a normal output in
+      // History, but this dialog keeps the output it was opened for.
+      if (controller.signal.aborted) return
       carry.current = { plan, overrides, options, ready: false }
       setTarget(next.output)
       setArrangeNote(arrangedNote(next.plates))

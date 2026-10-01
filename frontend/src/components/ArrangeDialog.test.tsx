@@ -130,4 +130,22 @@ describe('ArrangeDialog', () => {
     expect(save).not.toHaveBeenCalled()
     expect(onArranged).not.toHaveBeenCalled()
   })
+
+  it('acts on nothing when it is closed while the output is being saved', async () => {
+    let saved!: (output: Output) => void
+    vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (saved = resolve)),
+    )
+    const onArranged = vi.fn()
+    const dialog = (open: boolean) => (
+      <ArrangeDialog open={open} slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />
+    )
+    const { user, rerender } = renderPage(dialog(true))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(api.createOutput).toHaveBeenCalled())
+    rerender(dialog(false))
+    saved({ ...first, id: 'o-new' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(onArranged).not.toHaveBeenCalled()
+  })
 })

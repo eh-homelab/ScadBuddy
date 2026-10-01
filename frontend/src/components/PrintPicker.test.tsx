@@ -367,6 +367,37 @@ describe('PrintPicker', () => {
     expect(save).not.toHaveBeenCalled()
   })
 
+  it('keeps its output when it is closed while the arranged one is being saved', async () => {
+    let saved!: (output: Output) => void
+    vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (saved = resolve)),
+    )
+    const choices = vi.spyOn(api, 'getChoices')
+    const shown = { ...output, library_files: [], pipeline_run_id: undefined }
+    function Closing() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>Close it</button>
+          <button onClick={() => setOpen(true)}>Open it</button>
+          <PrintPicker open={open} slug="name-keychain" output={shown} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Closing />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(api.createOutput).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    saved({ ...output, id: 'o-arranged' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // Reopened, it is still the output it was opened for.
+    await user.click(screen.getByRole('button', { name: 'Open it', hidden: true }))
+    await loaded()
+    expect(screen.queryByText(/Arranged onto/)).toBeNull()
+    expect(choices.mock.calls.map(([id]) => id)).not.toContain('o-arranged')
+  })
+
   it('shows a failed re-arrange as an error, not as a note', async () => {
     server.use(
       http.post('/api/v1/outputs/arrange', () =>
