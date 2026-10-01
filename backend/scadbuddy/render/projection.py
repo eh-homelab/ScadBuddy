@@ -359,7 +359,9 @@ class JobProjection:
     def latest_finished(self, slug: str) -> Job | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                # An arrange row carries a source output's slug but is no render of it.
+                "SELECT * FROM render_jobs WHERE slug = %s AND kind = 'render'"
+                " AND state IN ('done', 'failed')"
                 " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
                 (slug,),
             ).fetchone()

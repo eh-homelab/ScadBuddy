@@ -411,3 +411,20 @@ def test_a_result_stored_before_its_newer_fields_still_reads(
 
     assert stored is not None
     assert (stored.diagnostics, stored.source_version) == ([], "")
+
+
+def test_the_latest_finished_render_is_never_an_arrange(projection: JobProjection) -> None:
+    # An arrange row carries a source output's slug; the model's diagnostics must still
+    # read its last render (final review M1).
+    render = projection.submit(_job(width=2), render_key("demo", {"width": 2}, None)).job
+    render.state, render.result, render.finished_at = "done", _result(), datetime.now(UTC)
+    assert projection.finish(render)
+    arrange = Job(
+        id=uuid.uuid4().hex, slug="demo", kind="arrange", inputs={}, created_at=datetime.now(UTC)
+    )
+    arrange = projection.submit(arrange, "arrange-key").job
+    arrange.state, arrange.error = "failed", "piece is not in the store"
+    arrange.finished_at = datetime.now(UTC) + timedelta(seconds=5)
+    assert projection.finish(arrange)
+    latest = projection.latest_finished("demo")
+    assert latest is not None and latest.id == render.id
