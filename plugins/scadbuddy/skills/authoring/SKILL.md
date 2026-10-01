@@ -303,8 +303,8 @@ One part packed alone keeps the plates it laid out itself (`echo(plates = N)`, s
 Nothing is installed per template. Arguments and results are JSON. A `Part`
 argument gives `part.meshes()`, and a `Blob` argument gives `blob.read_bytes()`.
 Return `scadbuddy.template.emit(name, data)` for a file. The function runs in its
-own process group, with no ScadBuddy secrets in its environment, and is killed with
-its children on cancellation or timeout (default the render timeout plus 60 s, at
+own process group, with an allowlisted environment; it otherwise has the render
+worker's reach (spec §9). It is killed with its children on cancellation or timeout (default the render timeout plus 60 s, at
 most `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`). An exception fails the job with
 `pipeline/activities.py:<line>`.
 
