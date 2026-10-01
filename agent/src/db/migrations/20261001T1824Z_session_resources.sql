@@ -7,14 +7,16 @@
 -- is NULL and `tool` names the call, so the gap stays visible. `model_slug`
 -- is the model the resource belongs to (a model's own slug for a model);
 -- `before_id`/`after_id` are what it was and became where that has an id (a
--- revision's parent and new commit).
+-- revision's parent and new commit). A `print` is always a Bambuddy queue item
+-- id, whichever tool queued it; a `print_run` is ScadBuddy's own run id.
 CREATE TABLE ai_session_resources (
   id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   session_id     uuid NOT NULL REFERENCES ai_sessions (id) ON DELETE CASCADE,
   at             timestamptz NOT NULL DEFAULT now(),
   tool           text NOT NULL,
   resource_type  text NOT NULL CHECK (resource_type IN
-                   ('model', 'revision', 'preset', 'asset', 'render_job', 'output', 'print', 'unclassified')),
+                   ('model', 'revision', 'preset', 'asset', 'render_job', 'output', 'print_run', 'print',
+                    'unclassified')),
   resource_id    text,
   action         text NOT NULL CHECK (action IN ('created', 'modified', 'deleted')),
   model_slug     text,

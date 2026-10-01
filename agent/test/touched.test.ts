@@ -110,8 +110,17 @@ describe('extractors', () => {
   })
 
   it('records prints, with what they printed', () => {
-    expect(touches('print_output', { output_id: 'o1' }, { id: 'r1', status: 'done' }, 'outward')).toEqual([
-      { type: 'print', id: 'r1', action: 'created', before: 'o1' },
+    // `print` is Bambuddy's queue item id from either tool, so the two are one id space.
+    expect(
+      touches('print_output', { output_id: 'o1' }, { id: 'r1', status: 'done', result: { queue_item_ids: [12, 13] } }, 'outward'),
+    ).toEqual([
+      { type: 'print_run', id: 'r1', action: 'created', before: 'o1' },
+      { type: 'print', id: '12', action: 'created', before: 'o1' },
+      { type: 'print', id: '13', action: 'created', before: 'o1' },
+    ])
+    // Still slicing: the run, and no queue item yet.
+    expect(touches('print_output', { output_id: 'o1' }, { id: 'r1', status: 'running', result: null }, 'outward')).toEqual([
+      { type: 'print_run', id: 'r1', action: 'created', before: 'o1' },
     ])
     expect(touches('print_again', { archive_id: 7 }, { queue_item_id: 12, printer_id: 1 }, 'outward')).toEqual([
       { type: 'print', id: '12', action: 'created', before: '7' },

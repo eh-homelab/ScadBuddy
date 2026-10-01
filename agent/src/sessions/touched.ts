@@ -27,6 +27,7 @@ export const RESOURCE_TYPES = [
   'asset',
   'render_job',
   'output',
+  'print_run',
   'print',
   'unclassified',
 ] as const
@@ -144,10 +145,18 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const id = str(input.output_id)
     return id ? [{ type: 'output', id, action: 'deleted' }] : []
   },
-  // Prints.
+  // Prints. `print` is always a Bambuddy queue item id, whichever tool queued it;
+  // `print_run` is ScadBuddy's own run (backend bambuddy/runs.py PrintRun.id).
   print_output: (input, result) => {
-    const id = str(field(result, 'id'))
-    return id ? [{ type: 'print', id, action: 'created', before: str(input.output_id) }] : []
+    const run = str(field(result, 'id'))
+    const output = str(input.output_id)
+    const items = field(field(result, 'result'), 'queue_item_ids')
+    return [
+      ...(run ? [{ type: 'print_run' as const, id: run, action: 'created' as const, before: output }] : []),
+      ...(Array.isArray(items) ? items : [])
+        .filter((item): item is number | string => typeof item === 'number' || typeof item === 'string')
+        .map((item) => ({ type: 'print' as const, id: String(item), action: 'created' as const, before: output })),
+    ]
   },
   // Answers Bambuddy's new queue item; `before` is the archive printed again.
   print_again: (input, result) => {

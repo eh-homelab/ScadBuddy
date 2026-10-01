@@ -418,9 +418,9 @@ export const sessionTools: Tool[] = [
   defineTool({
     name: 'sessions_resources',
     description:
-      'What a session this caller may see touched: every model, revision, preset, asset, render job, output and ' +
-      'print its tool calls created, changed or deleted, oldest first, with the tool that did it and, where they ' +
-      "exist, the before and after ids (a revision's parent and new commit). A write ScadBuddy cannot classify " +
+      'What a session this caller may see touched: every model, revision, preset, asset, render job, output, ' +
+      'print run and print (a Bambuddy queue item id) its tool calls created, changed or deleted, oldest first, with ' +
+      "the tool that did it and, where they exist, the before and after ids (a revision's parent and new commit). A write ScadBuddy cannot classify " +
       'yet is listed as `unclassified` with its tool.',
     input: z.object({ session_id: sessionId }),
     risk: 'read',
