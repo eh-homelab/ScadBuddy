@@ -909,6 +909,7 @@ def test_the_migration_backfills_inputs_from_params(
     assert _stored(pg_conninfo, saved["id"])[1] == {"params": {"width": 7}, "v": 0}
 
 
+@pytest.mark.requires_git
 def test_a_duplicated_template_takes_its_presets_inputs_along(client: TestClient) -> None:
     body = {"name": "Mine", "inputs": {"params": {"label": "Bo"}, "ui": {"tab": "text"}}}
     assert client.post(_url(BUILTIN), json=body).status_code == 201

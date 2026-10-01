@@ -196,10 +196,10 @@ class _PresetBody(BaseModel):
     @model_validator(mode="after")
     def _one_state(self) -> _PresetBody:
         try:
-            self.inputs = normalize_inputs(self.inputs, self.params)
+            normalized = normalize_inputs(self.inputs, self.params)
         except InputsError as error:
             raise ValueError(str(error)) from None
-        self.params = self.inputs["params"]
+        self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -228,10 +228,10 @@ class ParamPresetUpdate(BaseModel):
     def _one_state(self) -> ParamPresetUpdate:
         if self.inputs is not None:
             try:
-                self.inputs = normalize_inputs(self.inputs, self.params)
+                normalized = normalize_inputs(self.inputs, self.params)
             except InputsError as error:
                 raise ValueError(str(error)) from None
-            self.params = self.inputs["params"]
+            self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -267,10 +267,10 @@ class TemplatePreset(_PresetBody):
         if stored and inputs is not None and "params" in self.model_fields_set:
             inputs, params = {**inputs, "params": params}, None
         try:
-            self.inputs = normalize_inputs(inputs, params)
+            normalized = normalize_inputs(inputs, params)
         except InputsError as error:
             raise ValueError(str(error)) from None
-        self.params = self.inputs["params"]
+        self.inputs, self.params = normalized.data, normalized.params
         return self
 
 
@@ -606,7 +606,7 @@ class PresetStore:
                 inputs = patch.inputs
             elif patch.params is not None:
                 # Checked as a whole again: the new values count toward the size cap.
-                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None)
+                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None).data
             else:
                 inputs = current_inputs
             row = conn.execute(
