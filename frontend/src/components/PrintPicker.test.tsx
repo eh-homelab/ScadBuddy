@@ -295,19 +295,62 @@ describe('PrintPicker', () => {
     })
   })
 
-  it('carries nothing to the next output when the arranged one cannot be read', async () => {
-    // A re-arrange whose new choices never arrive must not hand its plan and settings
-    // to the next output the dialog opens.
+  /** Slot 1's checked spool, and one that is not. */
+  function slot1Radios() {
+    const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
+    return { checked: radios.find((radio) => radio.checked)!, other: radios.find((radio) => !radio.checked)! }
+  }
+
+  it('drops the carry when the arranged output\'s choices cannot be read', async () => {
+    // Read again later (a reopen), the arranged output opens on its own choices, not on
+    // a carry left behind by the failed read.
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    let failures = 1
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ params }) => {
+        if (originals.has(String(params.id)) || failures === 0) return undefined
+        failures -= 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const shown = { ...output, library_files: [], pipeline_run_id: undefined }
+    function Reopening() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>Close it</button>
+          <button onClick={() => setOpen(true)}>Open it</button>
+          <PrintPicker open={open} slug="name-keychain" output={shown} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Reopening />)
+    await loaded()
+    const { checked, other } = slot1Radios()
+    await user.click(other)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    await user.click(screen.getByRole('button', { name: 'Open it', hidden: true }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${checked.value}`)).toBeChecked(),
+    )
+  })
+
+  it('carries nothing to an output the caller passes in', async () => {
+    // The arranged output's choices are still on their way when the caller switches the
+    // dialog to another output; that output opens on its own choices.
     const originals = new Set(fixtures.outputs.map((entry) => entry.id))
     server.use(
-      http.get('/api/v1/print/outputs/:id/choices', ({ params }) =>
-        originals.has(String(params.id))
-          ? undefined
-          : HttpResponse.json(
-              { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
-              { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
-            ),
-      ),
+      http.get('/api/v1/print/outputs/:id/choices', async ({ params }) => {
+        if (originals.has(String(params.id))) return undefined
+        await delay('infinite')
+        return undefined
+      }),
     )
     const other = { ...(fixtures.outputs[1] as Output), library_files: [], pipeline_run_id: undefined }
     function Switching() {
@@ -321,17 +364,14 @@ describe('PrintPicker', () => {
     }
     const { user } = renderPage(<Switching />)
     await loaded()
-    const suggested = (within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[])
-      .find((radio) => radio.checked)!.value
-    const other1 = (within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[])
-      .find((radio) => !radio.checked)!
-    await user.click(other1)
+    const { checked, other: unchosen } = slot1Radios()
+    await user.click(unchosen)
     await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
-    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Next output' }))
     await loaded()
     await waitFor(() =>
-      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${suggested}`)).toBeChecked(),
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${checked.value}`)).toBeChecked(),
     )
   })
 
