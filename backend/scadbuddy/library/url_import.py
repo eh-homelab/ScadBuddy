@@ -45,7 +45,7 @@ import asyncio
 import ipaddress
 import socket
 import threading
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
@@ -336,7 +336,7 @@ async def _read_capped(response: httpx.Response, *, limit: int) -> bytes:
     kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
     if kind in HTML_TYPES:
         raise ImportRefusedError(
-            f"{host} answered with a web page, not a file; link to the raw .scad instead"
+            f"{host} answered with a web page, not a file; link to the raw file instead"
         )
     # Asked for `identity`, so an encoding here is the server insisting. It is
     # refused rather than inflated: a few KB of gzip can decode to gigabytes in
@@ -376,20 +376,24 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
         await _vet_hop(request)
 
     try:
-        async with (
-            asyncio.timeout(IMPORT_TIMEOUT),
-            httpx.AsyncClient(
-                timeout=IMPORT_TIMEOUT,
-                # `_fetch` follows them itself; see why there.
-                follow_redirects=False,
-                event_hooks={"request": [vet_hop]},
-                headers={"Accept-Encoding": "identity"},
-                # Its own transport, which also means no proxy from the environment:
-                # a proxy would make the connection, and the vetting with it.
-                transport=_transport(),
-                trust_env=False,
-            ) as client,
-        ):
+        async with asyncio.timeout(IMPORT_TIMEOUT), public_client(vet_hop) as client:
             return await resolver.resolve(url, client, limit=limit)
     except (UnreachableError, TimeoutError, httpx.HTTPError):
         raise unreachable(hop.host, redirected_from=url.host) from None
+
+
+def public_client(vet_hop: Callable[[httpx.Request], Awaitable[None]]) -> httpx.AsyncClient:
+    """The client every fetch here makes: ``vet_hop`` on each hop, which must at least
+    await :func:`_vet_hop`, and redirects left to :func:`_fetch`. Shared with the
+    asset fetch (#844, `library/asset_fetch.py`)."""
+    return httpx.AsyncClient(
+        timeout=IMPORT_TIMEOUT,
+        # `_fetch` follows them itself; see why there.
+        follow_redirects=False,
+        event_hooks={"request": [vet_hop]},
+        headers={"Accept-Encoding": "identity"},
+        # Its own transport, which also means no proxy from the environment:
+        # a proxy would make the connection, and the vetting with it.
+        transport=_transport(),
+        trust_env=False,
+    )
