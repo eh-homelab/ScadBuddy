@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
-import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
 import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
@@ -144,6 +145,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(runs[0]!.sessionStore).toBe(m.store)
       expect(runs[0]!.includePartialMessages).toBe(true)
       expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false, turns: 2 })
+    })
+
+    it("passes ScadBuddy's own plugin to each turn, and says so when Claude Code did not load it (#896)", async () => {
+      const paths = await tempPaths()
+      const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+      const runs: HarnessRun[] = []
+      const listed = [[{ path: '/plugins/own' }], []]
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          runs.push(run)
+          yield { type: 'system', subtype: 'init', mcp_servers: [], plugins: listed.shift() } as unknown as SDKMessage
+          yield* scripted.runner(run)
+        })()
+      const m = manager({ sql: db.sql, paths, run: runner, ownPlugin: '/plugins/own' })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      await turn!.done
+      await (await m.send(session.id, agentA, 'again')).done
+      expect(runs.map((r) => r.ownPlugin)).toEqual(['/plugins/own', '/plugins/own'])
+      const logged = (
+        await db.sql<{ event: string }[]>`
+          SELECT event FROM ai_session_events WHERE session_id = ${session.id} ORDER BY seq`
+      ).map((e) => JSON.parse(e.event) as { type: string; code?: string; message?: string })
+      // Only the second turn's init left it out.
+      expect(logged.filter((e) => e.code === 'plugin_unavailable').map((e) => e.message)).toEqual([
+        "ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable",
+      ])
     })
 
     it('rejects a concurrent send on the same replica with a clear error', async () => {

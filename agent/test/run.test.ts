@@ -9,7 +9,15 @@ import type { Credential } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
-import { buildHarnessOptions, credentialEnv, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../src/harness/run.js'
+import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
+import {
+  buildHarnessOptions,
+  credentialEnv,
+  DEFAULT_MAX_TURNS,
+  type HarnessRun,
+  harnessTierOf,
+  runHarness,
+} from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { testConnection } from '../src/harness/testConnection.js'
 import { createMemoryHooks, HindsightClient } from '../src/memory/hindsight.js'
@@ -78,6 +86,20 @@ describe('buildHarnessOptions', () => {
     expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('../plugins/scadbuddy') }])
     expect(typeof options.canUseTool).toBe('function')
     expect(options.hooks?.PreToolUse).toHaveLength(1)
+  })
+
+  it("loads ScadBuddy's own plugin first, with Skill and Agent at read and no other built-in (#896)", () => {
+    const options = buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR, pluginPaths: ['../plugins/scadbuddy'] })
+    expect(options.plugins).toEqual([
+      { type: 'local', path: OWN_PLUGIN_DIR },
+      { type: 'local', path: path.resolve('../plugins/scadbuddy') },
+    ])
+    expect(options.tools).toEqual(['Skill', 'Agent'])
+    expect(buildHarnessOptions(base).tools).toEqual([])
+    const withPlugin = harnessTierOf({ ownPlugin: OWN_PLUGIN_DIR })
+    expect(['Skill', 'Agent', 'Task'].map((t) => withPlugin(t))).toEqual(['read', 'read', 'read'])
+    expect(withPlugin('Bash')).toBeUndefined()
+    expect(harnessTierOf({})('Skill')).toBeUndefined()
   })
 
   it('passes the session options through (#300)', () => {

@@ -185,10 +185,21 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
-# The authoring guide the agent serves as `scadbuddy://docs/authoring` (#252):
-# `pnpm build` copies it into dist/docs (agent/src/tools/guide.ts).
-COPY plugins/scadbuddy/skills/authoring/SKILL.md /src/plugins/scadbuddy/skills/authoring/SKILL.md
+# ScadBuddy's own plugin's skills and subagents (#896): agent/plugins/scadbuddy
+# links to them, and `pnpm build` copies the authoring skill into dist/docs for
+# `scadbuddy://docs/authoring` (#252, agent/src/tools/guide.ts).
+COPY plugins/scadbuddy/skills /src/plugins/scadbuddy/skills
+COPY plugins/scadbuddy/agents /src/plugins/scadbuddy/agents
 RUN pnpm build
+# COPY keeps a symlink as a link, which would dangle in the agent stage:
+# replace the links with the files (agent/src/harness/ownPlugin.ts), readable
+# by the agent's non-root user whatever modes the build context had.
+RUN cp -rL plugins/scadbuddy /tmp/own-plugin \
+    && rm -r plugins/scadbuddy \
+    && mv /tmp/own-plugin plugins/scadbuddy \
+    && chmod -R a+rX plugins/scadbuddy \
+    && test -z "$(find plugins -type l)" \
+    && test -f plugins/scadbuddy/skills/customize/SKILL.md
 
 # Production dependencies only, installed from the same lockfile in a stage of
 # their own so the shipped node_modules carries no eslint/vitest/typescript.

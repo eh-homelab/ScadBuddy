@@ -39,7 +39,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
 | D6 | **MCP auth modes `bearer` (default), `disabled`, later `oidc`** | Bearer now, OIDC per the MCP authorization spec later (#262), and an explicit off switch for trusted LANs | Hard-requiring auth; forking the code path per mode |
-| D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web | Leaving Claude Code's built-in tools available |
+| D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web. Amended by #896: `Skill` and `Agent`, for ScadBuddy's own plugin (§10) | Leaving Claude Code's built-in tools available |
 | D8 | **Bambuddy is served by ScadBuddy itself** | Keeps the key server-side, scope-aware errors, tiers, approvals and the audit log | Third-party Bambuddy MCP servers |
 | D9 | **Plugins are Claude plugins, fetched and pinned** | The SDK loads plugins by local path only (§3.1) | Auto-updating plugins; stdio plugin servers |
 | D10 | **Citations are required** | Suggested settings, analyzers, agent edits and docs carry their sources; unsourced claims are labelled judgement and are never auto-applied | — |
@@ -987,10 +987,12 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
-  As built (#526): the harness does not load it yet. Every query runs with `tools: []`
-  (§4.4), which leaves no `Skill` or `Agent` tool, so its skills and subagents would be
-  listed but unusable; exposing them needs those tools and a tier for them (§8.1)
-  first (`agent/test/harnessWiring.test.ts`).
+  As built (#896): the harness loads `agent/plugins/scadbuddy/`, which has its own
+  manifest (no `userConfig`, no `.mcp.json`) and links `skills/` and `agents/` to
+  `plugins/scadbuddy/`. A query that loads it gets the `Skill` and `Agent` tools, both
+  `read` (§8.1), and no other built-in (D7, amended); a subagent's calls go through the
+  same permission seam (`agent/src/harness/ownPlugin.ts`,
+  `agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has
