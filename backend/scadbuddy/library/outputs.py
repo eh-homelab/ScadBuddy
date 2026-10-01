@@ -225,8 +225,14 @@ class OutputStore:
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
 
-        shutil.copyfile(self.paths.root / job.result.model_3mf, directory / MODEL_NAME)
-        shutil.copyfile(self.paths.root / job.result.preview_glb, directory / PREVIEW_NAME)
+        try:
+            shutil.copyfile(self.paths.root / job.result.model_3mf, directory / MODEL_NAME)
+            shutil.copyfile(self.paths.root / job.result.preview_glb, directory / PREVIEW_NAME)
+        except OSError:
+            # A result swept mid-copy: no `meta.json`, so nothing would ever list or
+            # remove the directory.
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
         (directory / PARAMS_NAME).write_text(
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
