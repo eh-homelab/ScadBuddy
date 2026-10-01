@@ -1,4 +1,5 @@
 import { expect, test, type FrameLocator, type Page, type WebSocketRoute } from '@playwright/test'
+import { bambuddyFrame } from './bambuddyFrame'
 
 /**
  * #254 — the tab's socket to the agent (`src/agent/link.ts`) in a real browser, at the
@@ -59,17 +60,7 @@ async function fakeAgent(page: Page) {
 }
 
 /** Bambuddy's External Link frame, as `downloads.spec.ts` replicates it. */
-async function framed(page: Page, baseURL: string | undefined, path: string): Promise<FrameLocator> {
-  const host = new URL('/mockServiceWorker.js', baseURL)
-  host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-  await page.goto(host.href)
-  await page.setContent(
-    `<iframe src="${new URL(path, baseURL).href}" title="ScadBuddy"
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-      style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
-  )
-  return page.frameLocator('iframe')
-}
+const framed = bambuddyFrame
 
 async function drivesTheCustomizer(agent: Awaited<ReturnType<typeof fakeAgent>>, app: Page | FrameLocator) {
   const hello = await agent.hello()
