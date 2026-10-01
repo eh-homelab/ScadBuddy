@@ -69,6 +69,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'tools do not pick spools yet.',
   },
   {
+    operation: 'POST /api/v1/outputs/{output_id}/backfill',
+    reason:
+      'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +
+      'dialogs ask the user first. The agent has no Arrange tool (above), so it has nothing to backfill for.',
+  },
+  {
     operation: 'POST /api/v1/models/{slug}/inputs/migrate',
     reason:
       'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',
