@@ -82,7 +82,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
     normalize_inputs,
 )
-from scadbuddy.render.job_models import BomEntry, ManifestObject, OutputRecord
+from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -511,6 +511,16 @@ async def backfill_output(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"output {output_id} was arranged, not rendered: there is nothing to render again",
         )
+    # A second POST (History and Print both offer it, and double clicks) while the
+    # re-render is still in flight answers that one rather than queueing another.
+    pending = await asyncio.to_thread(outputs.backfill, output_id)
+    if pending is not None and pending.error is None:
+        try:
+            inflight = await asyncio.to_thread(render.store.read, pending.job_id)
+        except JobNotFoundError:
+            inflight = None
+        if inflight is not None and inflight.state in ("pending", "running"):
+            return _job_status(inflight, None)
     version = meta.model_version
     if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):
         raise ApiError(
