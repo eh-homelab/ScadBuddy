@@ -282,6 +282,34 @@ async def test_a_reuse_that_loses_to_a_release_uploads_its_own_copy(
         store.index.put("c", gone, slug="demo", meta={}, reuse=True)
 
 
+async def test_a_sweep_racing_a_put_of_the_same_bytes_under_another_key_loses_nothing(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """The sweep takes a stale key while a put of another key reuses its object: the
+    put stores its own copy, so the new key stays readable."""
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    await store.put("piece", b"same", name="a", scope=SCOPE, key="a")
+    _age(pool, "a")
+    released = asyncio.Event()
+    backend = _ReleasedWhileReused(root, released)
+    store.backend = backend
+
+    async def sweep() -> list[str]:
+        await backend.gate.wait()  # the put found `a`'s object and means to reuse it
+        removed = await sweep_content(store, BlobRefs(pool), grace=3600, now=time.time())
+        released.set()
+        return removed
+
+    ref, removed = await asyncio.gather(
+        store.put("piece", b"same", name="b", scope=SCOPE, key="b"), sweep()
+    )
+    assert removed == ["a"]
+    assert await store.read(ref) == b"same"
+    named = store.index.get("b")
+    assert named is not None and named.ref == ref
+
+
 async def test_a_lost_reuse_at_the_cap_is_still_stored(
     tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
