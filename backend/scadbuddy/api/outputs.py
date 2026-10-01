@@ -217,11 +217,12 @@ async def create_output(
         files_dir = blobs.dir_for(chosen.files_key) / "files"
     public_url = (await asyncio.to_thread(store.load)).public_url
     # The Parts outlive the job that rendered them: Arrange reads them later (§7). They
-    # are held before the write, so a failed hold leaves nothing saved to retry over.
+    # are held before the write, so a failed hold leaves nothing saved to retry over;
+    # inside the `try`, so a hold that fails part way is released too.
     output_id = uuid.uuid4().hex
     manifest = chosen.manifest if chosen is not None else []
-    await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
     try:
+        await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
         meta = await asyncio.to_thread(
             outputs.create,
             job,
@@ -232,7 +233,9 @@ async def create_output(
             files_dir=files_dir,
             output_id=output_id,
         )
-    except BaseException:
+    except Exception:
+        # Not on cancellation: the write's thread cannot be stopped and may still finish,
+        # and an output written without its holds loses its Parts at the next sweep.
         try:
             await asyncio.to_thread(release_parts, state.refs, output_id)
         except psycopg.Error:

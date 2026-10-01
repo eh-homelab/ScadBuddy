@@ -142,3 +142,42 @@ def test_a_save_whose_write_fails_holds_nothing(
     with pytest.raises(OSError, match="No space left"):
         client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
     assert held(pool) == set()
+
+
+class _HoldLandsThenFails(BlobRefs):
+    """The hold's INSERT committed, then the connection dropped before it answered."""
+
+    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+        super().add(key, holder_kind, holder_id)
+        raise psycopg.OperationalError("the server closed the connection")
+
+
+def test_a_hold_that_fails_part_way_is_released(
+    app: FastAPI, pg_conninfo: str, tmp_path: Path
+) -> None:
+    job_id, _ = finished(app, tmp_path)
+    with (
+        TestClient(app, raise_server_exceptions=False) as client,
+        store_pool(pg_conninfo) as opened,
+    ):
+        state: AppState = getattr(app.state, STATE_ATTR)
+        state.refs = _HoldLandsThenFails(opened)
+        response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+        assert response.status_code == 500
+        assert held(opened) == set()
+
+
+def test_a_save_cancelled_mid_write_keeps_its_holds(
+    app: FastAPI, pool: Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write's thread cannot be stopped and may still finish: a cancelled save keeps
+    its holds rather than leave a written output unheld."""
+    job_id, parts = finished(app, tmp_path)
+
+    def cancelled(*_: object, **__: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(OutputStore, "create", cancelled)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+    assert {part for part, _ in held(pool)} == set(parts)
