@@ -57,7 +57,8 @@ async def get_library_plates(file_id: FileIdPath, store: SettingsStoreDep) -> li
     async with client_for(store.load()) as client:
         plates = await client.library_plates(file_id)
     return [
-        OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail) for plate in plates.plates
+        OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail, name=plate.name or None)
+        for plate in plates.plates
     ]
 
 

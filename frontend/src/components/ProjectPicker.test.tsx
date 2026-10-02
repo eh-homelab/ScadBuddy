@@ -109,6 +109,84 @@ describe('ProjectPicker', () => {
     expect(posted).toEqual([{ name: 'Workshop Bins', description: null, colour: '#ef4444' }])
   })
 
+  it('nests a new project under a chosen parent, with None the default (#930)', async () => {
+    const posted: ProjectRequest[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/print/projects')) {
+        posted.push((await request.clone().json()) as ProjectRequest)
+      }
+    })
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
+    expect(parent).toHaveValue('')
+    expect(within(parent).getByRole('option', { name: 'None' })).toBeInTheDocument()
+    await user.type(screen.getByTestId('new-project-name'), 'Tags')
+    await user.selectOptions(parent, '1')
+    await user.click(screen.getByTestId('create-project'))
+
+    await waitFor(() =>
+      expect(select().selectedOptions[0]).toHaveTextContent(/^Reagan Keychain › Tags · /),
+    )
+    expect(posted).toEqual([{ name: 'Tags', description: null, colour: null, parent_id: 1 }])
+  })
+
+  it('offers the project in view as the parent without choosing it (#930)', async () => {
+    withLastProject(1)
+    const { user } = mount()
+    await listed()
+    await waitFor(() => expect(select()).toHaveValue('1'))
+
+    await user.selectOptions(select(), 'new')
+    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
+    expect(parent).toHaveValue('')
+    await user.click(screen.getByTestId('suggested-parent'))
+    expect(parent).toHaveValue('1')
+  })
+
+  it('reopens the form on None after a cancelled one chose a parent (#930 review)', async () => {
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    await user.selectOptions(screen.getByTestId('new-project-parent'), '2')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.selectOptions(select(), 'new')
+
+    expect(screen.getByTestId('new-project-parent')).toHaveValue('')
+  })
+
+  it('has the mock refuse a parent the backend refuses (#930)', async () => {
+    // A link never re-parents, and a linked folder is not moved under the parent.
+    await expect(api.createProject({ project_id: 1, parent_id: 2 })).rejects.toMatchObject({
+      status: 400,
+    })
+    await expect(
+      api.createProject({ name: 'Tags', parent_id: 1, folder_id: 2 }),
+    ).rejects.toMatchObject({ status: 400 })
+  })
+
+  it('shows a child project under its parent as a breadcrumb (#930)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({
+          projects: [
+            ...fixtures.projectViews,
+            { ...fixtures.projectViews[1]!, id: 3, name: 'Tags', parent_id: 1 },
+          ],
+          last_project_id: null,
+        }),
+      ),
+    )
+    mount()
+    await listed()
+    expect(within(select()).getByRole('option', { name: /Tags/ })).toHaveTextContent(
+      /^Reagan Keychain › Tags · /,
+    )
+  })
+
   it('disables the select while its own "Create project" is in flight (#710 review)', async () => {
     // Its own `saving`, not the parent's `disabled`: a reselection here would be silently
     // reverted once the pending create resolves and moves `value` again.

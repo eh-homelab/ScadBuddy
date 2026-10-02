@@ -50,6 +50,7 @@ from scadbuddy.bambuddy.resolver import (
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -107,6 +108,9 @@ class PrintRunRequest(BaseModel):
     #: retry re-attaches to its run while a reprint with the same choices is a new
     #: print. Omitted (an older client), the key is the output and choices alone.
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+    #: Bambu's ``print_sequence`` for this print (#907), a process override over the
+    #: template's ``print_settings``. Omitted means whatever those and the process say.
+    print_sequence: PrintSequence | None = None
 
 
 class PrintRunResult(BaseModel):
@@ -454,7 +458,11 @@ async def execute_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
-            process_overrides=source.print_settings,
+            process_overrides=(
+                source.print_settings
+                if request.print_sequence is None
+                else {**source.print_settings, "print_sequence": request.print_sequence}
+            ),
         )
         planned.append((plate_id, options, resolved, plan))
     if errors:

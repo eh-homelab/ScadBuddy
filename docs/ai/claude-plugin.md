@@ -90,7 +90,8 @@ one copy of each skill. The image replaces the links with the files (Dockerfile,
 
 A query that loads the plugin gets the `Skill` and `Agent` tools, both at the `read`
 tier, and no other built-in ([`agent/src/harness/ownPlugin.ts`](../../agent/src/harness/ownPlugin.ts)).
-A subagent's calls go through the same permission checks as the session's own.
+A subagent's calls go through the same permission checks as the session's own. One asked
+to run in the background runs inside the turn instead (#946).
 [`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) runs both
 against the bundled Claude Code.
 

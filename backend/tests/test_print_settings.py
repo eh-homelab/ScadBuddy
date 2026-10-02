@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.catalogue import (
     PRINT_SETTING_KEYS,
+    PRINT_SETTING_VALUES,
     Catalogue,
     InvalidModelMetaError,
+    PrintSequence,
     meta_from_raw,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -43,6 +47,7 @@ def test_every_allowlisted_key_is_accepted() -> None:
         "support_type": "tree(auto)",
         "brim_width": "5",
         "brim_type": "outer_only",
+        "print_sequence": "by object",
     }
     assert tuple(raw) == PRINT_SETTING_KEYS
 
@@ -70,6 +75,8 @@ def test_every_allowlisted_key_is_accepted() -> None:
         ("brim_width", "0"),
         ("brim_width", "2.5"),
         ("brim_width", "10"),
+        ("print_sequence", "by layer"),
+        ("print_sequence", "by object"),
     ],
 )
 def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
@@ -84,6 +91,7 @@ def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
         ("enable_support", "", "must be one of '0', '1'"),
         ("support_type", "tree", "must be one of 'normal(auto)'"),
         ("brim_type", "outer", "must be one of 'auto_brim'"),
+        ("print_sequence", "by_object", "must be one of 'by layer', 'by object'"),
         ("brim_width", "-1", "non-negative number"),
         ("brim_width", "wide", "non-negative number"),
         ("brim_width", "nan", "non-negative number"),
@@ -173,3 +181,10 @@ def test_name_keychain_declares_its_print_defaults() -> None:
 @pytest.mark.parametrize("meta", sorted(MODELS.glob(f"*/{MODEL_META_NAME}")), ids=str)
 def test_every_bundled_model_json_reads(meta: Path) -> None:
     meta_from_raw(json.loads(meta.read_text(encoding="utf-8")), meta.parent.name)
+
+
+def test_a_prints_own_sequence_takes_exactly_what_a_template_may_declare() -> None:
+    """#907: the per-print ``print_sequence`` and the template's allowlist are one type."""
+    annotation: object = PrintRunRequest.model_fields["print_sequence"].annotation
+    assert annotation == PrintSequence | None
+    assert get_args(PrintSequence) == PRINT_SETTING_VALUES["print_sequence"]

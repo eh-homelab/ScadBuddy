@@ -241,6 +241,19 @@ Added for #313 on 2026-09-28, from Bambuddy 1.2.5.6 over the ingress (every requ
 - **Slicing a raw STL (#313 probe, the only write):** PASS: job 24 completed, sliced file
   177 left in the library. STL_PRINTABLE = yes.
 
+Added to `openapi/scadbuddy-routes.json` for #930 on 2026-10-01: the write routes
+`POST /api/v1/projects/` and `POST /api/v1/library/folders/` with their request schemas
+`ProjectCreate` and `FolderCreate`. They are written in `/openapi.json`'s form, and were
+checked field by field on 2026-10-01 against the pydantic models at tag `v1.2.5.5` of
+maziggy/bambuddy (`backend/app/schemas/project.py`, `backend/app/schemas/library.py`).
+The live instance's `/openapi.json` was not re-read for them, and nothing was written.
+
+- **Both carry `parent_id`.** `ProjectCreate.parent_id` nests a project under another
+  ("For sub-projects"). `FolderCreate.parent_id` nests a folder, which is how a child
+  project's folder goes inside its parent's.
+- The response schemas these routes reference (`ProjectResponse`, `FolderResponse`) are
+  **not** recorded. A test that needs a response body builds it inline instead.
+
 ## Blob store (#426): not yet measured against a live instance
 
 Phase 3 moves every file a render reads into Bambuddy's library (spec

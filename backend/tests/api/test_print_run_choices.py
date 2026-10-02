@@ -202,6 +202,57 @@ def test_a_templates_print_settings_reach_the_slice(
 
 
 @respx.mock
+def test_the_dialogs_print_sequence_goes_over_the_templates(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#907: the print's own sequence is a process override, and wins over the
+    template's default for the same key; the template's other settings stay."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_prime_tower": "1", "print_sequence": "by layer"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json={**body(), "print_sequence": "by object"})
+
+    assert response.status_code == 200, response.text
+    slice_body = json.loads(sliced.calls.last.request.content)
+    assert slice_body["process_overrides"] == {
+        "enable_prime_tower": "1",
+        "print_sequence": "by object",
+    }
+
+
+@respx.mock
+def test_a_print_sequence_without_template_settings_is_the_only_override(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json={**body(), "print_sequence": "by object"})
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["process_overrides"] == {
+        "print_sequence": "by object"
+    }
+
+
+def test_an_unknown_print_sequence_is_refused(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={**body(), "print_sequence": "by plate"}
+    )
+
+    assert response.status_code == 422
+
+
+@respx.mock
 def test_a_template_without_print_settings_sends_no_overrides(
     client: TestClient, model: str
 ) -> None:

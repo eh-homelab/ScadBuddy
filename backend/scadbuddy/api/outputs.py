@@ -129,6 +129,9 @@ class OutputPlate(BaseModel):
 
     index: int
     has_thumbnail: bool
+    #: What the plate holds, for its label (#929): its own name, else the names of the
+    #: objects on it; ``None`` when neither says, and the UI falls back to "Plate N".
+    name: str | None = None
 
 
 class CreateOutputRequest(BaseModel):
@@ -785,7 +788,7 @@ def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[Outp
     one plate unless the template asks for more (#289)."""
     require_output(outputs, output_id)
     return [
-        OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None)
+        OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None, name=plate.name)
         for plate in plates_of(_model_3mf(outputs, output_id))
     ]
 
