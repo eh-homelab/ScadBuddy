@@ -207,6 +207,23 @@ async def test_a_partial_manual_pick_is_noted_once_the_pick_is_made() -> None:
     assert [w.kind for w in warnings] == ["rack-manual-partial"]
 
 
+async def test_a_refused_multi_group_manual_pick_is_not_also_reported_as_given() -> None:
+    """Final review minor 1: when the slice's group does not fit the manual position,
+    the notes must not say both "group 0 got position 3" and "position 3 does not fit
+    group 0"."""
+    warnings: list[FilamentWarning] = []
+    reads = Reads(
+        grouped(requirement(1, group_id=0), requirement(2, group_id=1)),
+        status(slot(2), slot(3, "HH01"), slot(4)),
+    )
+    choice = await chooser(reads, warnings, manual=3)(77)
+    assert choice is not None and 3 not in choice.nozzle_rack_choice.values()
+    [note] = warnings
+    assert note.kind == "rack-manual-partial"
+    assert note.message.startswith("Rack position 3 does not fit group 0")
+    assert "got position" not in note.message
+
+
 async def test_rank_rack_raising_queues_without_a_choice_and_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

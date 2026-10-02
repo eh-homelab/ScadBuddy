@@ -384,6 +384,10 @@ def rack_chooser(
             stage = "rack pick failed"
             picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
             found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
+            if any(g not in picks or not picks[g].manual for g in manual):
+                # ``rack_warnings`` says the manual position was refused, so drop
+                # ``manual_for``'s "group N got position P" (final review minor 1).
+                notes = [note for note in notes if note.kind != "rack-manual-partial"]
             ordered = sorted(picks.items())
             choice = (
                 RackChoice(
