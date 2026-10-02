@@ -420,8 +420,8 @@ actually sent.
 
 **Simple mode** shows one line per rack-side group, for example: "Rack nozzle:
 position 3 (0.4 Standard) — already loaded with this color". When the pick is
-unsafe for the material, it adds a warning, for example: "No hardened 0.4 nozzle
-in the rack for PLA-CF; position 2 is brass." Like `hf-mounted`, the warning never
+unsafe for the material, it adds a warning, for example: "No free hardened 0.4
+nozzle in the rack for PLA-CF; position 2 is brass." Like `hf-mounted`, the warning never
 blocks Print.
 
 **Advanced mode** adds:
@@ -486,7 +486,9 @@ so the trade is accepted.
   - `rack-manual-partial`: the slice split the rack side into several groups,
     the manual position went to the lowest `group_id`, and ScadBuddy ranked the
     rest. Picks were sent for every group, so this is not
-    `rack-left-to-bambuddy`.
+    `rack-left-to-bambuddy` (except under Let Bambuddy pick, where only the
+    manual group gets a pick, §10). The same kind also reports a manual position
+    that does not fit the sliced group and so was not used (#1016, §10).
 
   On a multi-plate print, rack warnings join the plate loop's existing
   de-duplication in `print_run.py`. The plate's rack-warning list is iterated
@@ -505,7 +507,9 @@ so the trade is accepted.
 - `bambuddy/print_run.py`: the `choose_rack` callback, and writing the picks to
   `rack_nozzle_picks` after the enqueue.
 - `bambuddy/watcher.py`: on the first settled read, write the print's
-  `rack_nozzle_prints` rows from its linked archives.
+  `rack_nozzle_prints` rows from its linked archives. Superseded by §10: the
+  write is the rack component's `settle_hook`, registered on `PrintWatcher`, and
+  `watcher.py` neither imports the rack code nor writes rows.
 - Migration: `rack_nozzle_seen`, `rack_nozzle_picks` and `rack_nozzle_prints`.
 - `rack/usage.py` (new): `RackUsageStore`, the one store that owns all three
   tables: `seen()`, `record_picks()`, `record_prints()` and `usage(serials)`.
@@ -514,8 +518,8 @@ so the trade is accepted.
   feature package, and `bambuddy/component.py` already holds `ARCHIVE_CACHE`,
   so the rack code is its own feature package, `scadbuddy/rack/` (`rank.py`,
   `usage.py`, `component.py`), never a new `AppState` field. Routes read it
-  through `api/components.py` `component_dep`; `print_run.py`, `choices.py` and
-  `watcher.py` call it, and none of them holds SQL. `PrintLinkStore` is on the
+  through `api/components.py` `component_dep`; `print_run.py` and `choices.py`
+  call it (`watcher.py` only runs the hook, §10), and none of them holds SQL. `PrintLinkStore` is on the
   older `AppState` wiring and is not the pattern to copy.
 - `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` §6 and
   `docs/superpowers/plans/2026-09-27-spool-first-print.md` (its "no
