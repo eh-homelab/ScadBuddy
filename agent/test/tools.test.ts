@@ -265,6 +265,10 @@ describe('create_print_project (#930)', () => {
     expect(result.isError).toBeFalsy()
     expect(body).toMatchObject({ name: 'Tags', parent_id: 1 })
   })
+
+  it('says a parent applies only to a new project, not a linked one', () => {
+    expect(tool('create_print_project').description).toMatch(/parent_id.*only to a new project.*project_id.*refused/s)
+  })
 })
 
 describe('print_output (as it will run once approved, #258): spool-first, #335', () => {
