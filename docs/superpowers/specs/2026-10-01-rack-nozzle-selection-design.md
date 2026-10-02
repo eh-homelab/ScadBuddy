@@ -628,8 +628,8 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
   - `test_print_run_choices.py` keeps "no choice when the rack is unreadable"
     and gains "the ranked choice is sent".
 - A stale-pick test: a queue item that Bambuddy failed with "Nozzle rack pick no
-  longer fits the printer" shows that message in the print's progress and run
-  result, for a ranked pick and for a manual one.
+  longer fits the printer" shows that message in the print's progress (not the
+  run result, which is fixed at queue time; §10), for a ranked pick and for a manual one.
 - A `/check` test that no serial appears anywhere in the response body,
   nested candidates and options included (searched as a string over the whole
   JSON).
