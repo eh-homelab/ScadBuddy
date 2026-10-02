@@ -296,8 +296,10 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   }
   // What the session touched (#931, sessions/touched.ts): here, not in a
   // projection, so every path that runs a session's tool records it (the
-  // harness server today; a durable session's tool activities would call
-  // this too). The tool that ran, as it ran; never fails the call.
+  // harness server today; the tool activities a durable session would run,
+  // proposed in PR #972's docs/superpowers/specs/
+  // 2026-10-01-durable-printing-agents-flows-design.md §5.3, call this too).
+  // The tool that ran, as it ran; never fails the call.
   if (ctx.session !== undefined && (done.outcome === 'ok' || done.outcome === 'error') && ctx.touched) {
     await ctx.touched.record({
       sessionId: ctx.session,

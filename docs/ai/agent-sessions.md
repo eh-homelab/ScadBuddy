@@ -196,8 +196,10 @@ parent and new commit), presets, assets, render jobs, outputs, print runs and pr
 `outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
 gap stays visible; a `read` tool records nothing. It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
-projection, so a durable session's tool activities (the durable-sessions spec, §5.3)
-record the same way. Rows go with their session. Calls
+projection, so the tool activities a durable session would run record the same way
+(proposed in PR #972,
+`docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` §5.3, on
+branch `docs/durable-printing-agents-flows` until it merges). Rows go with their session. Calls
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 
