@@ -358,7 +358,7 @@ new serialises across models.
 |---|---|
 | render reconciler (started at `render/submit.py:112`; `reconcile_once` at `:192`) | deleted: renders are created by §4.2, so nothing needs reconciling |
 | print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
-| print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by `PrintRun`'s record step as an abandoned child. It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
+| print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by the `PrintRun` workflow, after its `print_record` activity, as an abandoned child (§5.3). It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
 | asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
 | preview scheduler (`PreviewScheduler.start`, `render/previews.py:155`) and its boot pass over every model (`request_all`, `:184`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
 | PgNotify bus, settings follower, in-process dev worker, openscad version probe, git reaper thread, LSP subprocesses | stay. They are the process's own plumbing, not operations |
@@ -490,8 +490,17 @@ today's `execute_run` (`bambuddy/print_run.py:366`) and `slice_and_queue`
 | `print_slice_start` | `POST /library/files/{id}/slice` (`client.py:623`), which starts a **new** slice job on every call; returns the job id | **`maximum_attempts = 1`** |
 | `print_slice_wait` | polls `/slice-jobs/{id}` every 2 s **inside the activity**, heartbeating, up to `DEFAULT_SLICE_TIMEOUT` (600 s); returns the sliced file id | default (re-polling an existing job is safe); heartbeat timeout 30 s |
 | `print_enqueue` | `POST /queue/` | **`maximum_attempts = 1`** |
-| `print_record` | `source.record`, `remember_project`, starts the progress observer and watcher | default |
+| `print_record` | `source.record` (which adds the print to the `PrintLog`), `remember_project` | default |
 | `print_project` | guarded transition of the row (`running` → `succeeded` / `failed`), `print.run` event in the same transaction | default |
+
+**Following the print.** An activity cannot start a workflow's child, so the record
+step is split between the two. In phase 1 the watcher is still the API's. It hears the
+run's `print.run` event on the PgNotify bus and calls `PrintWatcher.started` for a run
+that queued a plate. Its rescan of the `PrintLog` row `print_record` wrote
+(`RESCAN_INTERVAL`, 300 s, `bambuddy/watcher.py:85`) is the backstop for a missed
+event, and the progress route's `watch` brings it back for anyone looking. From phase 2, after `print_record` returns,
+the `PrintRun` workflow code itself calls `workflow.start_child_workflow(FollowPrint,
+…, parent_close_policy=ABANDON)` (§4.4).
 
 Per plate: `print_slice_start`, then `print_slice_wait` on the job id the workflow
 recorded, then the workflow records `enqueue_attempted` in its own state
@@ -707,11 +716,20 @@ the most constrained runtime in the system.
   `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
   `ai_durable_entries` (or `ai_session_entries`) and the session counters. It can do
   nothing else.
-- **Network.** A NetworkPolicy in `eh-homelab/clusters` allows egress only to Postgres,
-  the Temporal frontend, the cluster DNS (kube-dns/CoreDNS, UDP and TCP 53, which a
-  default-deny egress policy otherwise blocks), and the credential's endpoint:
-  `api.anthropic.com`, or the gateway's `base_url`. Nothing is fetched at run time: the pinned package is installed
-  at build.
+- **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
+  DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
+  blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
+  `base_url` host. Nothing is fetched at run time: the pinned package is installed at
+  build.
+  - A plain `NetworkPolicy` cannot name a host, only pods, namespaces and CIDRs. The
+    cluster's CNI is Cilium (the existing `applications/scadbuddy/networkpolicy-agent.yaml`
+    relies on it), so this is a `CiliumNetworkPolicy`: `toEndpoints` for Postgres and
+    Temporal, and `toFQDNs` (`matchName`) for the endpoint, with the DNS rule's
+    `rules.dns` that Cilium's DNS proxy needs to learn the names' addresses. Addresses
+    rotating behind a CDN are followed by the proxy, not pinned in the manifest.
+  - The host is named in the manifest, so pointing the credential at a new gateway
+    is also a clusters change. Until it lands, the new host is refused: the policy
+    fails closed, and the session's error names the blocked endpoint.
 - **The credential** is decrypted per segment, passed to the runner's `env`, and never
   logged, written to disk or put in history (§6.2).
 
