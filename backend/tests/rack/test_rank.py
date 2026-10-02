@@ -112,6 +112,25 @@ def test_material_ranks_above_color(hardened_code: str) -> None:
     assert positions(rank_rack([plain], rack, "least_used", {}, {})) == {0: 3}
 
 
+def test_a_hardened_nozzle_taken_by_another_group_is_reported_as_not_free(
+    hardened_code: str,
+) -> None:
+    """Final review deferred #27: the second abrasive group finds the rack's one hardened
+    nozzle taken, so "No hardened" would be false; it is "No free hardened"."""
+    rack = [slot(2, hardened_code), slot(3, "HS01")]
+    groups = [
+        group(0, abrasive=True, materials=("PLA-CF",)),
+        group(1, abrasive=True, materials=("PLA-CF",)),
+    ]
+    picks = rank_rack(groups, rack, "least_used", {}, {})
+    assert positions(picks) == {0: 2, 1: 3}
+    [warning] = rack_warnings(groups, rack, "least_used", picks, {})
+    assert warning.kind == "rack-unsafe-material"
+    assert warning.message == (
+        "No free hardened 0.4 nozzle in the rack for PLA-CF; position 3 is brass."
+    )
+
+
 def test_color_ranks_above_use() -> None:
     rack = [slot(2, color="FF6A13FF"), slot(3)]
     usage = {serial(17): Usage(prints=40, print_seconds=360_000)}

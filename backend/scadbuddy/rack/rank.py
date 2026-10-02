@@ -443,7 +443,7 @@ def rack_warnings(
                         f"Position {pick.position}, chosen by hand, {held}, and "
                         f"{_materials(group)} is abrasive."
                         if pick.manual
-                        else f"No hardened {_size(group)} nozzle in the rack for "
+                        else f"No free hardened {_size(group)} nozzle in the rack for "
                         f"{_materials(group)}; position {pick.position} {held}.",
                     )
                 )
