@@ -22,16 +22,25 @@ export const ATTENTION_POLL_MS = 15_000
 /** How long one read may take; a proxy that accepts and never answers counts as no answer. */
 export const ATTENTION_TIMEOUT_MS = 8_000
 
-/** The pending approvals the agent lists, or null when it did not answer as the agent. Never throws. */
+/** The pending approvals the agent lists, or null when it did not answer as the agent. Never throws, and settles within `timeoutMs`. */
 export async function fetchPendingApprovals(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<number | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), timeoutMs)
+  // Raced as well as aborted, as `fetchAiAvailability` does: a fetch that ignores the
+  // signal must not hold the poll (`useAttention` starts no read while one is open).
+  const deadline = new Promise<null>((resolve) => {
+    controller.signal.addEventListener('abort', () => resolve(null), { once: true })
+  })
   try {
-    const response = await fetch(ATTENTION_PATH, {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-      signal: controller.signal,
-    })
+    return await Promise.race([read(controller.signal), deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function read(signal: AbortSignal): Promise<number | null> {
+  try {
+    const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
     const body: unknown = await response.json()
     if (typeof body !== 'object' || body === null) return null
@@ -39,21 +48,22 @@ export async function fetchPendingApprovals(timeoutMs = ATTENTION_TIMEOUT_MS): P
     return Array.isArray(approvals) ? approvals.length : null
   } catch {
     return null
-  } finally {
-    clearTimeout(timer)
   }
 }
 
 export interface Attention {
-  /** Approvals waiting on the user; the last known count when a read fails. */
-  waiting: number
+  /**
+   * Approvals waiting on the user: the last known count when a read fails, and null
+   * until one has succeeded (unknown is not "nothing is waiting").
+   */
+  waiting: number | null
   /** Reads again now (the panel was toggled, so a decision may just have landed). */
   refresh: () => void
 }
 
 /** Polls the pending approvals while `enabled`, and again whenever the tab comes back into view. */
 export function useAttention(enabled: boolean): Attention {
-  const [waiting, setWaiting] = useState(0)
+  const [waiting, setWaiting] = useState<number | null>(null)
   const generation = useRef(0)
   // One read at a time: while the agent is slow to answer, the timer, focus and
   // toggles must not pile requests up behind it.
@@ -73,7 +83,7 @@ export function useAttention(enabled: boolean): Attention {
   useEffect(() => {
     if (!enabled) {
       generation.current += 1
-      setWaiting(0)
+      setWaiting(null)
       return
     }
     refresh()
@@ -93,9 +103,9 @@ export function useAttention(enabled: boolean): Attention {
   return { waiting, refresh }
 }
 
-/** What the header says about `n` waiting approvals; empty for none. */
-export function attentionLabel(n: number): string {
-  if (n <= 0) return ''
+/** What the header says about `n` waiting approvals; empty for none or unknown. */
+export function attentionLabel(n: number | null): string {
+  if (n === null || n <= 0) return ''
   return `${n} ${n === 1 ? 'action' : 'actions'} waiting for your approval`
 }
 
@@ -106,10 +116,10 @@ export function attentionLabel(n: number): string {
  * `(n) ` is never mistaken for this prefix. Off when embedded: inside Bambuddy's frame
  * the tab shows Bambuddy's title, and the frame's own is seen by nobody.
  */
-export function useAttentionTitle(waiting: number, enabled: boolean): void {
+export function useAttentionTitle(waiting: number | null, enabled: boolean): void {
   const bare = useRef<string | null>(null)
   useEffect(() => {
-    if (enabled && waiting > 0) {
+    if (enabled && waiting !== null && waiting > 0) {
       bare.current ??= document.title
       document.title = `(${waiting}) ${bare.current}`
     } else if (bare.current !== null) {

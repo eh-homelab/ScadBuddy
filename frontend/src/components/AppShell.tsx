@@ -185,7 +185,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               }`}
             >
               Assistant
-              {attention.waiting > 0 && (
+              {attention.waiting !== null && attention.waiting > 0 && (
                 <span
                   data-testid="assistant-attention"
                   aria-hidden="true"

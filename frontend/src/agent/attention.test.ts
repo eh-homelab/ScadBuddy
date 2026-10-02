@@ -27,6 +27,15 @@ describe('fetchPendingApprovals', () => {
     expect(await fetchPendingApprovals(20)).toBeNull()
   })
 
+  it('settles by its deadline even if fetch ignores the abort signal', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>(() => {}))
+    try {
+      expect(await fetchPendingApprovals(20)).toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('asks only for pending ones', async () => {
     let url = ''
     server.use(
@@ -51,7 +60,7 @@ describe('useAttention', () => {
     )
     const { result } = renderHook(() => useAttention(false))
     await act(async () => {})
-    expect(result.current.waiting).toBe(0)
+    expect(result.current.waiting).toBeNull()
     expect(seen).not.toHaveBeenCalled()
   })
 
@@ -72,6 +81,19 @@ describe('useAttention', () => {
       await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
     })
     expect(result.current.waiting).toBe(3)
+  })
+
+  it('is unknown (null), not zero, until a read succeeds', async () => {
+    server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const { result } = renderHook(() => useAttention(true))
+    expect(result.current.waiting).toBeNull()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(result.current.waiting).toBeNull()
+    server.resetHandlers()
+    act(() => result.current.refresh())
+    await waitFor(() => expect(result.current.waiting).toBe(0))
   })
 
   it('starts no second read while one is still waiting for the agent', async () => {
@@ -121,6 +143,7 @@ describe('useAttention', () => {
 
 describe('labels', () => {
   it('names the count for the button', () => {
+    expect(attentionLabel(null)).toBe('')
     expect(attentionLabel(0)).toBe('')
     expect(attentionLabel(1)).toBe('1 action waiting for your approval')
     expect(attentionLabel(4)).toBe('4 actions waiting for your approval')
