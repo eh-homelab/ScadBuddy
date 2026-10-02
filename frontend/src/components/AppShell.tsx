@@ -8,7 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import { attentionCount, attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -191,7 +191,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   aria-hidden="true"
                   className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-warn/50 bg-warn/10 px-1 text-[10.5px] leading-none font-semibold text-warn"
                 >
-                  {attention.waiting}
+                  {attentionCount(attention.waiting)}
                 </span>
               )}
             </button>

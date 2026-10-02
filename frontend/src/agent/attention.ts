@@ -103,10 +103,18 @@ export function useAttention(enabled: boolean): Attention {
   return { waiting, refresh }
 }
 
+/** The most approvals the agent's list returns (agent `approvals/service.ts` `list`, `LIMIT 500`). */
+export const APPROVALS_LIST_MAX = 500
+
+/** The count as shown: a full page from the agent means at least that many, so `500+`. */
+export function attentionCount(n: number): string {
+  return n >= APPROVALS_LIST_MAX ? `${APPROVALS_LIST_MAX}+` : String(n)
+}
+
 /** What the header says about `n` waiting approvals; empty for none or unknown. */
 export function attentionLabel(n: number | null): string {
   if (n === null || n <= 0) return ''
-  return `${n} ${n === 1 ? 'action' : 'actions'} waiting for your approval`
+  return `${attentionCount(n)} ${n === 1 ? 'action' : 'actions'} waiting for your approval`
 }
 
 /**
@@ -121,7 +129,7 @@ export function useAttentionTitle(waiting: number | null, enabled: boolean): voi
   useEffect(() => {
     if (enabled && waiting !== null && waiting > 0) {
       bare.current ??= document.title
-      document.title = `(${waiting}) ${bare.current}`
+      document.title = `(${attentionCount(waiting)}) ${bare.current}`
     } else if (bare.current !== null) {
       document.title = bare.current
       bare.current = null

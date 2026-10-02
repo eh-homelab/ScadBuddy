@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setPendingApprovals } from '../mocks/features/approvals'
 import { server } from '../mocks/server'
-import { ATTENTION_POLL_MS, attentionLabel, fetchPendingApprovals, useAttention, useAttentionTitle } from './attention'
+import { ATTENTION_POLL_MS, attentionCount, attentionLabel, fetchPendingApprovals, useAttention, useAttentionTitle } from './attention'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -147,6 +147,10 @@ describe('labels', () => {
     expect(attentionLabel(0)).toBe('')
     expect(attentionLabel(1)).toBe('1 action waiting for your approval')
     expect(attentionLabel(4)).toBe('4 actions waiting for your approval')
+    // The agent lists at most 500: a full page means at least that many.
+    expect(attentionCount(499)).toBe('499')
+    expect(attentionCount(500)).toBe('500+')
+    expect(attentionLabel(500)).toBe('500+ actions waiting for your approval')
   })
 })
 
