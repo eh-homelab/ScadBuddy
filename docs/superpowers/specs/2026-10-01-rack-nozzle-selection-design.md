@@ -316,8 +316,23 @@ After `slice_and_queue` returns, `print_run.py` (not the callback, which runs
 before the queue item exists) writes the picks it got back on `QueueOutcome` to
 `rack_nozzle_picks` against `QueueOutcome.queue_item_ids`.
 
-A raise or `None` from the callback means no choice: the item is queued without
+`None` from the callback means no choice: the item is queued without
 `nozzle_rack_choice`, and Bambuddy picks, as today.
+
+**The callback never raises; `slice_and_queue` does not catch it.** This is
+deliberate, and it matches `before_enqueue`: `slice_and_queue` awaits both hooks
+bare, so whatever either raises fails the plate. That is right for
+`before_enqueue`, because past it the print may already be on the queue (#470).
+For `choose_rack` it would turn a status-read blip into a failed plate, which
+breaks the "Bambuddy picks" row of §5's failure table. So the guarantee lives in
+the callback: `print_run.py` wraps its **whole** body (both reads, the grouping,
+the usage read and `rank_rack`) in one `try`/`except Exception`. On an
+exception it logs under §4's serial-safe rule, appends a
+`rack-left-to-bambuddy` warning with the reason to the plate's warning list
+(which the closure holds), and returns `None`. Nothing escapes it, so no
+`try` is added to `slice_and_queue`, and `before_enqueue`'s propagate-on-raise
+contract is unchanged. The plan includes a test where `rank_rack` itself raises
+and asserts that the plate is queued without a choice and carries the warning.
 
 The pure ranking lives in `rack/rank.py`, with no I/O:
 
@@ -435,6 +450,15 @@ so the trade is accepted.
     the manual position went to the lowest `group_id`, and ScadBuddy ranked the
     rest. Picks were sent for every group, so this is not
     `rack-left-to-bambuddy`.
+
+  On a multi-plate print, rack warnings join the plate loop's existing
+  de-duplication in `print_run.py`. The plate's rack-warning list is iterated
+  together with `resolved.warnings` and `check(...)`, and goes through the same
+  `warning not in warnings` test. `FilamentWarning` is a pydantic model, so that
+  test compares kind, `slot_id` and message. The same warning repeated on every plate is
+  shown once. Warnings whose messages differ (for example, a different group
+  number) are different facts and are kept. Rack warnings are never
+  `low-filament`, so the separate across-plates check does not touch them.
 
   All three carry `slot_id: null`, which the frontend reads as plate-wide
   (`warningsFor` in `frontend/src/lib/filaments.ts`). That is deliberate: a rack
