@@ -86,6 +86,7 @@ class ProjectRequest(BaseModel):
     #: The project to nest a new one under (#930); its folder is nested to match.
     parent_id: int | None = None
     #: The folder to link, when the project already has one nobody wants duplicated.
+    #: Linked where it stands, so it is refused together with ``parent_id``.
     folder_id: int | None = None
 
 
@@ -143,6 +144,10 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
     else:
         if not request.name:
             raise ApiError(400, "a new project needs a name")
+        if request.parent_id is not None and request.folder_id is not None:
+            # A linked folder stays where it is, so the project would be nested and its
+            # folder not.
+            raise ApiError(400, "parent_id cannot be combined with folder_id")
         project = await client.create_project(
             ProjectCreate(
                 name=request.name,

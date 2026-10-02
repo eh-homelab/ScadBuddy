@@ -218,6 +218,20 @@ async def test_a_parent_on_a_link_is_refused_rather_than_ignored(
 
 
 @respx.mock
+async def test_a_parent_with_an_existing_folder_is_refused_before_anything_is_made(
+    bambuddy: BambuddyClient,
+) -> None:
+    """``folder_id`` links a folder as it stands, wherever it is, so with ``parent_id``
+    the project would say nested while its folder is not. Refused before Bambuddy is
+    written to, rather than creating a project and then failing (#930)."""
+    created = respx.post(f"{API}/projects/").mock(return_value=httpx.Response(500))
+    with pytest.raises(ApiError) as raised:
+        await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1, folder_id=2))
+    assert raised.value.status == 400
+    assert not created.called
+
+
+@respx.mock
 async def test_a_new_project_needs_a_name(bambuddy: BambuddyClient) -> None:
     with pytest.raises(ApiError):
         await ensure_project(bambuddy, ProjectRequest())
