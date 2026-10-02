@@ -2812,8 +2812,15 @@ export const handlers = [
     if (body.project_id !== undefined && body.project_id !== null && !linked) {
       return problem(404, 'Not Found', `no project ${body.project_id}`)
     }
+    // #930 — the backend's own refusals for a parent it would otherwise drop.
+    if (linked && body.parent_id != null) {
+      return problem(400, 'Bad Request', 'parent_id applies only to a new project, not a linked one')
+    }
     if (!linked && !body.name) {
       return problem(400, 'Bad Request', 'a new project needs a name')
+    }
+    if (body.parent_id != null && body.folder_id != null) {
+      return problem(400, 'Bad Request', 'parent_id cannot be combined with folder_id')
     }
     const base_ = linked ?? {
       id: nextNumber(),

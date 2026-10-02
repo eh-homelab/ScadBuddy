@@ -158,6 +158,16 @@ describe('ProjectPicker', () => {
     expect(screen.getByTestId('new-project-parent')).toHaveValue('')
   })
 
+  it('has the mock refuse a parent the backend refuses (#930)', async () => {
+    // A link never re-parents, and a linked folder is not moved under the parent.
+    await expect(api.createProject({ project_id: 1, parent_id: 2 })).rejects.toMatchObject({
+      status: 400,
+    })
+    await expect(
+      api.createProject({ name: 'Tags', parent_id: 1, folder_id: 2 }),
+    ).rejects.toMatchObject({ status: 400 })
+  })
+
   it('shows a child project under its parent as a breadcrumb (#930)', async () => {
     server.use(
       http.get('/api/v1/print/projects', () =>

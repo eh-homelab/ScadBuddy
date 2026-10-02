@@ -565,7 +565,7 @@ export const printTools: Tool[] = [
     description:
       'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`. ' +
       '`parent_id` nests a new project under an existing one, and its folder under the parent\'s folder; ' +
-      'it applies only to a new project, and sent with `project_id` it is refused (400), never ignored.',
+      'it applies only to a new project, and sent with `project_id` or `folder_id` it is refused (400), never ignored.',
     input: z.object({
       name: z.string().optional(),
       description: z.string().optional(),
