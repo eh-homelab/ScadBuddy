@@ -81,6 +81,41 @@ def test_the_check_records_the_racks_hotends_as_seen(client: TestClient, model: 
     assert usage[serial(1)].first_seen_at is None  # the left hotend is not a rack hotend
 
 
+def assert_seen(client: TestClient) -> None:
+    usage = asyncio.run(rack_usage(client).usage([serial(17), serial(0)]))
+    assert usage[serial(17)].first_seen_at is not None
+    assert usage[serial(0)].first_seen_at is not None
+
+
+@respx.mock
+def test_the_output_choices_record_the_racks_hotends_as_seen(
+    client: TestClient, model: str
+) -> None:
+    """Final review deferred #77: ``/choices`` forwards ``rack=`` to ``choices_for``."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert_seen(client)
+
+
+@respx.mock
+def test_the_library_choices_record_the_racks_hotends_as_seen(client: TestClient) -> None:
+    configure(client)
+    library_file(89)
+    run_routes()
+    invented_rack_route()
+
+    response = client.get("/api/v1/print/library/89/choices?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert_seen(client)
+
+
 class BrokenUsage(RackUsageStore):
     """Reads work as an empty history; the picks write fails."""
 
