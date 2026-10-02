@@ -230,3 +230,35 @@ async def record_seen(
             "could not record the rack's hotends",
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
+
+
+async def save_picks(
+    store: RackUsage | None,
+    printer_id: int,
+    queue_item_ids: Sequence[int],
+    picks: Sequence[PickedHotend],
+) -> None:
+    """Write the sent picks against each queue item, right after ``POST /queue/`` (spec
+    §5). Advisory: the item is queued, so a failure is logged by type and dropped, and
+    that print's use goes uncounted. A pick of a hotend with no serial is skipped: it was
+    sent, but nothing can be attributed to it."""
+    attributable = [pick for pick in picks if pick.serial]
+    if store is None or not attributable:
+        return
+    try:
+        for queue_item_id in queue_item_ids:
+            written = await store.record_picks(queue_item_id, printer_id, attributable)
+            if written != len(attributable):
+                logger.warning(
+                    "a rack pick was already recorded for this queue item",
+                    extra={
+                        "queue_item_id": queue_item_id,
+                        "sent": len(attributable),
+                        "written": written,
+                    },
+                )
+    except Exception as exc:
+        logger.warning(
+            "could not record the rack picks",
+            extra={"printer_id": printer_id, "error": type(exc).__name__},
+        )

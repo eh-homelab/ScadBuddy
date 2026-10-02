@@ -55,7 +55,7 @@ from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import manual_for, rack_groups, rack_serials, rack_warnings, rank_rack
-from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen
+from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen, save_picks
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,14 @@ class PrintRunRequest(BaseModel):
     rack_algorithm: RackAlgorithm | None = None
 
 
+class RackPickView(BaseModel):
+    """A rack pick as the run reports it (spec 2026-10-01 §5): the group and the rack
+    position, never the hotend's serial (§7)."""
+
+    group_id: int
+    position: int
+
+
 class PrintRunResult(BaseModel):
     """What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
     reader of the result need not change until the dialog does (following it to
@@ -146,6 +154,10 @@ class PrintRunResult(BaseModel):
     project_id: int | None = None
     folder_id: int | None = None
     bambuddy_url: str
+    #: The rack positions actually sent, one per filament group that printed from the
+    #: rack (#836). A pick can go stale before the print starts; that shows in progress,
+    #: not here (spec §10).
+    rack_picks: list[RackPickView] = Field(default_factory=list)
 
 
 async def filament_options(
@@ -618,6 +630,11 @@ async def execute_run(
                 warnings=rack_notes,
             ),
         )
+        if isinstance(source, OutputSource):
+            # Only an output's print is ever settled: the watcher keys its print log and
+            # the settle hook by output id, and a library print is recorded nowhere. A
+            # pick row for a library run would never be credited.
+            await save_picks(rack, printer_id, outcome.queue_item_ids, outcome.rack_picks)
         sent = await source.record(library_file_id, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
         for warning in [
@@ -728,6 +745,11 @@ def _queued(
         project_id=project_id,
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
+        rack_picks=[
+            RackPickView(group_id=pick.group_id, position=pick.position)
+            for outcome in outcomes
+            for pick in outcome.rack_picks
+        ],
     )
 
 

@@ -255,6 +255,7 @@ async def post_run(
         request=body,
         source_for=source_for,
         started=started,
+        rack=rack,
     )
 
 
