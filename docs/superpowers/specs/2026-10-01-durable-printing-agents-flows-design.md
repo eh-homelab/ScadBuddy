@@ -385,8 +385,8 @@ two reasons, and both are answered here:
   - This changes the ID of a shipped workflow, which is `render-{job_id}` today
     (`render/projection.py:74`). At the phase 2 rollout, executions already running as
     `render-{job_id}` finish on the build they are pinned to (Worker Versioning, and the
-    old worker drains on SIGTERM, `worker.py`), with the reconciler of that build. New
-    requests start `render-<render_key>`. A request during the drain for content an old
+    old worker drains on SIGTERM, `worker.py`). New requests start
+    `render-<render_key>`. A request during the drain for content an old
     execution is still rendering does not join it, so at most one extra render per
     in-flight job happens once, and `piece_key` still dedupes its openscad work.
   - Its `accepted` Update adds one claim, in workflow state. A workflow's handlers run
