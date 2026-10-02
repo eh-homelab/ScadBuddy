@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
+from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus, RackAlgorithm
 from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
@@ -72,6 +72,9 @@ class ChoicesView(BaseModel):
     filament_presets: dict[str, list[FilamentPresetOption]] = Field(default_factory=dict)
     #: What this model last printed with (#78), so the dialog reopens on those spools.
     model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
+    #: How the chosen printer's rack nozzle is ranked (#836): remembered per printer,
+    #: else Least used. The dialog's Advanced selector opens on it.
+    rack_algorithm: RackAlgorithm = "least_used"
 
 
 def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPresetOption]]:
@@ -162,6 +165,7 @@ async def choices_for(
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
         model_choices=remembered or ModelPrintChoices(),
+        rack_algorithm=settings.rack_algorithm(printer_id),
     )
 
 

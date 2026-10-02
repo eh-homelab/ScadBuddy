@@ -453,3 +453,32 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "bambuddy"
     store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "local"
+
+
+def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#836: kept in the jsonb ``settings`` row, one printer at a time, no own table."""
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    store.set_printer_rack_algorithm(2, "bambuddy")
+    loaded = _fresh_load(settings)
+    assert loaded.printer_rack_algorithms == {"1": "oldest_first", "2": "bambuddy"}
+    assert (loaded.rack_algorithm(1), loaded.rack_algorithm(3), loaded.rack_algorithm(None)) == (
+        "oldest_first",
+        "least_used",
+        "least_used",
+    )
+
+    store.set_printer_rack_algorithm(2, None)
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+    store.forget_remembered()
+    assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
+    """A newer version's algorithm must not stop this one loading its settings."""
+    loaded = StoredSettings.model_validate(
+        {"printer_rack_algorithms": {"1": "newest_first", "2": "from-the-future"}}
+    )
+    assert loaded.printer_rack_algorithms == {"1": "newest_first"}

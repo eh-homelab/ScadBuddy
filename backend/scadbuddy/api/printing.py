@@ -31,6 +31,7 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
+from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -70,6 +71,19 @@ class PrinterBedType(BaseModel):
 
     printer_id: int
     bed_type: str | None = None
+
+
+class PrinterRackAlgorithmPut(BaseModel):
+    """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
+
+    algorithm: RackAlgorithm | None = None
+
+
+class PrinterRackAlgorithm(BaseModel):
+    """The rack algorithm in force on one printer (#836)."""
+
+    printer_id: int
+    algorithm: RackAlgorithm
 
 
 class ProjectAttach(BaseModel):
@@ -118,6 +132,22 @@ def put_printer_bed_type(
     settings = store.set_printer_bed_type(printer_id, body.bed_type)
     return PrinterBedType(
         printer_id=printer_id, bed_type=settings.printer_bed_types.get(str(printer_id))
+    )
+
+
+@router.put(
+    "/printers/{printer_id}/rack-algorithm",
+    response_model=PrinterRackAlgorithm,
+    summary="Remember how this printer's rack nozzle is picked",
+)
+def put_printer_rack_algorithm(
+    printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
+) -> PrinterRackAlgorithm:
+    """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
+    Bambuddy, like the printer's remembered plate."""
+    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    return PrinterRackAlgorithm(
+        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
     )
 
 
