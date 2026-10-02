@@ -37,6 +37,49 @@ async function row(name: string): Promise<HTMLElement> {
 }
 
 describe('HistoryPage', () => {
+  it('shows a pipeline output\'s bill of materials and links its files', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...first,
+            bom: [{ piece: 'wall', label: 'Wall', count: 8, plates: [1, 2], part: 'k1' }],
+            files: ['guide.svg'],
+          },
+        ]),
+      ),
+    )
+    render()
+    const item = await row('Reagan')
+    const table = within(item).getByRole('table')
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Wall81, 2')
+    const link = within(item).getByRole('link', { name: 'guide.svg' })
+    expect(link).toHaveAttribute('href', `/api/v1/outputs/${first.id}/files/guide.svg`)
+    expect(link).toHaveAttribute('download')
+    expect(link).not.toHaveAttribute('target')
+  })
+
+  it('opens a pipeline output\'s file in a new tab when embedded, out of the sandbox', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, bom: [], files: ['guide.svg'] }]),
+      ),
+    )
+    const top = window.top
+    // Inside Bambuddy's iframe: its sandbox has no allow-downloads (CLAUDE.md).
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    try {
+      render()
+      const link = within(await row('Reagan')).getByRole('link', { name: 'guide.svg' })
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener')
+    } finally {
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
   it('lists every output newest first', async () => {
     render()
     const list = await screen.findByTestId('outputs')

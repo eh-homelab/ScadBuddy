@@ -510,3 +510,62 @@ Source: `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §4 and
 - Ship your own CSS, as a `<style>` element the module adds (`models/dollhouse-kit/ui/index.js` keeps it in `const CSS` and appends `element('style', { textContent: CSS })`) or a stylesheet under `ui/`. The UI mounts in a shadow root, and Tailwind never scans `models/`, so the page's utility classes do not exist for a template's markup (spec §4.2).
 - Only files under `ui/` are served (`/api/v1/models/{slug}/ui/…`, and pinned to a revision at `/versions/{commit}/ui/…`; `backend/scadbuddy/api/template_ui.py`, spec §4.1), and only `.js .mjs .css .json .svg .png .jpg .jpeg .webp .woff2`. Import siblings relatively (`./pieces.js`). The page's Content-Security-Policy (`backend/scadbuddy/api/static.py` `PAGE_CSP`) loads script only from ScadBuddy and keeps fetch/XHR and subresource requests there, apart from Google Fonts style and font files. So: no CDN imports.
 - Template code is not sandboxed (§9). It runs in the page with the user's session and can call every ScadBuddy API. The CSP does not stop navigation, `window.open` or WebRTC. Review a template's `ui/` as you would any code you run.
+
+## 13. Pipelines: `pipeline/pipeline.py` and `pipeline/activities.py`
+
+Sources: `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §5 (the
+contract), §8.2 (inputs versions), §9 (trust); `backend/scadbuddy/workflows/ctx.py`
+(`Ctx`); `backend/scadbuddy/template.py` (`Blob`, `Part`, `emit`);
+`models/dollhouse-kit/pipeline/` (a worked example).
+
+A template with no `pipeline` renders `model.scad` with its parameters, as always.
+Declare one in `model.json`: `"pipeline": {"module": "pipeline/pipeline.py", "api": 1}`.
+
+`pipeline.py` defines `async def run(ctx, inputs)` and runs inside Temporal's
+workflow sandbox, so it must be deterministic: no files, no network, no clock, no
+randomness. A forbidden call fails the job with `pipeline/pipeline.py:<line>` in
+its error. Two more rules the sandbox does not catch for you:
+
+- **Yield within 2 s.** Between two `await ctx.…` calls, `run` must not compute
+  for more than 2 seconds; Temporal then reports a deadlock and retries forever,
+  and only the pipeline's overall bound (4 × `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`)
+  fails the job. Put heavy computation in `activities.py`.
+- **Never iterate a `set` to decide what to call.** String hashing differs between
+  worker processes, so a set's order does too; a replay on another worker would
+  issue the calls in another order and fail. Use a list, `dict`, or `sorted(...)`.
+  Sets for membership tests are fine.
+
+Everything else goes through `ctx`:
+
+| Call | Does | Returns |
+| --- | --- | --- |
+| `await ctx.render(file, **params)` | renders any `.scad` of the template; identical calls render once | `Part` (a reference: `bbox`, `colours`, `notes`, `plates`) |
+| `await ctx.activity(name, *args, timeout=None, **kwargs)` | runs `pipeline/activities.py:<name>` in its own process | its JSON result |
+| `await ctx.pack([part, (part, count)])` | packs parts onto plates (goal `fewest_plates`) | layout |
+| `ctx.plate_of(parts, at=[(x, y, 0)])` | one plate, placed by you | plate |
+| `await ctx.output(plates=…, name=…, bom=[…], files={…})` | writes a 3MF; call it again for another | `OutputRef` |
+| `ctx.progress(message, done=, total=)` | the job's progress line | — |
+
+One part packed alone keeps the plates it laid out itself (`echo(plates = N)`, section 5).
+`bom` entries are `{"piece", "label", "count", "plates": [..], "part": part.piece_key}`.
+`files` values are text (1 MiB in all per output; they travel in the workflow
+history, `backend/scadbuddy/workflows/ctx.py`), or a `Blob` returned by an activity.
+
+`activities.py` is plain Python on the render worker, with what the image ships
+(numpy, lxml, Pillow, the stdlib, `scadbuddy.render.*`, `scadbuddy.template`).
+Nothing is installed per template. Arguments and results are JSON. A `Part`
+argument gives `part.meshes()`, and a `Blob` argument gives `blob.read_bytes()`.
+Return `scadbuddy.template.emit(name, data)` for a file. The function runs in its
+own process group, with an allowlisted environment; it otherwise has the render
+worker's reach (spec §9). It is killed with its children on cancellation or timeout (default the render timeout plus 60 s, at
+most `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`). An exception fails the job with
+`pipeline/activities.py:<line>`.
+
+Inputs versions: set `INPUTS_VERSION = n` in `pipeline.py` and have your UI stamp
+`inputs.v = n`. When you change the inputs' shape, raise it, and define
+`migrate(inputs, from_version) -> inputs`. It runs when an older preset or output
+opens. If it raises, the user sees the raw inputs, read-only, with your error.
+
+`verify.sh`: list inputs cases in `pipeline/verify-inputs.json`, and run
+`python -m scadbuddy.workflows.verify_pipeline <template> --inputs …` in the
+`test` image, as `models/dollhouse-kit/verify.sh` does.

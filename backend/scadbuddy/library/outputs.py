@@ -23,6 +23,7 @@ from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
+from scadbuddy.render.job_models import FILE_NAME_PATTERN, BomEntry, OutputRecord
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
@@ -38,6 +39,10 @@ PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
 #: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
 GEOMETRY_NAME = "geometry.json"
+#: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
+BOM_NAME = "bom.json"
+RECORD_NAME = "record.json"
+FILES_DIR = "files"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -236,8 +241,17 @@ class OutputStore:
         name: str | None = None,
         public_url: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        index: int = 0,
+        files_dir: Path | None = None,
     ) -> OutputMeta:
-        if job.result is None:
+        """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
+        one result for a job without outputs. ``files_dir`` holds that output's extra
+        files (the caller's ``dir_for(files_key) / "files"``)."""
+        if job.outputs and not 0 <= index < len(job.outputs):
+            raise IndexError(index)
+        chosen = job.outputs[index] if job.outputs else None
+        result = chosen.result if chosen is not None else job.result
+        if result is None:
             raise ValueError("the job has no result to persist")
         # The store's own guarantee, kept even though the route checked the same
         # thing: checked before anything is written, so inputs the job did not
@@ -248,35 +262,48 @@ class OutputStore:
         output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
-
+        # Every copy and write, or none: a failure part-way (a source gone from the
+        # store, a full disk) leaves no half-written output behind to list.
         try:
-            shutil.copyfile(self.paths.root / job.result.model_3mf, directory / MODEL_NAME)
-            shutil.copyfile(self.paths.root / job.result.preview_glb, directory / PREVIEW_NAME)
+            shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
+            shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
+            (directory / PARAMS_NAME).write_text(
+                json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            (directory / INPUTS_NAME).write_text(
+                json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            # A job from before the hash existed has none to read back; the live tree is
+            # then the closest thing to what it rendered.
+            version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            stamp(
+                directory / MODEL_NAME,
+                Provenance(
+                    model=job.slug,
+                    version=version,
+                    output=output_id,
+                    params=dict(job.params),
+                    edit_url=edit_url(public_url, output_id),
+                ),
+            )
+
+            if chosen is not None:
+                # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
+                # a bill of materials only when the pipeline wrote one.
+                (directory / RECORD_NAME).write_text(
+                    chosen.record.model_dump_json(), encoding="utf-8"
+                )
+                if chosen.bom:
+                    (directory / BOM_NAME).write_text(
+                        json.dumps([b.model_dump(mode="json") for b in chosen.bom]),
+                        encoding="utf-8",
+                    )
+                if files_dir is not None and chosen.files:
+                    shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
         except OSError:
-            # A result swept mid-copy: no `meta.json`, so nothing would ever list or
-            # remove the directory.
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        (directory / PARAMS_NAME).write_text(
-            json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (directory / INPUTS_NAME).write_text(
-            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-
-        # A job from before the hash existed has none to read back; the live tree is
-        # then the closest thing to what it rendered.
-        version = job.result.source_version or source_version(self.paths.model_dir(job.slug))
-        stamp(
-            directory / MODEL_NAME,
-            Provenance(
-                model=job.slug,
-                version=version,
-                output=output_id,
-                params=dict(job.params),
-                edit_url=edit_url(public_url, output_id),
-            ),
-        )
 
         meta = OutputMeta(
             id=output_id,
@@ -285,11 +312,11 @@ class OutputStore:
             name=name or None,
             job_id=job.id,
             created_at=datetime.now(UTC),
-            bbox_mm=job.result.bbox_mm,
-            colors=list(job.result.colors),
-            parts=list(job.result.parts),
-            warnings=list(job.result.warnings),
-            libraries=list(job.result.libraries),
+            bbox_mm=result.bbox_mm,
+            colors=list(result.colors),
+            parts=list(result.parts),
+            warnings=list(result.warnings),
+            libraries=list(result.libraries),
         )
         self._write_meta(directory, meta)
         # After the record is complete: a lookup racing the writes above may have
@@ -297,6 +324,33 @@ class OutputStore:
         self.forget_plate_cover(job.slug)
         self._changed(job.slug)
         return meta
+
+    def bom(self, output_id: str) -> list[BomEntry]:
+        path = self.directory(output_id) / BOM_NAME
+        if not path.is_file():
+            return []
+        return [BomEntry.model_validate(e) for e in json.loads(path.read_text(encoding="utf-8"))]
+
+    def record(self, output_id: str) -> OutputRecord | None:
+        path = self.directory(output_id) / RECORD_NAME
+        if not path.is_file():
+            return None
+        return OutputRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def files(self, output_id: str) -> list[str]:
+        directory = self.directory(output_id) / FILES_DIR
+        if not directory.is_dir():
+            return []
+        return sorted(p.name for p in directory.iterdir() if p.is_file())
+
+    def file_path(self, output_id: str, name: str) -> Path:
+        """An extra file of the output; its name is a plain file name, never a path."""
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
+            raise OutputNotFoundError(name)
+        path = self.directory(output_id) / FILES_DIR / name
+        if not path.is_file():
+            raise OutputNotFoundError(name)
+        return path
 
     def record_send(
         self,

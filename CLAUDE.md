@@ -125,9 +125,13 @@ stage (OpenSCAD plus the image's fonts):
 
 ```bash
 docker build --target base -t scadbuddy-verify:ci .
+docker build --target test -t scadbuddy:test .   # for templates with a pipeline/ (#427)
 SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  SCADBUDDY_PIPELINE_IMAGE=scadbuddy:test \
   bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
 ```
+
+Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 
 ## Layout
 
@@ -151,7 +155,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
   `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
-  renders* across jobs. Never swap them.
+  renders* across jobs. Never swap them. Template pipelines (#427): `TemplatePipeline`
+  runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
+  workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
+  `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,
+  `run_template_activity`, `migrate_inputs`), `template_process.py`/`template_runner.py`
+  (template Python in its own process group, env allowlisted), `verify_pipeline.py`
+  (for `verify.sh`). `scadbuddy/template.py` is the surface a template's
+  `activities.py` imports.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

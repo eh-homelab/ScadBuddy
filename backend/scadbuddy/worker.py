@@ -36,6 +36,7 @@ from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -43,6 +44,7 @@ from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, is_current, make_current, render_worker
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 
 if TYPE_CHECKING:
@@ -160,6 +162,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         snapshots=state.store.snapshots,
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
+        openscad_version=state.openscad_version or "",
     )
 
 
@@ -233,10 +236,17 @@ async def _poll(
 ) -> None:
     config = deps.config
     build_id = settings.revision
+    # What every output's record names (§8.4): this image and its openscad. The
+    # in-process worker has the API's probe already; running openscad again here, in a
+    # task beside the API's first requests, would only race them.
+    deps.revision = settings.revision
+    if not deps.openscad_version:
+        deps.openscad_version = await probe_openscad_version(config) or ""
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
         RenderActivities(deps),
+        pipeline=PipelineActivities(deps),
         build_id=build_id,
         max_concurrent_activities=config.render_concurrency,
         graceful_shutdown_timeout=timedelta(

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, Output } from '../api/types'
+import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
@@ -14,6 +15,7 @@ import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
+import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
 function shortId(id: string): string {
@@ -359,6 +361,28 @@ function OutputRow({
           </dl>
         )}
       </div>
+
+      {/* A pipeline output's bill of materials and extra files (spec 2026-09-27 §5.2). */}
+      <BomTable bom={output.bom ?? []} />
+      {(output.files ?? []).length > 0 && (
+        <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
+          {(output.files ?? []).map((name) => (
+            <li key={name}>
+              {/* Bambuddy's iframe sandbox has no allow-downloads: there the file opens in
+                  a tab that escapes it (allow-popups-to-escape-sandbox), as lib/embed.ts does. */}
+              <a
+                className="text-accent underline"
+                href={api.outputFileUrl(output.id, name)}
+                download
+                rel="noopener"
+                target={isEmbedded() ? '_blank' : undefined}
+              >
+                {name}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
     </li>
   )
 }

@@ -47,7 +47,7 @@ const NULLABLE = new Set([
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = ['store_backend', 'bambuddy_url', 'library_folder_id']
 const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
-const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'media_upload_max_bytes'])
+const MORE_THAN_ZERO = new Set(['render_timeout', 'template_activity_max_timeout', 'job_ttl', 'media_upload_max_bytes'])
 
 function envName(name: string): string {
   return `SCADBUDDY_${name.toUpperCase()}`

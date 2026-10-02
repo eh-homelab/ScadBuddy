@@ -13,7 +13,13 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
 from scadbuddy.workflows.activities import RenderActivities
-from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from scadbuddy.workflows.pipelines import (
+    MigrateInputs,
+    RenderPiece,
+    RenderPreview,
+    TemplatePipeline,
+)
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -47,6 +53,7 @@ def render_worker(
     task_queue: str,
     activities: RenderActivities,
     *,
+    pipeline: PipelineActivities,
     build_id: str,
     max_concurrent_activities: int,
     graceful_shutdown_timeout: timedelta = timedelta(),
@@ -56,8 +63,8 @@ def render_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[TemplatePipeline, RenderPiece, RenderPreview],
-        activities=activities.all(),
+        workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
+        activities=[*activities.all(), *pipeline.all()],
         max_concurrent_activities=max_concurrent_activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=WorkerDeploymentConfig(

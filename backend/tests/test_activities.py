@@ -29,7 +29,15 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
+from scadbuddy.render.job_models import (
+    Job,
+    JobResult,
+    OutputRecord,
+    PartInfo,
+    PipelineOutput,
+    StepInfo,
+    render_key,
+)
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.render.runner import ProcessOutput
@@ -58,6 +66,7 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import PgPool, write_openscad_3mf
 from tests.support.activities import REVISION, demo_paths, piece_request, worker_deps
@@ -277,10 +286,11 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     acts = RenderActivities(worker_deps(tmp_path, paths))
     env = ActivityEnvironment()
     req = piece_request()
-    prepared = await env.run(acts.prepare, req)
 
+    # `prepare` derives the schema to check the parameters (phase 4), so a source that
+    # does not parse fails there, before any render.
     with pytest.raises(ApplicationError) as raised:
-        await env.run(acts.render_main, req, prepared)
+        await env.run(acts.prepare, req)
 
     assert raised.value.type == "OpenSCADError"
     assert raised.value.non_retryable
@@ -301,6 +311,26 @@ async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -
     assert raised.value.non_retryable
     failure = raised.value.details[0]
     assert isinstance(failure, Failure)
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+async def test_an_openscad_failure_in_render_main_carries_its_failure(tmp_path: Path) -> None:
+    """The source parsed at `prepare`, then stopped parsing: `render_main` maps the
+    render's OpenSCADError to a non-retryable failure with its log tail."""
+    paths = demo_paths(tmp_path)
+    acts = RenderActivities(worker_deps(tmp_path, paths))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    paths.model_source("demo").write_text("%%FAIL%%\n", encoding="utf-8")
+
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(acts.render_main, req, prepared)
+
+    assert raised.value.type == "OpenSCADError" and raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
+    assert failure.error == raised.value.message
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
@@ -364,6 +394,23 @@ async def test_render_main_heartbeats_while_its_checkout_waits(
 
 
 # ── project ────────────────────────────────────────────────────────────────────
+
+
+def _output(name: str, key: str) -> PipelineOutput:
+    return PipelineOutput(
+        name=name,
+        result=_result(),
+        blob_keys=[key],
+        record=OutputRecord(
+            revision="r",
+            ui_api=None,
+            pipeline_api=1,
+            pipeline_version="v",
+            inputs_v=0,
+            plate_key="default",
+            parts=[key],
+        ),
+    )
 
 
 @pytest.fixture
@@ -451,6 +498,8 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
         log_tail=["fine"],
         steps=[StepInfo(name="render", state="done", done=1, total=1)],
         blob_key="piece-key",
+        blob_keys=["piece-key", "output-x-0"],
+        outputs=[_output("house", "piece-key"), _output("garage", "output-x-0")],
     )
     await acts.project(done)
 
@@ -462,7 +511,8 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
     assert stored.diagnostics == _result().diagnostics
     assert stored.diagnostics_dropped == 2
     assert stored.steps == done.steps
-    assert "piece-key" in refs.referenced()
+    assert stored.outputs == done.outputs  # both, in order
+    assert {"piece-key", "output-x-0"} <= refs.referenced()
 
     # A second `done` (a retried activity) returns and changes nothing.
     await acts.project(done.model_copy(update={"log_tail": ["other"]}))
@@ -598,6 +648,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):
@@ -650,6 +701,7 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):
@@ -706,6 +758,8 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
 
     monkeypatch.setattr(activities_module, "render_main", refuses)
     monkeypatch.setattr(activities_module, "render_solids_stage", refuses)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     paths = demo_paths(tmp_path)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
@@ -745,6 +799,8 @@ async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the
         raise AssetUnavailableError("label", meta.id)
 
     monkeypatch.setattr(activities_module, "render_main", vanished)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
             worker_deps(tmp_path, paths),
