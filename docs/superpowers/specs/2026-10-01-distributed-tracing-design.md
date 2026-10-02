@@ -142,14 +142,21 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
 `scadbuddy/core/tracing.py`: `configure_tracing(service_name, settings)` builds
 the provider and is called once from `create_app` and from
 `python -m scadbuddy.worker`. Instrumentations: FastAPI (route templates as span
-names), httpx (per client, as §4 limits it), psycopg, and the Temporal
-interceptor. Dependencies:
+names), psycopg, and the Temporal interceptor. Dependencies:
 `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`,
-`opentelemetry-instrumentation-{fastapi,httpx,psycopg}`, and
+`opentelemetry-instrumentation-{fastapi,psycopg}`, and
 `temporalio[opentelemetry]` inside the existing `<1.34` pin. Verified against
 PyPI on 2026-10-01: 1.33.0 declares the `opentelemetry` extra
 (`opentelemetry-api` and `opentelemetry-sdk`, `>=1.26,<2`) and ships
 `temporalio.contrib.opentelemetry`, so no Temporal bump comes first.
+
+**No httpx instrumentation yet.** Every httpx client the backend has today
+calls something outside ScadBuddy: Bambuddy (`bambuddy/client.py`,
+`store/bambuddy.py`), Google Fonts (`library/googlefonts.py`) and URL import
+(`library/url_import.py`). §4 forbids injecting into any of them, so
+`opentelemetry-instrumentation-httpx` would have nothing to instrument. It
+arrives with the first client that calls a ScadBuddy service. The relay's
+forwarder (§5.2) is not one, since it must stay untraced.
 
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
@@ -482,13 +489,26 @@ not copied from that module, which has no such list:
 
 A test requests each excluded path and asserts no span was recorded.
 
-**Sampling:** `parentbased_always_on` by default; every trace is kept at
-homelab volume. `OTEL_TRACES_SAMPLER` changes it from clusters. The backend
-and agent honour the browser's decision.
+**Sampling:** parent-based. Every trace that starts at a request, a workflow
+or a manual span is kept at homelab volume. The backend's default root
+sampler adds one rule: **a `CLIENT` span with no parent is dropped.** The
+psycopg instrumentation creates a span for every query, and the background
+loops (the reconciler's poll every 5 s, the event bus, the pool's checks)
+have no parent span. Without the rule each query would be a trace of its
+own, and Tempo would fill with them. A query made while handling a request
+or running an activity has a parent and is kept. `OTEL_TRACES_SAMPLER`, when
+set, replaces this default entirely. The backend and agent honour the
+browser's decision.
 
 **Errors:** `ERROR` status, with the exception's type and where it was raised,
-**never its message**. A failed render's `scadbuddy.failure_class` matches the
-outcome recorded on its job, so a trace and the `render_jobs` row agree.
+**never its message**. Our own spans add `scadbuddy.failure_class`:
+- for an `ApiError`, its problem `type`, or `http-<status>` when that is
+  `about:blank`;
+- for anything else, the exception's class name (`OpenSCADError`,
+  `RenderTimeoutError`).
+
+A render's spans end in `ERROR` exactly when its job settles `failed`, so a
+trace and its `render_jobs` row agree.
 
 Exception messages carry exactly what the list above forbids:
 - `ParameterValueError` and the other checks in `render/runner.py` interpolate
