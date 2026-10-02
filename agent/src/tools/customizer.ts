@@ -204,8 +204,11 @@ export const customizerTools: Tool[] = [
       } catch (err) {
         // The render is done; only the save failed. Still the job's summary, so the
         // job can be saved again with save_output and is recorded as made (#931).
+        // Only ScadBuddy's own summary (it names the HTTP status): the backend's
+        // detail is upstream text, and this result is enveloped under
+        // render_model's source.
         if (!(err instanceof ToolError)) throw err
-        return { ...json({ ...summary, output: null, output_error: err.message }), isError: true }
+        return { ...json({ ...summary, output: null, output_error: err.summary }), isError: true }
       }
       return json({ ...summary, output })
     },

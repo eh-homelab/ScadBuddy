@@ -268,7 +268,10 @@ describe('the harness projection', () => {
     const answer = await mcp.callTool({ name: 'render_model', arguments: { slug: 'box', save_output: true } })
     await mcp.close()
     expect(answer.isError).toBe(true)
-    expect(resultJson(answer as never)).toMatchObject({ job_id: 'j9', output: null, output_error: expect.stringContaining('disk full') })
+    const answered = resultJson(answer as never) as { output_error: string }
+    expect(answered).toMatchObject({ job_id: 'j9', output: null, output_error: expect.stringContaining('HTTP 507') })
+    // The backend's detail is upstream text: not relayed under render_model's own source.
+    expect(answered.output_error).not.toContain('disk full')
     expect(seen).toHaveLength(1)
     expect(seen[0]!.ok).toBe(false)
     expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([
