@@ -155,7 +155,7 @@ class AssetFetch(BaseModel):
 
 class FetchedAsset(AssetMeta):
     #: The URL as given, to credit and to fetch again.
-    source_url: str
+    source_url: str = Field(max_length=2048)
 
 
 @router.post(
