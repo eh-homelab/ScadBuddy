@@ -1339,7 +1339,7 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
     )
 
     assert check.status_code == 200, check.text
-    assert check.json() == {"errors": [], "warnings": []}
+    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
     assert not upload.called
 
 
@@ -1365,10 +1365,10 @@ def test_the_check_carries_the_high_flow_warning(
     check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "standard"}])
 
     assert check.status_code == 200, check.text
-    assert check.json() == {
-        "errors": [],
-        "warnings": [{"kind": "hf-mounted", "slot_id": None, "message": HF_LEFT}],
-    }
+    assert (check.json()["errors"], check.json()["warnings"]) == (
+        [],
+        [{"kind": "hf-mounted", "slot_id": None, "message": HF_LEFT}],
+    )
     assert not upload.called
 
 
@@ -1383,7 +1383,7 @@ def test_the_check_says_nothing_of_standard_mounted_nozzles(
     check = _check(client, output_id, nozzles=[{"size": "0.4"}])
 
     assert check.status_code == 200, check.text
-    assert check.json() == {"errors": [], "warnings": []}
+    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
 
 
 @respx.mock
@@ -1417,7 +1417,7 @@ def test_the_check_does_not_carry_the_resolvers_high_flow_note(
     check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
 
     assert check.status_code == 200, check.text
-    assert check.json() == {"errors": [], "warnings": []}
+    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
 
 
 @respx.mock
@@ -1478,7 +1478,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
 
     assert check.status_code == 200, check.text
     assert run.status_code == 422, run.text
-    assert check.json() == {"errors": [run.json()["detail"]], "warnings": []}
+    assert check.json() == {"errors": [run.json()["detail"]], "warnings": [], "rack": None}
     assert not uploaded.called
     assert not sliced.called
 
