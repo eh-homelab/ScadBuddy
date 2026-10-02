@@ -222,19 +222,22 @@ path except `/api/v1/ai/*` to the backend.
   - A **per-client** bucket sits under it. The client is the immediate
     peer's address, unless that peer is in a new `SCADBUDDY_TRUSTED_PROXIES`
     (CIDRs, default empty: trust no forwarding header). Only then is
-    `X-Forwarded-For` read, from the right, taking the first hop not in the
-    list. With the list empty, every browser behind the gateway shares one
+    `X-Forwarded-For` read, and only its **last** value is taken: the one
+    the nearest proxy, the trusted peer, added. A missing or empty last
+    value falls back to the peer's address. With the list empty, every browser behind the gateway shares one
     per-client bucket, which only lowers the cap. Clusters sets it to the
     gateway's range in clusters#1596 Phase 5.
-  - This reuses the CIDR-matching idea of the agent's
-    `SCADBUDDY_AGENT_TRUSTED_PROXIES`, on a different header for a different
-    purpose. The agent's list (`src/http/origins.ts`) decides whether to
-    believe `X-Forwarded-Proto`/`X-Forwarded-Host` when it reconstructs an
-    origin. This one decides whether to believe `X-Forwarded-For` when it
-    picks a client address for a rate-limit bucket. The agent has no
-    `X-Forwarded-For` handling to copy; PR #2 writes it. The backend has no
-    proxy-trust handling today either: uvicorn runs with its defaults, so
-    behind the gateway every client is the gateway.
+  - This mirrors the agent exactly. `forwardedClient` in
+    `agent/src/http/origins.ts` reads the last `X-Forwarded-For` value
+    (`lastValue`) only when the peer is in `SCADBUDDY_AGENT_TRUSTED_PROXIES`.
+    `routes/mcpAuthMode.ts` uses it to attribute audit lines. PR #2 ports
+    that function to Python with the same rules (last value, trimmed, empty
+    means none) and the same test cases, so the two services cannot disagree
+    about who a client is. One trusted hop is all the cluster has (Envoy
+    Gateway in front of the pod), so a right-to-left walk over several
+    trusted hops is not needed. The backend has no proxy-trust handling
+    today: uvicorn runs with its defaults, so behind the gateway every
+    client is the gateway.
   - `trusted_proxies` is a `Settings` field that goes in `BOOTSTRAP_FIELDS`
     (`core/settings.py`), not `ENV_SEEDED`. It decides who the server
     believes about who it is talking to, so it belongs to the deployment, set
@@ -614,8 +617,9 @@ The uid never changes after that, so the check is needed once.
   `Sec-Fetch-Site` other than `same-origin`, with no CORS headers on any
   response; 415; 413 from the `RouteLimit` with and without `Content-Length`
   and past 512 spans; 429 from the per-client bucket and from the per-process one;
-  `X-Forwarded-For` ignored from an untrusted peer and read right to left from
-  a trusted one; resource rewrite; each attribute, event, link and name cap at
+  `X-Forwarded-For` ignored from an untrusted peer, its last value taken from
+  a trusted one, and an empty last value falling back to the peer, matching
+  the agent's `forwardedClient` cases; resource rewrite; each attribute, event, link and name cap at
   its limit and one past it, with the dropped count; the `off` response; nothing
   forwarded when off; the path never serves `index.html`; a failing
   collector, a full queue and a shutdown with batches still queued each
