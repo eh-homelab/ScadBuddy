@@ -100,20 +100,27 @@ export type VersionLink = z.infer<typeof VersionLinkSchema>
  * panel stops the user typing past it.
  */
 export const ANSWER_MAX = 20_000
+/** The agent's other bounds on a question (`src/harness/questions.ts`); its tests pin them to these. */
+export const QUESTIONS_MAX = 4
+export const OPTIONS_MIN = 2
+export const OPTIONS_MAX = 4
+export const QUESTION_TEXT_MAX = 2_000
+export const PREVIEW_MAX = 20_000
 
 export const QuestionSchema = z.object({
-  question: z.string().min(1),
-  header: z.string(),
+  question: z.string().min(1).max(QUESTION_TEXT_MAX),
+  header: z.string().max(200),
   multiSelect: z.boolean(),
   options: z
     .array(
       z.object({
-        label: z.string().min(1),
-        description: z.string(),
-        preview: z.string().optional(),
+        label: z.string().min(1).max(200),
+        description: z.string().max(QUESTION_TEXT_MAX),
+        preview: z.string().max(PREVIEW_MAX).optional(),
       }),
     )
-    .min(1),
+    .min(OPTIONS_MIN)
+    .max(OPTIONS_MAX),
 })
 export type Question = z.infer<typeof QuestionSchema>
 
@@ -236,7 +243,7 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     id: z.string().min(1),
     tool: z.string().min(1),
-    questions: z.array(QuestionSchema).min(1),
+    questions: z.array(QuestionSchema).min(1).max(QUESTIONS_MAX),
   }),
   /**
    * Answered (`answers`, one per question in order, and `by`), or cancelled with its
@@ -329,7 +336,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('question.answer'),
     sessionId,
     id: z.string().min(1),
-    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1),
+    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
