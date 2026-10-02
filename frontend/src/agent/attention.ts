@@ -66,15 +66,16 @@ export function useAttention(enabled: boolean): Attention {
   const [waiting, setWaiting] = useState<number | null>(null)
   const generation = useRef(0)
   // One read at a time: while the agent is slow to answer, the timer, focus and
-  // toggles must not pile requests up behind it.
-  const inflight = useRef(false)
+  // toggles must not pile requests up behind it. Held per generation, so a read
+  // left open by a switch off does not hold back the first read after switching on.
+  const inflight = useRef<number | null>(null)
 
   const refresh = useCallback(() => {
-    if (!enabled || inflight.current) return
-    inflight.current = true
+    if (!enabled || inflight.current === generation.current) return
     const started = generation.current
+    inflight.current = started
     void fetchPendingApprovals().then((n) => {
-      inflight.current = false
+      if (inflight.current === started) inflight.current = null
       // A failed read keeps the last count: an outage is not "nothing is waiting".
       if (n !== null && started === generation.current) setWaiting(n)
     })

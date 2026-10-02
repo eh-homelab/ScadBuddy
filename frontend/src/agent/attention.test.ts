@@ -124,6 +124,23 @@ describe('useAttention', () => {
     act(() => answer?.())
   })
 
+  it('reads at once after a quick off and on, though the read from before is still open', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/ai/approvals', async () => {
+        calls += 1
+        if (calls === 1) await new Promise<never>(() => {})
+        return HttpResponse.json({ approvals: [{}, {}] })
+      }),
+    )
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
+    await waitFor(() => expect(calls).toBe(1))
+    rerender({ on: false })
+    rerender({ on: true })
+    await waitFor(() => expect(calls).toBe(2))
+    await waitFor(() => expect(result.current.waiting).toBe(2))
+  })
+
   it('reads again on refresh and when the tab comes back into view', async () => {
     setPendingApprovals(1)
     const { result } = renderHook(() => useAttention(true))
