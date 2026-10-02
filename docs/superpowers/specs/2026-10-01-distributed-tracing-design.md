@@ -174,13 +174,7 @@ path except `/api/v1/ai/*` to the backend.
   the backend's REST writes accept any `Origin`: creating and deleting models,
   restoring revisions, submitting renders, sending and printing through
   Bambuddy. That is tracked in #962, and it is a much more serious exposure
-  than this one.
-  - The relay's check is the same check #962 calls for, written so that
-    #962 can lift it into a shared guard for every write. When #962 lands,
-    the relay uses that guard instead of its own copy.
-  - Until then the relay ships with its own copy, rather than adding one
-    more unchecked POST.
-  - This design does not fix #962 and does not depend on it.
+  than this one. The relay's checks, in order:
   - First, a separate check: a request with no `Origin` is refused.
     `origin_allowed` cannot do this, because it returns `True` for `None`
     on purpose (for the socket, a non-browser caller is as trusted as a REST
@@ -200,6 +194,11 @@ path except `/api/v1/ai/*` to the backend.
   - The route sends no CORS headers and answers no preflight. That keeps a
     cross-origin `fetch` in `cors` mode from ever reading a response, but it
     is not relied on to stop a request.
+  - These are the checks #962 calls for, written so that #962 can lift them
+    into a shared guard for every write. When #962 lands, the relay uses
+    that guard instead of its own copy. Until then it carries its own copy,
+    rather than adding one more unchecked POST. This design neither fixes
+    #962 nor depends on it.
 - Accepts OTLP/JSON only (the web exporter's default); any other
   `Content-Type` is 415.
 - Body ≤ 256 KiB through the existing `BodySizeGate`: a `RouteLimit` for
@@ -208,32 +207,42 @@ path except `/api/v1/ai/*` to the backend.
   `Content-Length`, before the handler runs. Without one the
   `application/json` default (8 MiB) would apply. The 512-span cap is checked
   after parsing; over it is also 413.
-- Rate limits, in memory with `RateLimit` (`api/realtime.py`'s token bucket),
-  else 429; the client drops the batch and does not
-  retry. A **per-process** bucket caps the relay's total rate whatever the
-  client, so no spoofing of the client's address raises what one pod sends
-  the collector. It is per pod, not cluster-wide: with N API replicas the
-  ceiling is N times the configured rate. The API runs one replica (as of
-  2026-10-01, `replicas: 1` in eh-homelab/clusters'
-  `applications/scadbuddy/scadbuddy.yaml`; clusters#1596 Phase 5 is where a
-  change to that would have to adjust this rate), and a shared bucket in Postgres would cost a write per
-  batch on a path whose only job is to be cheap. So this approximation is
-  accepted and documented beside the setting. Scaling the API means dividing
-  the rate by the replica count. A **per-client** bucket sits under it. The client is the immediate peer's address unless that peer
-  is in a new `SCADBUDDY_TRUSTED_PROXIES` (CIDRs, default empty: trust no
-  forwarding header). Only then is `X-Forwarded-For` read, from the right,
-  taking the first hop not in the list. This reuses the CIDR-matching idea of
-  the agent's `SCADBUDDY_AGENT_TRUSTED_PROXIES`, but on a different header for
-  a different purpose. The agent's list (`src/http/origins.ts`) decides
-  whether to believe `X-Forwarded-Proto`/`X-Forwarded-Host` when it
-  reconstructs an origin. This one decides whether to believe
-  `X-Forwarded-For` when it picks a client address for a rate-limit bucket.
-  The agent has no `X-Forwarded-For` handling to copy; PR #2 writes it. Like that variable it is
-  infrastructure, an env-only `Settings` field, not a Postgres setting. The
-  backend has no proxy-trust handling today (uvicorn runs with its defaults,
-  so behind the gateway every client is the gateway). With the list empty,
-  every browser shares one per-client bucket, which only lowers the cap.
-  Clusters sets it to the gateway's range in clusters#1596 Phase 5.
+- **Rate limits**, in memory with `RateLimit` (`api/realtime.py`'s token
+  bucket). Over a limit is 429; the client drops the batch and does not retry.
+  - A **per-process** bucket caps the relay's total rate whatever the
+    client, so no spoofed client address raises what one pod sends the
+    collector.
+  - It is per pod, not cluster-wide: with N API replicas the ceiling is N
+    times the configured rate. The API runs one replica (as of 2026-10-01,
+    `replicas: 1` in eh-homelab/clusters' `applications/scadbuddy/scadbuddy.yaml`;
+    a change there has to adjust this rate, in clusters#1596 Phase 5 or
+    later). A shared bucket in Postgres would cost a write per batch on a path
+    whose only job is to be cheap, so this approximation is accepted and
+    documented beside the setting.
+  - A **per-client** bucket sits under it. The client is the immediate
+    peer's address, unless that peer is in a new `SCADBUDDY_TRUSTED_PROXIES`
+    (CIDRs, default empty: trust no forwarding header). Only then is
+    `X-Forwarded-For` read, from the right, taking the first hop not in the
+    list. With the list empty, every browser behind the gateway shares one
+    per-client bucket, which only lowers the cap. Clusters sets it to the
+    gateway's range in clusters#1596 Phase 5.
+  - This reuses the CIDR-matching idea of the agent's
+    `SCADBUDDY_AGENT_TRUSTED_PROXIES`, on a different header for a different
+    purpose. The agent's list (`src/http/origins.ts`) decides whether to
+    believe `X-Forwarded-Proto`/`X-Forwarded-Host` when it reconstructs an
+    origin. This one decides whether to believe `X-Forwarded-For` when it
+    picks a client address for a rate-limit bucket. The agent has no
+    `X-Forwarded-For` handling to copy; PR #2 writes it. The backend has no
+    proxy-trust handling today either: uvicorn runs with its defaults, so
+    behind the gateway every client is the gateway.
+  - `trusted_proxies` is a `Settings` field that goes in `BOOTSTRAP_FIELDS`
+    (`core/settings.py`), not `ENV_SEEDED`. It decides who the server
+    believes about who it is talking to, so it belongs to the deployment, set
+    at start and never editable in the UI. That is the same reason
+    `allowed_origins` is a bootstrap field.
+    `tests/test_settings_coverage.py` requires every field to be in exactly
+    one of the two, with a reason string for a bootstrap field. PR #2 adds
+    the entry and its reason.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
   attribute dropped except `service.version` and `user_agent.original`. Then
@@ -277,8 +286,7 @@ path except `/api/v1/ai/*` to the backend.
     first increase alerts. Failures also log one warning a minute at most,
     naming the status or the error class. This one counter is the only
     metric change in this design: it watches the tracing path itself, and
-    it is not a move of metrics to OTel. A forged span can still name any trace ID, but never claim to be
-  the API or the worker.
+    it is not a move of metrics to OTel.
 - **Accepted residual risk.** Script running on ScadBuddy's origin (today
   only the app; in future an XSS or a compromised dependency) can post spans
   into any trace ID it knows or guesses, so they show up inside someone
@@ -323,7 +331,7 @@ its caller, so it cannot see the relay's off signal.
     requests;
   - it sends one request at a time, so in-flight `keepalive` bytes stay
     under the cap;
-  - a single span over 48 KiB after the SDK limits below is dropped and
+  - a single span over 48 KiB after the SDK limits (§5.2) is dropped and
     counted.
 
   The relay's 256 KiB ceiling only bounds non-browser callers; the browser
@@ -368,6 +376,15 @@ knows how to start:
 ESM (`"type": "module"`, `module: NodeNext`), so CommonJS hooks alone would
 patch nothing.
 
+The SDK is `@opentelemetry/sdk-node`, with the HTTP instrumentation for
+**incoming** requests only (`ignoreOutgoingRequestHook: () => true`, so no
+outgoing `node:http`/`https` request is touched, the pinned plugin
+forwarder's included). The undici instrumentation is not installed, so
+`fetch` is untouched too. The one outgoing call that carries context is the
+backend client's middleware (§4). Tests assert that a remote plugin request
+through the forwarder, an `http_request` call and a request to the fake
+Anthropic endpoint carry no `traceparent`, and that a backend request does.
+
 **Verified against npm on 2026-10-01** (every package declares
 `node ^18.19.0 || >=20.6.0`, which covers the pinned Node 24):
 - `@opentelemetry/sdk-node`, `@opentelemetry/instrumentation-http`,
@@ -382,14 +399,8 @@ These packages do not touch the Claude Agent SDK. They patch `node:http`
 only, and the SDK's bundled CLI runs as a child process the hook never
 loads into. The implementing PRs pin exact versions, as `package.json`
 already does for `@anthropic-ai/claude-agent-sdk`, and record their own
-check if the versions have moved by then. `@opentelemetry/sdk-node` with the HTTP instrumentation for
-**incoming** requests only (`ignoreOutgoingRequestHook: () => true`, so no
-outgoing `node:http`/`https` request is touched, the pinned plugin
-forwarder's included). The undici instrumentation is not installed, so
-`fetch` is untouched too. The one outgoing call that carries context is the
-backend client's middleware (§4). Tests assert that a remote plugin request
-through the forwarder, an `http_request` call and a request to the fake
-Anthropic endpoint carry no `traceparent`, and that a backend request does.
+check if the versions have moved by then.
+
 Porsager's `postgres` has no instrumentation; database work is not traced in
 this phase. Manual spans: `agent.turn` (one per chat turn, the trace root or
 the browser's child), `agent.tool/<name>`, `agent.mcp/<method>`.
@@ -462,7 +473,8 @@ not copied from that module, which has no such list:
   lose it. The worker's own `/healthz` and `/metrics` on 9090 are served by
   its health server, which is never instrumented.
 - The relay's httpx forwarder, whose client is never passed to
-  `instrument_client` (§4). Both would otherwise trace their own exports.
+  `instrument_client` (§4). Traced, the relay route and its forwarder would
+  each trace their own exports.
 - The reconciler's idle polls: a span only when it starts a row.
 
 A test requests each excluded path and asserts no span was recorded.
