@@ -30,8 +30,8 @@ from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
+from tests.support.activities import demo_paths, piece_request, worker_deps
 from tests.support.store import local_content
-from tests.test_activities import _deps, _paths, _request
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
@@ -139,19 +139,96 @@ def test_packing_is_deterministic_and_leaves_out_dotfiles(tmp_path: Path) -> Non
     assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ["a.txt"]
 
 
-async def test_eviction_keeps_unpublished_and_recent_pieces(
+async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
     for key in ("old", "recent"):
         (a.dir_for(key) / "m").write_bytes(b"x" * 10)
         await a.publish(key, scope=SCOPE)
-    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published, in flight
+    (a.dir_for("crashed") / "m").write_bytes(b"x" * 10)  # never published, abandoned
+    staging = a.local.root / ".staging-1"
+    staging.mkdir()
+    (staging / "m").write_bytes(b"x" * 10)  # an `unpack_dir` a crash left
+    past = time.time() - 3600
+    for name in ("old", "crashed", ".staging-1"):
+        os.utime(a.local.root / name, (past, past))
+    assert sorted(a.evict()) == [".staging-1", "crashed", "old"]
+    assert a.local.exists("recent") and a.local.exists("rendering")
+
+
+async def test_a_publish_or_a_download_over_the_cap_trims_the_cache(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#689: the cap holds between the periodic passes, keeping what is in flight."""
+    a = worker(tmp_path / "a", content, max_bytes=25, min_age=60.0)
+    b = worker(tmp_path / "b", content, max_bytes=1 << 30, min_age=60.0)
+    (b.dir_for("k") / "m").write_bytes(b"x" * 10)
+    await b.publish("k", scope=SCOPE)
+    past = time.time() - 3600
+
+    def abandoned(key: str) -> None:
+        (a.dir_for(key) / "m").write_bytes(b"x" * 10)
+        os.utime(a.local.root / key, (past, past))
+
+    abandoned("old-1")
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # in flight, never published
+    (a.dir_for("new") / "m").write_bytes(b"x" * 10)
+    await a.publish("new", scope=SCOPE)
+    assert sorted(a.local.keys()) == ["new", "rendering"]
+
+    abandoned("old-2")
+    assert await a.fetch("k")  # a miss, downloaded
+    assert sorted(a.local.keys()) == ["k", "new", "rendering"]
+
+
+async def test_only_one_eviction_pass_runs_at_a_time(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write's trim and the periodic pass never scan and remove side by side."""
+    from scadbuddy.store import cache as cache_module
+
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("old") / "m").write_bytes(b"x" * 10)
     past = time.time() - 3600
     os.utime(a.local.root / "old", (past, past))
-    os.utime(a.local.root / "rendering", (past, past))
-    assert a.evict() == ["old"]
-    assert a.local.exists("recent") and a.local.exists("rendering")
+    size = cache_module._size
+    scanning, release = threading.Event(), threading.Event()
+
+    def slow_size(directory: Path) -> int:
+        if not scanning.is_set():  # the first pass holds here; any later one does not
+            scanning.set()
+            release.wait(5)
+        return size(directory)
+
+    monkeypatch.setattr(cache_module, "_size", slow_size)
+    first = asyncio.create_task(asyncio.to_thread(a.evict))
+    assert await asyncio.to_thread(scanning.wait, 5)
+    assert a.evict() == []  # the second pass leaves it to the first
+    release.set()
+    assert await first == ["old"]
+
+
+async def test_eviction_skips_a_directory_touched_after_the_scan(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scadbuddy.store import cache as cache_module
+
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("claimed") / "m").write_bytes(b"x" * 10)
+    past = time.time() - 3600
+    os.utime(a.local.root / "claimed", (past, past))
+    size = cache_module._size
+
+    def size_then_claim(directory: Path) -> int:
+        counted = size(directory)
+        a.dir_for(directory.name)  # a claim lands between the scan and the removal
+        return counted
+
+    monkeypatch.setattr(cache_module, "_size", size_then_claim)
+    assert a.evict() == []
+    assert a.local.exists("claimed")
 
 
 async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_index(
@@ -215,8 +292,8 @@ async def test_cached_piece_answers_on_a_worker_that_never_rendered_it(
 
 def _stage_worker(tmp_path: Path, content: ContentStore) -> RenderActivities:
     """The activities over a cache of their own, as on a worker with no shared volume."""
-    paths = _paths(tmp_path)
-    deps = _deps(tmp_path, paths)
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
     blobs = CachedBlobStore(LocalBlobStore(paths.blobs), content, max_bytes=1 << 30, min_age=0)
     return RenderActivities(dataclasses.replace(deps, blobs=blobs))
 
@@ -226,7 +303,7 @@ async def test_the_stages_publish_so_a_third_worker_answers_the_piece(
 ) -> None:
     env = ActivityEnvironment()
     a, b, c = (_stage_worker(tmp_path / n, content) for n in "abc")
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await env.run(b.render_solids, req, prepared, main)
@@ -240,7 +317,7 @@ async def test_a_finished_piece_whose_publish_failed_is_not_answered_by_its_work
 ) -> None:
     env = ActivityEnvironment()
     a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await env.run(a.render_solids, req, prepared, main)
@@ -261,7 +338,7 @@ async def test_a_stage_whose_piece_is_gone_fails_by_name(
 ) -> None:
     env = ActivityEnvironment()
     a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
-    req = _request()
+    req = piece_request()
     prepared = await env.run(a.prepare, req)
     main = await env.run(a.render_main, req, prepared)
     await content.forget(req.piece_key)  # deleted in the backend between two stages

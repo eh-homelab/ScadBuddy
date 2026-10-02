@@ -107,7 +107,15 @@ def test_submit_inserts_pending_with_its_workflow_id(projection: JobProjection) 
     stored = projection.read(job.id)
     assert stored.state == "pending"
     assert stored.workflow_id == f"render-{job.id}"
-    assert stored.inputs == {"params": {"width": 1}}
+
+
+def test_a_job_without_inputs_is_stored_with_the_legacy_inputs(
+    projection: JobProjection,
+) -> None:
+    job = _job(width=1)
+    assert job.inputs == {}
+    projection.submit(job, render_key("demo", {"width": 1}, None))
+    assert projection.read(job.id).inputs == {"params": {"width": 1}, "v": 0}
 
 
 def test_an_identical_pending_submit_coalesces(projection: JobProjection) -> None:
@@ -411,3 +419,18 @@ def test_a_result_stored_before_its_newer_fields_still_reads(
 
     assert stored is not None
     assert (stored.diagnostics, stored.source_version) == ([], "")
+
+
+def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjection) -> None:
+    """#606: prune's predicate, `coalesce(finished_at, created_at)` over every settled
+    state, has an index to use as settled rows accumulate."""
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("SET enable_seqscan = off")
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                "EXPLAIN DELETE FROM render_jobs WHERE state IN ('done', 'failed', 'cancelled')"
+                " AND coalesce(finished_at, created_at) < now()"
+            )
+        )
+    assert "render_jobs_settled_at" in plan

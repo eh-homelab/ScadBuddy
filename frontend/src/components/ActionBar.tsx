@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -17,6 +17,8 @@ import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
+import type { InputsExtra } from '../lib/inputs'
+import { saveOutput } from '../lib/saveOutput'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { ImageDialog } from './ImageDialog'
@@ -28,7 +30,14 @@ import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
+/** What a template UI's `host.openPrint` reaches (spec §4.3). */
+export interface ActionBarHandle {
+  /** False, and nothing opens, when ``outputId`` is not the output on screen. */
+  openPrint(outputId: string): boolean
+}
+
 interface Props {
+  ref?: Ref<ActionBarHandle>
   slug: string
   job: Job | undefined
   rendering: boolean
@@ -51,6 +60,8 @@ interface Props {
   /** The template, so the rendered image can be added to its media. */
   model?: ModelSummary
   onModelChanged?: (model: ModelSummary) => void
+  /** The UI state recorded with the output (spec 2026-09-27 §4.3). */
+  extra: InputsExtra
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
   /**
@@ -67,6 +78,7 @@ interface Props {
 }
 
 export function ActionBar({
+  ref,
   slug,
   job,
   rendering,
@@ -78,6 +90,7 @@ export function ActionBar({
   cameraView,
   model,
   onModelChanged,
+  extra,
   fit,
   fitProblems,
   onPrinterModel,
@@ -132,6 +145,18 @@ export function ActionBar({
     }
   }
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      openPrint: (outputId) => {
+        if (output?.id !== outputId) return false
+        setPrintOpen(true)
+        return true
+      },
+    }),
+    [output],
+  )
+
   const ready = job?.status === 'done' && !rendering && upToDate
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
@@ -144,12 +169,7 @@ export function ActionBar({
     setFiled(null)
     setFileError(null)
     try {
-      const created = await api.createOutput(slug, job.id)
-      const png = await capture()
-      if (png) {
-        // A missing thumbnail is cosmetic — never fail the generate over it.
-        await api.putThumbnail(created.id, png).catch(() => undefined)
-      }
+      const created = await saveOutput({ slug, job, extra, capture })
       onGenerated(created)
       // After the thumbnail, so the file Bambuddy lists carries the plate image.
       await fileIntoProject(created)

@@ -7,6 +7,7 @@ import {
   BUILTIN_PREVIEW_ID,
   BUILTIN_SLUG,
   GALLERY_SLUG,
+  MAZE_SLUG,
   MEDIA_MP4_BASE64,
   keychainSource,
   outputs,
@@ -24,6 +25,7 @@ import {
   setMockPresets,
   setMockUploadLimit,
 } from './handlers'
+import { UI_MODULES } from './templateUi'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -901,6 +903,31 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
+  it('echoes the caller\'s normalised inputs on a submit, as RenderAccepted does (#904)', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Echo' }, tab: 'a' })
+    expect(accepted.inputs).toEqual({ params: { name: 'Echo' }, tab: 'a', v: 0 })
+  })
+
+  it('refuses the Bambuddy store without a URL and an inbox, as the backend does (#700)', async () => {
+    const put = (body: Record<string, unknown>) =>
+      fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const noInbox = await put({ store_backend: 'bambuddy', library_folder_id: null })
+    expect(noInbox.status).toBe(422)
+    expect(((await noInbox.json()) as { detail: string }).detail).toBe(
+      'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
+    )
+    expect((await put({ store_backend: 'bambuddy', bambuddy_url: null })).status).toBe(422)
+    // Nothing of a refused save is kept.
+    expect((await api.getSettings()).store_backend).toBe('local')
+    expect((await put({ store_backend: 'bambuddy' })).status).toBe(200)
+    // With the store on Bambuddy, clearing the inbox alone is refused too.
+    expect((await put({ library_folder_id: null })).status).toBe(422)
+  })
+
   it('refuses an upload over the limit with a 413 naming it', async () => {
     const saved = (await api.getSettings()).media_upload_max_bytes
     try {
@@ -1212,5 +1239,95 @@ describe('library print', () => {
   it('refuses a sliced file and a missing one', async () => {
     await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
     await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe('mock inputs, as the backend keeps them (spec 2026-09-27 §4.3)', () => {
+  beforeEach(() => resetMockState())
+
+  it('keeps a preset’s UI keys on a params-only update', async () => {
+    const created = await api.createPreset('name-keychain', {
+      name: 'Lid',
+      inputs: { params: { name: 'Kai' }, tab: 'lid' },
+    })
+    const updated = await api.updatePreset('name-keychain', created.id, { params: { name: 'Ada' } })
+    expect(updated.inputs).toEqual({ params: { name: 'Ada' }, tab: 'lid', v: 0 })
+  })
+
+  it('refuses a preset whose params and inputs.params disagree', async () => {
+    const clash = { name: 'Clash', params: { name: 'Kai' }, inputs: { params: { name: 'Ada' } } }
+    await expect(api.createPreset('name-keychain', clash)).rejects.toMatchObject({ status: 422 })
+    const created = await api.createPreset('name-keychain', { name: 'Ok', params: { name: 'Kai' } })
+    await expect(
+      api.updatePreset('name-keychain', created.id, {
+        params: { name: 'Kai' },
+        inputs: { params: { name: 'Ada' } },
+      }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('keeps a given v on a render and on the output made from it', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const job = await vi.waitFor(
+      async () => {
+        const current = await api.getJob(accepted.job_id)
+        if (current.status !== 'done') throw new Error(current.status)
+        return current
+      },
+      { timeout: 5000 },
+    )
+    expect(job.inputs).toEqual({ params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const fromJob = await api.createOutput('name-keychain', job.id)
+    expect(fromJob.inputs).toEqual({ params: { name: 'Kai' }, tab: 'a', v: 3 })
+    const given = await api.createOutput('name-keychain', job.id, undefined, {
+      params: { name: 'Kai' },
+      tab: 'b',
+      v: 2,
+    })
+    expect(given.inputs).toEqual({ params: { name: 'Kai' }, tab: 'b', v: 2 })
+  })
+})
+
+describe('mock template UI files and outputs, as the backend holds them (#425)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => {
+    delete UI_MODULES['ui-demo']?.['notes.txt']
+    delete UI_MODULES['ui-demo']?.['.hidden.js']
+    delete UI_MODULES['ui-demo']?.['theme.css']
+  })
+
+  it('gives the maze puzzle a version, as every record with history has', async () => {
+    expect((await api.getModel(MAZE_SLUG)).version).toMatch(/^[0-9a-f]{40}$/)
+  })
+
+  it('serves only UI_MEDIA_TYPES extensions, each with its type, and 404s dot segments', async () => {
+    const demo = UI_MODULES['ui-demo']!
+    demo['notes.txt'] = 'not servable'
+    demo['.hidden.js'] = 'export {}'
+    demo['theme.css'] = ':host { color: red }'
+    const get = (path: string) => fetch(`/api/v1/models/ui-demo/ui/${path}`)
+    expect((await get('notes.txt')).status).toBe(404)
+    expect((await get('.hidden.js')).status).toBe(404)
+    // Encoded, so the URL parser leaves the `..` for the route to see.
+    expect((await get('..%2Fui%2Findex.js')).status).toBe(404)
+    const css = await get('theme.css')
+    expect(css.status).toBe(200)
+    expect(css.headers.get('Content-Type')).toBe('text/css; charset=utf-8')
+    expect((await get('index.js')).headers.get('Content-Type')).toBe('text/javascript; charset=utf-8')
+  })
+
+  it('refuses an output whose inputs.params are not what the job rendered', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Kai' }, v: 0 })
+    const job = await vi.waitFor(
+      async () => {
+        const current = await api.getJob(accepted.job_id)
+        if (current.status !== 'done') throw new Error(current.status)
+        return current
+      },
+      { timeout: 5000 },
+    )
+    await expect(
+      api.createOutput('name-keychain', job.id, undefined, { params: { name: 'Ada' }, v: 0 }),
+    ).rejects.toMatchObject({ status: 422 })
   })
 })

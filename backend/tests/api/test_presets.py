@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 import scadbuddy.api.params as params_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
@@ -767,3 +768,285 @@ def test_a_template_write_does_not_hold_up_a_save_on_another(
     saved.set()
     writer.join(timeout=5)
     assert [preset.name for preset in store.saved_presets("b")] == ["X"]
+
+
+def test_a_preset_saves_inputs_and_reads_them_back(client: TestClient, model: str) -> None:
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    created = client.post(f"/api/v1/models/{model}/presets", json=body)
+    assert created.status_code == 201
+    preset = created.json()
+    assert preset["params"] == {"width": 12}
+    assert preset["inputs"] == {"params": {"width": 12}, "ui": {"tab": "lid"}, "v": 0}
+    listed = client.get(f"/api/v1/models/{model}/presets").json()
+    assert [p["inputs"] for p in listed if p["origin"] == "mine"] == [preset["inputs"]]
+
+
+def test_a_params_only_save_reads_as_version_zero_inputs(client: TestClient, model: str) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/presets", json={"name": "Wide", "params": {"width": 20}}
+    ).json()
+    assert created["inputs"] == {"params": {"width": 20}, "v": 0}
+
+
+def test_a_params_only_update_keeps_the_ui_state(client: TestClient, model: str) -> None:
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    preset = client.post(f"/api/v1/models/{model}/presets", json=body).json()
+    updated = client.patch(
+        f"/api/v1/models/{model}/presets/{preset['id']}", json={"params": {"width": 14}}
+    ).json()
+    assert updated["inputs"] == {"params": {"width": 14}, "ui": {"tab": "lid"}, "v": 0}
+
+
+def test_preset_inputs_are_checked_as_a_render_is(client: TestClient, model: str) -> None:
+    bad = {"name": "Bad", "inputs": {"params": {"nope": 1}}}
+    assert client.post(f"/api/v1/models/{model}/presets", json=bad).status_code == 422
+    clash = {"name": "Clash", "params": {"width": 1}, "inputs": {"params": {"width": 2}}}
+    assert client.post(f"/api/v1/models/{model}/presets", json=clash).status_code == 422
+
+
+def test_a_patch_whose_inputs_name_an_unknown_parameter_is_refused(
+    client: TestClient, model: str
+) -> None:
+    saved = _save(client, model, "Mine", {"width": 20})
+    bad = client.patch(_url(model, saved["id"]), json={"inputs": {"params": {"nope": 1}}})
+    assert bad.status_code == 422, bad.text
+    assert client.get(_url(model)).json()[0]["inputs"] == {"params": {"width": 20}, "v": 0}
+
+
+def test_template_presets_carry_inputs_or_read_as_v0(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["presets"] = [
+        {"name": "Plain", "params": {"width": 5}},
+        {"name": "Designed", "inputs": {"params": {"width": 6}, "ui": {"tab": "b"}, "v": 2}},
+    ]
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    listed = client.get(f"/api/v1/models/{model}/presets").json()
+    by_name = {p["name"]: p for p in listed}
+    assert by_name["Plain"]["inputs"] == {"params": {"width": 5}, "v": 0}
+    assert by_name["Designed"]["inputs"] == {"params": {"width": 6}, "ui": {"tab": "b"}, "v": 2}
+    assert by_name["Designed"]["params"] == {"width": 6}
+
+
+# ── fix round 1: `params` is authoritative for `inputs["params"]` ────────────
+
+
+def _sql(conninfo: str, statement: str, args: tuple[Any, ...] = ()) -> None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute(statement.encode(), args)
+
+
+def _stored(conninfo: str, preset_id: str) -> tuple[Any, Any]:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT params, inputs FROM saved_presets WHERE id = %s", (preset_id,)
+        ).fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
+def _lid(client: TestClient, model_id: str) -> Any:
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    created = client.post(_url(model_id), json=body)
+    assert created.status_code == 201, created.text
+    return created.json()
+
+
+def test_a_preset_whose_params_an_older_release_changed_reads_them_in_its_inputs(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """A rollback's `update` writes `params` only; back on this release they win."""
+    lid = _lid(client, model)
+    _sql(
+        pg_conninfo,
+        "UPDATE saved_presets SET params = %s WHERE id = %s",
+        (json.dumps({"width": 30}), lid["id"]),
+    )
+    listed = {p["id"]: p for p in client.get(_url(model)).json()}
+    assert listed[lid["id"]]["inputs"] == {"params": {"width": 30}, "ui": {"tab": "lid"}, "v": 0}
+    renamed = client.patch(_url(model, lid["id"]), json={"name": "Lid 2"}).json()
+    assert renamed["params"] == {"width": 30}
+    assert renamed["inputs"] == {"params": {"width": 30}, "ui": {"tab": "lid"}, "v": 0}
+    assert _stored(pg_conninfo, lid["id"])[0] == {"width": 30}
+    copy = _duplicate(client, model, lid["id"], "Lid copy").json()
+    assert copy["params"] == {"width": 30}
+    assert copy["inputs"] == {"params": {"width": 30}, "ui": {"tab": "lid"}, "v": 0}
+
+
+def test_an_update_with_inputs_replaces_them(client: TestClient, model: str) -> None:
+    lid = _lid(client, model)
+    body = {"inputs": {"params": {"width": 9}, "ui": {"tab": "base"}}}
+    updated = client.patch(_url(model, lid["id"]), json=body)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["params"] == {"width": 9}
+    assert updated.json()["inputs"] == {"params": {"width": 9}, "ui": {"tab": "base"}, "v": 0}
+
+
+def test_a_params_only_update_is_checked_as_inputs(client: TestClient, model: str) -> None:
+    """Merged into the stored inputs, the values go through the same checks and cap."""
+    body = {"name": "Big", "inputs": {"params": {"width": 1}, "ui": {"blob": "x" * 40000}}}
+    big = client.post(_url(model), json=body).json()
+    refused = client.patch(_url(model, big["id"]), json={"params": {"label": "y" * 30000}})
+    assert refused.status_code == 422, refused.text
+    assert "at most 65536" in refused.json()["detail"]
+
+
+def test_a_row_saved_before_inputs_reads_as_version_zero(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    saved = _save(client, model, "Old", {"width": 7})
+    _sql(pg_conninfo, "UPDATE saved_presets SET inputs = '{}'::jsonb WHERE id = %s", (saved["id"],))
+    listed = {p["id"]: p for p in client.get(_url(model)).json()}
+    assert listed[saved["id"]]["inputs"] == {"params": {"width": 7}, "v": 0}
+
+
+def test_the_migration_backfills_inputs_from_params(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """The migration's own backfill, run on a row as the column default leaves it."""
+    saved = _save(client, model, "Old", {"width": 7})
+    _sql(pg_conninfo, "UPDATE saved_presets SET inputs = '{}'::jsonb WHERE id = %s", (saved["id"],))
+    migration = (
+        Path(__file__).parents[2] / "scadbuddy/migrations/20260929T0311Z_saved_presets_inputs.sql"
+    )
+    [backfill] = [
+        line
+        for line in migration.read_text(encoding="utf-8").splitlines()
+        if line.startswith("UPDATE saved_presets")
+    ]
+    _sql(pg_conninfo, backfill)
+    assert _stored(pg_conninfo, saved["id"])[1] == {"params": {"width": 7}, "v": 0}
+
+
+@pytest.mark.requires_git
+def test_a_duplicated_template_takes_its_presets_inputs_along(client: TestClient) -> None:
+    body = {"name": "Mine", "inputs": {"params": {"label": "Bo"}, "ui": {"tab": "text"}}}
+    assert client.post(_url(BUILTIN), json=body).status_code == 201
+    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    assert created.status_code == 201, created.text
+    [mine] = [p for p in client.get(_url(created.json()["slug"])).json() if p["origin"] == "mine"]
+    assert mine["inputs"] == {"params": {"label": "Bo"}, "ui": {"tab": "text"}, "v": 0}
+
+
+def test_model_json_keeps_inputs_only_beside_ui_state(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    presets = [
+        {"name": "Plain", "params": {"width": 5}},
+        {"name": "Designed", "inputs": {"params": {"width": 6}, "ui": {"tab": "b"}}},
+    ]
+    assert _patch_presets(client, model, presets).status_code == 200
+    written = {
+        p["name"]: p
+        for p in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    }
+    assert "inputs" not in written["Plain"]
+    assert written["Plain"]["params"] == {"width": 5}
+    assert written["Designed"]["params"] == {"width": 6}
+    assert written["Designed"]["inputs"]["ui"] == {"tab": "b"}
+
+
+def test_a_hand_edited_template_preset_keeps_the_list(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Editing `params` in the committed file wins over the `inputs` beside it, and
+    never costs the template its other presets."""
+    presets = [
+        {"name": "Plain", "params": {"width": 5}},
+        {"name": "Designed", "inputs": {"params": {"width": 6}, "ui": {"tab": "b"}}},
+    ]
+    assert _patch_presets(client, model, presets).status_code == 200
+    meta_path = paths.model_meta(model)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    for preset in meta["presets"]:
+        if preset["name"] == "Designed":
+            preset["params"] = {"width": 99}
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    listed = {p["name"]: p for p in client.get(_url(model)).json()}
+    assert set(listed) == {"Plain", "Designed"}
+    assert listed["Designed"]["params"] == {"width": 99}
+    assert listed["Designed"]["inputs"] == {"params": {"width": 99}, "ui": {"tab": "b"}, "v": 0}
+
+
+# ── fix round 2: request bodies stay strict; model.json keeps `v` ────────────
+
+
+def test_a_metadata_patch_whose_preset_disagrees_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Only a stored file is read leniently: a client that sends both and changed one
+    is told so, rather than having its `inputs.params` edit dropped."""
+    clash = {"name": "A", "params": {"width": 1}, "inputs": {"params": {"width": 2}, "ui": {}}}
+    refused = _patch_presets(client, model, [clash])
+    assert refused.status_code == 422, refused.text
+    assert "disagree" in refused.text
+    # The same disagreement in the committed file still loads, with `params`'s values.
+    _define(paths, model, [clash])
+    [listed] = [p for p in client.get(_url(model)).json() if p["origin"] == "template"]
+    assert listed["params"] == {"width": 1}
+    assert listed["inputs"] == {"params": {"width": 1}, "ui": {}, "v": 0}
+
+
+def test_an_inputs_version_survives_model_json(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    versioned = {"name": "V", "inputs": {"params": {"width": 3}, "v": 2}}
+    assert _patch_presets(client, model, [versioned]).status_code == 200
+    [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert written["inputs"] == {"params": {"width": 3}, "v": 2}
+    [listed] = [p for p in client.get(_url(model)).json() if p["origin"] == "template"]
+    assert listed["inputs"] == {"params": {"width": 3}, "v": 2}
+
+
+# ── fix round 3: inputs-only patches, duplicate's 422, model.json left alone ──
+
+
+def test_an_inputs_only_update_without_params_keeps_the_params(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    lid = _lid(client, model)
+    updated = client.patch(_url(model, lid["id"]), json={"inputs": {"ui": {"tab": "base"}}})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["params"] == {"width": 12}
+    assert updated.json()["inputs"] == {"params": {"width": 12}, "ui": {"tab": "base"}, "v": 0}
+    assert _stored(pg_conninfo, lid["id"]) == (
+        {"width": 12},
+        {"params": {"width": 12}, "ui": {"tab": "base"}, "v": 0},
+    )
+
+
+def test_duplicating_a_preset_whose_stored_inputs_are_oversized_is_a_422(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    saved = _save(client, model, "Big", {"width": 1})
+    oversized = {"params": {"width": 1}, "ui": {"blob": "x" * 70000}, "v": 0}
+    _sql(
+        pg_conninfo,
+        "UPDATE saved_presets SET inputs = %s WHERE id = %s",
+        (Jsonb(oversized), saved["id"]),
+    )
+    refused = _duplicate(client, model, saved["id"], "Big copy")
+    assert refused.status_code == 422, refused.text
+    assert "at most 65536" in refused.json()["detail"]
+
+
+def test_an_unrelated_metadata_patch_leaves_model_json_presets_as_written(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = {
+        "id": "plain",
+        "name": "Plain",
+        "params": {"width": 5},
+        "inputs": {"params": {"width": 5}, "v": 0},
+    }
+    _define(paths, model, [legacy])
+    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]})
+    assert tagged.status_code == 200, tagged.text
+    [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert written == legacy
+    # A patch that writes the presets still writes them in canonical form.
+    assert _patch_presets(client, model, [legacy]).status_code == 200
+    [rewritten] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert "inputs" not in rewritten
+    assert rewritten["params"] == {"width": 5}

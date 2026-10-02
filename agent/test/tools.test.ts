@@ -163,6 +163,46 @@ describe('settings tools pass every answer through redact (#322)', () => {
 })
 
 describe('render_model', () => {
+  it('renders template inputs and validates their params', async () => {
+    let body: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const inputs = { params: { width: 5 }, house: { storeys: 2 } }
+    await runTool(tool('render_model'), { slug: 'box', inputs }, ctx())
+    expect(body).toEqual({ inputs, version: null })
+    const refused = await runTool(tool('render_model'), { slug: 'box', inputs: { params: { width: 0 } } }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
+  it('refuses params beside inputs, and checks the inputs.params it renders', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const beside = await runTool(tool('render_model'), { slug: 'box', params: { width: 5 }, inputs: { house: {} } }, ctx())
+    expect(beside.isError).toBe(true)
+    expect(firstText(beside)).toBe('not rendered: put the parameters in inputs.params, not beside inputs')
+    const notObject = await runTool(tool('render_model'), { slug: 'box', inputs: { params: 'abc' } }, ctx())
+    expect(notObject.isError).toBe(true)
+    expect(firstText(notObject)).toBe('not rendered: inputs.params must be an object')
+    expect(posts).toBe(0)
+    // Without inputs.params the defaults render, and nothing else is checked.
+    const defaults = await runTool(tool('render_model'), { slug: 'box', inputs: { house: {} } }, ctx())
+    expect(defaults.isError).toBeFalsy()
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
@@ -230,6 +270,23 @@ describe('render_model', () => {
       error: 'cancelled: every request for it was withdrawn',
       log_tail: ['cancelled: every request for it was withdrawn'],
     })
+  })
+
+  it('saves the given inputs with the output, UI state and all', async () => {
+    let saved: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
+        saved = await request.json()
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
+      }),
+    )
+    const inputs = { params: { width: 40 }, v: 1, picked: 'x' }
+    const done = await runTool(tool('render_model'), { slug: 'box', inputs, save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done' })
+    expect(saved).toEqual({ job_id: 'j', name: null, inputs })
   })
 })
 

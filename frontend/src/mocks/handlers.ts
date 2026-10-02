@@ -2,6 +2,8 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
   AssetUsage,
+  RenderAccepted,
+  StoreUsage,
   AttachResult,
   ChoicesView,
   BoundingBox,
@@ -66,6 +68,7 @@ import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
+import { UI_MODULES } from './templateUi'
 
 const base = '/api/v1'
 
@@ -1217,6 +1220,39 @@ function refusal(check: SourceCheck) {
   })
 }
 
+/**
+ * `params` sent beside `inputs` must be the same values, as the backend's
+ * `normalize_inputs` holds them; an empty `params` is not a claim about them.
+ */
+function paramsClash(
+  params: Record<string, ParamValue> | null | undefined,
+  inputs: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!params || !inputs || Object.keys(params).length === 0) return false
+  const other = (inputs['params'] ?? {}) as Record<string, ParamValue>
+  const names = Object.keys(params)
+  return names.length !== Object.keys(other).length || names.some((name) => other[name] !== params[name])
+}
+
+/** `api/template_ui.py` `UI_MEDIA_TYPES`: the only files under ui/ that are served. */
+const UI_MEDIA_TYPES: Record<string, string> = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.woff2': 'font/woff2',
+}
+
+/** Inputs as the backend records them: a given `v` is kept, a missing one is 0. */
+function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
+  return { ...inputs, v: inputs['v'] ?? 0 }
+}
+
 export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
@@ -2054,6 +2090,29 @@ export const handlers = [
     return HttpResponse.json(updated)
   }),
 
+  // #425 — a template's own UI files, live or pinned, served as `api/template_ui.py` serves them.
+  // A pinned revision serves `UI_MODULES['<slug>@<commit>']` when a test gives one, else
+  // the live files: the mock keeps no history of ui/, so a test of a pinned UI that must
+  // differ from the live one adds its own entry.
+  ...['/models/:slug/ui/*', '/models/:slug/versions/:commit/ui/*'].map((route) =>
+    http.get(`${base}${route}`, ({ params, request }) => {
+      const slug = decodeURIComponent(String(params['slug']))
+      const commit = params['commit'] === undefined ? undefined : String(params['commit'])
+      // Everything after the route's own `ui/`, so a nested `…/ui/…` path stays whole.
+      const match = /^\/api\/v1\/models\/[^/]+\/(?:versions\/[^/]+\/)?ui\/(.+)$/.exec(
+        new URL(request.url).pathname,
+      )
+      const path = decodeURIComponent(match?.[1] ?? '')
+      const files = (commit !== undefined ? UI_MODULES[`${slug}@${commit}`] : undefined) ?? UI_MODULES[slug]
+      // `_ui_file`'s rules: no empty or dot segment, and only a UI_MEDIA_TYPES extension.
+      const type = UI_MEDIA_TYPES[/\.[^./]+$/.exec(path)?.[0].toLowerCase() ?? '']
+      const body = path.split('/').some((part) => !part || part.startsWith('.')) ? undefined : files?.[path]
+      return body === undefined || type === undefined
+        ? problem(404, 'Not Found', `no ui file '${path}'`)
+        : new HttpResponse(body, { headers: { 'Content-Type': type } })
+    }),
+  ),
+
   http.get(`${base}/models/:slug`, ({ params }) => {
     landPreviews()
     const model = state.models.find((m) => m.slug === params['slug'])
@@ -2133,8 +2192,14 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug/versions/:commit/schema`, ({ params }) => {
-    const schema = state.schemas[String(params['slug'])]
-    return schema ? HttpResponse.json(schema) : problem(404, 'Model not found')
+    const slug = String(params['slug'])
+    const schema = state.schemas[slug]
+    // The revision's own `ui` (the backend reads that revision's model.json); a mock
+    // revision declares what the model does now.
+    const model = state.models.find((m) => m.slug === slug)
+    return schema
+      ? HttpResponse.json({ ...schema, ui: model?.ui ?? null, ui_error: model?.ui_error ?? null })
+      : problem(404, 'Model not found')
   }),
 
   http.get(`${base}/models/:slug/versions/:commit/source`, ({ params }) => {
@@ -2172,15 +2237,21 @@ export const handlers = [
     if (details) return details
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const name = body.name.trim().replace(/\s+/g, ' ')
-    const refused = presetRefusal(slug, name, body.params ?? {}, null)
+    if (paramsClash(body.params, body.inputs)) {
+      return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
+    }
+    const inputs = body.inputs ?? { params: body.params ?? {} }
+    const presetParams = (inputs['params'] ?? {}) as Record<string, ParamValue>
+    const refused = presetRefusal(slug, name, presetParams, null)
     if (refused) return refused
     const created: ParamPreset = {
       id: nextHexId(),
       name,
       origin: 'mine',
-      params: body.params ?? {},
+      params: presetParams,
       description: (body.description ?? '').trim(),
       tags: cleanTags(body.tags ?? []),
+      inputs: withVersion(inputs),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -2206,6 +2277,7 @@ export const handlers = [
       params: { ...source.params },
       description: source.description,
       tags: [...source.tags],
+      inputs: source.inputs ?? { params: { ...source.params }, v: 0 },
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
@@ -2223,18 +2295,26 @@ export const handlers = [
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Preset not found')
     const name = body.name?.trim().replace(/\s+/g, ' ')
-    const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
+    if (paramsClash(body.params, body.inputs)) {
+      return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
+    }
+    // `params` alone keeps the preset's other inputs keys, as the backend's update does.
+    const current = existing.inputs ?? { params: existing.params, v: 0 }
+    const inputs = body.inputs ?? (body.params ? { ...current, params: body.params } : undefined)
+    const presetParams = inputs ? ((inputs['params'] ?? {}) as Record<string, ParamValue>) : undefined
+    const refused = presetRefusal(slug, name ?? existing.name, presetParams ?? {}, id)
     if (refused) return refused
     const updated: ParamPreset = {
       ...existing,
       name: name ?? existing.name,
-      params: body.params ?? existing.params,
+      params: presetParams ?? existing.params,
       // Each detail given replaces the old one; an empty one clears it.
       description:
         body.description === undefined || body.description === null
           ? existing.description
           : body.description.trim(),
       tags: body.tags === undefined || body.tags === null ? existing.tags : cleanTags(body.tags),
+      ...(inputs ? { inputs: withVersion(inputs) } : {}),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -2254,19 +2334,23 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/render`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const body = (await request.json()) as { params: Record<string, ParamValue> }
+    const body = (await request.json()) as {
+      inputs?: { params?: Record<string, ParamValue> }
+      params?: Record<string, ParamValue>
+    }
+    const renderParams = body.inputs?.params ?? body.params ?? {}
     const schema = state.schemas[slug]
     if (!schema) return problem(404, 'Model not found')
 
     const known = new Set((schema.parameters ?? []).map((p) => p.name))
-    const unknown = Object.keys(body.params).filter((key) => !known.has(key))
+    const unknown = Object.keys(renderParams).filter((key) => !known.has(key))
     if (unknown.length > 0) {
       return problem(422, 'Unknown parameter', `Not in the model schema: ${unknown.join(', ')}`)
     }
     // #204 — `file_assets`: empty, the model's default, one of its samples, or an
     // uploaded id; never a path.
     for (const param of schema.parameters ?? []) {
-      const value = body.params[param.name]
+      const value = renderParams[param.name]
       if (param.type !== 'file' || value === undefined || value === '' || value === param.initial) {
         continue
       }
@@ -2281,17 +2365,20 @@ export const handlers = [
     }
 
     const jobId = nextHexId()
+    const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
       id: jobId,
       slug,
       status: 'pending',
       created_at: new Date().toISOString(),
-      params: body.params,
+      params: renderParams,
+      inputs,
       log_tail: [],
     })
     runJob(jobId)
+    // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.
     return HttpResponse.json(
-      { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
+      { job_id: jobId, status_url: `${base}/jobs/${jobId}`, inputs } satisfies RenderAccepted,
       { status: 202 },
     )
   }),
@@ -2323,6 +2410,18 @@ export const handlers = [
       max_total_bytes: 1_000_000_000,
     } satisfies AssetUsage)
   }),
+
+  // #426 — the blob store's usage, over every kind.
+  http.get(`${base}/store/usage`, () =>
+    HttpResponse.json({
+      backend: 'local',
+      count: 3,
+      bytes: 4096,
+      max_count: 200000,
+      max_total_bytes: 53687091200,
+      by_kind: { piece: 4096 },
+    } satisfies StoreUsage),
+  ),
 
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
@@ -2365,10 +2464,24 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/outputs`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const body = (await request.json()) as { job_id: string; name?: string | null }
+    const body = (await request.json()) as {
+      job_id: string
+      name?: string | null
+      inputs?: Record<string, unknown>
+    }
     const job = state.jobs.get(body.job_id)
     if (!job || job.status !== 'done' || !job.bbox_mm) {
       return problem(409, 'Job not finished', 'Wait for the render to finish before generating.')
+    }
+    // The backend's rule: the inputs saved must be the ones the job rendered.
+    const given = (body.inputs?.['params'] ?? {}) as Record<string, ParamValue>
+    const rendered = job.params ?? {}
+    if (
+      body.inputs &&
+      (Object.keys(given).length !== Object.keys(rendered).length ||
+        Object.entries(given).some(([name, value]) => rendered[name] !== value))
+    ) {
+      return problem(422, 'Unprocessable Content', `inputs.params are not the parameters job ${job.id} rendered`)
     }
     const output: Output = {
       id: nextHexId(),
@@ -2378,6 +2491,8 @@ export const handlers = [
       created_at: new Date().toISOString(),
       has_thumbnail: false,
       params: job.params,
+      // The inputs sent with Generate, else the job's own, as the backend records them.
+      inputs: withVersion(body.inputs ?? job.inputs ?? { params: job.params }),
       bbox_mm: job.bbox_mm,
       colors: job.colors ?? [],
       parts: [],
@@ -2405,6 +2520,7 @@ export const handlers = [
       slug: output.slug,
       name: output.name ?? null,
       params: output.params ?? {},
+      inputs: output.inputs ?? { params: output.params, v: 0 },
       model_version: output.model_version ?? null,
       source: 'record',
     })
