@@ -53,6 +53,8 @@ class ProjectView(BaseModel):
     description: str | None = None
     colour: str | None = None
     status: str
+    #: The project this one is nested under (#930); ``None`` is a top-level project.
+    parent_id: int | None = None
     archive_count: int = 0
     queue_count: int = 0
     folder_id: int | None = None
@@ -81,7 +83,10 @@ class ProjectRequest(BaseModel):
     colour: str | None = None
     tags: str | None = None
     url: str | None = None
+    #: The project to nest a new one under (#930); its folder is nested to match.
+    parent_id: int | None = None
     #: The folder to link, when the project already has one nobody wants duplicated.
+    #: Linked where it stands, so it is refused together with ``parent_id``.
     folder_id: int | None = None
 
 
@@ -92,6 +97,7 @@ def _view(project: Project, folder: Folder | None) -> ProjectView:
         description=project.description,
         colour=project.color,
         status=project.status,
+        parent_id=project.parent_id,
         archive_count=project.archive_count,
         queue_count=project.queue_count,
         folder_id=folder.id if folder else None,
@@ -131,10 +137,17 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
     name pointing at it.
     """
     if request.project_id is not None:
+        if request.parent_id is not None:
+            # Linking never re-parents a project; dropping the field would look like it did.
+            raise ApiError(400, "parent_id applies only to a new project, not a linked one")
         project = await client.project(request.project_id)
     else:
         if not request.name:
             raise ApiError(400, "a new project needs a name")
+        if request.parent_id is not None and request.folder_id is not None:
+            # A linked folder stays where it is, so the project would be nested and its
+            # folder not.
+            raise ApiError(400, "parent_id cannot be combined with folder_id")
         project = await client.create_project(
             ProjectCreate(
                 name=request.name,
@@ -142,6 +155,7 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
                 color=request.colour,
                 tags=request.tags,
                 url=request.url,
+                parent_id=request.parent_id,
             )
         )
 
@@ -160,8 +174,26 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             None,
         )
     if folder is None:
-        folder = await client.create_folder(FolderCreate(name=project.name, project_id=project.id))
+        folder = await client.create_folder(
+            FolderCreate(
+                name=project.name,
+                project_id=project.id,
+                parent_id=await _parent_folder_id(client, project),
+            )
+        )
     return _view(project, folder)
+
+
+async def _parent_folder_id(client: BambuddyClient, project: Project) -> int | None:
+    """The folder a nested project's folder goes in: its parent project's own (#930).
+
+    ``None`` (the library's top level) when the project has no parent, or the parent
+    has no folder — making one for it would write to a project nobody touched.
+    """
+    if project.parent_id is None:
+        return None
+    parent = project_folder(await client.folders_by_project(project.parent_id))
+    return parent.id if parent else None
 
 
 async def folder_for(client: BambuddyClient, project_id: int) -> int:

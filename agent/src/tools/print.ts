@@ -562,7 +562,10 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'create_print_project',
-    description: 'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`.',
+    description:
+      'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`. ' +
+      '`parent_id` nests a new project under an existing one, and its folder under the parent\'s folder; ' +
+      'it applies only to a new project, and sent with `project_id` or `folder_id` it is refused (400), never ignored.',
     input: z.object({
       name: z.string().optional(),
       description: z.string().optional(),
@@ -571,6 +574,7 @@ export const printTools: Tool[] = [
       url: z.string().optional(),
       folder_id: z.number().int().optional(),
       project_id: z.number().int().optional(),
+      parent_id: z.number().int().optional(),
     }),
     risk: 'outward',
     bambuddyScope: ['Manage Projects', 'Manage Library'],
@@ -589,6 +593,7 @@ export const printTools: Tool[] = [
               url: args.url ?? null,
               folder_id: args.folder_id ?? null,
               project_id: args.project_id ?? null,
+              parent_id: args.parent_id ?? null,
             },
           }),
           'create project',
