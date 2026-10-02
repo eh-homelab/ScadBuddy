@@ -5,6 +5,7 @@ import json
 import math
 import os
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -506,6 +507,59 @@ class TestPlatesOf:
             (2, "Metadata/plate_2.png"),
         ]
 
+    def test_a_plate_is_named_by_its_plater_name(self, tmp_path: Path) -> None:
+        """#929: the name Bambu Studio gives a plate is what the UI labels it by."""
+        path = _edit_settings(
+            _write(tmp_path / "named.3mf", covers=False),
+            lambda config: config.replace(
+                '<metadata key="plater_name" value=""/>',
+                '<metadata key="plater_name" value="Body"/>',
+            ),
+        )
+        assert [plate.name for plate in plates_of(path)] == ["Body"]
+
+    def test_an_unnamed_plate_falls_back_to_its_object_names(self, tmp_path: Path) -> None:
+        """#929: no ``plater_name``, so the objects on the plate name it, joined."""
+        path = _edit_settings(
+            _write(tmp_path / "objects.3mf", covers=False),
+            lambda config: config.replace(
+                "</config>",
+                ' <object id="90">\n  <metadata key="name" value="Lid"/>\n </object>\n'
+                " <plate>\n"
+                '  <metadata key="plater_id" value="2"/>\n'
+                '  <metadata key="plater_name" value=""/>\n'
+                "  <model_instance>\n"
+                '   <metadata key="object_id" value="3"/>\n'
+                "  </model_instance>\n"
+                "  <model_instance>\n"
+                '   <metadata key="object_id" value="90"/>\n'
+                "  </model_instance>\n"
+                " </plate>\n</config>",
+            ),
+        )
+        assert [plate.name for plate in plates_of(path)] == ["two_boxes", "two_boxes + Lid"]
+
+    def test_an_instance_without_an_object_id_names_no_object(self, tmp_path: Path) -> None:
+        """#929 review: a missing ``object_id`` and an ``<object>`` with no ``id`` must not
+        meet on ``""`` and lend the plate an unrelated object's name."""
+        path = _edit_settings(
+            _write(tmp_path / "foreign.3mf", covers=False),
+            lambda config: config.replace(
+                "</config>",
+                ' <object>\n  <metadata key="name" value="Stray"/>\n </object>\n'
+                " <plate>\n"
+                '  <metadata key="plater_id" value="2"/>\n'
+                '  <model_instance>\n   <metadata key="instance_id" value="0"/>\n'
+                "  </model_instance>\n"
+                " </plate>\n</config>",
+            ),
+        )
+        assert [plate.name for plate in plates_of(path)] == ["two_boxes", None]
+
+    def test_a_plate_with_no_name_and_no_objects_has_none(self, tmp_path: Path) -> None:
+        path = add_plate(_write(tmp_path / "bare.3mf", covers=False), 2)
+        assert [plate.name for plate in plates_of(path)] == ["two_boxes", None]
+
     def test_a_plate_without_a_plater_id_is_a_malformed_3mf(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "bad.3mf", covers=False)
         with zipfile.ZipFile(path) as archive:
@@ -519,6 +573,18 @@ class TestPlatesOf:
                 archive.writestr(name, payload)
         with pytest.raises(ValueError, match="plater_id"):
             plates_of(path)
+
+
+def _edit_settings(path: Path, edit: Callable[[str], str]) -> Path:
+    """Rewrite a written 3MF's ``model_settings.config`` through ``edit``."""
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    entries["Metadata/model_settings.config"] = edit(config).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+    return path
 
 
 def add_plate(path: Path, index: int, *, thumbnail: bytes | None = None) -> Path:
