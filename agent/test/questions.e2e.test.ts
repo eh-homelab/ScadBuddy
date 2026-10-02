@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ASK_USER_QUESTION } from '../src/harness/questions.js'
@@ -46,7 +47,7 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
 
   const lastContent = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1)?.content ?? '')
 
-  async function replica(): Promise<SessionManager> {
+  async function replica(audit?: AuditLog): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     return manager({
@@ -55,6 +56,7 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
       credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       approvalPollMs: 50,
+      ...(audit ? { audit } : {}),
     })
   }
 
@@ -80,7 +82,8 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
               },
             },
           }
-    const m = await replica()
+    const audit = new AuditLog({ sql: db.sql, settings: () => ({ get: () => Promise.resolve(undefined), set: () => Promise.resolve() }), hashKey: Buffer.alloc(32, 3) })
+    const m = await replica(audit)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'draft an issue, let me approve it' })
     const events = await m.attach(session.id, browser, { signal: stop.signal })
     const seen = await collectUntil(events, (e) => e.event.type === 'question.asked')
@@ -105,6 +108,10 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
     const call = log.find((e) => e.type === 'tool.call')
     expect(call).toMatchObject({ id: asked.tool, name: ASK_USER_QUESTION, risk: 'read' })
     expect(log.map((e) => e.type)).toContain('question.resolved')
+    // Audited at the tier the harness and the panel give it, not as an outward action.
+    await expect
+      .poll(async () => (await audit.list()).entries.filter((e) => e.action === ASK_USER_QUESTION).map((e) => e.tier))
+      .toEqual(['read'])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false })
   }, 60_000)
 })

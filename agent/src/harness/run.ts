@@ -288,7 +288,8 @@ function answeringQuestions(questions: QuestionGate, inner: CanUseTool): CanUseT
  * reaches canUseTool (where it is answered) and no allow rule can skip it.
  */
 const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
-  matcher: ASK_USER_QUESTION,
+  // Anchored: the SDK tests the matcher as a regex (memory/hindsight.ts).
+  matcher: `^${ASK_USER_QUESTION}$`,
   hooks: [
     (input) =>
       Promise.resolve(
