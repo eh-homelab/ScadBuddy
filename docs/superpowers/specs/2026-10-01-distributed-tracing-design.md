@@ -260,8 +260,16 @@ path except `/api/v1/ai/*` to the backend.
   - When the queue is full, a new batch is dropped at once, and the browser
     still gets its 204.
   - **Shutdown:** on SIGTERM the lifespan stops accepting (new requests get
-    503), then drains the queue for up to 5 s, inside the pod's grace
-    period, and drops whatever is left.
+    503), then drains the queue for up to 5 s in total, inside the pod's
+    grace period, and drops whatever is left.
+    - During the drain, each post's timeout is whatever remains of the
+      budget, not a fresh 5 s.
+    - The first post that fails or times out ends the drain at once: an
+      unreachable collector would fail every later post the same way.
+    - The rest is dropped and counted as `shutdown`.
+    - This is an accepted trade-off. When the collector is down at shutdown,
+      the queued browser batches are lost either way. The only choice is
+      whether the pod waits out its grace period first, and it should not.
   - **Visibility:** every outcome is counted in
     `scadbuddy_trace_relay_batches_total{outcome}`, with the outcomes
     `forwarded`, `failed`, `queue_full` and `shutdown`. The counter goes in
@@ -433,7 +441,10 @@ piece cache hit; printer and plate IDs on send and print; for the agent, tool
 name, tier, outcome, token counts and cost. High cardinality is fine here.
 These are span attributes and never become metric labels.
 
-**Never recorded**, matching the `ai_audit` rules:
+**Never recorded.** This list is this design's own. It follows the same
+approach as `ai_audit` (`agent/src/audit/log.ts`), which records a fixed set
+of fields and keeps inputs only as keyed hashes and scrubbed summaries. It is
+not copied from that module, which has no such list:
 
 - parameter values;
 - OpenSCAD source and its stderr (only the exit code and a failure class);
@@ -443,9 +454,18 @@ These are span attributes and never become metric labels.
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
-**Not traced:** `/healthz`, `/metrics`, `/telemetry/v1/traces` and the
-relay's httpx forwarder (they would trace their own exports), and the reconciler's idle polls (a span only when it
-starts a row).
+**Not traced:**
+- `/healthz`, `/metrics` and `/telemetry/v1/traces`, through
+  `FastAPIInstrumentor.instrument_app(app,
+  excluded_urls="/healthz,/metrics,/telemetry/v1/traces")`. This is set in
+  code, not by `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`, so a deployment cannot
+  lose it. The worker's own `/healthz` and `/metrics` on 9090 are served by
+  its health server, which is never instrumented.
+- The relay's httpx forwarder, whose client is never passed to
+  `instrument_client` (§4). Both would otherwise trace their own exports.
+- The reconciler's idle polls: a span only when it starts a row.
+
+A test requests each excluded path and asserts no span was recorded.
 
 **Sampling:** `parentbased_always_on` by default; every trace is kept at
 homelab volume. `OTEL_TRACES_SAMPLER` changes it from clusters. The backend
@@ -587,7 +607,9 @@ The uid never changes after that, so the check is needed once.
   its limit and one past it, with the dropped count; the `off` response; nothing
   forwarded when off; the path never serves `index.html`; a failing
   collector, a full queue and a shutdown with batches still queued each
-  increment their outcome and never fail the browser's request. Redaction tests put a
+  increment their outcome and never fail the browser's request.
+  A shutdown with a dead collector ends its drain after the first failed post,
+  well inside the 5 s budget, and counts the rest as `shutdown`. Redaction tests put a
   sentinel string in each forbidden place and assert it appears nowhere in any
   exported span: not in attributes, event attributes or status descriptions,
   on success or on failure. The places are:
