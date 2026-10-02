@@ -4,6 +4,54 @@ export type Block =
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
   | { kind: 'para'; text: string }
+  | { kind: 'table'; align: Align[]; header: string[]; rows: string[][] }
+
+export type Align = 'left' | 'center' | 'right' | null
+
+const DELIMITER_CELL = /^\s*(:?)-+(:?)\s*$/
+
+/**
+ * A GFM table row's cells: edge pipes dropped, split on unescaped `|`, `\|` unescaped.
+ * A pipe is escaped only after an odd run of backslashes, so `\\|` is a backslash
+ * followed by a real cell edge.
+ */
+function cells(line: string): string[] {
+  const row = line.trim()
+  const out: string[] = []
+  let cell = ''
+  let slashes = 0
+  let edge = false
+  for (const ch of row) {
+    edge = ch === '|' && slashes % 2 === 0
+    if (edge) {
+      out.push(cell)
+      cell = ''
+    } else if (ch === '|') {
+      cell = cell.slice(0, -1) + ch
+    } else {
+      cell += ch
+    }
+    slashes = ch === '\\' ? slashes + 1 : 0
+  }
+  out.push(cell)
+  if (row.startsWith('|')) out.shift()
+  if (edge && out.length > 1) out.pop()
+  return out.map((c) => c.trim())
+}
+
+/** The delimiter row's alignments, or null when `line` is not one for `width` columns. */
+function delimiter(line: string | undefined, width: number): Align[] | null {
+  if (line === undefined || !line.includes('|')) return null
+  const parts = cells(line)
+  if (parts.length !== width) return null
+  const align: Align[] = []
+  for (const part of parts) {
+    const m = DELIMITER_CELL.exec(part)
+    if (!m) return null
+    align.push(m[1] && m[2] ? 'center' : m[2] ? 'right' : m[1] ? 'left' : null)
+  }
+  return align
+}
 
 export function parseBlocks(text: string): Block[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n')
@@ -27,12 +75,29 @@ export function parseBlocks(text: string): Block[] {
       continue
     }
     const heading = /^(#{1,3})\s+(.*)$/.exec(line)
+    const bullet = /^\s*(?:[-*]|(\d+)\.)\s+(.*)$/.exec(line)
+    // A heading or list item that happens to hold a `|` stays one, as in GFM.
+    if (!heading && !bullet && line.includes('|')) {
+      const header = cells(line)
+      const align = delimiter(lines[i + 1], header.length)
+      if (align) {
+        flush()
+        const rows: string[][] = []
+        i += 2
+        while (i < lines.length && (lines[i] ?? '').includes('|') && (lines[i] ?? '').trim() !== '') {
+          const row = cells(lines[i++] ?? '')
+          rows.push(header.map((_, c) => row[c] ?? ''))
+        }
+        i--
+        out.push({ kind: 'table', align, header, rows })
+        continue
+      }
+    }
     if (heading) {
       flush()
       out.push({ kind: 'heading', level: (heading[1]?.length ?? 1) as 1 | 2 | 3, text: heading[2] ?? '' })
       continue
     }
-    const bullet = /^\s*(?:[-*]|(\d+)\.)\s+(.*)$/.exec(line)
     if (bullet) {
       flush()
       const ordered = bullet[1] !== undefined
