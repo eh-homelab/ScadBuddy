@@ -26,6 +26,101 @@ describe('Markdown', () => {
     expect(screen.getByText('click')).toBeInTheDocument()
   })
 
+  it('renders a GFM table with column alignment in a horizontal scroller (#820)', () => {
+    const { container } = render(
+      <Markdown
+        text={'Plan:\n\n| Part | Spool | Loaded |\n|:--|:-:|--:|\n| body | **PLA** red | yes |\n| text | `#fff` | no |'}
+      />,
+    )
+    const table = screen.getByRole('table')
+    expect(table.parentElement).toHaveClass('overflow-x-auto')
+    expect(screen.getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Part', 'Spool', 'Loaded'])
+    for (const th of screen.getAllByRole('columnheader')) expect(th).toHaveAttribute('scope', 'col')
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(3)
+    const cells = screen.getAllByRole('cell')
+    expect(cells.map((td) => td.textContent)).toEqual(['body', 'PLA red', 'yes', 'text', '#fff', 'no'])
+    expect(cells.map((td) => td.style.textAlign)).toEqual(['left', 'center', 'right', 'left', 'center', 'right'])
+    expect(screen.getByText('PLA').tagName).toBe('STRONG')
+    expect(container.textContent).not.toContain('|')
+  })
+
+  it('parses table rows with and without edge pipes, escaped pipes and short rows', () => {
+    expect(parseBlocks('a | b\n--- | ---\n1 \\| 2 | 3\n| 4 |')).toEqual([
+      {
+        kind: 'table',
+        align: [null, null],
+        header: ['a', 'b'],
+        rows: [
+          ['1 | 2', '3'],
+          ['4', ''],
+        ],
+      },
+    ])
+  })
+
+  it('keeps a heading or list item with a pipe as itself, not a table header', () => {
+    const blocks = parseBlocks('# A | B\n-|-\n\n- x | y\n--|--')
+    expect(blocks.map((b) => b.kind)).not.toContain('table')
+    expect(blocks[0]).toEqual({ kind: 'heading', level: 1, text: 'A | B' })
+  })
+
+  it('reads a pipe after an escaped backslash as a real cell edge', () => {
+    expect(parseBlocks('| a | b |\n|---|---|\n| x\\\\ | y\\\\|')).toEqual([
+      { kind: 'table', align: [null, null], header: ['a', 'b'], rows: [['x\\\\', 'y\\\\']] },
+    ])
+  })
+
+  it('needs a pipe in the delimiter row, so `text` over `--` is not a table (setext, as in cmark-gfm)', () => {
+    expect(parseBlocks('a\n--\n1').map((b) => b.kind)).not.toContain('table')
+  })
+
+  it('leaves pipes without a delimiter row as a paragraph', () => {
+    expect(parseBlocks('| a | b |\n| c | d |')).toEqual([{ kind: 'para', text: '| a | b | | c | d |' }])
+  })
+
+  it('shows a same-origin API image inline, such as a render view (#820)', () => {
+    render(<Markdown text={'Top: ![top view](/api/v1/jobs/j1/views/top.png?size=256)'} />)
+    const img = screen.getByRole('img', { name: 'top view' })
+    expect(img).toHaveAttribute('src', '/api/v1/jobs/j1/views/top.png?size=256')
+  })
+
+  it('never fetches a remote, protocol-relative or non-API image', () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '![remote](https://evil.example/x.png) ![proto](//evil.example/x.png) ' +
+          '![data](data:image/png;base64,AAAA) ![js](javascript:alert(1)) ![other](/assets/x.png) ' +
+          '![dots](/api/v1/../../x.png) ![slash](/api/v1\\evil) ![settings](/api/v1/settings) ' +
+          '![print](/api/v1/prints/1/thumbnail) ![climb](/api/v1/models/m/../../settings#thumbnail)'
+        }
+      />,
+    )
+    expect(container.querySelector('img')).toBeNull()
+    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash', 'settings', 'print', 'climb']) {
+      expect(screen.getByText(alt)).toBeInTheDocument()
+    }
+  })
+
+  it('shows only the read-only media routes: views, colours, thumbnails, plates', () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '![a](/api/v1/jobs/j1/views/iso.png) ![b](/api/v1/jobs/j1/colours.png) ' +
+          '![c](/api/v1/outputs/o1/thumbnail) ![d](/api/v1/outputs/o1/views/top.png) ' +
+          '![e](/api/v1/outputs/o1/plates/2/thumbnail) ![f](/api/v1/models/my-box/thumbnail?v=3)'
+        }
+      />,
+    )
+    expect(container.querySelectorAll('img')).toHaveLength(6)
+  })
+
+  it('renders an image and a link side by side', () => {
+    render(<Markdown text={'see ![a](/api/v1/models/m/thumbnail) and [b](https://example.org)'} />)
+    expect(screen.getByRole('img', { name: 'a' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'b' })).toHaveAttribute('href', 'https://example.org')
+  })
+
   it('treats an unclosed fence mid-stream as code to the end', () => {
     expect(parseBlocks('text\n```\ncube(')).toEqual([
       { kind: 'para', text: 'text' },

@@ -85,7 +85,7 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 4')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 7')
   })
 })
 

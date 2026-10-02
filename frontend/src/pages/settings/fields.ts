@@ -224,9 +224,16 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
 
 export const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const
 
-/** The key a secret is reported under: `has_api_key`, `has_google_fonts_api_key`. */
-export function hasKey(name: 'bambuddy_api_key' | 'google_fonts_api_key'): 'has_api_key' | 'has_google_fonts_api_key' {
-  return name === 'bambuddy_api_key' ? 'has_api_key' : 'has_google_fonts_api_key'
+const HAS_KEY = {
+  bambuddy_api_key: 'has_api_key',
+  bambuddy_render_api_key: 'has_render_api_key',
+  google_fonts_api_key: 'has_google_fonts_api_key',
+} as const
+export type SecretName = keyof typeof HAS_KEY
+
+/** The flag a secret is reported under: `has_api_key`, `has_render_api_key`, … */
+export function hasKey(name: SecretName): (typeof HAS_KEY)[SecretName] {
+  return HAS_KEY[name]
 }
 
 export function envVar(name: string): string {
@@ -235,7 +242,7 @@ export function envVar(name: string): string {
 
 /** The value a field has on the server, as the form holds it. Secrets are never shown. */
 export function serverValue(settings: Settings, name: FieldName): string {
-  if (name === 'bambuddy_api_key' || name === 'google_fonts_api_key') return ''
+  if (name === 'bambuddy_api_key' || name === 'bambuddy_render_api_key' || name === 'google_fonts_api_key') return ''
   const value = (settings as Record<string, unknown>)[name]
   if (value === null || value === undefined) return ''
   return String(value)

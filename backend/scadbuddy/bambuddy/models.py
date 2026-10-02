@@ -432,7 +432,10 @@ class FolderCreate(BambuddyModel):
 
 
 class LibraryFile(BambuddyModel):
-    """``POST /api/v1/library/files`` — the uploaded file."""
+    """``POST /api/v1/library/files`` (``FileUploadResponse``) — the uploaded file —
+    and ``GET /api/v1/library/files/{id}`` (``FileResponse``). ``folder_id`` and
+    ``file_hash`` come only from the latter: after `upload_library_file` they are
+    always None."""
 
     id: int
     filename: str

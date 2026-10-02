@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -587,14 +587,17 @@ class BambuddyClient:
         )
         return LibraryPlates.model_validate(response.json())
 
-    async def download_library_file(self, file_id: int) -> AsyncIterator[bytes]:
+    async def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]:
         """``GET /library/files/{id}/download`` (``openapi/routes.txt``): by id, so the
-        blob store never scans a folder to find a file (spec 2026-09-27 §6.3)."""
+        blob store never scans a folder to find a file (spec 2026-09-27 §6.3). The
+        stream stays open until the generator ends: a caller that may stop early wraps
+        it in ``contextlib.aclosing``."""
         what = f"download library file {file_id}"
+        path = f"/library/files/{file_id}/download"
         try:
             async with self._http.stream(
                 "GET",
-                self.config.url(f"/library/files/{file_id}/download"),
+                self.config.url(path),
                 headers=self._headers,
                 timeout=self.config.upload_timeout,
             ) as response:
@@ -604,6 +607,7 @@ class BambuddyClient:
                 async for chunk in response.aiter_bytes():
                     yield chunk
         except httpx.HTTPError as error:
+            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
             raise map_transport(error, what=what) from error
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:

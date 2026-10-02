@@ -2,5 +2,6 @@
   "name": "Ball Maze",
   "description": "A tilt-and-roll ball maze generated from a seed: a floor, maze walls and a border, with a round start marker and a star finish marker inlaid in the floor. Every seed gives a different perfect maze (one route from start to finish); the same seed always gives the same one. Square or round outline, 4 to 15 cells a side. Corridors widen automatically to fit the chosen ball bearing or BB. Optional snap-on lid, printed alongside and upside down, keeps the ball in. Three colours, four with the lid.",
   "tags": ["maze", "puzzle", "toy", "kids", "game", "multi-colour"],
-  "source": "inspired by Printables Russian Doll Maze Puzzle Box (18.4k downloads) and Random Maze Generator"
+  "source": "inspired by Printables Russian Doll Maze Puzzle Box (18.4k downloads) and Random Maze Generator",
+  "ui": {"module": "ui/index.js", "slot": "panel", "api": 1}
 }

@@ -1,4 +1,5 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
+import { bambuddyFrame } from './bambuddyFrame'
 
 /**
  * #311 — one print's page: its gallery and timelapse through the media proxy, its
@@ -109,15 +110,7 @@ test.describe('print detail', () => {
 
 /** Bambuddy's External Link frame: another origin and its sandbox flags. */
 async function framed(page: Page, baseURL: string | undefined, path: string): Promise<FrameLocator> {
-  const host = new URL('/mockServiceWorker.js', baseURL)
-  host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-  await page.goto(host.href)
-  await page.setContent(
-    `<iframe src="${new URL(path, baseURL).href}" title="ScadBuddy"
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-      style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
-  )
-  const frame = page.frameLocator('iframe')
+  const frame = await bambuddyFrame(page, baseURL, path)
   await expect(frame.getByRole('heading', { level: 1 })).toBeVisible({ timeout: 15_000 })
   return frame
 }

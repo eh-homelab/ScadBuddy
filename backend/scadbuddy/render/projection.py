@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
     SUPERSEDED_ERROR,
     Job,
@@ -168,7 +169,7 @@ class JobProjection:
                     job.id,
                     job.slug,
                     Jsonb(job.params),
-                    Jsonb(job.inputs or {"params": job.params}),
+                    Jsonb(job.inputs or legacy_inputs(job.params)),
                     job.model_version,
                     job.created_at,
                     key,

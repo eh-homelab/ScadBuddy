@@ -52,8 +52,8 @@ from scadbuddy.render.previews import (
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
-from scadbuddy.store import BlobRefs
-from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.factory import StoreBundle
 from scadbuddy.workflows.client import connect_lazily
 
 logger = logging.getLogger(__name__)
@@ -64,10 +64,11 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
-#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
+#: `POST /models/{slug}/assets/fetch` share it. An in-process cap, because what it
 #: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
 #: N x this. As many as the resolver has threads. Library installs share those
-#: threads; an import that finds none free is the same retryable 503.
+#: threads; a fetch that finds none free is the same retryable 503.
 IMPORT_CONCURRENCY = RESOLVER_THREADS
 #: `POST /models/{slug}/dependencies` reports worked out at once per replica (#253,
 #: review of #740). Each reads the model's files and every model.json in a worker
@@ -129,9 +130,8 @@ class AppState:
     assets: AssetStore
     #: Submits renders to Temporal and reads them back from the projection (#546).
     render: RenderService
-    #: The `render_jobs` projection, the blob store and its references.
+    #: The `render_jobs` projection and the blob references.
     projection: JobProjection
-    blobs: LocalBlobStore
     refs: BlobRefs
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
@@ -162,10 +162,11 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
-    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
-    #: replica. Held for the fetch only -- the parse check after it takes `checks`
-    #: like any create -- and an import that finds it full is refused at once, not
-    #: queued.
+    #: At most IMPORT_CONCURRENCY `POST /models/import` and `POST
+    #: /models/{slug}/assets/fetch` fetches at once on this replica, together. Held for
+    #: the fetch only -- an import's parse check takes `checks` like any create, an
+    #: asset's sanitising runs after it -- and a fetch that finds it full is refused at
+    #: once, not queued.
     imports: ImportPermits = field(default_factory=lambda: ImportPermits(IMPORT_CONCURRENCY))
     #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
     dependency_checks: asyncio.Semaphore = field(
@@ -197,6 +198,10 @@ class AppState:
     def components(self, value: Components) -> None:
         self._components = value
 
+    #: The blob store (#426), built in the lifespan once the settings pool is open;
+    #: nothing reads it earlier. `blobs` is its piece store, set with it.
+    store: StoreBundle = field(init=False)
+    blobs: BlobStore = field(init=False)
     #: The in-process worker's client (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), which the
     #: lifespan connects eagerly: a worker cannot run on the API's lazy one.
     temporal: Client | None = field(default=None)
@@ -355,7 +360,6 @@ def _build_core(settings: Settings) -> AppState:
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
         projection=projection,
-        blobs=LocalBlobStore(paths.blobs),
         refs=BlobRefs(pool),
     )
 

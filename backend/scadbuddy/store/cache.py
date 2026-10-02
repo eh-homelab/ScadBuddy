@@ -10,12 +10,20 @@ directory a stage changed but never published is a miss, never an answer. Sticky
 scheduling would make every fetch a hit; nothing depends on it. Publishing is a
 compare-and-swap on the sha the stage checked out, so an attempt Temporal has already
 retried elsewhere cannot overwrite its successor.
+
+The per-key lock covers `fetch` and `checkout`, not a stage's use of the directory.
+While a stage writes, the directory has no marker, so a `fetch` of the same key in the
+same process is a miss and swaps the directory out from under the stage: a key must
+not be fetched while a stage of that key is writing it. One `RenderPiece` per key
+keeps that true, except for a retry overlapping a zombie attempt on the same worker,
+where the zombie loses and the retry works on fresh state.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import weakref
 from pathlib import Path
@@ -71,6 +79,9 @@ class CachedBlobStore:
         self._fetching: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        #: Held by the one eviction pass that runs at a time, whatever started it (a
+        #: write's trim or the periodic pass): another finds it held and skips.
+        self._evicting = threading.Lock()
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
 
@@ -146,6 +157,7 @@ class CachedBlobStore:
                 await self.content.forget(key)
                 return None
             await asyncio.to_thread(unpack_dir, data, directory, sha256=stat.ref.sha256)
+            await self._trim()
         # Claimed: the sweep's `delete_if_stale` now skips it (see `sweep_content`).
         await self.content.touch(key)
         return stat.ref.sha256
@@ -170,32 +182,59 @@ class CachedBlobStore:
         if ref is None:
             raise StaleBlobError(f"piece {key} was published by a later attempt")
         await asyncio.to_thread(write_marker, directory, ref.sha256)
+        await self._trim()
+
+    async def _trim(self) -> None:
+        """After a write grew the cache: evict down to `max_bytes` now, in a thread and
+        one pass at a time, so the cap holds between the periodic passes (#689), which
+        stay as a backstop."""
+        try:
+            removed = await asyncio.to_thread(self.evict)
+            if removed:
+                logger.info("evicted cached pieces", extra={"count": len(removed)})
+        except Exception:
+            logger.exception("could not evict the piece cache")
 
     def cached_bytes(self) -> int:
         cached = self.local.keys()  # a list of blob keys, not a dict view
         return sum(_size(self.local.root / key) for key in cached)
 
     def evict(self, *, now: float | None = None) -> list[str]:
-        """Least recently used first, down to `max_bytes`; only published directories
-        (a marker) not touched within `min_age`."""
+        """Least recently used first, down to `max_bytes`: any directory not touched
+        within `min_age`. That includes one never published (a render that crashed) and a
+        dot-named `unpack_dir` staging directory a crash left; one in use is recent, as
+        rendering and unpacking both touch it. One pass at a time: a call while another
+        runs removes nothing."""
+        if not self._evicting.acquire(blocking=False):
+            return []
+        try:
+            return self._evict(now)
+        finally:
+            self._evicting.release()
+
+    def _evict(self, now: float | None) -> list[str]:
         cutoff = (time.time() if now is None else now) - self.min_age
         entries = []
         cached = self.local.keys()  # a list of blob keys, not a dict view
         for key in cached:
-            if key.startswith("."):
-                continue  # an `unpack_dir` staging directory, gone in a moment
             directory = self.local.root / key  # not dir_for: that would touch it
             try:
                 mtime = directory.stat().st_mtime
             except FileNotFoundError:
                 continue
-            entries.append((mtime, key, _size(directory), read_marker(directory)))
-        total = sum(size for _, _, size, _ in entries)
+            entries.append((mtime, key, _size(directory)))
+        total = sum(size for _, _, size in entries)
         removed: list[str] = []
-        for mtime, key, size, marker in sorted(entries):
+        for mtime, key, size in sorted(entries):
             if total <= self.max_bytes:
                 break
-            if marker is None or mtime > cutoff:
+            if mtime > cutoff:
+                continue
+            try:  # re-read: a `dir_for` or `unpack_dir` since the scan touches it first
+                if (self.local.root / key).stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                total -= size  # gone already
                 continue
             self.local.remove(key)
             total -= size

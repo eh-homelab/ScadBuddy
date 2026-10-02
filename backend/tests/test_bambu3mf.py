@@ -836,3 +836,27 @@ class TestMultiplePlates:
         plates, colours = _two_plates()
         with pytest.raises(ValueError, match="extruder"):
             write_plates_3mf(plates, colours[:2], tmp_path / "x.3mf", thumbnails=None)
+
+
+def test_a_write_that_fails_part_way_leaves_the_previous_3mf_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#867: the file is replaced whole, so a retried `finish_piece` racing a timed-out
+    attempt's thread never leaves (or serves) a half-written archive."""
+    out = _write_plates(tmp_path / "model.3mf", covers=False)
+    before = out.read_bytes()
+    writes = 0
+    original = zipfile.ZipFile.writestr
+
+    def failing(self: zipfile.ZipFile, *args: object, **kwargs: object) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 3:
+            raise OSError("disk full")
+        original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", failing)
+    with pytest.raises(OSError, match="disk full"):
+        _write_plates(out, covers=False)
+    assert out.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["model.3mf"]

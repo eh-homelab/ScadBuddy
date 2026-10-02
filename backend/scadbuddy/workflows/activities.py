@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.assets import AssetStore, asset_ids_in
+from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.job_models import Job, JobNotFoundError, now
@@ -38,7 +38,7 @@ from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
-from scadbuddy.store.fonts import FontMirror, wanted_families
+from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     Failure,
@@ -89,6 +89,36 @@ def _failure(error: OpenSCADError) -> ApplicationError:
     )
 
 
+async def _ensure_assets(d: WorkerDeps, params: Mapping[str, object]) -> set[str] | None:
+    """Bring the render's uploads in from the store; the ids it could not provide, or
+    None without a store (one volume: nothing to bring in). A render that then finds
+    one of those missing names it as not in the store."""
+    if d.remote_assets is None:
+        return None
+    wanted = asset_ids_in(params)
+    absent = await _heartbeating(asyncio.create_task(d.remote_assets.ensure(d.assets, wanted)))
+    return set(absent)
+
+
+def _unavailable(error: AssetUnavailableError, missing: set[str] | None) -> ApplicationError:
+    """Non-retryable: the same parameters name the same missing file on every attempt.
+    The one exception is a copy `ensure` provided that went before the render read it
+    (the worker's upload sweep): the next attempt brings it in again."""
+    if missing is not None and error.asset_id not in missing:
+        return ApplicationError(
+            f"parameter {error.parameter!r} names uploaded file {error.asset_id}, whose copy"
+            " on this worker went before the render read it",
+            type="AssetUnavailable",
+        )
+    message = str(error)
+    if missing is not None:
+        message = (
+            f"parameter {error.parameter!r} names uploaded file {error.asset_id}, which is"
+            " not in the blob store"
+        )
+    return ApplicationError(message, type="AssetUnavailable", non_retryable=True)
+
+
 async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
     """Heartbeat while a long openscad run is on. When Temporal cancels the activity,
     cancel `work` and await it so the runner kills the openscad process group before
@@ -131,11 +161,13 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
 
 
 async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
-    """Where the piece's blob goes: its template's folder, named by `model.json`.
+    """Where the piece's blob goes: its template's folder, named by `model.json` in
+    the template's root (a piece in `parts/` reads the root's, not `parts/`).
 
     Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
     """
-    title = await asyncio.to_thread(template_title, Path(prepared.scad).parent, req.slug)
+    root = model_dir(Path(prepared.scad), req.file)
+    title = await asyncio.to_thread(template_title, root, req.slug)
     return BlobScope(slug=req.slug, title=title)
 
 
@@ -233,22 +265,25 @@ class RenderActivities:
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
+    async def _materialize(self, slug: str, revision: str | None) -> None:
+        """The revision's snapshot, from the store onto this worker's volume."""
+        d = self.deps
+        if d.snapshots is None or revision is None:
+            return
+        found = await _heartbeating(asyncio.create_task(d.snapshots.materialize(slug, revision)))
+        if not found and (d.history is None or not d.history.available):
+            # Nothing to export it from here, and no retry will find it: fail now. The
+            # next submit's `pin` (on the API, with git) stores it.
+            raise ApplicationError(
+                f"the template's source at {revision} is no longer in the store; render again",
+                type=SnapshotUnavailableError.__name__,
+                non_retryable=True,
+            )
+
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
-        if d.snapshots is not None and req.revision is not None:
-            found = await _heartbeating(
-                asyncio.create_task(d.snapshots.materialize(req.slug, req.revision))
-            )
-            if not found and (d.history is None or not d.history.available):
-                # Nothing to export it from here, and no retry will find it: fail the
-                # piece now. The next submit's `pin` (on the API, with git) stores it.
-                raise ApplicationError(
-                    f"the template's source at {req.revision} is no longer in the store;"
-                    " render again",
-                    type=SnapshotUnavailableError.__name__,
-                    non_retryable=True,
-                )
+        await self._materialize(req.slug, req.revision)
         try:
             with timed_stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
@@ -268,7 +303,8 @@ class RenderActivities:
         if d.fonts_mirror is not None:
             # Only the families this template could name: a fresh worker does not
             # download the whole font library for its first piece.
-            families = await asyncio.to_thread(wanted_families, prepared.scad.parent, req.params)
+            source = model_dir(prepared.scad, req.file)
+            families = await asyncio.to_thread(wanted_families, source, req.params)
             await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         return PrepareResult(
             version=prepared.version,
@@ -283,11 +319,10 @@ class RenderActivities:
         d = self.deps
         # It renders into a directory it never fetched: the compare-and-swap baseline is
         # what the index holds now, and the directory is no hit until this publishes.
-        baseline = await d.blobs.checkout_fresh(req.piece_key)
-        if d.remote_assets is not None:
-            await _heartbeating(
-                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
-            )
+        # Heartbeated as `_checkout` is: it waits on the key's lock, which another fetch
+        # of the same key in this process may hold for a whole transfer.
+        baseline = await _heartbeating(asyncio.create_task(d.blobs.checkout_fresh(req.piece_key)))
+        missing = await _ensure_assets(d, req.params)
         work = asyncio.create_task(
             render_main(
                 _prepared(prepared),
@@ -304,6 +339,8 @@ class RenderActivities:
             output = await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        except AssetUnavailableError as error:
+            raise _unavailable(error, missing) from None
         await _heartbeating(
             asyncio.create_task(
                 d.blobs.publish_fresh(
@@ -320,10 +357,7 @@ class RenderActivities:
         d = self.deps
         # The main 3MF may have been rendered on another worker.
         baseline = await _checkout(d.blobs, req.piece_key)
-        if d.remote_assets is not None:
-            await _heartbeating(
-                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
-            )
+        missing = await _ensure_assets(d, req.params)
         work = asyncio.create_task(
             render_solids_stage(
                 _prepared(prepared),
@@ -341,6 +375,8 @@ class RenderActivities:
             await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        except AssetUnavailableError as error:
+            raise _unavailable(error, missing) from None
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(
@@ -392,17 +428,32 @@ class RenderActivities:
         return piece
 
     @activity.defn(name="render_preview_png")
-    async def render_preview_png(self, slug: str) -> bytes:
+    async def render_preview_png(self, slug: str, revision: str | None = None) -> bytes:
+        """As `prepare` then the render, for the default parameters: on the bambuddy
+        store the worker has no volume, so the source is the pinned revision's
+        snapshot and its fonts come from the store (final review C1). The defaults
+        name no upload (`file_assets` skips a file parameter's own default)."""
         d = self.deps
+        await self._materialize(slug, revision)
+        if d.fonts_mirror is not None:
+            source = (
+                d.paths.model_revision_dir(slug, revision)
+                if revision is not None
+                else d.paths.model_dir(slug)
+            )
+            families = await asyncio.to_thread(wanted_families, source, {})
+            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         work = asyncio.create_task(
             render_preview(
                 slug,
+                revision=revision,
                 config=d.config,
                 paths=d.paths,
                 history=d.history,
                 assets=d.assets,
                 executor=d.thumbnail_executor,
                 checkouts=d.checkouts,
+                fetcher=d.fetcher,
             )
         )
         try:

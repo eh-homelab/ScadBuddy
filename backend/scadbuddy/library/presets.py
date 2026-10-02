@@ -40,11 +40,14 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugError, slugify
+from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
 
@@ -181,11 +184,23 @@ class _PresetBody(BaseModel):
     # require the field, which a client has no reason to send.
     description: PresetDescription = Field(default_factory=str)
     tags: PresetTags = Field(default_factory=list)
+    #: Template inputs (spec 2026-09-27 §4.3). Given, they win and ``params`` is read
+    #: from them; left out, ``params`` is read as ``{"params": …, "v": 0}``.
+    inputs: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
     def _name(cls, name: str) -> str:
         return _clean_name(name)
+
+    @model_validator(mode="after")
+    def _one_state(self) -> _PresetBody:
+        try:
+            normalized = normalize_inputs(self.inputs, self.params)
+        except InputsError as error:
+            raise ValueError(str(error)) from None
+        self.inputs, self.params = normalized.data, normalized.params
+        return self
 
 
 class ParamPresetCreate(_PresetBody):
@@ -194,10 +209,13 @@ class ParamPresetCreate(_PresetBody):
 
 class ParamPresetUpdate(BaseModel):
     """What changes: a rename, new values, new details, or any of them. Each field
-    given replaces the old one whole -- an empty description or tag list clears it."""
+    given replaces the old one whole -- an empty description or tag list clears it.
+    ``inputs`` replaces the old ones whole, except that inputs without ``params`` keep
+    the preset's current values; ``params`` alone keeps the preset's other inputs keys."""
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] | None = None
+    inputs: dict[str, Any] | None = None
     description: PresetDescription | None = None
     tags: PresetTags | None = None
 
@@ -205,6 +223,18 @@ class ParamPresetUpdate(BaseModel):
     @classmethod
     def _name(cls, name: str | None) -> str | None:
         return None if name is None else _clean_name(name)
+
+    @model_validator(mode="after")
+    def _one_state(self) -> ParamPresetUpdate:
+        # Inputs without `params` keep the preset's values: `PresetStore.update` adds
+        # them and checks the whole then, so they are left as sent here.
+        if self.inputs is not None and ("params" in self.inputs or self.params is not None):
+            try:
+                normalized = normalize_inputs(self.inputs, self.params)
+            except InputsError as error:
+                raise ValueError(str(error)) from None
+            self.inputs, self.params = normalized.data, normalized.params
+        return self
 
 
 class ParamPresetDuplicate(BaseModel):
@@ -226,6 +256,34 @@ class TemplatePreset(_PresetBody):
     """
 
     id: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=MAX_SLUG_LENGTH)
+
+    @model_validator(mode="after")
+    def _one_state(self, info: ValidationInfo) -> TemplatePreset:
+        # Read from a stored file (`STORED`), `params` wins over the `inputs` beside
+        # them: a hand edit, or an older release, changes `params` only, and a
+        # disagreement must never cost the template its whole list. A request body is
+        # strict, as a saved preset's is: a client that disagrees with itself is a 422.
+        inputs = self.inputs
+        params: dict[str, ParamValue] | None = self.params
+        stored = bool(info.context and info.context.get(STORED))
+        if stored and inputs is not None and "params" in self.model_fields_set:
+            inputs, params = {**inputs, "params": params}, None
+        try:
+            normalized = normalize_inputs(inputs, params)
+        except InputsError as error:
+            raise ValueError(str(error)) from None
+        self.inputs, self.params = normalized.data, normalized.params
+        return self
+
+
+def for_model_json(preset: dict[str, Any]) -> dict[str, Any]:
+    """A template preset as ``model.json`` keeps it: ``params``, and ``inputs`` beside
+    them unless they are only the plain ``{"params": …, "v": 0}``, so a file without UI
+    state or a version has one place to edit the values, and a version is never lost."""
+    inputs, params = preset.get("inputs"), preset.get("params")
+    if isinstance(params, dict) and inputs == legacy_inputs(params):
+        return {key: value for key, value in preset.items() if key != "inputs"}
+    return preset
 
 
 def _checked(presets: list[TemplatePreset]) -> list[TemplatePreset]:
@@ -260,6 +318,8 @@ class TemplatePresets(BaseModel):
 
 
 _PRESET_LIST: TypeAdapter[list[TemplatePreset]] = TypeAdapter(list[TemplatePreset])
+#: The validation context key for a preset read from a stored file (`TemplatePreset`).
+STORED = "stored"
 
 
 def template_preset_keys(presets: Sequence[TemplatePreset]) -> list[str]:
@@ -298,6 +358,8 @@ class ParamPreset(BaseModel):
     id: str
     name: str
     params: dict[str, ParamValue]
+    #: The preset's template inputs (spec §4.3); ``params`` is their ``params``.
+    inputs: dict[str, Any] = Field(default_factory=dict)
     origin: PresetOrigin = Field(
         description="`template`: defined by the template in its model.json, read-only. "
         "`mine`: saved here, editable -- on built-ins too."
@@ -360,7 +422,9 @@ class PresetStore:
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
         try:
-            return _checked(_PRESET_LIST.validate_python(_details_as_written(raw)))
+            return _checked(
+                _PRESET_LIST.validate_python(_details_as_written(raw), context={STORED: True})
+            )
         except (ValidationError, ValueError, RecursionError) as error:
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
@@ -407,6 +471,7 @@ class PresetStore:
                 id=f"{TEMPLATE_ID_PREFIX}{key}",
                 name=preset.name,
                 params=preset.params,
+                inputs=preset.inputs or legacy_inputs(preset.params),
                 origin="template",
                 description=preset.description,
                 tags=preset.tags,
@@ -429,11 +494,21 @@ class PresetStore:
             yield conn
 
     @staticmethod
-    def _view(row: DictRow) -> ParamPreset:
+    def _inputs(row: DictRow) -> dict[str, Any]:
+        """A row's inputs with its ``params`` column authoritative for their ``params``:
+        an older release (a rollback) updates ``params`` only. A row saved before
+        inputs (``'{}'``) reads as ``{"params": …, "v": 0}``."""
+        if not row["inputs"]:
+            return legacy_inputs(row["params"])
+        return {**row["inputs"], "params": row["params"]}
+
+    @classmethod
+    def _view(cls, row: DictRow) -> ParamPreset:
         return ParamPreset(
             id=row["id"],
             name=row["name"],
             params=row["params"],
+            inputs=cls._inputs(row),
             origin="mine",
             description=row["description"],
             tags=row["tags"],
@@ -503,13 +578,14 @@ class PresetStore:
             now = datetime.now(UTC)
             row = conn.execute(
                 "INSERT INTO saved_presets"
-                " (model_id, id, name, params, description, tags, created_at, updated_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " (model_id, id, name, params, inputs, description, tags, created_at, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     model_id,
                     uuid.uuid4().hex,
                     body.name,
                     Jsonb(body.params),
+                    Jsonb(body.inputs),
                     body.description,
                     body.tags,
                     now,
@@ -527,13 +603,27 @@ class PresetStore:
                 raise PresetNotFoundError(preset_id)
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
+            current_inputs = self._inputs(current)
+            if patch.inputs is not None and "params" not in patch.inputs:
+                inputs = normalize_inputs(
+                    {**patch.inputs, "params": current_inputs["params"]}, None
+                ).data
+            elif patch.inputs is not None:
+                inputs = patch.inputs
+            elif patch.params is not None:
+                # Checked as a whole again: the new values count toward the size cap.
+                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None).data
+            else:
+                inputs = current_inputs
             row = conn.execute(
                 "UPDATE saved_presets"
-                " SET name = %s, params = %s, description = %s, tags = %s, updated_at = %s"
+                " SET name = %s, params = %s, inputs = %s, description = %s, tags = %s,"
+                " updated_at = %s"
                 " WHERE model_id = %s AND id = %s RETURNING *",
                 (
                     patch.name if patch.name is not None else current["name"],
-                    Jsonb(patch.params if patch.params is not None else current["params"]),
+                    Jsonb(inputs["params"]),
+                    Jsonb(inputs),
                     patch.description if patch.description is not None else current["description"],
                     patch.tags if patch.tags is not None else current["tags"],
                     datetime.now(UTC),
@@ -566,13 +656,15 @@ class PresetStore:
             for row in self._saved(conn, source_id):
                 conn.execute(
                     "INSERT INTO saved_presets"
-                    " (model_id, id, name, params, description, tags, created_at, updated_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    " (model_id, id, name, params, inputs, description, tags,"
+                    " created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         target_id,
                         uuid.uuid4().hex,
                         row["name"],
                         Jsonb(row["params"]),
+                        Jsonb(self._inputs(row)),
                         row["description"],
                         row["tags"],
                         row["created_at"],

@@ -1,4 +1,5 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
+import { bambuddyFrame } from './bambuddyFrame'
 
 /**
  * Downloads, at the top level and inside Bambuddy's External Link frame. That frame is
@@ -44,15 +45,5 @@ test.describe('downloads', () => {
     await expect(frame.getByRole('alert')).toContainText('Allow pop-ups')
   })
 
-  async function framed(page: Page, baseURL: string | undefined): Promise<FrameLocator> {
-    const host = new URL('/mockServiceWorker.js', baseURL)
-    host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-    await page.goto(host.href)
-    await page.setContent(
-      `<iframe src="${new URL('/m/name-keychain', baseURL).href}" title="ScadBuddy"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-        style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
-    )
-    return page.frameLocator('iframe')
-  }
+  const framed = (page: Page, baseURL: string | undefined) => bambuddyFrame(page, baseURL, '/m/name-keychain')
 })
