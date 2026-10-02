@@ -252,6 +252,10 @@ describe('assistant panel', () => {
     const button = await screen.findByRole('button', { name: 'Assistant, 2 actions waiting for your approval' })
     expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 actions waiting for your approval')
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('2')
+    // Announced, not only shown: the badge appears while focus is elsewhere.
+    const live = screen.getByTestId('assistant-attention-live')
+    expect(live).toHaveAttribute('aria-live', 'polite')
+    expect(live).toHaveTextContent('2 actions waiting for your approval')
     await waitFor(() => expect(document.title).toBe('(2) ScadBuddy'))
 
     // Decided elsewhere: toggling the panel reads again, and the badge goes.
@@ -259,6 +263,7 @@ describe('assistant panel', () => {
     await user.click(button)
     const plain = await screen.findByRole('button', { name: 'Assistant' })
     expect(within(plain).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
   })

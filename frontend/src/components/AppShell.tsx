@@ -171,6 +171,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         <div className="ml-auto flex items-center gap-2">
           <LiveUpdatesIndicator />
           {shown && (
+            // Announces the badge (#815): it appears while focus is elsewhere, so the
+            // button's own name changing is not enough. A bare live region, not
+            // role=status, so it is not mistaken for a page's status message.
+            <span data-testid="assistant-attention-live" aria-live="polite" className="sr-only">
+              {waitingLabel}
+            </span>
+          )}
+          {shown && (
             <button
               ref={toggleButton}
               type="button"
