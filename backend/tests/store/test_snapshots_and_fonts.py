@@ -40,6 +40,7 @@ from scadbuddy.store.snapshots import (
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import write_openscad_3mf
+from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -106,7 +107,8 @@ async def test_prepare_on_a_worker_without_history_uses_the_materialized_snapsho
     await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
     worker_paths = DataPaths(tmp_path / "worker")
     deps = WorkerDeps(
-        config=Config(data_dir=tmp_path / "worker"),
+        # `prepare` derives the schema (phase 4): the fake openscad answers for it.
+        config=install_fake_openscad(tmp_path, worker_paths),
         paths=worker_paths,
         assets=AssetStore(tmp_path / "worker" / "assets"),
         blobs=LocalBlobStore(tmp_path / "worker" / "blobs"),

@@ -59,6 +59,15 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Uploads the 3D viewer's canvas capture. An agent has no canvas; a browser_* tool driving the open tab " +
       'can (#254, #266).',
   },
+  {
+    operation: 'GET /api/v1/outputs/{output_id}/files/{name}',
+    reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
+  },
+  {
+    operation: 'POST /api/v1/models/{slug}/inputs/migrate',
+    reason:
+      'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',
+  },
   // #274: template media. An agent reads `media` (ids, captions, order) from the model record.
   ...(
     [

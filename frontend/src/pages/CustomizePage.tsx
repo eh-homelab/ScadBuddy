@@ -15,6 +15,7 @@ import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
+import { RawInputs } from '../components/RawInputs'
 import { PresetPicker } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
@@ -32,7 +33,16 @@ import {
   sameValues,
   type ParamValues,
 } from '../lib/params'
-import { joinInputs, NO_EXTRA, sameJson, splitInputs, type InputsExtra, type JsonObject } from '../lib/inputs'
+import {
+  isJsonObject,
+  joinInputs,
+  NO_EXTRA,
+  sameJson,
+  splitInputs,
+  type InputsExtra,
+  type JsonObject,
+} from '../lib/inputs'
+import { migrateIfOld, type MigrateOutcome } from '../lib/useMigratedInputs'
 import { applyPreset, presetInputs } from '../lib/presets'
 import { saveOutput } from '../lib/saveOutput'
 import { findParamRow } from '../template-ui/elements'
@@ -145,12 +155,47 @@ export function CustomizePage() {
   // useAsync reports loading whether or not it has anything to fetch, so reading it
   // directly would hold the values back for a render even when the target is already
   // in hand — long enough to paint the schema defaults and snap off them.
-  const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
-
-  const reopenedInputs = useMemo(
-    () => (reopened ? splitInputs(reopened.inputs, reopened.params) : null),
+  // An output's inputs are brought up to the template's INPUTS_VERSION before they are
+  // applied (spec 2026-09-27 §8.2): the version is on the model record.
+  const inputsVersion = modelState.data?.inputs_version
+  const reopenedRaw = useMemo<JsonObject | null>(
+    () =>
+      reopened
+        ? isJsonObject(reopened.inputs)
+          ? (reopened.inputs as JsonObject)
+          : joinInputs(reopened.params ?? {}, NO_EXTRA)
+        : null,
     [reopened],
   )
+  const migration = useAsync(
+    async () =>
+      reopenedRaw && inputsVersion !== undefined
+        ? await migrateIfOld(slug, reopenedRaw, inputsVersion, version)
+        : null,
+    [slug, reopenedRaw, inputsVersion ?? null, version ?? null],
+  )
+  // Held back until the model says which version is current (a model that did not load
+  // applies the inputs as they are), then until the migration has answered.
+  const migrating =
+    reopenedRaw !== null &&
+    ((inputsVersion === undefined && !modelState.error) ||
+      (inputsVersion !== undefined && migration.loading))
+  const reopenOutcome: MigrateOutcome | null = migration.data ?? null
+
+  const resolving = (Boolean(reopenId) && !preloaded && reopenState.loading) || migrating
+
+  const reopenedInputs = useMemo(() => {
+    if (!reopened) return null
+    if (reopenOutcome?.kind === 'failed') return null // the current (default) state stays
+    const raw = reopenOutcome?.kind === 'ready' ? reopenOutcome.inputs : reopened.inputs
+    return splitInputs(raw, reopened.params)
+  }, [reopened, reopenOutcome])
+  // Inputs that could not be migrated, shown read-only until something else is loaded.
+  const [presetFailure, setPresetFailure] = useState<{ inputs: JsonObject; error: string } | null>(null)
+  const [dismissedReopen, setDismissedReopen] = useState<MigrateOutcome | null>(null)
+  const unmigrated =
+    presetFailure ??
+    (reopenOutcome?.kind === 'failed' && reopenOutcome !== dismissedReopen ? reopenOutcome : null)
   const seed = useMemo(
     // Null until there is something to show: the schema has to be here, and a deep
     // link's values have to have arrived, before the defaults are the right answer.
@@ -301,15 +346,40 @@ export function CustomizePage() {
 
   const onReset = useCallback(() => {
     if (schema) {
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
     }
-  }, [schema])
+  }, [schema, reopenOutcome])
 
-  const onApplyPreset = useCallback((next: ParamValues, nextExtra: InputsExtra) => {
-    latestInputs.current = joinInputs(next, nextExtra)
-    setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
-  }, [])
+  const onApplyPreset = useCallback(
+    (next: ParamValues, nextExtra: InputsExtra) => {
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
+      latestInputs.current = joinInputs(next, nextExtra)
+      setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
+    },
+    [reopenOutcome],
+  )
+
+  // A preset's stored inputs, brought up to the template version before the picker cuts
+  // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
+  // they are, at once; ones that cannot be migrated show read-only instead.
+  const migratePreset = useCallback(
+    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
+      const v = typeof saved.v === 'number' ? saved.v : 0
+      if (inputsVersion === undefined || v === inputsVersion) return saved
+      return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
+        if (outcome.kind === 'failed') {
+          setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
+          return null
+        }
+        return outcome.inputs
+      })
+    },
+    [slug, version, inputsVersion],
+  )
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
   const captureImage = useCallback(
@@ -623,7 +693,8 @@ export function CustomizePage() {
     )
   }
 
-  if (schemaState.loading) {
+  // Reopened inputs wait for their migration: the panel must not paint defaults first.
+  if (schemaState.loading || migrating) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
         <Spinner /> Loading model
@@ -765,6 +836,7 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      migrate={migratePreset}
     />
   )
   const templateUi = customUi && (
@@ -988,6 +1060,7 @@ export function CustomizePage() {
               : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
+          {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />}
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
               <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
@@ -1019,6 +1092,7 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    migrate={migratePreset}
                   />
                 </>
               }

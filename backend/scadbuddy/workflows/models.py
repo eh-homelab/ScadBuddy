@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -14,8 +14,10 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.job_models import BomEntry, JobResult, OutputRecord, PipelineOutput, StepInfo
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.template import Blob as Blob
+from scadbuddy.template import Part as Part
 
 
 def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, ParamValue]) -> str:
@@ -104,6 +106,8 @@ class PieceOutcome(BaseModel):
 
     result: PieceResult | None = None
     failure: Failure | None = None
+    #: Which piece: one job waits on many (§3.4).
+    piece_key: str = ""
 
 
 class Projection(BaseModel):
@@ -119,3 +123,112 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+    #: Every `ctx.output`, in order (§5.2); ``result`` is the first one's.
+    outputs: list[PipelineOutput] = Field(default_factory=list)
+    #: Every blob the job reads (pieces and outputs); `project` refs each on done.
+    blob_keys: list[str] = Field(default_factory=list)
+
+
+class PlateSize(BaseModel):
+    """The plate a pipeline packs onto (spec §5.2). Task 2's `load_pipeline` reads it
+    from the template; the fields are the plan's."""
+
+    key: str
+    width: float
+    depth: float
+
+
+class LoadRequest(BaseModel):
+    slug: str
+    revision: str | None
+
+
+class LoadedPipeline(BaseModel):
+    """What `load_pipeline` returns: recorded in the history, so a replay runs this
+    source whatever the template holds by then (§3.4, §8.3)."""
+
+    source: str
+    file: str
+    api: int
+    #: sha256 of ``source``, or "default" (§3.2).
+    version: str
+    inputs_version: int
+    ui_api: int | None = None
+    plate: PlateSize
+
+
+class PackItem(BaseModel):
+    part: Part
+    count: int = Field(default=1, ge=1)
+
+
+class Placed(BaseModel):
+    """Where one copy of a piece goes: its box's min corner, relative to the plate's
+    content (the writer then centres the plate as it does today)."""
+
+    piece_key: str
+    x: float
+    y: float
+
+
+class LayoutPlate(BaseModel):
+    items: list[Placed]
+
+
+class Layout(BaseModel):
+    """What `pack`/`plate_of` yield (§5.2). ``own``: one part alone, on the plates it
+    laid out itself, written exactly as it rendered (§5.3)."""
+
+    plates: list[LayoutPlate] = Field(default_factory=list)
+    own: str | None = None
+
+
+class PackRequest(BaseModel):
+    items: list[PackItem]
+    plate: PlateSize
+    goal: str = "fewest_plates"
+
+
+class OutputRequest(BaseModel):
+    job_id: str
+    index: int
+    slug: str
+    layout: Layout
+    parts: list[Part]
+    name: str | None
+    bom: list[BomEntry]
+    files: dict[str, str | Blob]
+    plate_model: str | None = None
+    record: OutputRecord
+
+
+class OutputRef(BaseModel):
+    index: int
+    name: str | None
+
+
+class TemplateCall(BaseModel):
+    """`ctx.activity(name, …)` (§5.2): JSON arguments, `Blob`/`Part` as their dicts."""
+
+    slug: str
+    revision: str | None
+    name: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: float
+    #: The job that holds (refs) the blob the call emits.
+    job_id: str = ""
+
+
+class MigrateRequest(BaseModel):
+    """`migrate(inputs, from_version)` (§8.2) of ``slug`` at ``revision``."""
+
+    slug: str
+    revision: str | None
+    inputs: dict[str, Any]
+
+
+class MigrateResult(BaseModel):
+    inputs: dict[str, Any]
+    from_version: int
+    to_version: int

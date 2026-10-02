@@ -5,13 +5,20 @@ import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset, ParamValue } from '../api/types'
 import { defaultValues, sameValues, type ParamValues } from '../lib/params'
 import {
+  isJsonObject,
+  joinInputs,
+  NO_EXTRA,
+  splitInputs,
+  type InputsExtra,
+  type JsonObject,
+} from '../lib/inputs'
+import {
   applyPreset,
   parsePresetTags,
   presetDescriptionProblem,
   presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
-import { splitInputs, type InputsExtra } from '../lib/inputs'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -25,6 +32,12 @@ interface Props {
   extra: InputsExtra
   /** Replaces every value on screen, and the UI state, as Reset to defaults does. */
   onApply: (values: ParamValues, extra: InputsExtra) => void
+  /**
+   * Brings a preset's stored inputs up to the template's INPUTS_VERSION (spec §8.2)
+   * before they are cut to the schema, so a renamed parameter is carried forward.
+   * Null means they could not be, and the caller has said so; nothing is applied.
+   */
+  migrate?: (inputs: JsonObject) => JsonObject | null | Promise<JsonObject | null>
 }
 
 interface Selection {
@@ -56,7 +69,7 @@ const FIELD =
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
+export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -110,21 +123,30 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
       setPending(preset)
       return
     }
-    pick(preset)
+    void pick(preset)
   }
 
+  /** The latest pick: a migration answering after another pick is dropped. */
+  const picking = useRef(0)
+
   /** Applies `preset`, or with none clears the selection and leaves the values alone. */
-  function pick(preset: ParamPreset | undefined) {
+  async function pick(preset: ParamPreset | undefined) {
     setError(null)
+    const turn = ++picking.current
     if (!preset) {
       setSelection(null)
       setSkipped([])
       return
     }
-    const applied = applyPreset(schema, preset)
+    const stored = isJsonObject(preset.inputs)
+      ? (preset.inputs as JsonObject)
+      : joinInputs(preset.params ?? {}, NO_EXTRA)
+    const migrated = migrate ? await migrate(stored) : stored
+    if (migrated === null || turn !== picking.current) return
+    const applied = applyPreset(schema, { ...preset, inputs: migrated })
     setSelection({ preset, applied: applied.values })
-    const stored = splitInputs(preset.inputs, preset.params).params
-    setSkipped(applied.skipped.map((name) => ({ name, value: stored[name] as ParamValue })))
+    const storedParams = splitInputs(migrated, preset.params).params
+    setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     onApply(applied.values, applied.extra)
   }
 
@@ -532,7 +554,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
               // Not USER_ONLY: replacing the values on screen stays in the page, so the
               // assistant may confirm a pick it made (spec §8.1).
               onClick={() => {
-                pick(pending ?? undefined)
+                void pick(pending ?? undefined)
                 setPending(null)
               }}
             >

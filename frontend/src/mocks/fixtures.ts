@@ -270,7 +270,7 @@ export const media: Record<string, MediaView[]> = {
   ],
 }
 
-export const models: ModelSummary[] = [
+const modelsSeed: ModelSummary[] = [
   {
     slug: 'name-keychain',
     name: 'Name Keychain',
@@ -372,6 +372,9 @@ export const models: ModelSummary[] = [
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
 ]
+
+/** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
+export const models: ModelSummary[] = modelsSeed.map((entry) => ({ inputs_version: 0, ...entry }))
 
 /**
  * #90 — the git history of `name-keychain`. Commit ids are the real shape (40 hex
@@ -611,7 +614,7 @@ export const libraries: CatalogueLibrary[] = [
 /** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
 export const MISSING_REF = 'v9.9.9'
 
-export const outputs: Output[] = [
+const outputsSeed: Output[] = [
   {
     id: 'a'.repeat(32),
     slug: 'name-keychain',
@@ -701,6 +704,9 @@ export const outputs: Output[] = [
   },
 ]
 
+/** Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null. */
+export const outputs: Output[] = outputsSeed.map((entry) => ({ bom: [], files: [], record: null, ...entry }))
+
 /**
  * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what
  * this mock deployment sets through `SCADBUDDY_*`. A reset goes back to the deployment's
@@ -713,6 +719,7 @@ export const settingsDefaults = {
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,
   render_timeout: 120,
+  template_activity_max_timeout: 1800,
   render_concurrency: 2,
   solid_concurrency: 0,
   render_queue_max: 0,

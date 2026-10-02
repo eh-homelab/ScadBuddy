@@ -31,7 +31,13 @@ from scadbuddy.workflows.commands import (
     temporal_failure,
 )
 from scadbuddy.workflows.operation import OperationWorkflow
-from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from scadbuddy.workflows.pipelines import (
+    MigrateInputs,
+    RenderPiece,
+    RenderPreview,
+    TemplatePipeline,
+)
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from scadbuddy.workflows.problems import OPERATION_LOST
 
@@ -75,6 +81,7 @@ def render_worker(
     task_queue: str,
     activities: RenderActivities,
     *,
+    pipeline: PipelineActivities,
     build_id: str,
     max_concurrent_activities: int,
     graceful_shutdown_timeout: timedelta = timedelta(),
@@ -84,8 +91,8 @@ def render_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[TemplatePipeline, RenderPiece, RenderPreview],
-        activities=activities.all(),
+        workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
+        activities=[*activities.all(), *pipeline.all()],
         # The interceptor's workflow spans run inside the sandbox; OpenTelemetry's
         # module state must be the process's, not a sandboxed copy.
         workflow_runner=SandboxedWorkflowRunner(

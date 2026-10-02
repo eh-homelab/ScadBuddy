@@ -32,6 +32,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.project_file import (
@@ -61,6 +62,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
     normalize_inputs,
 )
+from scadbuddy.render.job_models import BomEntry, OutputRecord
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -84,6 +86,11 @@ class OutputDetail(OutputSummary):
     params: dict[str, ParamValue] = Field(default_factory=dict)
     #: The template inputs this output was saved with (spec §4.3).
     inputs: dict[str, Any] = Field(default_factory=dict)
+    #: A pipeline output's bill of materials, what reproduces it (§8.4), and the names
+    #: of its extra files (`GET /outputs/{id}/files/{name}`); empty or None otherwise.
+    bom: list[BomEntry] = Field(default_factory=list)
+    record: OutputRecord | None = None
+    files: list[str] = Field(default_factory=list)
 
 
 class OutputPlate(BaseModel):
@@ -102,6 +109,9 @@ class CreateOutputRequest(BaseModel):
     #: The inputs on screen when Generate was pressed (spec §4.3). Their ``params``
     #: must be the ones the job rendered; left out, the job's own inputs are recorded.
     inputs: dict[str, Any] | None = None
+    #: Which of a pipeline job's outputs (§5.2); 0, the only one, otherwise. A factory
+    #: default, so the generated clients read it as optional (a literal one is required).
+    index: int = Field(default_factory=int, ge=0)
 
 
 class EditTarget(BaseModel):
@@ -127,6 +137,9 @@ def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCop
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
         params=params,
         inputs=store.inputs(meta.id, params),
+        bom=store.bom(meta.id),
+        record=store.record(meta.id),
+        files=store.files(meta.id),
         library_files=library_files,
     )
 
@@ -167,6 +180,12 @@ async def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
+    count = len(job.outputs) or 1
+    if body.index >= count:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"job {job.id} has no output {body.index}"
+        )
+    chosen = job.outputs[body.index] if job.outputs else None
     inputs: dict[str, Any] | None = None
     if body.inputs is not None:
         rendered = f"inputs.params are not the parameters job {job.id} rendered"
@@ -178,20 +197,45 @@ async def create_output(
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        # A template's own pipeline read the job's whole inputs (§3.4), so the output
+        # records exactly those (§8.4), not only matching params.
+        own_pipeline = chosen is not None and chosen.record.pipeline_version != "default"
+        if own_pipeline and inputs != job.inputs:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"inputs are not the ones job {job.id} rendered",
+            )
         # The job with no params: nothing was compared above, so compare here.
         if inputs["params"] != job.params:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
+    result = chosen.result if chosen is not None else job.result
+    blobs = state.store.blobs
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
-    await materialize_result(state.store.blobs, job.result)
+    await materialize_result(blobs, result)
     # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
     # fetched, and the copy would fail with a server path in its message: say so instead.
-    files = (job.result.model_3mf, job.result.preview_glb)
+    files = (result.model_3mf, result.preview_glb)
     if not all((outputs.paths.root / name).is_file() for name in files):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
+    files_dir = None
+    if chosen is not None and chosen.files_key is not None:
+        if not await blobs.fetch(chosen.files_key):
+            # Before `create`, so a refused save leaves nothing under outputs/.
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "the job's extra files are no longer in the store; render again",
+            )
+        files_dir = blobs.dir_for(chosen.files_key) / "files"
     public_url = (await asyncio.to_thread(store.load)).public_url
     try:
         meta = await asyncio.to_thread(
-            outputs.create, job, name=body.name, public_url=public_url, inputs=inputs
+            outputs.create,
+            job,
+            name=body.name,
+            public_url=public_url,
+            inputs=inputs,
+            index=body.index,
+            files_dir=files_dir,
         )
     except OSError:
         # Evicted or swept after the check above, or unreadable: the same answer, not
@@ -344,6 +388,27 @@ def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResp
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
     return FileResponse(path, media_type=GLB_MEDIA_TYPE)
+
+
+@router.get(
+    "/outputs/{output_id}/files/{name}",
+    response_class=FileResponse,
+    summary="Download one of a pipeline output's extra files",
+)
+def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> FileResponse:
+    """An extra file a pipeline wrote (§10): served as a download, never as a page."""
+    try:
+        path = outputs.file_path(output_id, name)
+    except OutputNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"no file {name!r} on output {output_id}"
+        ) from None
+    return FileResponse(
+        path,
+        filename=name,
+        headers=UI_FILE_HEADERS,
+        media_type="image/svg+xml" if name.endswith(".svg") else "application/octet-stream",
+    )
 
 
 @router.get(

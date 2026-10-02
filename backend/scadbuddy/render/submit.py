@@ -21,10 +21,11 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
@@ -38,7 +39,7 @@ from scadbuddy.core.tracing import (
     use_traceparent,
 )
 from scadbuddy.library.previews import source_key
-from scadbuddy.render.inputs import legacy_inputs
+from scadbuddy.render.inputs import InputsError, inputs_key, legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import (
     INITIAL_RENDER_ESTIMATE,
@@ -48,7 +49,14 @@ from scadbuddy.render.jobs import (
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.models import MigrateRequest, MigrateResult
+from scadbuddy.workflows.pipelines import (
+    MIGRATE_EXECUTION_TIMEOUT,
+    PREVIEW_TRANSFER,
+    MigrateInputs,
+    RenderPreview,
+    TemplatePipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +139,10 @@ class RenderService:
             self._reconciler = None
 
     def _memo(self) -> dict[str, Any]:
-        return {"activity_timeout": self.config.activity_timeout}
+        return {
+            "activity_timeout": self.config.activity_timeout,
+            "template_activity_max_timeout": self.config.template_activity_max_timeout,
+        }
 
     async def submit(
         self,
@@ -141,11 +152,18 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
     ) -> Job:
-        """Record the job (or join the waiting one it matches) and start its workflow."""
+        """Record the job (or join the waiting one it matches) and start its workflow.
+        ``whole_inputs``: a pipeline template's job, keyed on all of its inputs (§3.4)."""
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
             job, coalesced = await self._submit(
-                slug, params, model_version=model_version, supersedes=supersedes, inputs=inputs
+                slug,
+                params,
+                model_version=model_version,
+                supersedes=supersedes,
+                inputs=inputs,
+                whole_inputs=whole_inputs,
             )
             current.set_attribute("scadbuddy.job_id", job.id)
             current.set_attribute("scadbuddy.coalesced", coalesced)
@@ -166,6 +184,7 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
@@ -193,7 +212,11 @@ class RenderService:
                 f"these parameters make a render request of {size} bytes; the most a render"
                 f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
             )
-        key = render_key(slug, params, model_version)
+        key = (
+            inputs_key(slug, job.inputs, model_version)
+            if whole_inputs
+            else render_key(slug, params, model_version)
+        )
         try:
             submitted = await asyncio.to_thread(
                 self.store.submit,
@@ -331,6 +354,60 @@ class RenderService:
         png: bytes = await asyncio.wait_for(handle.result(), wait)
         return png
 
+    async def migrate_inputs(
+        self, slug: str, inputs: Mapping[str, Any], *, version: str | None
+    ) -> MigrateResult:
+        """``inputs`` brought up to the template's `INPUTS_VERSION` by its `migrate`, run
+        on a worker (§8.2, §9). The template's refusal is an `InputsError` with its
+        message; a request too large to carry is a 413, the service unreachable a 503,
+        and a migration that ran out of time a 504. On the bambuddy store the worker has
+        no volume, so every revision is pinned as a snapshot first, as for a render
+        (`pin` takes None as the last commit)."""
+        # Measured before the pin, so an oversized request uploads no snapshot: with a
+        # full-length revision, the longest `pin` can return.
+        probe = MigrateRequest(slug=slug, revision="0" * 40, inputs=dict(inputs))
+        size = len(pydantic_data_converter.payload_converter.to_payload(probe).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these inputs make a migration request of {size} bytes; the most one"
+                f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
+        revision = version
+        if self.snapshots is not None:
+            revision = await self.snapshots.pin(slug, version)
+        req = MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs))
+        try:
+            result: MigrateResult = await self.client.execute_workflow(
+                MigrateInputs.run,
+                req,
+                id=f"migrate-{uuid.uuid4().hex}",
+                task_queue=self.task_queue,
+                execution_timeout=MIGRATE_EXECUTION_TIMEOUT,
+                rpc_timeout=RPC_TIMEOUT,
+            )
+        except RPCError as error:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"the render service is unavailable: {error.message}",
+            ) from None
+        except WorkflowFailureError as error:
+            cause: BaseException | None = error.cause
+            timed_out = False
+            while cause is not None and not isinstance(cause, ApplicationError):
+                timed_out = timed_out or isinstance(cause, TemporalTimeoutError)
+                cause = cause.__cause__
+            if isinstance(cause, ApplicationError):
+                raise InputsError(cause.message) from None
+            if timed_out:
+                raise ApiError(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    "migrating the inputs timed out after"
+                    f" {MIGRATE_EXECUTION_TIMEOUT.total_seconds():g}s",
+                ) from None
+            raise InputsError(str(error)) from None
+        return result
+
     def retry_after(self) -> int:
         return max(1, math.ceil(INITIAL_RENDER_ESTIMATE))
 
@@ -363,6 +440,8 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=conflict,
             memo=self._memo(),
+            # Bounds a pipeline that never yields; `settle_timed_out` fails its row.
+            execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
             rpc_timeout=RPC_TIMEOUT,
         )
 
@@ -407,6 +486,41 @@ class RenderService:
             )
             self.metrics.store_errors.labels("cancel_workflow").inc()
 
+    async def settle_timed_out(self) -> int:
+        """Fail every running row whose workflow ended without settling it: timed out
+        (a pipeline that never yields), terminated, or failed. Returns how many."""
+        timeout = self.config.pipeline_timeout
+        stale = await asyncio.to_thread(self.store.stale_running, timeout)
+        settled = 0
+        for job in stale:
+            try:
+                handle = self.client.get_workflow_handle(workflow_id_for(job.id))
+                status = (await handle.describe(rpc_timeout=RPC_TIMEOUT)).status
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    # The server could not say (unavailable, a deadline): nothing is
+                    # known about the job, so it waits for the next pass.
+                    logger.warning(
+                        "could not describe a stale job's workflow",
+                        extra={"job_id": job.id},
+                        exc_info=True,
+                    )
+                    continue
+                status = None  # gone from the server's retention
+            if status == WorkflowExecutionStatus.RUNNING:
+                continue
+            job.state = "failed"
+            job.finished_at = now()
+            job.error = (
+                f"the pipeline did not finish within {timeout:g}s"
+                if status == WorkflowExecutionStatus.TIMED_OUT
+                else "the job's workflow ended without settling it"
+            )
+            if await asyncio.to_thread(self.store.finish, job):
+                self._settled(job, "failed")
+                settled += 1
+        return settled
+
     async def _reconcile_forever(self) -> None:
         loop = asyncio.get_running_loop()
         pruned = loop.time()
@@ -414,6 +528,7 @@ class RenderService:
             await asyncio.sleep(self.reconcile_interval)
             try:
                 await self.reconcile_once()
+                await self.settle_timed_out()
             except Exception:
                 logger.exception("the render reconciler's pass failed")
             if loop.time() - pruned >= self.prune_interval:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -24,12 +25,14 @@ from scadbuddy.api.deps import (
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.models import require_model, require_model_exists
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
+from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -39,6 +42,7 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
+    BomEntry,
     Job,
     JobNotFoundError,
     JobState,
@@ -62,6 +66,7 @@ from scadbuddy.render.thumbnail import (
 )
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.workflows.models import MigrateResult
 
 router = APIRouter(tags=["jobs"])
 
@@ -100,6 +105,16 @@ class RenderAccepted(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class JobOutputSummary(BaseModel):
+    """One `ctx.output` of a pipeline job (spec 2026-09-27 §5.2): what Generate saves by
+    its ``index``."""
+
+    index: int
+    name: str | None
+    bom: list[BomEntry] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+
+
 class JobStatus(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -134,6 +149,8 @@ class JobStatus(BaseModel):
     #: A factory default, as the lists have, so the generated client reads it as
     #: optional: an older mock or cached response without it still type-checks.
     diagnostics_dropped: int = Field(default_factory=int)
+    #: A pipeline job's outputs, in order; empty for a job that wrote none.
+    outputs: list[JobOutputSummary] = Field(default_factory=list)
 
 
 class ModelDiagnostics(BaseModel):
@@ -174,7 +191,24 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         plates=result.plates if result else None,
         diagnostics=job.diagnostics,
         diagnostics_dropped=job.diagnostics_dropped,
+        outputs=[
+            JobOutputSummary(index=i, name=o.name, bom=o.bom, files=o.files)
+            for i, o in enumerate(job.outputs)
+        ],
     )
+
+
+def _declares_pipeline(directory: Path, slug: str) -> bool:
+    """Whether the template's model.json at this revision declares a pipeline (§5.1),
+    read as the catalogue reads it. A malformed declaration counts: the job then reaches
+    the worker, whose `load_pipeline` names what is wrong with it. An unreadable
+    model.json declares none, and the job renders `model.scad`'s parameters."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return False
+    return meta.pipeline is not None or meta.pipeline_raw is not None
 
 
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
@@ -252,9 +286,13 @@ async def render_model(
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     params, inputs = normalized.params, normalized.data
-    require_valid_params(schema, params)
-    # A family that is not installed is a 422 here, not a render in the default font.
-    await require_installed_fonts(schema, params, fonts)
+    # A pipeline passes params to the pieces it renders, each of which checks its own
+    # (§5.2); only the built-in pipeline renders `model.scad` with them.
+    pipeline = await asyncio.to_thread(_declares_pipeline, source.scad.parent, slug)
+    if not pipeline:
+        require_valid_params(schema, params)
+        # A family that is not installed is a 422 here, not a render in the default font.
+        await require_installed_fonts(schema, params, fonts)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
@@ -272,6 +310,7 @@ async def render_model(
             inputs=inputs,
             model_version=source.version,
             supersedes=body.supersedes,
+            whole_inputs=pipeline,
         )
     except QueueFullError as error:
         raise ApiError(
@@ -418,6 +457,47 @@ async def get_job_view(
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
     )
+
+
+class MigrateInputsRequest(BaseModel):
+    inputs: dict[str, Any]
+    #: The template revision to migrate for, as the render route takes it; the live
+    #: template by default.
+    version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+
+
+@router.post(
+    "/models/{slug}/inputs/migrate",
+    response_model=MigrateResult,
+    summary="Migrate saved inputs",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {"description": "the inputs are too large to carry"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "the render service is unavailable"},
+        status.HTTP_504_GATEWAY_TIMEOUT: {"description": "the migration ran out of time"},
+    },
+)
+async def migrate_inputs(
+    slug: SlugPath,
+    body: MigrateInputsRequest,
+    render: RenderDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+) -> MigrateResult:
+    """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
+    record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
+    v = body.inputs.get("v", 0)
+    if record.pipeline is None and record.pipeline_raw is None:
+        # No pipeline, so no `migrate` to run, at any revision: the inputs are as they are.
+        current = v if isinstance(v, int) else 0
+        return MigrateResult(inputs=body.inputs, from_version=current, to_version=current)
+    if body.version is None and isinstance(v, int) and v == record.inputs_version:
+        # Already current: no worker.
+        return MigrateResult(inputs=body.inputs, from_version=v, to_version=v)
+    version = await _resolve_version(history, slug, body.version)
+    try:
+        return await render.migrate_inputs(slug, body.inputs, version=version)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
 #: The header naming a breakdown's tiles, row by row.

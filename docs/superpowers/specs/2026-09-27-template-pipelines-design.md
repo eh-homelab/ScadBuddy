@@ -328,11 +328,27 @@ Measured while phase 1 landed (the base spec's §3 rule), in
 - `imports_passed_through` for `scadbuddy.render.job_models` and
   `scadbuddy.workflows.models` (pydantic) is accepted by the sandbox.
 
-Still to verify when their phases land: the sandbox exception type and message shape
-on a restricted import or call, and that a traceback through `exec`'d source compiled
-with a file name carries usable line numbers (phase 4, §5.2); worker build-ID
-versioning semantics, including whether the dev server needs
-`system.enableDeploymentVersions` (§3.5, the worker PR).
+Measured while phase 4 landed, against the pinned 1.33.0, in
+`backend/tests/test_pipeline_sandbox.py`:
+
+- `compile(source, "pipeline/pipeline.py", "exec")`, then `exec`, works inside the
+  sandbox.
+- A traceback frame's `co_filename`/`tb_lineno` name the template file and line. This
+  holds for a runtime error, for a restricted call at module level or inside `run`,
+  and for a `SyntaxError` (via its `lineno`).
+- A restricted call raises
+  `temporalio.worker.workflow_sandbox._restrictions.RestrictedWorkflowAccessError`,
+  which the workflow can catch. For `datetime.datetime.now()` inside `run`, the
+  message is "Cannot access datetime.datetime.now.__call__ from inside a workflow.
+  If this is code from a module not used in a workflow or known to only be used
+  deterministically from a workflow, mark the import as pass through."
+- For `open(...)` at module level: "Cannot access __builtins__.open from inside a
+  workflow. If this is code from a module not used in a workflow or known to only be
+  used deterministically from a workflow, mark the import as pass through."
+- Walking `tb_next` needs no `linecache`, so no file is read inside the sandbox.
+
+Still to verify when its phase lands: worker build-ID versioning semantics, including
+whether the dev server needs `system.enableDeploymentVersions` (§3.5, the worker PR).
 
 ### 3.7 Tests
 

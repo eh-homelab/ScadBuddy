@@ -61,6 +61,7 @@ PROJECTION_COLUMNS = (
     "steps",
     "workflow_id",
     "traceparent",
+    "outputs",
 )
 
 
@@ -289,7 +290,7 @@ class JobProjection:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"
-                " warnings = %s, steps = %s, pipeline_version = %s"
+                " warnings = %s, steps = %s, pipeline_version = %s, outputs = %s"
                 " WHERE id = %s AND state IN ('pending', 'running')",
                 (
                     job.state,
@@ -302,6 +303,7 @@ class JobProjection:
                     Jsonb(job.warnings),
                     Jsonb([s.model_dump(mode="json") for s in job.steps]),
                     job.pipeline_version,
+                    Jsonb([o.model_dump(mode="json") for o in job.outputs]),
                     job.id,
                 ),
             )
@@ -334,6 +336,17 @@ class JobProjection:
                 "SELECT * FROM render_jobs WHERE state = 'pending' AND started_at IS NULL"
                 " AND workflow_id IS NOT NULL"
                 " AND created_at < now() - make_interval(secs => %s) ORDER BY created_at",
+                (older_than,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def stale_running(self, older_than: float) -> list[Job]:
+        """Workflow-owned rows still `running` ``older_than`` seconds after they started:
+        what `RenderService.settle_timed_out` checks against Temporal."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state = 'running' AND workflow_id IS NOT NULL"
+                " AND started_at < now() - make_interval(secs => %s) ORDER BY started_at",
                 (older_than,),
             ).fetchall()
         return [_job(row) for row in rows]

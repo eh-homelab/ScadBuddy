@@ -34,6 +34,7 @@ import type {
   LibraryRepinRequest,
   LibraryUser,
   MediaView,
+  MigrateResult,
   ModelPatch,
   LastProject,
   ModelPrintChoices,
@@ -891,11 +892,28 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
+  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
     request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
+      body: JSON.stringify({
+        job_id: jobId,
+        name: name ?? null,
+        ...(inputs ? { inputs } : {}),
+        ...(index !== undefined ? { index } : {}),
+      }),
     }),
+
+  /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
+  migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
+    request<MigrateResult>(`/models/${seg(slug)}/inputs/migrate`, {
+      method: 'POST',
+      body: JSON.stringify({ inputs, version: version ?? null }),
+    }),
+
+  /** An extra file a pipeline wrote beside an output (spec 2026-09-27 §5.2). */
+  outputFileUrl: (outputId: string, name: string) =>
+    `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
