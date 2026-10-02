@@ -10,25 +10,25 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep
 from scadbuddy.api.outputs import OutputPlate
+from scadbuddy.api.printing import accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
-    PrintRunResult,
     check_for_library,
     filament_options_for_library,
-    run_for_library,
 )
-from scadbuddy.bambuddy.print_source import LibrarySource
+from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
+from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.library.settings_store import ModelPrintChoices
 
 router = APIRouter(prefix="/print/library", tags=["print"])
@@ -57,7 +57,8 @@ async def get_library_plates(file_id: FileIdPath, store: SettingsStoreDep) -> li
     async with client_for(store.load()) as client:
         plates = await client.library_plates(file_id)
     return [
-        OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail) for plate in plates.plates
+        OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail, name=plate.name or None)
+        for plate in plates.plates
     ]
 
 
@@ -148,17 +149,41 @@ async def get_library_filaments(
 
 @router.post(
     "/{file_id}/run",
-    response_model=PrintRunResult,
-    summary="Slice this library file with the dialog's choices and queue it",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PrintRun,
+    responses={
+        status.HTTP_200_OK: {
+            "model": PrintRun,
+            "description": "A repeat of a run in flight, or one that succeeded (or failed "
+            "after it tried to queue) within the last ten minutes: that run, and no new print.",
+        },
+    },
+    summary="Slice this library file with the dialog's choices and queue it, in the background",
 )
 async def post_library_run(
-    file_id: FileIdPath, body: PrintRunRequest, store: SettingsStoreDep
-) -> PrintRunResult:
-    """As ``/print/outputs/{id}/run``, on the file as it stands in Bambuddy. A sliced
-    file is a 422, and a file deleted in Bambuddy is its 404, both before any slice."""
-    settings = store.load()
-    async with client_for(settings) as client:
-        return await run_for_library(client, settings, file_id, body)
+    file_id: FileIdPath,
+    body: PrintRunRequest,
+    response: Response,
+    store: SettingsStoreDep,
+    runs: PrintRunsDep,
+) -> PrintRun:
+    """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
+    repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
+    A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
+    202 and any slice. The run's ``output_id`` is ``library:<file id>``."""
+
+    async def source_for(client: BambuddyClient) -> PrintSource:
+        return await LibrarySource.load(client, file_id)
+
+    return await accept_run(
+        runs,
+        response,
+        subject=f"library:{file_id}",
+        slug=f"library-{file_id}",
+        settings=store.load(),
+        request=body,
+        source_for=source_for,
+    )
 
 
 @router.post(

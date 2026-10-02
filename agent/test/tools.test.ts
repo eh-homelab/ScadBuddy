@@ -252,6 +252,25 @@ describe('uploads', () => {
   })
 })
 
+describe('create_print_project (#930)', () => {
+  it('passes a parent project through, so an agent can nest one as the dialog does', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/projects`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: 7, name: 'Tags', status: 'active', parent_id: 1 })
+      }),
+    )
+    const result = await tool('create_print_project').execute({ name: 'Tags', parent_id: 1 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toMatchObject({ name: 'Tags', parent_id: 1 })
+  })
+
+  it('says a parent applies only to a new project, not a linked one', () => {
+    expect(tool('create_print_project').description).toMatch(/parent_id.*only to a new project.*project_id.*refused/s)
+  })
+})
+
 describe('print_output (as it will run once approved, #258): spool-first, #335', () => {
   const OUT = '0123456789abcdef0123456789abcdef'
   const FILAMENTS = {
@@ -561,6 +580,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(executed.isError).toBe(true)
     expect(firstText(executed)).toContain('"untrusted_data"')
     expect(firstText(executed)).toContain('needs \\"Manage Library\\"')
+  })
+})
+
+describe('get_printer_camera (#796)', () => {
+  it("returns the printer's current frame as an image, marked untrusted", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/printers/7/camera`, () =>
+        new HttpResponse(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { headers: { 'content-type': 'image/jpeg' } }),
+      ),
+    )
+    const result = await runTool(tool('get_printer_camera'), { printer_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
+      untrusted_data: { tool: 'get_printer_camera', content_follows: { type: 'image', mime_type: 'image/jpeg' } },
+    })
+    expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
   })
 })
 

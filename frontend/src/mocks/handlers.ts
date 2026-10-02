@@ -716,6 +716,11 @@ export function setMockSettings(settings: Settings): void {
   state.settings = settings
 }
 
+/** #742 — a print run the mock accepted, which `GET /print/runs/:id` then answers. */
+export function recordMockPrintRun(run: PrintRun): void {
+  state.printRuns.set(run.id, run)
+}
+
 export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
@@ -2807,8 +2812,15 @@ export const handlers = [
     if (body.project_id !== undefined && body.project_id !== null && !linked) {
       return problem(404, 'Not Found', `no project ${body.project_id}`)
     }
+    // #930 — the backend's own refusals for a parent it would otherwise drop.
+    if (linked && body.parent_id != null) {
+      return problem(400, 'Bad Request', 'parent_id applies only to a new project, not a linked one')
+    }
     if (!linked && !body.name) {
       return problem(400, 'Bad Request', 'a new project needs a name')
+    }
+    if (body.parent_id != null && body.folder_id != null) {
+      return problem(400, 'Bad Request', 'parent_id cannot be combined with folder_id')
     }
     const base_ = linked ?? {
       id: nextNumber(),
@@ -2816,6 +2828,7 @@ export const handlers = [
       description: body.description ?? null,
       colour: body.colour ?? null,
       status: 'active',
+      parent_id: body.parent_id ?? null,
       archive_count: 0,
       queue_count: 0,
       folder_id: null,

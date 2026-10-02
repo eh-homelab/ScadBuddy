@@ -1184,7 +1184,7 @@ describe('CustomizePage, project file (#317)', () => {
     expect(screen.queryByTestId('project-filed')).not.toBeInTheDocument()
   })
 
-  it('keeps Print disabled until the project file is filed, so the print reuses it', async () => {
+  it('keeps Print and the picker disabled until the project file is filed', async () => {
     withLastProject(1)
     let answer: (() => void) | undefined
     const answered = new Promise<void>((resolve) => {
@@ -1207,10 +1207,13 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
     await generate(user)
 
+    // The print reuses the filed copy, and the file lands where the picker showed.
     expect(screen.getByTestId('print')).toBeDisabled()
+    expect(pagePicker()).toBeDisabled()
     answer?.()
     await screen.findByTestId('project-filed')
     expect(screen.getByTestId('print')).toBeEnabled()
+    expect(pagePicker()).toBeEnabled()
   })
 
   it('shares one choice with the print dialog', async () => {
