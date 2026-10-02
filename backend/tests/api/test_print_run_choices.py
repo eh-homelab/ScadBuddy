@@ -1620,6 +1620,7 @@ def test_let_bambuddy_pick_sends_no_choice(client: TestClient, model: str) -> No
 
     assert response.status_code == 200, response.text
     assert json.loads(queued.calls.last.request.content).get("nozzle_rack_choice") is None
+    assert all(w["kind"] != "rack-left-to-bambuddy" for w in response.json()["warnings"])
 
 
 @respx.mock
@@ -1668,3 +1669,4 @@ def test_a_rack_warning_repeated_on_every_plate_is_shown_once(
     assert response.status_code == 200, response.text
     kinds = [w["kind"] for w in response.json()["warnings"]]
     assert kinds.count("rack-unsafe-material") == 1
+    assert "rack-left-to-bambuddy" not in kinds

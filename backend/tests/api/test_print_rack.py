@@ -28,7 +28,7 @@ from tests.api.test_print_run_choices import (
 )
 from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
-from tests.rack.helpers import invented_status, serial
+from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -320,3 +320,18 @@ def test_a_clear_spool_is_no_color_in_the_preview(client: TestClient, model: str
     rack = response.json()["rack"]
     assert rack["position"] == 2
     assert rack["reason"] != "already loaded with this color"
+
+
+@respx.mock
+def test_no_serial_appears_anywhere_in_the_check_body(client: TestClient, model: str) -> None:
+    """Spec §5, §9: searched as a string over the whole JSON, options included."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack"]["options"], "the check must have ranked a rack to be a real test"
+    assert not [s for s in INVENTED_SERIALS if s in response.text]

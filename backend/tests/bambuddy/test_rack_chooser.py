@@ -246,7 +246,12 @@ async def test_a_rack_with_no_eligible_position_says_so() -> None:
 
 async def test_let_bambuddy_pick_reads_no_usage_and_sends_nothing() -> None:
     usages = Usages()
+    warnings: list[FilamentWarning] = []
     choice = await chooser(
-        Reads(grouped(requirement()), status(slot(2))), [], usages=usages, algorithm="bambuddy"
+        Reads(grouped(requirement()), status(slot(2))),
+        warnings,
+        usages=usages,
+        algorithm="bambuddy",
     )(77)
     assert choice is None and usages.calls == ["seen"]
+    assert warnings == []
