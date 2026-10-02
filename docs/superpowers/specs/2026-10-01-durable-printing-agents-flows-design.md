@@ -209,10 +209,17 @@ The same for every kind:
      or already closed.** Two SDK policies do this together:
      - `id_conflict_policy = USE_EXISTING`: a retry while the execution is running
        attaches to it.
-     - `id_reuse_policy = REJECT_DUPLICATE` for every `request_id`-keyed kind: a retry
-       after it closed (a `done` command finishes in under a second, so this is the
-       usual case after a dropped answer) cannot start a second execution. The start
-       fails with `WorkflowAlreadyStartedError`.
+     - `id_reuse_policy = ALLOW_DUPLICATE_FAILED_ONLY` for every `request_id`-keyed
+       kind: a retry after a *completed* execution cannot start a second one. A `done`
+       command finishes in under a second, so this is the usual case after a dropped
+       answer. The start fails with `WorkflowAlreadyStartedError`.
+     - **Which outcomes count as "failed" in Temporal's sense:** a command's workflow
+       *fails* only when it did nothing, that is, a refusal or an error in step 3
+       before any effect. Its retry may therefore start again.
+     - Every outcome after the first effect *completes* the workflow, success or
+       failure, with that outcome as its result and in our record. That covers a
+       print that failed with `may_have_queued`, and a commit that failed after
+       writing. So a retry after an effect can never run it again.
      - On that error the route reads our record by `workflow_id` and answers with it,
        as the original answer would have been (`repeated: true`).
      - The route also reads the record first, before calling Temporal. That makes a
@@ -418,10 +425,14 @@ shape with answer `accepted`; renders take the same shape (§4.5).
   completes at once, so a retry is a new run. This is #470's rule, kept by the workflow
   instead of `PrintRunStore.find`.
 - The window and `ALLOW_DUPLICATE` apply to body-only keys. A key with a `request_id`
-  (every current client sends one) is `REJECT_DUPLICATE` with the record lookup of
-  §4.2. A retry of the same press, however late, gets its run, and the next press has
-  a new `request_id`, so it is a new print. A refused run writes no record, so its
-  retry is a new start; it is refused again, or runs.
+  (every current client sends one) is `ALLOW_DUPLICATE_FAILED_ONLY` with the record
+  lookup of §4.2.
+  - A retry of the same press, however late, gets its run.
+  - The next press has a new `request_id`, so it is a new print.
+  - A refused run *fails* its workflow and writes no record, so its retry is a new
+    start, which is refused again or runs.
+  - A run that failed after an effect *completes* its workflow (§4.2), so its retry
+    gets that failed run, with `may_have_queued`. That is #470's rule.
 
 ### 5.3 The workflow
 
@@ -841,7 +852,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   `done` kind):
   - a retry while running attaches;
   - a retry after the execution closed returns the record and does not run the effect
-    again (`REJECT_DUPLICATE` + record lookup);
+    again (`ALLOW_DUPLICATE_FAILED_ONLY` + record lookup);
+  - a retry after a refusal starts again;
+  - a retry after a failure that followed an effect returns that failure and does not
+    run the effect again;
   - a retry after the workflow ID has been forgotten (the record exists, the history
     does not) returns the record.
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
