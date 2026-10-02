@@ -16,7 +16,9 @@ ScadBuddy now ranks the rack itself and sends its pick on the queue item. Simple
 mode shows the pick and the reason for it. Advanced mode lets the user change the
 ranking algorithm or pick a position by hand.
 
-This supersedes one decision of the spool-first-print work: its spec (§6,
+Once implemented, this supersedes one decision of the spool-first-print work
+(this PR changes only this document; the edits to the other two are part of the
+implementation, §6): its spec (§6,
 `2026-09-27-spool-first-print-design.md`) and plan (`2026-09-27-spool-first-print.md`)
 say ScadBuddy sends no `nozzle_rack_choice`, and
 `backend/tests/api/test_print_run_choices.py` asserts
@@ -314,7 +316,11 @@ it builds the `RackChoice`. `slice_and_queue` puts the choice on
 
 After `slice_and_queue` returns, `print_run.py` (not the callback, which runs
 before the queue item exists) writes the picks it got back on `QueueOutcome` to
-`rack_nozzle_picks` against `QueueOutcome.queue_item_ids`.
+`rack_nozzle_picks` against `QueueOutcome.queue_item_ids`. This write is
+advisory, like the settle write (§4). The item is already queued, so an
+exception here is caught, logged under the same serial-safe rule, and dropped:
+the run still returns its `PrintRunResult` as queued, and that print's use goes
+uncounted at settle because it has no pick to join.
 
 `None` from the callback means no choice: the item is queued without
 `nozzle_rack_choice`, and Bambuddy picks, as today.
@@ -571,7 +577,9 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
     the print still settles and publishes `print.settled` once;
   - an output whose progress is `None` never reaches the write;
   - a database error whose text contains a serial logs neither the serial nor
-    a traceback.
+    a traceback;
+  - a `rack_nozzle_picks` write that raises after enqueue is logged, writes
+    nothing, and the run still returns its queued `PrintRunResult`.
 - A `choose_rack` test: on a two-plate print the second plate's pick uses a
   rack read after the first plate sliced.
 - A `slice_and_queue` test: `choose_rack`'s choice lands on the queued item,
