@@ -326,9 +326,10 @@ def test_a_template_that_asks_for_two_plates_renders_a_two_plate_3mf(
         "/api/v1/models/two-plates/outputs", json={"job_id": job["id"], "name": "Both"}
     ).json()
     plates = client.get(f"/api/v1/outputs/{output['id']}/plates").json()
+    # #929: each plate is named by the object ScadBuddy's writer puts on it.
     assert plates == [
-        {"index": 1, "has_thumbnail": True},
-        {"index": 2, "has_thumbnail": True},
+        {"index": 1, "has_thumbnail": True, "name": "two-plates (plate 1)"},
+        {"index": 2, "has_thumbnail": True, "name": "two-plates (plate 2)"},
     ]
 
 

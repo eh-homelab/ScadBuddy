@@ -1480,6 +1480,29 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
   })
 
+  it('labels each plate by its name, with the number only as secondary text (#929)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Body' },
+          { index: 2, has_thumbnail: false, name: null },
+        ]),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    const plates = await screen.findByTestId('plate-choice')
+    const body = within(plates).getByRole('radio', { name: /Body/ })
+    expect(within(plates).getByRole('img', { name: 'Body' })).toBeInTheDocument()
+    const number = within(body.closest('label')!).getByText('Plate 1')
+    expect(number).toHaveClass('text-faint')
+    // No name from the 3MF: "Plate N" is the label itself, the last resort.
+    const unnamed = within(plates).getByRole('radio', { name: 'Plate 2' })
+    // Its number keeps the numeric face a named plate's secondary text has.
+    expect(within(unnamed.closest('label')!).getByText('2')).toHaveClass('sb-num')
+  })
+
   it('queues every plate when asked for all of them', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>

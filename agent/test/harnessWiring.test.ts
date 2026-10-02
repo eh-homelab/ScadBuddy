@@ -244,6 +244,66 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
       expect(deletes).toBe(0)
     }, 60_000)
 
+    // #946: a subagent asked to run in the background runs inside the turn.
+    // Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
+    // input at a string prompt's first result, and from then on Claude Code
+    // refused every permission request itself ("The user doesn't want to take
+    // this action right now"), asking neither canUseTool nor the user. That hit
+    // the subagent's own calls and those of the turn Claude Code starts when it
+    // reports back, read tools included (measured on Claude Code 2.1.283).
+    describe('a subagent asked to run in the background (#946)', () => {
+      /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
+      function backgroundScript(tool: string, input: Record<string, unknown>) {
+        const parent: string[] = []
+        const subagent: string[] = []
+        script = (r) => {
+          const last = lastContent(r)
+          if (JSON.stringify(r.body?.messages?.[0] ?? '').includes('BG-TASK')) {
+            if (!last.includes('tool_result')) return { toolUse: { name: tool, input } }
+            subagent.push(last)
+            return { text: 'BG-DONE' }
+          }
+          if (last.includes('tool_result')) {
+            parent.push(last)
+            return { text: 'done' }
+          }
+          return {
+            toolUse: {
+              name: 'Agent',
+              input: { subagent_type: 'scadbuddy:model-author', description: 'Background', prompt: 'BG-TASK', run_in_background: true },
+            },
+          }
+        }
+        return { parent, subagent }
+      }
+
+      it('runs a read call through canUseTool, and the parent gets its result', async () => {
+        const { parent, subagent } = backgroundScript('mcp__scadbuddy__list_models', {})
+        const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+        expect(result.subtype).toBe('success')
+        expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
+        expect(subagent.join('')).toContain('keychain')
+        // The parent waited for the subagent instead of being told it was launched.
+        expect(parent.join('')).toContain('BG-DONE')
+        expect(parent.join('')).not.toContain('Async agent launched')
+      }, 60_000)
+
+      it('parks an outward call at the gate', async () => {
+        const { parent } = backgroundScript('mcp__scadbuddy__delete_model', { slug: 'keychain' })
+        const asked: string[] = []
+        const gate: ApprovalGate = (request) => {
+          asked.push(request.toolName)
+          return Promise.resolve({ approved: true, input: request.input })
+        }
+        const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, approvalGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(decisions).toEqual([['mcp__scadbuddy__delete_model', 'needs_approval']])
+        expect(asked).toEqual(['mcp__scadbuddy__delete_model'])
+        expect(deletes).toBe(1)
+        expect(parent.join('')).toContain('BG-DONE')
+      }, 60_000)
+    })
+
     // With Skill and Agent offered, another loaded plugin's subagents run too
     // (an approved package's, #297). One that asks for a built-in gets none:
     // the session offers only Skill and Agent (docs/ai/security.md, "Plugin packages").
