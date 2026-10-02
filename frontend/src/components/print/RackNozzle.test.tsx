@@ -23,6 +23,11 @@ describe('RackNozzleLine (#836)', () => {
     )
   })
 
+  it('names the pick without a dash when there is no reason', () => {
+    render(<RackNozzleLine rack={{ ...rack, reason: null }} algorithm="least_used" />)
+    expect(screen.getByTestId('rack-nozzle-line').textContent).toBe('Rack nozzle: position 3 (0.4 Standard)')
+  })
+
   it('says Bambuddy picks when the algorithm leaves it to Bambuddy', () => {
     render(<RackNozzleLine rack={{ ...rack, position: null, reason: null }} algorithm="bambuddy" />)
     expect(screen.getByTestId('rack-nozzle-line')).toHaveTextContent('Rack nozzle: Bambuddy picks at dispatch')

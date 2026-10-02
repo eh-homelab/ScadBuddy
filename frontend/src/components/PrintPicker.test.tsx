@@ -1902,5 +1902,27 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
     expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
     expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
+    await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
+  it('drops the hand pick when going back to Simple, which cannot show it', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const runs = watch('POST', '/run')
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_position: null })
   })
 })

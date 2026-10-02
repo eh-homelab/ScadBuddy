@@ -137,6 +137,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setRackAlgorithm(openedAlgorithm ?? 'least_used')
     setRackPosition(null)
   }, [openedAlgorithm, printerId])
+  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
+  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
+  const { advanced } = picker
+  useEffect(() => {
+    if (!advanced) setRackPosition(null)
+  }, [advanced])
   useEffect(() => {
     setRackPosition(null)
   }, [size])
