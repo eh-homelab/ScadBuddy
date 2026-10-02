@@ -658,6 +658,18 @@ class ModelHistory:
         assert isinstance(completed.stdout, bytes)
         return completed.stdout
 
+    def blob_size(self, commit: str, path: str) -> int:
+        """The size in bytes of the file ``path`` at a revision, read from the tree
+        without reading the blob, so a caller can refuse one too large to load.
+        :class:`RevisionNotFoundError` when no file is there (a directory included)."""
+        resolved = self.resolve(commit)
+        listing = self._out("ls-tree", "-l", resolved, "--", path, check=False)
+        # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory.
+        fields = listing.partition("\t")[0].split()
+        if len(fields) != 4 or fields[1] != "blob" or not fields[3].isdigit():
+            raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
+        return int(fields[3])
+
     def parent(self, commit: str) -> str | None:
         return self._parent_of(self.resolve(commit))
 

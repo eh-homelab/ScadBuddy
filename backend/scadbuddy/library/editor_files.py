@@ -1,15 +1,18 @@
-"""Files the source editor opens read-only beside the model (#185).
+"""Files read read-only from beside a model or from a pinned library, under one root.
 
 Go-to-definition can land in a model's sibling file (an ``include``/``use`` target)
-or in a library on its ``OPENSCADPATH``. The editor has no copy of either, so it
+or in a library on its ``OPENSCADPATH`` (#185). The editor has no copy of either, so it
 reads the one file it jumps into through here, confined to one root: the model's
-directory, or one pinned library checkout.
+directory, or one pinned library checkout. A model README's relative images are read
+the same way (#951): :func:`read_file` returns the bytes, and
+:func:`read_text_file` adds the check that they are UTF-8 text.
 
 A path is relative, ``/``-separated and plain: no empty, ``.`` or ``..`` segment and
 no dot-file anywhere along it (``.git``, a model's ``.renders``), so nothing outside
 the files a model ships is reachable. The file it names must resolve, symlinks
-followed, to a regular file still under the root, and be UTF-8 text no larger than
-the caller's limit (the API's ``MAX_SOURCE_CHARS``, the cap on a model's own source).
+followed, to a regular file still under the root, no larger than the caller's limit
+(for text, the API's ``MAX_SOURCE_CHARS``, the cap on a model's own source; for an
+image, ``MAX_MODEL_IMAGE_BYTES``).
 
 The check and the read are one file: the resolved path is opened without following a
 symlink at its end (``O_NOFOLLOW``) and without blocking on a FIFO (``O_NONBLOCK``),

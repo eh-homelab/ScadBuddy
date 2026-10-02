@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import lsp
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.library.history import ModelHistory
 
 PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + b"\1" * 32
 OTHER_PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + b"\2" * 32
@@ -203,6 +204,26 @@ def test_a_revision_image_over_the_cap_is_a_413(
     commit = _commit_image(client, paths, "big.png", PNG + b"x")
     monkeypatch.setattr(lsp, "MAX_MODEL_IMAGE_BYTES", len(PNG))
 
+    def unread(*_: object) -> bytes:
+        raise AssertionError("the blob was read before its size was checked")
+
+    monkeypatch.setattr(ModelHistory, "show", unread)
     response = client.get(f"/api/v1/models/{SLUG}/images/big.png", params={"commit": commit})
 
     assert response.status_code == 413
+
+
+@pytest.mark.requires_git
+def test_a_directory_named_like_an_image_at_a_revision_is_a_404(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _upload(client)
+    (paths.model_dir(SLUG) / "dir.png").mkdir()
+    (paths.model_dir(SLUG) / "dir.png" / "inner.png").write_bytes(PNG)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    commit = state.history.commit("Add a directory", f"{model_path(SLUG)}/dir.png")
+    assert commit is not None
+
+    response = client.get(f"/api/v1/models/{SLUG}/images/dir.png", params={"commit": commit})
+
+    assert response.status_code == 404

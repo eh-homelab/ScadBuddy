@@ -154,6 +154,12 @@ describe('safeImageSrc', () => {
       '/api/v1/models/demo/images/images/a.png?commit=abc1234',
     )
     expect(safeImageSrc('/api/v1/models/demo/images/model.scad')).toBeNull()
+    // Only the model image's extension is case-blind; every other route matches exactly.
+    expect(safeImageSrc('/api/v1/models/demo/images/a.PNG')).toBe('/api/v1/models/demo/images/a.PNG')
+    expect(safeImageSrc('/api/v1/jobs/j/views/a.PNG')).toBeNull()
+    expect(safeImageSrc('/api/v1/jobs/j/COLOURS.png')).toBeNull()
+    expect(safeImageSrc('/api/v1/models/demo/THUMBNAIL')).toBeNull()
+    expect(safeImageSrc('/api/v1/models/demo/IMAGES/a.png')).toBeNull()
     expect(safeImageSrc('/api/v1/models/demo/files/a.png')).toBeNull()
     // An API path and a data: image are what they were without a base.
     expect(safeImageSrc('/api/v1/jobs/j/views/top.png', base)).toBe('/api/v1/jobs/j/views/top.png')

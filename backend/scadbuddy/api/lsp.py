@@ -237,12 +237,18 @@ def _too_large(path: str) -> ApiError:
 
 def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) -> bytes:
     require_history(history)
+    target = f"{model_path(slug)}/{path}"
     try:
-        data = history.show(commit, f"{model_path(slug)}/{path}")
+        # Sized from the tree first, as the working tree's file is stat'ed before it is
+        # read: a blob over the cap is refused without loading it.
+        if history.blob_size(commit, target) > MAX_MODEL_IMAGE_BYTES:
+            raise _too_large(path)
+        data = history.show(commit, target)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    # Larger than the tree said only if the ref moved between the two reads; still refused.
     if len(data) > MAX_MODEL_IMAGE_BYTES:
         raise _too_large(path)
     return data

@@ -24,9 +24,11 @@ const SEG = '[A-Za-z0-9._~%-]+'
 const IMAGE_ROUTES = new RegExp(
   `^/api/v1/(?:jobs/${SEG}/(?:views/${SEG}\\.png|colours\\.png)` +
     `|outputs/${SEG}/(?:thumbnail|views/${SEG}\\.png|plates/\\d+/thumbnail)` +
-    `|models/${SEG}/(?:thumbnail|images/(?:${SEG}/)*${SEG}\\.(?:png|jpe?g|gif|webp|svg)))$`,
-  'i',
+    `|models/${SEG}/thumbnail)$`,
 )
+// A model's own image (#951), any path under its folder with an image extension in
+// any case, as `GET /models/{slug}/images/{path}` serves.
+const MODEL_IMAGE_ROUTE = new RegExp(`^/api/v1/models/${SEG}/images/(?:${SEG}/)*${SEG}$`)
 
 /** The model a Markdown text belongs to, which its relative images resolve against (#951). */
 export interface ImageBase {
@@ -81,7 +83,9 @@ function apiPath(value: string): string | null {
   } catch {
     return null
   }
-  if (parsed.origin !== ORIGIN || !IMAGE_ROUTES.test(parsed.pathname)) return null
+  const path = parsed.pathname
+  const allowed = IMAGE_ROUTES.test(path) || (MODEL_IMAGE_ROUTE.test(path) && IMAGE_EXTENSION.test(path))
+  if (parsed.origin !== ORIGIN || !allowed) return null
   return parsed.pathname + parsed.search
 }
 
