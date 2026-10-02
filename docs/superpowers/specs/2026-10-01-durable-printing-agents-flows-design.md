@@ -213,13 +213,15 @@ The same for every kind:
        kind: a retry after a *completed* execution cannot start a second one. A `done`
        command finishes in under a second, so this is the usual case after a dropped
        answer. The start fails with `WorkflowAlreadyStartedError`.
-     - **Which outcomes count as "failed" in Temporal's sense:** a command's workflow
-       *fails* only when it did nothing, that is, a refusal or an error in step 3
-       before any effect. Its retry may therefore start again.
-     - Every outcome after the first effect *completes* the workflow, success or
+     - **Which outcomes count as "failed" in Temporal's sense is tied to our record.**
+       A command's workflow *fails* only when step 3 wrote no record: a refusal, or an
+       error before the insert. Nothing was done, so its retry may start again.
+     - Once the record exists, every outcome *completes* the workflow, success or
        failure, with that outcome as its result and in our record. That covers a
-       print that failed with `may_have_queued`, and a commit that failed after
-       writing. So a retry after an effect can never run it again.
+       print that failed with `may_have_queued`, a slice start that failed without a
+       job id, and a commit that failed after writing. So a retry with the same
+       `request_id` can never run it again; it gets the recorded outcome, and the next
+       deliberate press (a new `request_id`) is a new command.
      - On that error the route reads our record by `workflow_id` and answers with it,
        as the original answer would have been (`repeated: true`).
      - The route also reads the record first, before calling Temporal. That makes a
@@ -242,6 +244,16 @@ The same for every kind:
    answers today) end the workflow with nothing written. Otherwise, in one transaction, it
    writes our record and publishes the event in the same transaction
    (`PgNotifyEventBus.publish_in`, `core/pg_events.py:413`).
+   - **The insert is idempotent against Temporal retrying this activity** (a worker that
+     dies after the commit but before reporting it). Every record carries
+     `workflow_id` and `workflow_run_id` with a unique index on the pair, and the
+     insert is `ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING`. On a conflict
+     the activity re-reads the existing row and returns it. The event is published only
+     when the row was actually inserted, in the same transaction, so a retry neither
+     duplicates the row nor announces it twice.
+   - The run id is part of the key because a workflow id can have several executions
+     over time (a render's `render-<render_key>` after its first closed, a print key
+     after `REPEAT_WINDOW`), and each execution has its own row.
 4. **The answer.** Each kind declares one of two:
    - **`done`**, for commands that normally finish in under a second (a git commit, a
      delete). The route answers as it does today (200/201/204 with today's body).
@@ -286,7 +298,8 @@ The same for every kind:
 - A kind that already has its own table writes that: `render_jobs`, `print_runs`,
   `workflow_runs`.
 - Every other kind writes one generic table, `operations(id, kind, subject, status,
-  request jsonb, result jsonb, error jsonb, workflow_id, created_at, finished_at)`. It is
+  request jsonb, result jsonb, error jsonb, workflow_id, workflow_run_id, created_at,
+  finished_at)`. It is
   read by `GET /api/v1/operations/{id}` (and so a tool) and announced as `operation.*`
   events. Its pruning is a Postgres setting, `operation_retention_seconds`, like
   `print_run_retention_seconds`.
@@ -431,8 +444,9 @@ shape with answer `accepted`; renders take the same shape (§4.5).
   - The next press has a new `request_id`, so it is a new print.
   - A refused run *fails* its workflow and writes no record, so its retry is a new
     start, which is refused again or runs.
-  - A run that failed after an effect *completes* its workflow (§4.2), so its retry
-    gets that failed run, with `may_have_queued`. That is #470's rule.
+  - A run that has a record *completes* its workflow whatever its outcome (§4.2), so
+    its retry gets that run as recorded: a failure with `may_have_queued`, or a slice
+    start that failed (§5.3). That is #470's rule.
 
 ### 5.3 The workflow
 
@@ -460,7 +474,9 @@ with `may_have_queued = true`, which is today's meaning.
 A worker that dies while polling resumes polling the same job, so no second slice is
 started. If `print_slice_start` fails without returning a job id (a timeout, or a
 dropped connection after Bambuddy may have accepted it), the run fails before any
-enqueue, which is a refusal-free failure a retry may repeat.
+enqueue. The run already has its record, so this *completes* the workflow with the
+run `failed` (§4.2): a retry with the same `request_id` gets that failed run, and the
+next press is a new run.
 - Each job id is recorded, so every sliced file the run created is known.
 - `print_project` lists the sliced files of a failed run on its row.
 - An unknown job that a lost start may have created stays in Bambuddy's library. The
@@ -473,7 +489,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
   - drops `heartbeat_at`;
-  - adds `workflow_id text`.
+  - adds `workflow_id text` and `workflow_run_id text`, with a unique index on the pair
+    (§4.2 step 3).
 
   `output_id` keeps holding the run's subject as #945 records it: an output id, or
   `library:<file id>`, whose event topic is `print:library:<file id>`.
@@ -802,7 +819,8 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   - `workflow_definitions(id, name, version, script, created_by, created_at)`; versions
     are immutable.
   - `workflow_runs(id, definition_id, version, status, waiting_on jsonb, steps jsonb,
-    workflow_id, created_at, updated_at)`, written by the workflow's activities.
+    workflow_id, workflow_run_id, created_at, updated_at)`, written by the workflow's
+    activities.
 
   Creates follow §5.1: `POST /runs` is update-with-start, and the first activity
   type-checks, inserts the row and publishes the event. Each run carries §4.2's
@@ -828,13 +846,14 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   - Everything already done in the world stays done: a sliced file, a queued or finished
     print, a committed template, a tool's outward effect.
   - Every host call after the reset point runs again.
-  - Before resetting, `POST /api/v1/workflow-runs/{id}/reset {event_id}` lists the host
-    calls between that event and now that had outward effects. Those are `print`, an
-    outward `tool`, and `agent`/`ask_session` turns that made outward calls.
-  - **The list is pinned to the run's history at the moment it is shown.** The answer
+  - Before resetting, the read `GET /api/v1/workflow-runs/{id}/reset-preview?event_id=`
+    lists the host calls between that event and now that had outward effects. Those are
+    `print`, an outward `tool`, and `agent`/`ask_session` turns that made outward calls.
+    It is a read (§4.1) and changes nothing.
+  - **The list is pinned to the run's history at the moment it is shown.** The preview
     carries `as_of_event_id`, the last event of the history the list was computed from.
-    - Confirming sends `{event_id, confirm: true, as_of_event_id}`. The route recomputes
-      the list. If the history has moved past `as_of_event_id` and added an outward
+    - The command is `POST /api/v1/workflow-runs/{id}/reset {event_id, as_of_event_id}`.
+      The route recomputes the list. If the history has moved past `as_of_event_id` and added an outward
       call, it refuses with 409 and the new list, and the person confirms again.
     - The run is not paused while the person decides. A flow waiting on a printer may
       sit for hours, and pausing it would hold up work they did not ask to stop. The
@@ -854,8 +873,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   - a retry after the execution closed returns the record and does not run the effect
     again (`ALLOW_DUPLICATE_FAILED_ONLY` + record lookup);
   - a retry after a refusal starts again;
-  - a retry after a failure that followed an effect returns that failure and does not
+  - a retry after a failure that followed the record returns that failure and does not
     run the effect again;
+  - the first activity retried after its commit (the worker killed before reporting)
+    returns the same row and publishes no second event;
   - a retry after the workflow ID has been forgotten (the record exists, the history
     does not) returns the record.
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
@@ -863,6 +884,8 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   - a repeat while running, within the window, and after it;
   - both routes (output and `library:<file id>`) on the same workflow;
   - a worker killed mid-slice (resumes) and mid-enqueue (`may_have_queued`);
+  - a slice start that fails without a job id completes the run `failed`, and its retry
+    with the same `request_id` returns that run;
   - the projection's guarded transitions and the event in the same transaction;
   - the retention setting.
 
