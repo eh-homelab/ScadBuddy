@@ -194,3 +194,18 @@ def test_a_stored_allowlist_is_normalised_on_load() -> None:
         {"asset_fetch_domains": ["Example.COM.", "not a domain", "example.com"]}
     )
     assert stored.allowed_asset_domains() == ("example.com",)
+
+
+@respx.mock
+def test_a_url_that_grows_when_encoded_is_still_answered(client: TestClient) -> None:
+    """The request caps the URL as given; the parsed one percent-encodes each
+    non-ASCII character, so the answer's `source_url` must not hold it to that cap."""
+    url = "https://openmoji.org/" + "é" * 1000 + ".svg"
+    respx.get(url__startswith="https://openmoji.org/").mock(
+        return_value=httpx.Response(200, content=UNICORN_SVG)
+    )
+
+    response = _fetch(client, url)
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()["source_url"]) > 2048

@@ -154,8 +154,10 @@ class AssetFetch(BaseModel):
 
 
 class FetchedAsset(AssetMeta):
-    #: The URL as given, to credit and to fetch again.
-    source_url: str = Field(max_length=2048)
+    #: The URL as given, to credit and to fetch again. Not capped: it is the parsed
+    #: form, which percent-encodes what the request's 2048 characters allowed, and
+    #: can be longer (as `ModelRecord.origin_url`).
+    source_url: str
 
 
 @router.post(
