@@ -10,8 +10,9 @@ import { unwrapUntrusted } from '../safety/untrusted.js'
 // Derived inline, per tool call, from the call's parsed input and its result
 // (tools/registry.ts runToolWithOutcome, for any call that carries a
 // session), by the per-tool extractors in
-// EXTRACTORS below. Only calls that succeeded are recorded; a refused, denied
-// or failed call changed nothing. A `write` or `outward` tool with no
+// EXTRACTORS below. Only calls that succeeded are recorded, plus the failed
+// calls of the few tools whose error still names what they made
+// (RECORDED_WHEN_FAILED); a refused or denied call changed nothing. A `write` or `outward` tool with no
 // extractor is recorded as one `unclassified` row naming the tool, so a gap
 // shows in the list instead of the call vanishing from it; a `read` tool with
 // no extractor records nothing.
@@ -105,6 +106,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_source_file: revision,
   restore_version: (input, result) =>
     revision(input, result).map((t) => ({ ...t, before: t.before ?? str(input.commit) })),
+  // A merge is a revision (its answer wraps the ModelRecord); dismiss and detach change the model.
+  update_from_upstream: (input, result) => {
+    if (input.action === 'merge') return revision(input, field(result, 'model'))
+    const slug = str(field(result, 'slug')) ?? str(input.slug)
+    return slug ? [{ type: 'model', id: slug, action: 'modified', model: slug, after: str(field(result, 'version')) }] : []
+  },
   set_readme: revision,
   delete_readme: revision,
   set_model_thumbnail: revision,
@@ -178,8 +185,25 @@ export function resultJson(result: CallToolResult): unknown {
   }
 }
 
-/** What a successful call touched: its extractor's rows, one `unclassified` row for a write with none, else nothing. */
-export function touchesOf(tool: { name: string; risk: Risk }, input: Record<string, unknown>, result: CallToolResult): Touch[] {
+/**
+ * Tools whose error result still names what they made, so a failed call is
+ * recorded too: a render_model whose render failed, or whose save_output did,
+ * created its job all the same, and its error result is the job's summary.
+ */
+export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model'])
+
+/**
+ * What a call touched: its extractor's rows, one `unclassified` row for a
+ * write with none, else nothing. A failed call (`ok` false) touched nothing
+ * unless its tool is in RECORDED_WHEN_FAILED.
+ */
+export function touchesOf(
+  tool: { name: string; risk: Risk },
+  input: Record<string, unknown>,
+  result: CallToolResult,
+  ok = true,
+): Touch[] {
+  if (!ok && !RECORDED_WHEN_FAILED.has(tool.name)) return []
   const extract = EXTRACTORS[tool.name]
   if (extract) return extract(input, resultJson(result))
   return tool.risk === 'read' ? [] : [{ type: 'unclassified', id: null, action: 'modified' }]
@@ -190,6 +214,8 @@ export type TouchedCall = {
   tool: { name: string; risk: Risk }
   input: Record<string, unknown>
   result: CallToolResult
+  /** False for a call that ran and failed (outcome `error`); refused and denied calls are never reported. */
+  ok?: boolean
 }
 
 /** Where the harness projection reports a session's successful calls (ToolServices.touched). Never throws. */
@@ -222,8 +248,12 @@ type Row = {
 /** The longest id stored; longer ones are cut (they come from a tool result). */
 const ID_MAX = 300
 
+/** At most ID_MAX UTF-16 units, cut between code points: never half a surrogate pair. */
 function bounded(value: string | null | undefined): string | null {
-  return value == null ? null : value.slice(0, ID_MAX)
+  if (value == null || value.length <= ID_MAX) return value ?? null
+  const kept = value.slice(0, ID_MAX)
+  const last = kept.charCodeAt(kept.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? kept.slice(0, -1) : kept
 }
 
 export class SessionResources implements TouchedSink {
@@ -237,7 +267,7 @@ export class SessionResources implements TouchedSink {
 
   async record(call: TouchedCall): Promise<void> {
     try {
-      const touches = touchesOf(call.tool, call.input, call.result)
+      const touches = touchesOf(call.tool, call.input, call.result, call.ok ?? true)
       if (touches.length === 0) return
       const rows = touches.map((t) => ({
         session_id: call.sessionId,

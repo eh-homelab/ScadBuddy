@@ -62,6 +62,15 @@ describe('extractors', () => {
     ])
   })
 
+  it("records an upstream merge as a revision, and dismiss or detach as a model change", () => {
+    expect(
+      touches('update_from_upstream', { slug: 'mine', action: 'merge' }, { model: { slug: 'mine', version: C2 }, taken: [] }),
+    ).toEqual([{ type: 'revision', id: C2, action: 'created', model: 'mine', before: null, after: C2 }])
+    expect(touches('update_from_upstream', { slug: 'mine', action: 'detach' }, { slug: 'mine', version: C1 })).toEqual([
+      { type: 'model', id: 'mine', action: 'modified', model: 'mine', after: C1 },
+    ])
+  })
+
   it('records models created, duplicated, changed and deleted', () => {
     expect(touches('create_model', { name: 'Box' }, { slug: 'box', version: C1 })).toEqual([
       { type: 'model', id: 'box', action: 'created', model: 'box', before: null, after: C1 },
@@ -127,6 +136,17 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a failed render_model (its job was made), and no other failed call', () => {
+    const failed = (name: string, input: Record<string, unknown>, data: unknown) =>
+      touchesOf({ name, risk: 'write' }, input, { ...result(data, name), isError: true }, false)
+    expect(failed('render_model', { slug: 'box' }, { job_id: 'j1', status: 'failed', model_version: C1 })).toEqual([
+      { type: 'render_job', id: 'j1', action: 'created', model: 'box', after: C1 },
+    ])
+    // apply_patch's conflict answer is JSON too, but nothing was written.
+    expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
+    expect(failed('set_print_options', {}, {})).toEqual([])
+  })
+
   it('records nothing it cannot name, rather than a row with no id', () => {
     expect(touches('save_preset', { slug: 'box' }, 'not an object')).toEqual([])
     expect(touches('update_source', {}, {})).toEqual([])
@@ -172,7 +192,7 @@ describe('the harness projection', () => {
     ])
   })
 
-  it('reports nothing for a failed call, or outside a session', async () => {
+  it('reports a failed call as failed, and nothing outside a session', async () => {
     backend.use(
       http.put(`${BACKEND}/api/v1/models/box/source`, () => HttpResponse.json({ detail: 'nope' }, { status: 422 })),
       http.put(`${BACKEND}/api/v1/models/ok/source`, () => HttpResponse.json({ slug: 'ok', version: C2 })),
@@ -185,7 +205,9 @@ describe('the harness projection', () => {
     const outside = await connect(undefined, seen)
     await outside.callTool({ name: 'update_source', arguments: { slug: 'ok', source: '' } })
     await outside.close()
-    expect(seen).toEqual([])
+    // The failed call reaches the sink as failed, which records nothing for it.
+    expect(seen.map((c) => [c.sessionId, c.tool.name, c.ok])).toEqual([['sess-1', 'update_source', false]])
+    expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([])
   })
 
   it('records from runToolWithOutcome itself, so a path that bypasses the projection still records', async () => {
@@ -229,6 +251,28 @@ describe('the harness projection', () => {
     expect(seen.map((c) => c.tool.name)).toEqual(['delete_model'])
     expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result)).toEqual([
       { type: 'model', id: 'box', action: 'deleted', model: 'box' },
+    ])
+  })
+
+  it('records a render whose save_output failed: the job, with the reason in the result', async () => {
+    backend.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json({ groups: [], parameters: [] })),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () =>
+        HttpResponse.json({ job_id: 'j9', status_url: '/api/v1/jobs/j9' }, { status: 202 }),
+      ),
+      http.get(`${BACKEND}/api/v1/jobs/j9`, () => HttpResponse.json({ id: 'j9', slug: 'box', status: 'done', params: {} })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, () => HttpResponse.json({ detail: 'disk full' }, { status: 507 })),
+    )
+    const seen: TouchedCall[] = []
+    const mcp = await connect('sess-4', seen)
+    const answer = await mcp.callTool({ name: 'render_model', arguments: { slug: 'box', save_output: true } })
+    await mcp.close()
+    expect(answer.isError).toBe(true)
+    expect(resultJson(answer as never)).toMatchObject({ job_id: 'j9', output: null, output_error: expect.stringContaining('disk full') })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.ok).toBe(false)
+    expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([
+      { type: 'render_job', id: 'j9', action: 'created', model: 'box', after: null },
     ])
   })
 })

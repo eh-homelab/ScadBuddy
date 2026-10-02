@@ -192,13 +192,21 @@ export const customizerTools: Tool[] = [
         return json({ ...summary, note: 'still rendering; poll get_render_job with this job_id' })
       }
       if (!save_output) return json(summary)
-      const output = await ok(
-        ctx.backend.POST('/api/v1/models/{slug}/outputs', {
-          params: { path: { slug } },
-          body: { job_id: job.id, name: output_name ?? null },
-        }),
-        `save output of ${job.id}`,
-      )
+      let output
+      try {
+        output = await ok(
+          ctx.backend.POST('/api/v1/models/{slug}/outputs', {
+            params: { path: { slug } },
+            body: { job_id: job.id, name: output_name ?? null },
+          }),
+          `save output of ${job.id}`,
+        )
+      } catch (err) {
+        // The render is done; only the save failed. Still the job's summary, so the
+        // job can be saved again with save_output and is recorded as made (#931).
+        if (!(err instanceof ToolError)) throw err
+        return { ...json({ ...summary, output: null, output_error: err.message }), isError: true }
+      }
       return json({ ...summary, output })
     },
   }),

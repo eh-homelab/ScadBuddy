@@ -298,12 +298,13 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   // projection, so every path that runs a session's tool records it (the
   // harness server today; a durable session's tool activities would call
   // this too). The tool that ran, as it ran; never fails the call.
-  if (ctx.session !== undefined && done.outcome === 'ok' && ctx.touched) {
+  if (ctx.session !== undefined && (done.outcome === 'ok' || done.outcome === 'error') && ctx.touched) {
     await ctx.touched.record({
       sessionId: ctx.session,
       tool: ranTool(tool, done, ctx),
       input: done.ran?.input ?? parsedOrRaw(tool, args),
       result: done.result,
+      ok: done.outcome === 'ok',
     })
   }
   return done

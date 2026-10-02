@@ -114,6 +114,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     ])
   })
 
+  it('cuts a long id between code points, never inside a surrogate pair', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    // 299 units then a two-unit emoji: a 300-unit cut would keep half of it.
+    const long = `${'x'.repeat(299)}😀tail`
+    await store.record({
+      sessionId: session.id,
+      tool: { name: 'delete_model', risk: 'outward' },
+      input: { slug: long },
+      result: { content: [] },
+    })
+    const [row] = await m.resources(session.id, browser)
+    expect(row!.id).toBe('x'.repeat(299))
+  })
+
   it('reports a row it cannot write, and never throws', async () => {
     const errors: unknown[] = []
     const broken = new SessionResources(db.sql, (err) => errors.push(err))
