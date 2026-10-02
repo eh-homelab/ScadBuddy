@@ -192,6 +192,12 @@ cannot count a print twice. `rack_nozzle_seen` is the one upsert:
 `ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id`, which
 moves the hotend's printer and never touches `first_seen_at`.
 
+For `rack_nozzle_picks` a conflict is never expected: Bambuddy mints a new queue item
+id per `POST /queue/`, and the write runs once per item. `DO NOTHING` is kept so a
+replayed run cannot fail a print that is already queued. `record_picks` returns the
+rows written, and the caller logs a warning when that is fewer than it sent, so a
+bug that writes twice still surfaces (#1015).
+
 `rack_nozzle_seen`, primary key `serial`:
 
 | Column | Type | Notes |
@@ -232,6 +238,12 @@ keeps its `first_seen_at` and its print history, and the write updates
   Not from `BambuddyClient.printer_status` itself: `download.py` and
   `project_file.py` read status for other reasons, and "first seen" means first
   seen by the print flow, which is what Oldest and Newest first rank on.
+- Within `choose_rack`, `usage(serials)` is read **before** that read's
+  `rack_nozzle_seen` write (#1015). `prepare_run`'s read has normally recorded the
+  hotend already, so a hotend new to the print flow reaches the ranking with a
+  `first_seen_at` of moments ago. That is the newest of all, so it orders exactly as
+  `None` does: last for Oldest first, first for Newest first. `None` itself is reached
+  only when no earlier read recorded it.
 - The pick writes its `rack_nozzle_picks` rows right after `POST /queue/` returns
   the item id.
 - The settle writes `rack_nozzle_prints`. `runs.py` cannot: a run finishes at
@@ -373,6 +385,12 @@ made per rack side, not per group:
 - `manual` is `{group_id: position}`. Its positions are placed first and
   excluded for every other group, so a manual pick and a ranked one can never
   name the same position.
+- `rank_rack` re-checks each manual entry against the **sliced** group's diameter and
+  flow, like any ranked pick (#1016). One that does not fit is not sent: that group is
+  ranked like any other, and the run carries `rack-manual-partial` naming the position
+  and the group. Both the 422 and the preview judge the flow the slice will carry,
+  which is Standard while #484 is open, because that is the flow Bambuddy re-checks
+  at dispatch.
 
 `Pick` is internal and carries the serial: `group_id`, `position`, `serial`,
 `reason`, `unsafe_material: bool` and the ranked `candidates`. Each candidate
@@ -417,8 +435,12 @@ blocks Print.
 the same rack read and pick the same position, and that is fine: a queue item's
 pick applies when Bambuddy dispatches that item, and Bambuddy prints a
 printer's items one at a time, so two items naming one position never use it at
-once. There is no reservation between the read and `POST /queue/`. Positions are
-exclusive only within one plate's groups (§3), because those print together.
+once. There is no reservation between the read and `POST /queue/`. The same holds
+for color: two requests ranked against one rack read can both prefer
+the position holding their color, and the one dispatched second finds that hotend
+holding the first print's color. Bambuddy re-checks diameter and flow at dispatch,
+never color, so the second print loses only the purge saving. It does not fail.
+Positions are exclusive only within one plate's groups (§3), because those print together.
 
 **Failure handling.**
 
@@ -516,6 +538,12 @@ Serials go into the three `rack_nozzle_*` tables and nowhere else. They never ap
 in logs, in API errors, in the print dialog (which shows positions), in test
 fixtures (which use invented serials), or in commits.
 
+**Decision (#1011).** The type-name-only rule is kept knowingly. A failure on these
+paths is logged with a fixed message naming the step, `type(exc).__name__` and the
+ids, which says *where* and *what class* failed. A redaction pass over `str(exc)` was
+rejected: it would have to know every serial format the firmware might report, and
+one it missed would leak.
+
 ## 8. Unknowns to settle before building on them
 
 | # | Question | Test | If it fails |
@@ -560,6 +588,8 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
     both never matching;
   - three groups over two shared positions: deterministic picks, and the group
     left with nothing gets no pick and a warning;
+    - this test is a **permanent** regression test of the allocation order: a change to
+      the order must change it deliberately (#1012).
   - an order where a static sort and the dynamic re-count disagree: the
     dynamic order wins (a group whose options drop to one after the first pick
     goes next);
@@ -613,3 +643,34 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
 - Frontend tests: the Simple line, the warning, and the Advanced selects sending
   a manual pick.
 - Live acceptance after deploy (unknown 3 above), recorded in §8.
+
+## 10. Rulings made while planning (2026-10-02)
+
+- §9 asks a `slice_and_queue` test for "a raise from it queues the item without one";
+  §5 is the design: `slice_and_queue` awaits `choose_rack` bare, so a raise from the
+  callback itself fails the plate with nothing queued, and the no-choice behavior is
+  tested on a raise *inside* the callback's body.
+- Under "Let Bambuddy pick" a manual pick is still sent for its group: it is the user's
+  explicit choice for this print. The other groups get no pick.
+- Under "Let Bambuddy pick" with a manual pick and several `on_rack` groups,
+  `rack-manual-partial` is still emitted, though the other groups get no pick: the note
+  names the groups Bambuddy picks for, and `rack-left-to-bambuddy` is not added for
+  them.
+- `PrintRunRequest.rack_algorithm` overrides the remembered algorithm for one print, so
+  the dialog's preview matches its selector; the selector also remembers it per printer.
+- `choose_rack` reads the requirements first; a plate with no `on_rack` group reads no
+  status and warns of nothing (unless a manual pick was made: "manual rack pick unused").
+- The rack-side hotend on the carriage (status id 0, `RACK_SIDE`) is the one missing
+  position when exactly one of 16-21 is absent, as Bambuddy's `_rack_by_position`.
+- A rack color whose alpha byte is `00` (the rack reports `00000000` for a hotend with
+  no filament loaded) is no color: it never matches, not even a black group.
+- `RackOption` also carries `nozzle_diameter` and `flow`; `RackPickView` carries
+  `glow_unchecked`, and its `group_id` is `null` in the preview.
+- An empty `serial_number` is skipped by `seen()`; a pick of such a hotend is sent but
+  writes no `rack_nozzle_picks` row.
+- A stale rack pick (Bambuddy rejects it at dispatch) shows in the print's progress
+  only, not in the run result: the result is fixed at queue time, and a dispatch
+  failure postdates it. §9's stale-pick test therefore asserts progress, not the run result.
+- `watcher.py` does not import or call the rack code. The rack component registers an
+  `on_settled` hook (`settle_hook`) on `PrintWatcher`, which keeps `watcher.py` free of
+  feature imports and SQL, §6's intent.
