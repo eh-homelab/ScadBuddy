@@ -169,6 +169,7 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     sent = json.loads(queued.calls.last.request.content)
     assert sent["printer_id"] == 1
     assert sent.get("ams_mapping") is None
+    # The recorded requirements carry no group, so nothing prints from the rack (#836).
     assert sent.get("nozzle_rack_choice") is None
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
@@ -604,6 +605,9 @@ def test_all_plates_pads_a_plate_that_uses_only_slot_2(
                     ],
                 },
             ),
+            # Then each sliced file's own read for its rack groups (#836), none here.
+            httpx.Response(200, json=recording("filament-requirements.json")),
+            httpx.Response(200, json=recording("filament-requirements.json")),
         ]
     )
     sliced = slice_routes()
@@ -612,6 +616,7 @@ def test_all_plates_pads_a_plate_that_uses_only_slot_2(
     response = run_print(client, output_id, json=run_request(all_plates=True))
 
     assert response.status_code == 200, response.text
+    assert all(w["kind"] != "rack-left-to-bambuddy" for w in response.json()["warnings"])
     bodies = [json.loads(call.request.content) for call in sliced.calls]
     assert [slice_body["plate"] for slice_body in bodies] == [1, 2]
     # Plate 1 is dense (both slots used).
@@ -935,7 +940,9 @@ def test_an_all_plates_run_reads_the_assignments_and_printer_once(
     assert response.status_code == 200, response.text
     assert reads("/inventory/assignments") == 1
     assert reads("/printers/1/inventory-remain") == 1
-    assert reads("/filament-requirements") == 2
+    # Each plate's slots once, then each sliced file once more for its rack groups
+    # (``choose_rack``, #836): that read is of the slice, which only exists per plate.
+    assert reads("/filament-requirements") == 4
 
 
 # --- final review 2: the run refuses a printer it cannot resolve presets for ----------
@@ -1516,3 +1523,148 @@ def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
     # Bambuddy's own 422, passed through by errors.py, not a 200 carrying a verdict.
     assert check.status_code == 422, check.text
     assert "errors" not in check.json()
+
+
+# --- #836: the rack pick, ranked per plate after the slice ------------------------------
+
+
+def grouped_requirements_route(
+    *,
+    sliced_id: int = 77,
+    filament_type: str = "PLA",
+    color: str = "#FF6A13",
+    diameter: str = "0.40",
+) -> None:
+    """The sliced file's requirements grouped as on library file 228 (spec §8 unknown 2);
+    every other file answers the recording. Registered with ``inventory_routes``' pattern,
+    so respx re-uses that route and this answer replaces its own."""
+    base = recording("filament-requirements.json")
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if f"/library/files/{sliced_id}/" not in request.url.path:
+            return httpx.Response(200, json=base)
+        filament = {
+            "slot_id": 1,
+            "type": filament_type,
+            "color": color,
+            "used_grams": 3.2,
+            "used_meters": 1.1,
+            "used_in_plate": True,
+            "group_id": 0,
+            "group": {
+                "on_rack": True,
+                "nozzle_diameter": diameter,
+                "volume_type": "Standard",
+                "filament_color": color,
+            },
+        }
+        return httpx.Response(200, json={"file_id": sliced_id, "filaments": [filament]})
+
+    respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
+        side_effect=answer
+    )
+
+
+@respx.mock
+def test_the_ranked_rack_choice_is_sent(client: TestClient, model: str) -> None:
+    """Spec §1: with a readable rack and a sliced group, the ranked pick is sent. The
+    recorded rack's 0.4 Standard positions are 2, 4 and 6; position 4 holds FF6A13."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    grouped_requirements_route()
+    slice_routes()
+    queued = queue_route()
+
+    response = run_print(client, output_id, json=body(nozzles=[{"size": "0.4"}], tier="standard"))
+
+    assert response.status_code == 200, response.text
+    assert json.loads(queued.calls.last.request.content)["nozzle_rack_choice"] == {"0": 4}
+
+
+@respx.mock
+def test_a_rack_position_chosen_by_hand_is_sent(client: TestClient, model: str) -> None:
+    """Spec §5: the dialog's manual position wins over the ranking where it fits."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    grouped_requirements_route()
+    slice_routes()
+    queued = queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "rack_position": 6},
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(queued.calls.last.request.content)["nozzle_rack_choice"] == {"0": 6}
+
+
+@respx.mock
+def test_let_bambuddy_pick_sends_no_choice(client: TestClient, model: str) -> None:
+    """The request's algorithm wins over the printer's remembered one (Least used)."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    grouped_requirements_route()
+    slice_routes()
+    queued = queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "rack_algorithm": "bambuddy"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(queued.calls.last.request.content).get("nozzle_rack_choice") is None
+
+
+@respx.mock
+def test_an_unreadable_rack_sends_no_choice_and_says_so(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    grouped_requirements_route()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    slice_routes()
+    queued = queue_route()
+
+    response = run_print(client, output_id, json=body(nozzles=[{"size": "0.4"}], tier="standard"))
+
+    assert response.status_code == 200, response.text
+    assert json.loads(queued.calls.last.request.content).get("nozzle_rack_choice") is None
+    assert {(w["kind"], w["message"]) for w in response.json()["warnings"]} >= {
+        ("rack-left-to-bambuddy", "Rack pick left to Bambuddy: status unreadable.")
+    }
+
+
+@respx.mock
+def test_a_rack_warning_repeated_on_every_plate_is_shown_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Spec §6: rack warnings join the plate loop's de-duplication."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    grouped_requirements_route(filament_type="PLA-CF")
+    slice_routes()
+    queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json=run_request(
+            all_plates=True, choices={"nozzles": [{"size": "0.4"}], "tier": "standard"}
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    kinds = [w["kind"] for w in response.json()["warnings"]]
+    assert kinds.count("rack-unsafe-material") == 1

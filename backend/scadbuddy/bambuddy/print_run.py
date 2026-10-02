@@ -9,7 +9,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -18,13 +18,14 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
+from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    SpoolOption,
     across_plates,
     check,
     every_plate,
@@ -37,7 +38,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import FilamentRequirements, PrinterStatus, RackAlgorithm
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import (
@@ -53,7 +54,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.rack.usage import RackUsage, record_seen
+from scadbuddy.rack.rank import manual_for, rack_groups, rack_serials, rack_warnings, rank_rack
+from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,12 @@ class PrintRunRequest(BaseModel):
     #: Bambu's ``print_sequence`` for this print (#907), a process override over the
     #: template's ``print_settings``. Omitted means whatever those and the process say.
     print_sequence: PrintSequence | None = None
+    #: A rack position (1-6) chosen by hand for the rack side (#836, spec 2026-10-01 §5).
+    #: Omitted is Automatic: ScadBuddy ranks the rack.
+    rack_position: int | None = Field(default=None, ge=1, le=6)
+    #: How to rank the rack for this print (#836). Omitted means the printer's remembered
+    #: algorithm, else Least used.
+    rack_algorithm: RackAlgorithm | None = None
 
 
 class PrintRunResult(BaseModel):
@@ -254,6 +262,98 @@ class PrintCheck(BaseModel):
 
     errors: list[str] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
+
+
+ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
+
+
+class RackReads(Protocol):
+    """The two reads ``choose_rack`` makes; ``BambuddyClient`` is one."""
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements: ...
+
+    async def printer_status(self, printer_id: int) -> PrinterStatus: ...
+
+
+def rack_chooser(
+    client: RackReads,
+    *,
+    printer_id: int,
+    plate_id: int,
+    spools: Mapping[int, SpoolOption],
+    algorithm: RackAlgorithm,
+    manual_position: int | None,
+    rack: RackUsage | None,
+    warnings: list[FilamentWarning],
+) -> ChooseRack:
+    """The plate's ``choose_rack`` (spec 2026-10-01 §5). It reads the sliced file's
+    requirements for ``plate_id`` and then, only when a group prints from the rack, a
+    fresh status, once per plate and never ``PreparedRun.printer_status``. It ranks, and
+    appends its warnings to ``warnings``, the plate's list. It **never raises**: the whole
+    body is one ``try``, and on any exception it logs a fixed message with the exception's
+    type, appends ``rack-left-to-bambuddy`` and returns ``None``, so Bambuddy picks."""
+
+    async def choose(sliced: int) -> RackChoice | None:
+        stage = "requirements unreadable"
+        try:
+            requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+            stage = "rack pick failed"
+            groups = rack_groups(requirements.filaments, spools)
+            manual, notes = manual_for(groups, manual_position, algorithm)
+            if not groups:
+                warnings.extend(notes)
+                return None
+            stage = "status unreadable"
+            status_read = await client.printer_status(printer_id)
+            stage = "rack usage unreadable"
+            # Read before this read is recorded as seen (#1015).
+            usage = (
+                await rack.usage(rack_serials(status_read.nozzle_rack))
+                if rack is not None and algorithm != "bambuddy"
+                else {}
+            )
+            await record_seen(rack, printer_id, status_read)
+            stage = "rack pick failed"
+            picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
+            found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
+            ordered = sorted(picks.items())
+            choice = (
+                RackChoice(
+                    nozzle_rack_choice={str(group_id): pick.position for group_id, pick in ordered},
+                    picks=[
+                        PickedHotend(group_id=group_id, position=pick.position, serial=pick.serial)
+                        for group_id, pick in ordered
+                    ],
+                )
+                if ordered
+                else None
+            )
+        except Exception as exc:
+            # Never str(exc) or a traceback: an error's text can carry a serial (§7).
+            logger.warning(
+                "rack pick left to Bambuddy",
+                extra={"printer_id": printer_id, "stage": stage, "error": type(exc).__name__},
+            )
+            warnings.append(
+                FilamentWarning(
+                    kind="rack-left-to-bambuddy", message=f"Rack pick left to Bambuddy: {stage}."
+                )
+            )
+            return None
+        # Only once the pick is made: a read that failed above says only why (F8).
+        warnings.extend(notes)
+        warnings.extend(found)
+        return choice
+
+    return choose
+
+
+def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, SpoolOption]:
+    """Each plate slot's chosen inventory spool, for the Glow test (spec §3)."""
+    by_id = {spool.spool_id: spool for spool in options.spools}
+    return {slot.slot_id: by_id[slot.spool_id] for slot in plan.slots if slot.spool_id in by_id}
 
 
 async def check_print(
@@ -490,10 +590,12 @@ async def execute_run(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     hardware += high_flow_warnings(printer_status, choices.nozzles)
+    algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id)
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
     warnings: list[FilamentWarning] = []
     for plate_id, options, resolved, plan in planned:
+        rack_notes: list[FilamentWarning] = []
         outcome = await slice_and_queue(
             client,
             library_file_id=library_file_id,
@@ -505,11 +607,26 @@ async def execute_run(
             project_id=project_id,
             options=print_options,
             before_enqueue=before_enqueue,
+            choose_rack=rack_chooser(
+                client,
+                printer_id=printer_id,
+                plate_id=plate_id,
+                spools=_spools_by_slot(options, request.filament_plan),
+                algorithm=algorithm,
+                manual_position=request.rack_position,
+                rack=rack,
+                warnings=rack_notes,
+            ),
         )
         sent = await source.record(library_file_id, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
-        for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
-            # Checked once below, against what every plate needs together.
+        for warning in [
+            *resolved.warnings,
+            *check(options, request.filament_plan, copies=copies),
+            *rack_notes,
+        ]:
+            # Checked once below, against what every plate needs together. A rack
+            # warning repeated on every plate is one fact, shown once (spec §6).
             if warning.kind != "low-filament" and warning not in warnings:
                 warnings.append(warning)
     warnings += [
