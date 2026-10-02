@@ -278,4 +278,18 @@ describe('the harness projection', () => {
       { type: 'render_job', id: 'j9', action: 'created', model: 'box', after: null },
     ])
   })
+
+  it('answers the call unchanged when the sink throws', async () => {
+    backend.use(http.put(`${BACKEND}/api/v1/models/box/source`, () => HttpResponse.json({ slug: 'box', version: C2 })))
+    const tool = ALL_TOOLS.find((t) => t.name === 'update_source')!
+    const run = await runToolWithOutcome(tool, { slug: 'box', source: '' }, {
+      ...services({ touched: { record: () => Promise.reject(new Error('sink broke')) } }),
+      principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+      progress: async () => {},
+      signal: new AbortController().signal,
+      session: 'sess-5',
+    })
+    expect(run.outcome).toBe('ok')
+    expect(resultJson(run.result)).toEqual({ slug: 'box', version: C2 })
+  })
 })

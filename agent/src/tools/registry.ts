@@ -301,13 +301,19 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   // 2026-10-01-durable-printing-agents-flows-design.md §5.3, call this too).
   // The tool that ran, as it ran; never fails the call.
   if (ctx.session !== undefined && (done.outcome === 'ok' || done.outcome === 'error') && ctx.touched) {
-    await ctx.touched.record({
-      sessionId: ctx.session,
-      tool: ranTool(tool, done, ctx),
-      input: done.ran?.input ?? parsedOrRaw(tool, args),
-      result: done.result,
-      ok: done.outcome === 'ok',
-    })
+    // A sink should never throw (TouchedSink); held to that here, so a sink
+    // that does cannot turn a call that ran into one that failed.
+    try {
+      await ctx.touched.record({
+        sessionId: ctx.session,
+        tool: ranTool(tool, done, ctx),
+        input: done.ran?.input ?? parsedOrRaw(tool, args),
+        result: done.result,
+        ok: done.outcome === 'ok',
+      })
+    } catch {
+      // Nothing to report it to: the sink's own onError is where its failures go.
+    }
   }
   return done
 }
