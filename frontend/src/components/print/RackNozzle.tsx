@@ -38,9 +38,12 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
       <legend className="px-1 text-[13px] text-ink">Rack nozzle</legend>
-      <label className="mt-1.5 flex flex-col gap-1 text-[12px] text-muted">
-        Algorithm
+      <div className="mt-1.5 flex flex-col gap-1">
+        <label htmlFor="rack-algorithm" className="text-[12px] text-muted">
+          Algorithm
+        </label>
         <select
+          id="rack-algorithm"
           aria-label="Rack algorithm"
           value={algorithm}
           onChange={(event) => onAlgorithm(event.target.value as RackAlgorithm)}
@@ -52,10 +55,13 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
             </option>
           ))}
         </select>
-      </label>
-      <label className="mt-1.5 flex flex-col gap-1 text-[12px] text-muted">
-        Nozzle
+      </div>
+      <div className="mt-1.5 flex flex-col gap-1">
+        <label htmlFor="rack-position" className="text-[12px] text-muted">
+          Nozzle
+        </label>
         <select
+          id="rack-position"
           aria-label="Rack nozzle position"
           value={position === null ? '' : String(position)}
           onChange={(event) => onPosition(event.target.value === '' ? null : Number(event.target.value))}
@@ -68,7 +74,7 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
             </option>
           ))}
         </select>
-      </label>
+      </div>
     </fieldset>
   )
 }
