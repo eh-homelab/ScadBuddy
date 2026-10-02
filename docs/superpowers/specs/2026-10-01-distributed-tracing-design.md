@@ -168,10 +168,19 @@ SPA's static fallback, so the path never serves `index.html`. Same origin, so
 it works inside the Bambuddy iframe. Clusters' HTTPRoute already sends every
 path except `/api/v1/ai/*` to the backend.
 
-- **Browser, same origin only.** Every other browser-reachable backend route
-  is either a read or the realtime socket. The relay is the backend's first
-  unauthenticated POST meant for browser JS, so a page on another origin
-  must not be able to drive it (to spend its budget or inject spans).
+- **Browser, same origin only.** A page on another origin must not be able
+  to drive the relay through a LAN user's browser, to spend its budget or
+  inject spans. The relay is **not** unusual in being exposed to this. Today
+  the backend's REST writes accept any `Origin`: creating and deleting models,
+  restoring revisions, submitting renders, sending and printing through
+  Bambuddy. That is tracked in #962, and it is a much more serious exposure
+  than this one.
+  - The relay's check is the same check #962 calls for, written so that
+    #962 can lift it into a shared guard for every write. When #962 lands,
+    the relay uses that guard instead of its own copy.
+  - Until then the relay ships with its own copy, rather than adding one
+    more unchecked POST.
+  - This design does not fix #962 and does not depend on it.
   - First, a separate check: a request with no `Origin` is refused.
     `origin_allowed` cannot do this, because it returns `True` for `None`
     on purpose (for the socket, a non-browser caller is as trusted as a REST
@@ -204,8 +213,10 @@ path except `/api/v1/ai/*` to the backend.
   retry. A **per-process** bucket caps the relay's total rate whatever the
   client, so no spoofing of the client's address raises what one pod sends
   the collector. It is per pod, not cluster-wide: with N API replicas the
-  ceiling is N times the configured rate. The API runs one replica
-  (`replicas: 1`), and a shared bucket in Postgres would cost a write per
+  ceiling is N times the configured rate. The API runs one replica (as of
+  2026-10-01, `replicas: 1` in eh-homelab/clusters'
+  `applications/scadbuddy/scadbuddy.yaml`; clusters#1596 Phase 5 is where a
+  change to that would have to adjust this rate), and a shared bucket in Postgres would cost a write per
   batch on a path whose only job is to be cheap. So this approximation is
   accepted and documented beside the setting. Scaling the API means dividing
   the rate by the replica count. A **per-client** bucket sits under it. The client is the immediate peer's address unless that peer
@@ -618,6 +629,12 @@ One PR per row, in order; each is useful alone.
 | 3 | Agent telemetry, manual spans, `ai_approvals.traceparent` and the end-and-link approvals | 1 (for end-to-end), not for its own tests |
 | 4 | Frontend SDK, `RelayExporter`, the `vite.config.ts` proxy rule | 2 |
 | 5 | `deploy/grafana/`, its lint with a pinned kustomize, and the optional-line `ref` rewrite in `deploy.reusable.yml` with its tests | clusters#1596 Phase 4 for the Tempo panels |
+
+Row 3 can ship before rows 2 and 4. Until they land, an agent turn's trace
+simply starts at the agent instead of the browser: the chat socket's
+`traceparent` is optional (§4), and without one `agent.turn` is the root.
+Nothing in the agent waits on the relay. Rows 2 and 4 only add the browser
+segment in front of it.
 
 Clusters#1596 Phases 1–4 can proceed in parallel. Spans flow end to end once
 Phase 3 routes `alloy-receiver` to Tempo and Phase 5 sets the endpoint on the
