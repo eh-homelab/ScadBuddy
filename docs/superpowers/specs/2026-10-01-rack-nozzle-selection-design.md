@@ -114,6 +114,12 @@ CF print with no safe nozzle, and that costs a print. The trade is taken
 knowingly: on a plate with no abrasive filament anywhere, a brass nozzle holding
 the wrong color beats a hardened one holding the right color.
 
+Color also ranks above the algorithm on purpose, including an algorithm the
+user chose explicitly in Settings. The algorithm only orders the hotends among
+the remaining candidates. It answers "which of these equivalent hotends wears
+next," not "skip the hotend that already holds my color." A user who wants
+usage to win over color picks the position by hand.
+
 1. **Material safe for the filament.** An abrasive filament needs a hardened
    nozzle. A filament is abrasive when either:
    - its `filament-requirements` `type`, split on `-` and spaces, has a `CF` or
@@ -447,7 +453,10 @@ so the trade is accepted.
 - `bambuddy/filaments.py`: three new `WarningKind` literals beside `hf-mounted`,
   both carried on `PrintRunResult.warnings` and on `/check`'s warnings like the
   existing kinds:
-  - `rack-unsafe-material`: the pick is not hardened for an abrasive group;
+  - `rack-unsafe-material`: the pick is not hardened for an abrasive group.
+    This is checked on every sent pick, so a manual pick is checked too. A
+    manual pick of a non-hardened position for an abrasive group is still sent,
+    because it is the user's call, and it carries this warning;
   - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
     unreadable", "requirements unreadable", "no eligible position for group N").
     This is the message §5's failure table promises. It means Bambuddy chose,
