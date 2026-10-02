@@ -227,6 +227,24 @@ The same for every kind:
      - The route also reads the record first, before calling Temporal. That makes a
        repeat cheap, and it still holds after the namespace's 168h retention has
        forgotten the ID.
+     - **How "a record means the workflow completes" is enforced**, since Temporal does
+       not do it for us. Two guards, either of which is enough:
+       - *The record lookup comes first.* A retry whose `request_id` already has a
+         record is answered from the record and never reaches
+         `start_workflow`, whatever state the execution closed in (`Failed`,
+         `TimedOut`, `Terminated` or `Canceled`, all of which
+         `ALLOW_DUPLICATE_FAILED_ONLY` would let a new start reuse). The reuse policy
+         only covers the window before the record exists, when there is no effect to
+         repeat.
+       - *The command workflow base class never lets the execution fail after the
+         record.* Everything after step 3 runs inside one `try`: an `ActivityError`,
+         `ApplicationError` or cancellation is caught, written through the kind's
+         projection activity as an `unexpected` failed outcome with its message, and
+         the workflow returns normally. Any other exception in workflow code is, in
+         the Python SDK, a failed *workflow task* that Temporal retries, so it leaves
+         the execution running, not `Failed`. Command workflows set no execution or
+         run timeout, so none can close `TimedOut`. An operator's terminate is the
+         one way left, and the first guard covers it.
    - A body-only print key (a client that sends no `request_id`) keeps #470's rule
      instead: a repeat within `REPEAT_WINDOW` is the same run, and after it a new one
      (§5.2). Such a print uses `ALLOW_DUPLICATE` with the window.
@@ -680,8 +698,9 @@ the most constrained runtime in the system.
   `ai_durable_entries` (or `ai_session_entries`) and the session counters. It can do
   nothing else.
 - **Network.** A NetworkPolicy in `eh-homelab/clusters` allows egress only to Postgres,
-  the Temporal frontend, and the credential's endpoint: `api.anthropic.com`, or the
-  gateway's `base_url`. Nothing is fetched at run time: the pinned package is installed
+  the Temporal frontend, the cluster DNS (kube-dns/CoreDNS, UDP and TCP 53, which a
+  default-deny egress policy otherwise blocks), and the credential's endpoint:
+  `api.anthropic.com`, or the gateway's `base_url`. Nothing is fetched at run time: the pinned package is installed
   at build.
 - **The credential** is decrypted per segment, passed to the runner's `env`, and never
   logged, written to disk or put in history (§6.2).
@@ -804,7 +823,11 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   outward.
 - The host functions are harness tools (`@agent.activity_tool_defn`, or workflow
   functions for the child workflows). Approvals use the harness's `ToolApprovalPolicy`:
-  an outward `tool(...)` goes to a human, through the same panel and an Update. Event
+  an outward `tool(...)` goes to a human through the Workflows page (§7.3), whose
+  Approve/Deny sends the harness's Update. A flow has no chat session, so its approvals
+  do not appear in the assistant's panel. An `agent(...)` step is a durable session of
+  its own, and that session's approvals appear in the assistant's panel (§6.4), with
+  the Workflows page linking to it. Event
   streams and continue-as-new use the harness defaults.
 - Type checking (`code_mode_type_check`) runs when a flow is registered, and again before
   each run. A script that fails is refused with its errors, by line.
@@ -833,7 +856,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   them as activities.
 - `ask_session` reaches durable sessions only. A classic session is not a workflow.
 - **UI:** Settings → Administration links to the Temporal UI already (#668). A minimal
-  Workflows page lists runs with their status, what each waits on, and Approve/Answer. An
+  Workflows page lists runs with their status, what each waits on, and Approve/Answer.
+  It is the one place a flow's own approvals and `wait_for_human` questions are
+  answered (§7.2); both read the pending request from the workflow and answer it with
+  an Update, so there is no second copy to keep in sync. An
   agent panel links to the runs its session started.
 
 ### 7.4 Changing course: Temporal Reset
@@ -877,6 +903,12 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
     run the effect again;
   - the first activity retried after its commit (the worker killed before reporting)
     returns the same row and publishes no second event;
+  - for every kind, a generic property test injects an exception at each activity
+    boundary after the record write and asserts that the execution *completes* with an
+    `unexpected` failed outcome, never *fails*, and that a retry with the same
+    `request_id` is answered from the record without a second start;
+  - a retry after an operator terminated the execution post-record is answered from the
+    record;
   - a retry after the workflow ID has been forgotten (the record exists, the history
     does not) returns the record.
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
