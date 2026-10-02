@@ -121,7 +121,7 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
     respx.get(f"{API}/queue/51").mock(
         return_value=httpx.Response(200, json={"id": 51, "status": "completed"})
     )
-    respx.get(f"{API}/slice-jobs/9").mock(
+    slice_job = respx.get(f"{API}/slice-jobs/9").mock(
         return_value=httpx.Response(200, json={"id": 9, "status": "completed"})
     )
     progress = await progress_for(
@@ -135,6 +135,8 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
     assert progress is not None
     assert progress.route == "slice_queue"
     assert progress.queue_item_id == 51
+    # With a queue item, its slice job has finished and is not read again (#898).
+    assert not slice_job.called
 
 
 @respx.mock
@@ -189,7 +191,7 @@ async def test_a_queue_entry_bambuddy_has_dropped_reads_as_finished(
 async def test_a_bambuddy_that_refuses_the_read_is_not_swallowed(
     bambuddy: BambuddyClient,
 ) -> None:
-    respx.get(f"{API}/slice-jobs/9").mock(
+    respx.get(f"{API}/queue/51").mock(
         return_value=httpx.Response(500, json={"detail": "the database is locked"})
     )
     with pytest.raises(ApiError) as raised:
@@ -197,6 +199,79 @@ async def test_a_bambuddy_that_refuses_the_read_is_not_swallowed(
             bambuddy, meta(slice_job_id=9, queue_item_id=51, print_route="slice_queue")
         )
     assert "the database is locked" in raised.value.detail
+
+
+@respx.mock
+async def test_a_bambuddy_that_refuses_the_slice_job_read_is_not_swallowed(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Only a 404 settles a slice job (#898); any other refusal is still an error."""
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(500, json={"detail": "the database is locked"})
+    )
+    with pytest.raises(ApiError) as raised:
+        await progress_for(bambuddy, meta(slice_job_id=9, print_route="slice_queue"))
+    assert raised.value.status == 502
+    assert "the database is locked" in raised.value.detail
+
+
+@respx.mock
+async def test_an_expired_slice_job_does_not_hide_the_queue_item_it_became(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#898: a queue item is only recorded once its slice job finished, so the slice job
+    says nothing more. Bambuddy forgets slice jobs (they expire, and its ids restart),
+    and asking for one it has dropped must not fail a read the queue item can answer."""
+    expired = respx.get(f"{API}/slice-jobs/21").mock(
+        return_value=httpx.Response(404, json={"detail": "Slice job not found or expired"})
+    )
+    respx.get(f"{API}/queue/114").mock(
+        return_value=httpx.Response(200, json={"id": 114, "status": "pending"})
+    )
+    progress = await progress_for(
+        bambuddy, meta(slice_job_id=21, queue_item_id=114, print_route="slice_queue")
+    )
+    assert progress is not None
+    assert progress.stage == "queued"
+    assert progress.queue_item_id == 114
+    assert not expired.called
+
+
+@respx.mock
+async def test_a_reused_slice_job_id_cannot_lend_its_state_to_an_older_print(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#898: Bambuddy's slice-job ids restart, so the id an old output kept can name
+    another output's job. Its failure must not be read as this print's."""
+    reused = respx.get(f"{API}/slice-jobs/3").mock(
+        return_value=httpx.Response(200, json={"id": 3, "status": "failed", "error": "not ours"})
+    )
+    respx.get(f"{API}/queue/106").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    progress = await progress_for(
+        bambuddy, meta(slice_job_id=3, queue_item_id=106, print_route="slice_queue")
+    )
+    assert progress is not None
+    assert progress.stage == "done"
+    assert progress.error_message is None
+    assert not reused.called
+
+
+@respx.mock
+async def test_a_slice_job_bambuddy_no_longer_has_settles_the_print(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#898: with no queue item to fall back to, a slice job Bambuddy has forgotten
+    will never report again. Polling on would show "waiting" forever."""
+    respx.get(f"{API}/slice-jobs/21").mock(
+        return_value=httpx.Response(404, json={"detail": "Slice job not found or expired"})
+    )
+    progress = await progress_for(bambuddy, meta(slice_job_id=21, print_route="slice_queue"))
+    assert progress is not None
+    assert progress.settled is True
+    assert progress.stage == "unknown"
+    assert progress.slice_job_id == 21
+    assert progress.error_message is not None
+    assert "slice job 21" in progress.error_message
 
 
 # --- every plate of an all-plates print (#200) ------------------------------
@@ -502,6 +577,30 @@ async def test_a_failing_archive_scan_still_reads_the_gone_item_as_finished(
     assert scan.called
     assert progress is not None
     assert (progress.stage, progress.settled) == ("done", True)
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
+async def test_a_gone_slice_job_still_looks_for_the_print_by_hash(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#898 review: a slice job Bambuddy dropped may still have printed, so its archive
+    is looked for by hash the way a gone queue item's is."""
+    respx.get(f"{API}/slice-jobs/21").mock(
+        return_value=httpx.Response(404, json={"detail": "Slice job not found or expired"})
+    )
+    scan = respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    progress = await progress_for(
+        bambuddy,
+        meta(slice_job_id=21, print_route="slice_queue"),
+        uploads=FakeUploads(),
+        links=FakeLinks(),
+    )
+    assert scan.called
+    assert progress is not None
+    assert (progress.stage, progress.settled) == ("unknown", True)
 
 
 @respx.mock

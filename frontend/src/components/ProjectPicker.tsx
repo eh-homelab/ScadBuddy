@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { ProjectRequest, ProjectView } from '../api/types'
@@ -32,11 +32,35 @@ const NEW = 'new'
  * room for secondary text, so it goes in the label. The folder is named first because it
  * is the part that decides whether the send has anywhere to go.
  */
-function optionLabel(project: ProjectView): string {
+function optionLabel(project: ProjectView, path: string): string {
   const parts = [project.folder_name ?? 'no folder yet']
   if (project.archive_count > 0) parts.push(`${project.archive_count} archived`)
   if (project.queue_count > 0) parts.push(`${project.queue_count} queued`)
-  return `${project.name} · ${parts.join(' · ')}`
+  return `${path} · ${parts.join(' · ')}`
+}
+
+/**
+ * #930 — each project named by its path, `Parent › Child`, since a native `<option>`
+ * cannot indent; keyed by id, built once per list. A parent missing from the list (or a
+ * cycle) ends the path there.
+ */
+function breadcrumbs(projects: ProjectView[]): Map<number, string> {
+  const byId = new Map(projects.map((project) => [project.id, project]))
+  const paths = new Map<number, string>()
+  for (const project of projects) {
+    const names = [project.name]
+    const seen = new Set([project.id])
+    let parentId = project.parent_id ?? null
+    while (parentId !== null && !seen.has(parentId)) {
+      seen.add(parentId)
+      const parent = byId.get(parentId)
+      if (!parent) break
+      names.unshift(parent.name)
+      parentId = parent.parent_id ?? null
+    }
+    paths.set(project.id, names.join(' › '))
+  }
+  return paths
 }
 
 interface Props {
@@ -93,6 +117,10 @@ export function ProjectPicker({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [colour, setColour] = useState('')
+  /** #930 — the project to nest the new one under; `null` (None) is the default. */
+  const [parentId, setParentId] = useState<number | null>(null)
+  /** The project in view when "New project…" was chosen, offered but never pre-selected. */
+  const [suggestedParent, setSuggestedParent] = useState<number | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
@@ -108,8 +136,10 @@ export function ProjectPicker({
     reportCreating.current = onCreating
   })
 
-  const projects = choices?.projects ?? []
+  const projects = useMemo(() => choices?.projects ?? [], [choices])
+  const paths = useMemo(() => breadcrumbs(projects), [projects])
   const current = projects.find((project) => project.id === value)
+  const suggested = projects.find((project) => project.id === suggestedParent)
 
   useEffect(() => {
     reportProject.current?.(current ?? null)
@@ -131,6 +161,8 @@ export function ProjectPicker({
       name: name.trim(),
       description: description.trim() || null,
       colour: colour.trim() || null,
+      // Only when chosen: an unset parent is not sent at all.
+      ...(parentId !== null && { parent_id: parentId }),
     }
     setSaving(true)
     // Tied to the request, not this component: the picker can unmount mid-create (the
@@ -144,6 +176,7 @@ export function ProjectPicker({
       setName('')
       setDescription('')
       setColour('')
+      setParentId(null)
       onChange(created.id)
     } catch (cause) {
       setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
@@ -173,6 +206,10 @@ export function ProjectPicker({
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
+            // A fresh form every time: a parent chosen in a cancelled one must not
+            // carry over into this project's nesting.
+            setParentId(null)
+            setSuggestedParent(current?.id ?? null)
             setCreating(true)
             return
           }
@@ -184,7 +221,7 @@ export function ProjectPicker({
         <option value="">No project</option>
         {projects.map((project) => (
           <option key={project.id} value={project.id}>
-            {optionLabel(project)}
+            {optionLabel(project, paths.get(project.id) ?? project.name)}
           </option>
         ))}
         <option value={NEW} data-testid="new-project">
@@ -214,6 +251,38 @@ export function ProjectPicker({
               onChange={(event) => setName(event.target.value)}
               className="sb-field mt-1.5"
             />
+          </div>
+
+          <div>
+            <label htmlFor="new-project-parent" className="block text-[13px]">
+              Parent project
+            </label>
+            <select
+              id="new-project-parent"
+              data-testid="new-project-parent"
+              value={parentId === null ? '' : String(parentId)}
+              onChange={(event) =>
+                setParentId(event.target.value === '' ? null : Number(event.target.value))
+              }
+              className="sb-field mt-1.5 cursor-pointer"
+            >
+              <option value="">None</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {paths.get(project.id) ?? project.name}
+                </option>
+              ))}
+            </select>
+            {suggested && parentId !== suggested.id && (
+              <button
+                type="button"
+                data-testid="suggested-parent"
+                onClick={() => setParentId(suggested.id)}
+                className="mt-1 text-[12px] text-accent hover:underline"
+              >
+                Put it under {paths.get(suggested.id) ?? suggested.name}
+              </button>
+            )}
           </div>
 
           <div>
