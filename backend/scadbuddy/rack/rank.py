@@ -173,7 +173,7 @@ def glow(*texts: str | None) -> bool:
     return any("glow" in (text or "").lower() for text in texts)
 
 
-def rack_colour(raw: str) -> str | None:
+def rack_color(raw: str) -> str | None:
     """A rack color, or ``None`` for a zero alpha: the rack reports ``00000000`` for a
     hotend with no filament loaded, which is no color rather than black."""
     text = raw.strip().lstrip("#")
@@ -252,7 +252,7 @@ def _rank(
     found: list[RackCandidate] = []
     for position, entry in _available(group, positions, taken).items():
         use = usage.get(entry.serial_number, Usage()) if entry.serial_number else Usage()
-        have = rack_colour(entry.filament_colour)
+        have = rack_color(entry.filament_colour)
         found.append(
             RackCandidate(
                 position=position,

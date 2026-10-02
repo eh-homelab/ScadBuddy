@@ -123,9 +123,13 @@ def test_color_ranks_above_use() -> None:
 def test_a_hash_rgb_group_matches_an_rgba_slot_and_empty_never_matches() -> None:
     rack = [slot(2), slot(3, color="00B1B7FF")]
     assert positions(rank_rack([group(color="#00B1B7")], rack, "least_used", {}, {})) == {0: 3}
-    rack = [slot(2, color=""), slot(3, color="")]
-    picks = rank_rack([group(color=None)], rack, "least_used", {}, {})
-    assert picks[0].reason == "lowest free position"
+    # No group color never matches a hotend with no color, whether the rack reports
+    # it empty or as a zero alpha: the lower position, with a real color, still wins.
+    for empty in ("", "00000000"):
+        rack = [slot(2, color="00B1B7FF"), slot(3, color=empty)]
+        picks = rank_rack([group(color=None)], rack, "least_used", {}, {})
+        assert positions(picks) == {0: 2}
+        assert picks[0].reason == "lowest free position"
 
 
 def test_an_empty_hotends_zero_alpha_color_never_matches_black() -> None:
