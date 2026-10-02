@@ -253,10 +253,12 @@ export class QuestionService {
         await tx`
           INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
           VALUES (${id}, ${sessionId}, ${turnId}, ${request.toolUseId}, ${tx.json(questions)})`
-        // Only the parked turn itself moves the session to waiting_input.
+        // Only the parked turn itself moves the session to waiting_input, from
+        // running or from an approval it is also waiting on (the latest wait is
+        // shown; each refreshStatus hands back to whichever is still pending).
         const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
-          WHERE id = ${sessionId} AND turn_id = ${turnId} AND status = 'running'`
+          WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`
         if (moved.count > 0) tail.push(event({ type: 'session.status', sessionId, status: 'waiting_input' }))
         return { value: undefined, events: tail }
       })

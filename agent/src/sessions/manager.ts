@@ -386,7 +386,10 @@ export type SessionManagerDeps = {
    * (audit/turn.ts), and every approval decision.
    */
   audit?: AuditLog
-  /** How often a parked turn polls its approval for a decision made on another replica. */
+  /**
+   * How often a parked turn polls its approval, or its question (#940), for a
+   * decision or answer given on another replica: one interval for both.
+   */
   approvalPollMs?: number
   /** How long a handoff offer lasts (HANDOFF_OFFER_TTL_MS by default). */
   handoffOfferTtlMs?: number

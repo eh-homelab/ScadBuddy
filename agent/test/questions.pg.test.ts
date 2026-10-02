@@ -223,6 +223,52 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
+  it('an approval asked first, then a question: the session shows the question, then hands back to the approval', async () => {
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
+        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal }))
+        await approved
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'print and ask' })
+    const id = await pendingQuestion(m, session.id)
+
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_approval')
+    const approvalId = (await m.approvals.list(browser, { sessionId: session.id, pending: true }))[0]!.id
+    await m.approvals.decide(browser, approvalId, true)
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
+    const statuses = (await events(m, session.id)).flatMap((e) => (e.type === 'session.status' ? [e.status] : []))
+    expect(statuses.indexOf('waiting_input')).toBeGreaterThan(statuses.indexOf('waiting_approval'))
+    expect(statuses.at(-1)).toBe('idle')
+  })
+
+  it('a shutdown cancels a pending question (unlike an approval, it does not outlive its turn)', async () => {
+    const parked = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: new AbortController().signal }))
+        yield* []
+        throw new Error('Claude Code process aborted by user')
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parked, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+
+    m.abortAll()
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+    const [row] = await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ outcome: 'cancelled' })
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false })
+  })
+
   it('a row and the event that reports it commit together: a failed append resolves nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
