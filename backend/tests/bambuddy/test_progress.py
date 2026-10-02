@@ -202,6 +202,20 @@ async def test_a_bambuddy_that_refuses_the_read_is_not_swallowed(
 
 
 @respx.mock
+async def test_a_bambuddy_that_refuses_the_slice_job_read_is_not_swallowed(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Only a 404 settles a slice job (#898); any other refusal is still an error."""
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(500, json={"detail": "the database is locked"})
+    )
+    with pytest.raises(ApiError) as raised:
+        await progress_for(bambuddy, meta(slice_job_id=9, print_route="slice_queue"))
+    assert raised.value.status == 502
+    assert "the database is locked" in raised.value.detail
+
+
+@respx.mock
 async def test_an_expired_slice_job_does_not_hide_the_queue_item_it_became(
     bambuddy: BambuddyClient,
 ) -> None:
