@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -368,3 +369,34 @@ def test_an_empty_rack_previews_nothing_and_refuses_a_manual_position(
     assert (result["rack"], result["errors"]) == (None, [message])
     assert (response.status_code, response.json()["detail"]) == (422, message)
     assert not sliced.called
+
+
+class LeakyUsage(BrokenUsage):
+    """Every read fails with a serial in its text, as a database error's might."""
+
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        raise RuntimeError(f"duplicate key value: (serial)=({INVENTED_SERIALS[2]})")
+
+
+@respx.mock
+def test_a_failed_rack_preview_still_answers_the_check_without_logging_a_serial(
+    client: TestClient, model: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spec §4, §7: the preview's error path logs the type only."""
+    client.app.dependency_overrides[getter_for(RACK_USAGE)] = LeakyUsage  # type: ignore[attr-defined]
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+
+    with caplog.at_level(logging.DEBUG):
+        response = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack"] is None
+    assert "the rack preview could not be built" in [r.getMessage() for r in caplog.records]
+    for record in caplog.records:
+        text = f"{record.getMessage()} {record.__dict__!r}"
+        assert not [s for s in INVENTED_SERIALS if s in text], record.getMessage()
+        assert record.exc_info is None and record.exc_text is None
+    assert not [s for s in INVENTED_SERIALS if s in response.text]

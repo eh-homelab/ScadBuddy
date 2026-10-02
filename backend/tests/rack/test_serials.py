@@ -54,6 +54,13 @@ class Leaky:
         raise RuntimeError(leak(INVENTED_SERIALS[2]))
 
 
+class UnreadablePicks(Leaky):
+    """The settle's read of the picked items fails, as a database error would."""
+
+    async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
+        raise RuntimeError(leak(INVENTED_SERIALS[4]))
+
+
 class Archives:
     async def archive(self, archive_id: int) -> ArchiveDetail:
         if archive_id == 101:
@@ -67,6 +74,16 @@ class Links:
             PrintLink(archive_id=101, matched_by="queue_item", queue_item_id=51),
             PrintLink(archive_id=102, matched_by="queue_item", queue_item_id=51),
         ]
+
+
+EXPECTED_MESSAGES = [
+    "rack pick left to Bambuddy",
+    "could not record the rack's hotends",
+    "could not record the rack picks",
+    "could not record a rack nozzle's print",
+    "could not record a rack nozzle's print",
+    "could not read a settled print's rack picks",
+]
 
 
 async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) -> None:
@@ -91,8 +108,14 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
             Leaky(), 1, [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
         )
         await record_settled("c" * 32, client=Archives(), links=Links(), store=Leaky())
+        assert (
+            await record_settled(
+                "d" * 32, client=Archives(), links=Links(), store=UnreadablePicks()
+            )
+            == 0
+        )
 
-    assert len(caplog.records) >= 4
+    assert sorted(r.getMessage() for r in caplog.records) == sorted(EXPECTED_MESSAGES)
     for record in caplog.records:
         text = f"{record.getMessage()} {record.__dict__!r}"
         assert not [serial for serial in INVENTED_SERIALS if serial in text], record.getMessage()
