@@ -90,3 +90,9 @@ def inputs_key(slug: str, inputs: Mapping[str, Any], model_version: str | None) 
         ["inputs", slug, model_version, dict(inputs)], sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def arrange_key(slug: str, inputs: Mapping[str, Any]) -> str:
+    """An arrange job's key: identical requests coalesce like renders (§3.3)."""
+    raw = json.dumps(["arrange", slug, dict(inputs)], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

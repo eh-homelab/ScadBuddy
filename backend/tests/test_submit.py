@@ -66,8 +66,12 @@ class ProjectingActivities(FakeActivities):
         await self._real.project(projection)
 
 
-def _sample(metrics: Metrics, name: str) -> float:
-    return metrics.registry.get_sample_value(name) or 0.0
+#: The render series of a counter labelled by job kind.
+RENDER = {"kind": "render"}
+
+
+def _sample(metrics: Metrics, name: str, labels: dict[str, str] | None = None) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
 
 
 async def _settled(projection: JobProjection, job_id: str, timeout: float = 30) -> Job:
@@ -142,7 +146,7 @@ async def test_a_submit_starts_the_workflow_its_row_names(
 
     assert done.state == "done", done.error
     assert done.result is not None
-    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
 
 
 async def test_a_submit_whose_start_failed_is_started_by_the_reconciler(
@@ -234,7 +238,7 @@ async def test_an_identical_submit_coalesces_and_starts_nothing_new(
     assert second.id == first.id
     assert submitted == [workflow_id_for(first.id)]
     assert reconciled == 0
-    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total", RENDER) == 1
     assert (await asyncio.to_thread(projection.read, first.id)).claims == 2
 
 

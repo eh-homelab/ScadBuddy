@@ -55,6 +55,8 @@ def test_persisting_a_job_writes_the_documented_layout(
     directory = paths.output_dir(model, body["id"])
     assert sorted(path.name for path in directory.iterdir()) == [
         "inputs.json",
+        # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
+        "manifest.json",
         "meta.json",
         "model.3mf",
         "params.json",
@@ -269,6 +271,7 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
+        "arranged_from": [],
     }
 
 
@@ -293,6 +296,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
+        "arranged_from": [],
     }
 
 

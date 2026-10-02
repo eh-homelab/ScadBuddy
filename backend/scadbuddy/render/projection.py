@@ -180,6 +180,15 @@ class JobProjection:
             ).fetchone()
             assert row is not None
             if row["inserted"]:
+                if job.kind == "arrange":
+                    # Held from the insert, in its transaction: a source output deleted
+                    # while this waits must not let a sweep take the Parts it places.
+                    # `prune`/`delete` release them with the row.
+                    conn.cursor().executemany(
+                        "INSERT INTO blob_refs (key, holder_kind, holder_id)"
+                        " VALUES (%s, 'job', %s) ON CONFLICT DO NOTHING",
+                        [(key, row["id"]) for key in _piece_keys(job.inputs)],
+                    )
                 self._announce(conn, row["id"], row["slug"], "job.pending")
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
 
@@ -360,7 +369,9 @@ class JobProjection:
     def latest_finished(self, slug: str) -> Job | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                # An arrange row carries a source output's slug but is no render of it.
+                "SELECT * FROM render_jobs WHERE slug = %s AND kind = 'render'"
+                " AND state IN ('done', 'failed')"
                 " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
                 (slug,),
             ).fetchone()
@@ -401,3 +412,9 @@ class JobProjection:
             conn.execute(
                 "DELETE FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s", (job_id,)
             )
+
+
+def _piece_keys(inputs: dict[str, Any] | None) -> list[str]:
+    """The Parts an arrange's `ArrangeInputs` places, once each."""
+    items = (inputs or {}).get("items", [])
+    return list(dict.fromkeys(item["part"]["piece_key"] for item in items))
