@@ -24,7 +24,7 @@ function request(size: Size): PrintRunRequest {
 }
 
 function verdict(error: string): PrintCheck {
-  return { errors: [error], warnings: [] }
+  return { errors: [error], warnings: [], rack: null }
 }
 
 async function settle(ms = 0) {
