@@ -18,7 +18,7 @@ below). Print flow: `2026-09-24-print-flow-design.md`,
 `2026-09-27-spool-first-print-design.md`, `2026-09-28-print-library-file-design.md`.
 AI agent: `2026-09-27-ai-integration-design.md`. Issues: #470 (the output run's 202,
 implemented in PR #567), #742 (the library run's 202, implemented in PR #945, merged
-2026-10-01 18:22 UTC after this spec's incident), #305 / #912 (print history).
+2026-10-01 18:56 UTC after this spec's incident), #305 / #912 (print history).
 
 ## 1. Why
 
