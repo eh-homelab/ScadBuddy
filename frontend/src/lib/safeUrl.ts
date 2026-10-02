@@ -84,8 +84,12 @@ function apiPath(value: string): string | null {
     return null
   }
   const path = parsed.pathname
-  const allowed = IMAGE_ROUTES.test(path) || (MODEL_IMAGE_ROUTE.test(path) && IMAGE_EXTENSION.test(path))
-  if (parsed.origin !== ORIGIN || !allowed) return null
+  // The parser resolves `%2e%2e` as `..`, but not a `%2F` or `%5C` inside a segment,
+  // which the server decodes; so each segment is checked as the server will read it.
+  if (parsed.origin !== ORIGIN || !plainSegments(path.slice(1).split('/'))) return null
+  const decoded = decodeURIComponent(path)
+  const allowed = IMAGE_ROUTES.test(path) || (MODEL_IMAGE_ROUTE.test(path) && IMAGE_EXTENSION.test(decoded))
+  if (!allowed) return null
   return parsed.pathname + parsed.search
 }
 
@@ -101,17 +105,25 @@ function modelImage(value: string, base: ImageBase): string | null {
   }
   if (parsed.origin !== ORIGIN || !parsed.pathname.startsWith('/m/')) return null
   const path = parsed.pathname.slice('/m/'.length)
-  const segments = path.split('/')
+  if (!plainSegments(path.split('/')) || !IMAGE_EXTENSION.test(decodeURIComponent(path))) return null
+  const revision = base.revision ? `?commit=${encodeURIComponent(base.revision)}` : ''
+  return `/api/v1/models/${encodeURIComponent(base.slug)}/images/${path}${revision}`
+}
+
+/**
+ * Whether every segment, percent-decoded as the server reads it, is a plain name: not
+ * empty, not a dot-file, `.` or `..`, and holding no `/` or `\\`. False for a segment
+ * that is not valid percent-encoding.
+ */
+function plainSegments(segments: string[]): boolean {
   for (const segment of segments) {
     let decoded: string
     try {
       decoded = decodeURIComponent(segment)
     } catch {
-      return null
+      return false
     }
-    if (!decoded || decoded.startsWith('.') || /[/\\]/.test(decoded)) return null
+    if (!decoded || decoded.startsWith('.') || /[/\\]/.test(decoded)) return false
   }
-  if (!IMAGE_EXTENSION.test(decodeURIComponent(segments[segments.length - 1] ?? ''))) return null
-  const revision = base.revision ? `?commit=${encodeURIComponent(base.revision)}` : ''
-  return `/api/v1/models/${encodeURIComponent(base.slug)}/images/${path}${revision}`
+  return true
 }

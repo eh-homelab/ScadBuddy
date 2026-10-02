@@ -140,6 +140,10 @@ class RevisionNotFoundError(KeyError):
     pass
 
 
+class BlobTooLargeError(ValueError):
+    """A file at a revision is larger than the caller will read."""
+
+
 @dataclass(frozen=True)
 class FileChange:
     """One entry of ``git log --name-status``: ``A``/``M``/``D`` plus the path."""
@@ -658,17 +662,25 @@ class ModelHistory:
         assert isinstance(completed.stdout, bytes)
         return completed.stdout
 
-    def blob_size(self, commit: str, path: str) -> int:
-        """The size in bytes of the file ``path`` at a revision, read from the tree
-        without reading the blob, so a caller can refuse one too large to load.
-        :class:`RevisionNotFoundError` when no file is there (a directory included)."""
+    def read_blob(self, commit: str, path: str, *, limit: int) -> bytes:
+        """The bytes of the file ``path`` at a revision, at most ``limit`` of them.
+
+        The revision is resolved once; the tree entry gives the blob's id and size, so
+        one over ``limit`` is refused (:class:`BlobTooLargeError`) without reading it,
+        and the bytes read are that blob's by id, the one that was sized.
+        :class:`RevisionNotFoundError` when no file is there (a directory included).
+        """
         resolved = self.resolve(commit)
         listing = self._out("ls-tree", "-l", resolved, "--", path, check=False)
         # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory.
         fields = listing.partition("\t")[0].split()
         if len(fields) != 4 or fields[1] != "blob" or not fields[3].isdigit():
             raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-        return int(fields[3])
+        if int(fields[3]) > limit:
+            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+        completed = self._run("cat-file", "blob", fields[2], text=False)
+        assert isinstance(completed.stdout, bytes)
+        return completed.stdout
 
     def parent(self, commit: str) -> str | None:
         return self._parent_of(self.resolve(commit))

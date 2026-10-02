@@ -29,7 +29,7 @@ from scadbuddy.api.models import (
     MAX_SOURCE_CHARS,
     MAX_THUMBNAIL_BYTES,
     THUMBNAIL_CACHE_CONTROL,
-    _etag_matches,
+    etag_matches,
     require_model_exists,
 )
 from scadbuddy.api.versions import require_history
@@ -47,6 +47,7 @@ from scadbuddy.library.editor_files import (
 )
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
+    BlobTooLargeError,
     GitError,
     ModelHistory,
     RevisionNotFoundError,
@@ -237,21 +238,15 @@ def _too_large(path: str) -> ApiError:
 
 def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) -> bytes:
     require_history(history)
-    target = f"{model_path(slug)}/{path}"
     try:
-        # Sized from the tree first, as the working tree's file is stat'ed before it is
-        # read: a blob over the cap is refused without loading it.
-        if history.blob_size(commit, target) > MAX_MODEL_IMAGE_BYTES:
-            raise _too_large(path)
-        data = history.show(commit, target)
+        # Sized from the tree before it is read, as the working tree's file is stat'ed.
+        return history.read_blob(commit, f"{model_path(slug)}/{path}", limit=MAX_MODEL_IMAGE_BYTES)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
+    except BlobTooLargeError:
+        raise _too_large(path) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    # Larger than the tree said only if the ref moved between the two reads; still refused.
-    if len(data) > MAX_MODEL_IMAGE_BYTES:
-        raise _too_large(path)
-    return data
 
 
 @router.get(
@@ -307,7 +302,7 @@ def get_model_image(
         cache_control = THUMBNAIL_CACHE_CONTROL
     etag = f'"{hashlib.sha256(data).hexdigest()}"'
     headers = {**INERT_IMAGE_HEADERS, "ETag": etag, "Cache-Control": cache_control}
-    if _etag_matches(if_none_match, etag):
+    if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(data, media_type=media_type, headers=headers)
 

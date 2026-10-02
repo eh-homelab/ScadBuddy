@@ -21,6 +21,7 @@ from scadbuddy.library.history import (
     LOCK_NAME,
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
+    BlobTooLargeError,
     GitTimeoutError,
     ModelHistory,
     RevisionNotFoundError,
@@ -281,6 +282,63 @@ def test_show_rejects_an_unknown_revision(models: Path, history: ModelHistory) -
 
     with pytest.raises(RevisionNotFoundError):
         history.show("0" * 40, "keychain/model.scad")
+
+
+def test_read_blob_reads_a_file_at_a_revision_resolving_it_once(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    first = history.ensure_repo()
+    assert first is not None
+    write_model(models, "keychain", "cube(20);\n")
+    history.commit("Edit keychain source", "keychain")
+    calls: list[tuple[str, ...]] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args)
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted):
+        data = history.read_blob(first[:7], "keychain/model.scad", limit=100)
+
+    assert data == b"cube(10);\n"
+    assert [args[0] for args in calls] == ["rev-parse", "ls-tree", "cat-file"]
+
+
+def test_read_blob_refuses_a_blob_over_the_limit_without_reading_it(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+    calls: list[str] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted), pytest.raises(BlobTooLargeError):
+        history.read_blob(commit, "keychain/model.scad", limit=len("cube(10);\n") - 1)
+    assert "cat-file" not in calls
+    assert history.read_blob(commit, "keychain/model.scad", limit=len("cube(10);\n"))
+
+
+def test_read_blob_refuses_a_directory_a_missing_file_and_an_unknown_revision(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for revision, path in (
+        (commit, "keychain"),
+        (commit, "keychain/nope.png"),
+        ("0" * 40, "keychain/model.scad"),
+    ):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(revision, path, limit=100)
 
 
 def test_diff_defaults_to_the_parent_and_handles_the_root_commit(

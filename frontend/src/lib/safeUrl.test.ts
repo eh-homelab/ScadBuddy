@@ -57,6 +57,23 @@ describe('safeImageSrc (#820)', () => {
     expect(safeImageSrc('/api/v1/models/m/thumbnail/extra')).toBeNull()
   })
 
+  it('refuses percent-encoded dot segments and slashes on an API path (#951)', () => {
+    for (const src of [
+      '/api/v1/models/m/%2e%2e/%2e%2e/settings',
+      '/api/v1/models/%2E%2E/thumbnail',
+      '/api/v1/models/.%2e/thumbnail',
+      '/api/v1/models/..%2F..%2Fsettings/thumbnail',
+      '/api/v1/models/a%2fb/thumbnail',
+      '/api/v1/models/a%5Cb/thumbnail',
+      '/api/v1/models/m/images/%2e%2e/x.png',
+      '/api/v1/models/m/images/%2Ehidden.png',
+      '/api/v1/models/%E0%A4%A/thumbnail',
+    ]) {
+      expect(safeImageSrc(src), src).toBeNull()
+    }
+    expect(safeImageSrc('/api/v1/models/m/images/my%20pic.png')).toBe('/api/v1/models/m/images/my%20pic.png')
+  })
+
   it('refuses other hosts and schemes, and origin-confusion tricks', () => {
     expect(safeImageSrc('https://evil.example/api/v1/models/m/thumbnail')).toBeNull()
     expect(safeImageSrc('//evil.example/api/v1/models/m/thumbnail')).toBeNull()
