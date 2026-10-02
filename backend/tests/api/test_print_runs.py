@@ -514,9 +514,21 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
     assert len({run_key("a" * 32, r) for r in (plain, one, two)}) == 3
     # An older client that sends none keeps the key it had before the field existed.
     before = json.dumps(
-        plain.model_dump(mode="json", exclude={"request_id"}), sort_keys=True, separators=(",", ":")
+        plain.model_dump(mode="json", exclude={"request_id", "print_sequence"}),
+        sort_keys=True,
+        separators=(",", ":"),
     )
     assert run_key("a" * 32, plain) == hashlib.sha256(f"{'a' * 32}\n{before}".encode()).hexdigest()
+
+
+def test_the_print_sequence_is_part_of_the_key_only_when_chosen() -> None:
+    """#907: a request with no sequence keeps the key it had before the field existed,
+    and each sequence is a print of its own."""
+    plain = PrintRunRequest.model_validate(body())
+    by_object = PrintRunRequest.model_validate({**body(), "print_sequence": "by object"})
+    by_layer = PrintRunRequest.model_validate({**body(), "print_sequence": "by layer"})
+    assert len({run_key("a" * 32, r) for r in (plain, by_object, by_layer)}) == 3
+    assert "print_sequence" not in json.dumps(plain.model_dump(mode="json", exclude_none=True))
 
 
 def test_an_unknown_run_is_a_404(client: TestClient) -> None:

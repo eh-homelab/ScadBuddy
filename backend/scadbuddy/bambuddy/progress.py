@@ -200,7 +200,9 @@ class _Linker:
                 extra={"output_id": self.meta.id, "queue_item_id": item.id},
             )
 
-    async def gone(self, queue_item_id: int) -> None:
+    async def gone(self, queue_item_id: int | None) -> None:
+        """Look for a print by hash once Bambuddy has dropped its queue item, or its
+        slice job before any queue item was recorded (``None``, #898)."""
         try:
             await self._gone(queue_item_id)
         except _LINK_ERRORS:
@@ -209,14 +211,15 @@ class _Linker:
                 extra={"output_id": self.meta.id, "queue_item_id": queue_item_id},
             )
 
-    async def _gone(self, queue_item_id: int) -> None:
+    async def _gone(self, queue_item_id: int | None) -> None:
         if self._searched:
             return
         # An item linked before it went needs nothing; another plate's gone item still
         # may, so this item's own link must not spend the read's one scan (#522 review).
-        known = await self.links.for_output(self.meta.id)
-        if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
-            return
+        if queue_item_id is not None:
+            known = await self.links.for_output(self.meta.id)
+            if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
+                return
         # Once per read, however many plates' items are gone: one scan covers them all.
         # Plates' tasks run concurrently, but nothing awaits between the re-check above
         # and this assignment, so only one of them gets past it.
@@ -237,10 +240,31 @@ async def _queued_progress(
     linker: _Linker | None = None,
     plate_id: int | None = None,
 ) -> PrintProgress:
-    """One slice job and the queue item it became, read off Bambuddy."""
+    """One slice job and the queue item it became, read off Bambuddy.
+
+    A queue item is recorded only once its slice job has finished, so with one the
+    slice job is not read at all (#898): Bambuddy expires slice jobs and restarts their
+    ids, so the id kept may name nothing, or another output's job.
+    """
     slice_job = None
-    if slice_job_id is not None:
-        slice_job = await client.slice_job(slice_job_id)
+    if slice_job_id is not None and queue_item_id is None:
+        try:
+            slice_job = await client.slice_job(slice_job_id)
+        except ApiError as error:
+            if error.status != 404:
+                raise
+            # Gone from Bambuddy, it will never report again: polling on would read as
+            # "waiting" forever. It may still have printed, so look for that by hash.
+            if linker is not None:
+                await linker.gone(None)
+            return PrintProgress(
+                route="slice_queue",
+                stage="unknown",
+                settled=True,
+                slice_job_id=slice_job_id,
+                error_message=error.detail,
+                bambuddy_url=url,
+            )
     item = None
     if queue_item_id is not None:
         try:

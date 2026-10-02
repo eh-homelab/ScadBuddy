@@ -203,6 +203,27 @@ class BambuddyClient:
         )
         return PrinterStatus.model_validate(response.json())
 
+    async def camera_snapshot(self, printer_id: int) -> bytes:
+        """One JPEG frame from the printer's camera (#796).
+
+        The snapshot route takes no API key: when Bambuddy's auth is on it wants a
+        camera stream token as ``?token=`` (``camera.py`` at v1.2.5.6), minted under
+        ``camera:view``, which an API key holds with ``can_read_status``. A capture can
+        take Bambuddy up to 15 s; a camera that gives no frame is its 503.
+        """
+        what = f"capture the camera of printer {printer_id}"
+        minted = await self._send(
+            "POST", "/printers/camera/stream-token", scope=Scope.READ_STATUS, what=what
+        )
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/camera/snapshot",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"token": minted.json()["token"]},
+        )
+        return response.content
+
     async def available_filaments(
         self, model: str, *, location: str | None = None
     ) -> list[AvailableFilament]:
