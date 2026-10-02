@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import type { QuestionVerdict, UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
-import { QuestionError } from '../src/questions/service.js'
+import { QuestionError, QuestionService } from '../src/questions/service.js'
+import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
@@ -220,6 +221,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await m.approvals.decide(browser, approvalId!, true)
     await turn!.done
     expect((await m.get(session.id, browser)).status).toBe('idle')
+  })
+
+  it('a row and the event that reports it commit together: a failed append resolves nothing', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const failing = { append: () => Promise.reject(new Error('the log is down')), committed: () => {} } as unknown as EventLog
+    const broken = new QuestionService({ sql: db.sql, events: failing })
+
+    await expect(broken.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('the log is down')
+    await expect(broken.cancelPending(session.id, 'x')).rejects.toThrow('the log is down')
+    const [row] = await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ outcome: null })
+
+    // Still answerable through the working log.
+    await m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
   })
 
   it('an answer given through another replica reaches the parked turn', async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -102,8 +102,25 @@ export class QuestionService {
     this.pollMs = deps.pollMs ?? DEFAULT_QUESTION_POLL_MS
   }
 
-  private async append(sessionId: string, events: ServerEvent[]): Promise<void> {
-    if (events.length) await this.deps.events.append(sessionId, events)
+  /**
+   * Runs `change` in one transaction with the append of the events it returns,
+   * so a row and the event that reports it commit together (as approvals do,
+   * approvals/service.ts `create`/`settle`): a watcher never sees a question
+   * resolved, or a session waiting, that the log does not show. Followers are
+   * woken once it has committed.
+   */
+  private async atomically<T>(
+    sessionId: string,
+    change: (tx: TransactionSql) => Promise<{ value: T; events: ServerEvent[] }>,
+  ): Promise<T> {
+    let logged: { events: ServerEvent[]; seqs: number[] } | undefined
+    const value = await this.deps.sql.begin(async (tx) => {
+      const { value, events } = await change(tx)
+      if (events.length) logged = { events, seqs: await this.deps.events.append(sessionId, events, tx) }
+      return value
+    })
+    if (logged) this.deps.events.committed(sessionId, logged.events, logged.seqs)
+    return value as T
   }
 
   private async row(id: string): Promise<Row | undefined> {
@@ -112,20 +129,14 @@ export class QuestionService {
     return row
   }
 
-  /** Whether the session has a question nobody answered yet. */
-  async hasPending(sessionId: string): Promise<boolean> {
-    const [row] = await this.deps.sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL`
-    return (row?.n ?? 0) > 0
-  }
-
   /**
    * Sets a session that no longer waits on a question back from
    * `waiting_input`: to `waiting_approval` while an approval is pending, to
    * `running` while its turn is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {
-    const [row] = await this.deps.sql<{ status: 'running' | 'idle' | 'waiting_approval' }[]>`
+    await this.atomically(sessionId, async (tx) => {
+      const [row] = await tx<{ status: 'running' | 'idle' | 'waiting_approval' }[]>`
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
@@ -137,7 +148,8 @@ export class QuestionService {
       WHERE id = ${sessionId} AND status = 'waiting_input'
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL)
       RETURNING status`
-    if (row) await this.append(sessionId, [event({ type: 'session.status', sessionId, status: row.status })])
+      return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
+    })
   }
 
   /** The panel's `question.answer`, from the user in the panel. */
@@ -157,14 +169,18 @@ export class QuestionService {
     if (answers.length !== asked.questions.length || answers.some((a) => !a.trim())) {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
     }
-    const [row] = await this.deps.sql<{ id: string }[]>`
-      UPDATE ai_questions
-      SET outcome = 'answered', answers = ${this.deps.sql.json(answers)}, resolved_at = now(),
-          answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
-      WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
-      RETURNING id`
-    if (!row) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
-    await this.append(sessionId, [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })])
+    const answered = await this.atomically(sessionId, async (tx) => {
+      const [row] = await tx<{ id: string }[]>`
+        UPDATE ai_questions
+        SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
+            answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
+        WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
+        RETURNING id`
+      return row
+        ? { value: true, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
+        : { value: false, events: [] }
+    })
+    if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     this.wake(id)
     await this.refreshStatus(sessionId)
   }
@@ -175,15 +191,17 @@ export class QuestionService {
    * finishing turn) sets the status itself.
    */
   async cancelPending(sessionId: string, reason: string, options: { refresh?: boolean } = {}): Promise<number> {
-    const rows = await this.deps.sql<{ id: string }[]>`
-      UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
-      WHERE session_id = ${sessionId} AND outcome IS NULL
-      RETURNING id`
+    const rows = await this.atomically(sessionId, async (tx) => {
+      const cancelled = await tx<{ id: string }[]>`
+        UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
+        WHERE session_id = ${sessionId} AND outcome IS NULL
+        RETURNING id`
+      return {
+        value: cancelled,
+        events: cancelled.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
+      }
+    })
     if (rows.length === 0) return 0
-    await this.append(
-      sessionId,
-      rows.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
-    )
     for (const r of rows) this.wake(r.id)
     if (options.refresh !== false) await this.refreshStatus(sessionId)
     return rows.length
@@ -230,8 +248,8 @@ export class QuestionService {
       const id = randomUUID()
       const questions = redactQuestions(request.questions, context.secrets())
       const { sessionId, turnId } = context
-      const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
-      await this.deps.sql.begin(async (tx) => {
+      await this.atomically(sessionId, async (tx) => {
+        const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
         await tx`
           INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
           VALUES (${id}, ${sessionId}, ${turnId}, ${request.toolUseId}, ${tx.json(questions)})`
@@ -240,8 +258,8 @@ export class QuestionService {
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status = 'running'`
         if (moved.count > 0) tail.push(event({ type: 'session.status', sessionId, status: 'waiting_input' }))
+        return { value: undefined, events: tail }
       })
-      await this.append(sessionId, tail)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const resolved = await this.waitFor(id, AbortSignal.any([context.signal, request.signal]))
