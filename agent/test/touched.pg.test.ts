@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { SessionResources } from '../src/sessions/touched.js'
+import { MAX_TOUCHES_PER_CALL, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -126,6 +126,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     })
     const [row] = await m.resources(session.id, browser)
     expect(row!.id).toBe('x'.repeat(299))
+  })
+
+  it('records at most MAX_TOUCHES_PER_CALL rows for one call, the last saying the rest were dropped', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const items = Array.from({ length: MAX_TOUCHES_PER_CALL + 50 }, (_, i) => i + 1)
+    await store.record({
+      sessionId: session.id,
+      tool: { name: 'print_output', risk: 'outward' },
+      input: { output_id: 'o1' },
+      result: { content: [{ type: 'text', text: JSON.stringify({ id: 'r1', result: { queue_item_ids: items } }) }] },
+    })
+    const rows = await m.resources(session.id, browser)
+    expect(rows).toHaveLength(MAX_TOUCHES_PER_CALL)
+    expect(rows[0]).toMatchObject({ type: 'print_run', id: 'r1' })
+    expect(rows.at(-1)).toMatchObject({ type: 'unclassified', id: null, tool: 'print_output' })
   })
 
   it('reports a row it cannot write, and never throws', async () => {

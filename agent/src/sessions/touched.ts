@@ -245,6 +245,13 @@ type Row = {
   at: Date
 }
 
+/**
+ * The most rows one call records; past it, the rest are dropped and one
+ * `unclassified` row says so. A print of every plate is one queue item per
+ * plate; a real call stays far below this.
+ */
+export const MAX_TOUCHES_PER_CALL = 100
+
 /** The longest id stored; longer ones are cut (they come from a tool result). */
 const ID_MAX = 300
 
@@ -269,7 +276,11 @@ export class SessionResources implements TouchedSink {
     try {
       const touches = touchesOf(call.tool, call.input, call.result, call.ok ?? true)
       if (touches.length === 0) return
-      const rows = touches.map((t) => ({
+      const kept =
+        touches.length > MAX_TOUCHES_PER_CALL
+          ? [...touches.slice(0, MAX_TOUCHES_PER_CALL - 1), { type: 'unclassified' as const, id: null, action: 'modified' as const }]
+          : touches
+      const rows = kept.map((t) => ({
         session_id: call.sessionId,
         tool: call.tool.name,
         resource_type: t.type,
