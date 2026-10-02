@@ -42,5 +42,5 @@ async def test_a_failed_write_is_logged_by_type_only(caplog: pytest.LogCaptureFi
         await record_seen(store, 1, status(slot(2)))  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
     assert record.getMessage() == "could not record the rack's hotends"
-    assert record.error == "RuntimeError"
+    assert record.__dict__["error"] == "RuntimeError"
     assert serial(17) not in repr(record.__dict__) and record.exc_info is None
