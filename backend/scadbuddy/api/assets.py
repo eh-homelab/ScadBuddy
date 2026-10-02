@@ -24,7 +24,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import RESOLVER_RETRY_AFTER, _import_busy, require_model_exists
+from scadbuddy.api.models import RESOLVER_RETRY_AFTER, fetch_busy, require_model_exists
 from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.asset_fetch import fetch_file
@@ -199,7 +199,7 @@ async def fetch_asset(
     domains = (await asyncio.to_thread(settings.load)).allowed_asset_domains()
     # As the import: no await between the check and the hold.
     if imports.full():
-        raise _import_busy(
+        raise fetch_busy(
             f"{IMPORT_CONCURRENCY} fetches are already running on this replica",
             imports.retry_after(),
         )
@@ -209,7 +209,7 @@ async def fetch_asset(
         except ImportRefusedError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except ResolverBusyError:
-            raise _import_busy(
+            raise fetch_busy(
                 "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
             ) from None
     meta = await _store(slug, fetched.data, fetched.filename, assets=assets, state=state)

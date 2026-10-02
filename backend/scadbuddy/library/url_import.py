@@ -82,8 +82,9 @@ class ResolverBusyError(ResolverUnavailableError):
     """Every resolver thread on this replica was busy, so the lookup never started.
 
     Decided before the host is looked up, so unlike a timeout it cannot depend on
-    the host: an import may say it (a retryable 503) instead of the refusal. Library
-    installs vet their clone URLs on the same threads, so they can cause it too.
+    the host: an import or an asset fetch (#844) may say it (a retryable 503) instead
+    of the refusal. Library installs vet their clone URLs on the same threads, so they
+    can cause it too.
     """
 
 
