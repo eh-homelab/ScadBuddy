@@ -451,6 +451,10 @@ export const printTools: Tool[] = [
         .describe('A filament preset per slot id, in place of the spool\'s own'),
       project_id: nullable(z.number().int()).describe('Omit for the remembered project; null for "No project"'),
       options: printOptions,
+      print_sequence: z
+        .enum(['by layer', 'by object'])
+        .optional()
+        .describe("'by object' finishes each object before the next starts; omit for the template's own"),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -550,6 +554,7 @@ export const printTools: Tool[] = [
               // Omitted stays omitted (the remembered project); null is "No project" (#317).
               ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
+              ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
               request_id: requestId,
             },
           }),

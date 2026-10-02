@@ -340,6 +340,18 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(run.body).not.toHaveProperty('project_id')
   })
 
+  it('sends a chosen print_sequence, and omits it when none is chosen (#907)', async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    server.use(...capturedRun(chosen))
+    await tool('print_output').execute({ ...args, print_sequence: 'by object' }, ctx())
+    server.use(...capturedRun(plain))
+    await tool('print_output').execute(args, ctx())
+    expect(chosen.body).toMatchObject({ print_sequence: 'by object' })
+    expect(plain.body).not.toHaveProperty('print_sequence')
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}
