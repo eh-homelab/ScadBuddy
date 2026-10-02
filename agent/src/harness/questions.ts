@@ -38,7 +38,12 @@ export const QuestionSchema = z.object({
   question: z.string().min(1).max(QUESTION_TEXT_MAX),
   header: z.string().max(200),
   multiSelect: z.boolean(),
-  options: z.array(OptionSchema).min(OPTIONS_MIN).max(OPTIONS_MAX),
+  options: z
+    .array(OptionSchema)
+    .min(OPTIONS_MIN)
+    .max(OPTIONS_MAX)
+    // The panel tells options apart by label, and the answer names one.
+    .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
 })
 export type UserQuestion = z.infer<typeof QuestionSchema>
 

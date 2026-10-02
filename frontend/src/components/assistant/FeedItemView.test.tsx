@@ -206,7 +206,12 @@ describe('the question card (#940)', () => {
     const preview = screen.getByTestId('agent-question-preview')
     expect(screen.getByRole('heading', { name: 'Bed level' })).toBeVisible()
     expect(preview.querySelector('strong')).toHaveTextContent('first')
+    // Cancel declines the draft, so it is not shown under Cancel.
+    await user.click(screen.getByRole('radio', { name: /Cancel/ }))
+    expect(screen.queryByTestId('agent-question-preview')).toBeNull()
+    expect(screen.getByRole('radio', { name: 'Edit…' })).toBeInTheDocument()
     await user.click(screen.getByRole('radio', { name: /Approve/ }))
+    expect(screen.getByRole('heading', { name: 'Bed level' })).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Send answer' }))
     expect(onAnswer).toHaveBeenLastCalledWith('q1', ['Approve'])
     unmount()

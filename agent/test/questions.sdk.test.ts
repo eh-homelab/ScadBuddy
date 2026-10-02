@@ -4,7 +4,7 @@ import path from 'node:path'
 import { query, type SDKMessage, type SDKResultMessage, type SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
-import { ASK_USER_QUESTION, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
+import { ASK_USER_QUESTION, parseQuestions, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
 import { buildHarnessOptions, type HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -35,6 +35,20 @@ const QUESTIONS = [
     ],
   },
 ]
+
+describe('parseQuestions', () => {
+  it('refuses two options with the same label, or two questions with the same text', () => {
+    const q = (labels: string[], question = 'Pick one?') => ({
+      question,
+      header: 'H',
+      multiSelect: false,
+      options: labels.map((label) => ({ label, description: '' })),
+    })
+    expect(parseQuestions({ questions: [q(['Yes', 'No'])] }).ok).toBe(true)
+    expect(parseQuestions({ questions: [q(['Yes', 'Yes'])] })).toMatchObject({ ok: false, error: expect.stringMatching(/own label/) })
+    expect(parseQuestions({ questions: [q(['Yes', 'No']), q(['A', 'B'])] }).ok).toBe(false)
+  })
+})
 
 describe.skipIf(cliMissing !== undefined)(`AskUserQuestion through the question gate${cliMissing ? ` (skipped: ${cliMissing})` : ''}`, () => {
   let fake: FakeAnthropic

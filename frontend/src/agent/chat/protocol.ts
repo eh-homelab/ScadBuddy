@@ -120,7 +120,9 @@ export const QuestionSchema = z.object({
       }),
     )
     .min(OPTIONS_MIN)
-    .max(OPTIONS_MAX),
+    .max(OPTIONS_MAX)
+    // The card tells options apart by label.
+    .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
 })
 export type Question = z.infer<typeof QuestionSchema>
 

@@ -190,10 +190,20 @@ function answerOf(q: AskedQuestion, c: Choice): string | undefined {
   return parts.length ? parts.join(', ') : undefined
 }
 
-/** The draft a question shows: its picked option's preview, else its first one. */
+/** The question's draft: its first option preview, what "Edit…" starts from. */
+function draftOf(q: AskedQuestion): string | undefined {
+  return q.options.find((o) => o.preview !== undefined)?.preview
+}
+
+/**
+ * The preview a question shows: the picked option's own (none when it has none, so
+ * picking Cancel never shows the draft it declines); before any pick, or while the
+ * user edits, the draft.
+ */
 function previewOf(q: AskedQuestion, c: Choice): string | undefined {
-  const picked = q.options.find((o) => c.picked.includes(o.label) && o.preview !== undefined)
-  return (picked ?? q.options.find((o) => o.preview !== undefined))?.preview
+  if (c.other || c.picked.length === 0) return draftOf(q)
+  const picked = q.options.filter((o) => c.picked.includes(o.label) && o.preview !== undefined)
+  return picked.length === 1 ? picked[0]!.preview : picked.map((o) => o.preview).join('\n\n---\n\n') || undefined
 }
 
 /**
@@ -230,8 +240,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
           {item.questions.map((q, i) => {
             const choice = choices[i] ?? NO_CHOICE
             const preview = previewOf(q, choice)
+            const draft = draftOf(q)
             const name = `${item.id}-${i}`
-            const ownWords = preview === undefined ? 'Other…' : 'Edit…'
+            const ownWords = draft === undefined ? 'Other…' : 'Edit…'
             const kind = q.multiSelect ? 'checkbox' : 'radio'
             const pick = (label: string) =>
               update(i, (c) =>
@@ -280,7 +291,7 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                       update(i, (c) => ({
                         picked: q.multiSelect ? c.picked : [],
                         other: q.multiSelect ? !c.other : true,
-                        text: c.text || (preview ?? ''),
+                        text: c.text || (draft ?? ''),
                       }))
                     }
                   />
@@ -290,7 +301,7 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                   <textarea
                     aria-label="Your answer"
                     maxLength={ANSWER_MAX}
-                    rows={preview === undefined ? 2 : 6}
+                    rows={draft === undefined ? 2 : 6}
                     className="w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]"
                     value={choice.text}
                     onChange={(e) => update(i, (c) => ({ ...c, text: e.target.value }))}
