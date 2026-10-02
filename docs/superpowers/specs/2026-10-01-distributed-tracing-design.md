@@ -211,8 +211,13 @@ path except `/api/v1/ai/*` to the backend.
   the rate by the replica count. A **per-client** bucket sits under it. The client is the immediate peer's address unless that peer
   is in a new `SCADBUDDY_TRUSTED_PROXIES` (CIDRs, default empty: trust no
   forwarding header). Only then is `X-Forwarded-For` read, from the right,
-  taking the first hop not in the list. These are the same semantics as the
-  agent's `SCADBUDDY_AGENT_TRUSTED_PROXIES`. Like that variable it is
+  taking the first hop not in the list. This reuses the CIDR-matching idea of
+  the agent's `SCADBUDDY_AGENT_TRUSTED_PROXIES`, but on a different header for
+  a different purpose. The agent's list (`src/http/origins.ts`) decides
+  whether to believe `X-Forwarded-Proto`/`X-Forwarded-Host` when it
+  reconstructs an origin. This one decides whether to believe
+  `X-Forwarded-For` when it picks a client address for a rate-limit bucket.
+  The agent has no `X-Forwarded-For` handling to copy; PR #2 writes it. Like that variable it is
   infrastructure, an env-only `Settings` field, not a Postgres setting. The
   backend has no proxy-trust handling today (uvicorn runs with its defaults,
   so behind the gateway every client is the gateway). With the list empty,
@@ -313,7 +318,18 @@ its caller, so it cannot see the relay's off signal.
 Also: fetch instrumentation that injects `traceparent` **only
 for same-origin URLs** (never Bambuddy deep links or Google Fonts);
 document-load instrumentation; manual spans around Generate, Print and Send,
-named after the action. The msw mocks get a handler for the relay returning
+named after the action.
+
+**Dev server.** `frontend/vite.config.ts`'s proxy table (also used by
+`pnpm preview`) gets a rule for `^/telemetry(?:/|$)` to the backend, beside
+the existing `/api` rule. Without it, `vite dev` against a real backend would
+send every batch to Vite's own SPA fallback. The batch would be lost with no
+error, because `RelayExporter` drops batches without retrying. Vite's
+`changeOrigin` rewrites `Host`, not `Origin`, so the page's
+`http://localhost:5173` still reaches the relay. `origin_allowed` accepts
+loopback hosts.
+
+The msw mocks get a handler for the relay returning
 the `off` response (`src/mocks/features/telemetry.ts`), so vitest and the
 mocked e2e never export.
 
@@ -600,7 +616,7 @@ One PR per row, in order; each is useful alone.
 | 1 | Backend tracing core, FastAPI/httpx/psycopg, Temporal interceptor, render stage spans, `render_jobs.traceparent` and the coalesce link | — |
 | 2 | Relay route, `SCADBUDDY_TRUSTED_PROXIES` | 1 |
 | 3 | Agent telemetry, manual spans, `ai_approvals.traceparent` and the end-and-link approvals | 1 (for end-to-end), not for its own tests |
-| 4 | Frontend SDK | 2 |
+| 4 | Frontend SDK, `RelayExporter`, the `vite.config.ts` proxy rule | 2 |
 | 5 | `deploy/grafana/`, its lint with a pinned kustomize, and the optional-line `ref` rewrite in `deploy.reusable.yml` with its tests | clusters#1596 Phase 4 for the Tempo panels |
 
 Clusters#1596 Phases 1–4 can proceed in parallel. Spans flow end to end once
