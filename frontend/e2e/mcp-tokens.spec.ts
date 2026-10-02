@@ -1,4 +1,5 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
+import { bambuddyFrame } from './bambuddyFrame'
 
 // Settings → MCP access tokens (#251), against the msw stand-in for the agent
 // service's /api/v1/ai/mcp-tokens (src/mocks/features/mcpTokens.ts).
@@ -55,17 +56,8 @@ test.describe('MCP access tokens', () => {
   })
 
   test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, baseURL }) => {
-    // Bambuddy's External Link frame: another origin, its sandbox flags and no
-    // allow="clipboard-write", so the async Clipboard API is not granted to it.
-    const host = new URL('/mockServiceWorker.js', baseURL)
-    host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-    await page.goto(host.href)
-    await page.setContent(
-      `<iframe src="${new URL('/settings', baseURL).href}" title="ScadBuddy"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-        style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
-    )
-    const frame = page.frameLocator('iframe')
+    // No allow="clipboard-write" on Bambuddy's frame: the async Clipboard API is not granted to it.
+    const frame = await bambuddyFrame(page, baseURL, '/settings')
     const { panel, token } = await createToken(frame, 'In the frame')
 
     await panel.getByRole('button', { name: 'Copy token' }).click()

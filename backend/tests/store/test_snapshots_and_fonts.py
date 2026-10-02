@@ -1,28 +1,40 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import subprocess
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
+from unittest import mock
 
 import pytest
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
+from trimesh.creation import box
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.render import previews as previews_module
+from scadbuddy.render.jobs import prune_revision_exports, resolve_source
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store import snapshots as snapshots_module
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.fonts import FontMirror, font_key, wanted_families
+from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
+from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError, snapshot_key
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
+from tests.conftest import write_openscad_3mf
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -122,6 +134,31 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert content.index.get(font_key(family.name)) is not None
 
 
+async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#687: `install(force=True)` republishes a family under the same key; a worker
+    holding the old files fetches the new ones, and the API's own install (no marker,
+    the source of what was published) is never overwritten by a sync."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v1")
+    api = FontMirror(content, api_fonts)
+    await api.publish("Lobster Two")
+    worker_fonts = FontService(tmp_path / "worker")
+    worker = FontMirror(content, worker_fonts)
+    assert await worker.sync() == [family.name]
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v2")
+    await api.publish("Lobster Two")
+    assert await worker.sync() == [family.name]
+    assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"v2"
+    assert await worker.sync() == []
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"v3, not yet published")
+    assert await api.sync() == []
+    assert (family / "LobsterTwo-Regular.ttf").read_bytes() == b"v3, not yet published"
+
+
 def _worker_deps(tmp_path: Path, pool: Pool, snapshots: SnapshotStore) -> WorkerDeps:
     return WorkerDeps(
         config=Config(data_dir=tmp_path / "worker"),
@@ -208,3 +245,179 @@ async def test_a_worker_syncs_only_the_families_its_template_names(
     mirror = FontMirror(content, FontService(tmp_path / "worker"))
     assert await mirror.sync(wanted) == ["lobstertwo"]
     assert await mirror.sync(wanted) == []
+
+
+def test_a_piece_in_a_subdirectory_scans_the_templates_root_files(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    (source / "parts").mkdir(parents=True)
+    (source / "model.scad").write_text('label_font = "Lobster Two"; // font\n')
+    (source / "parts" / "roof.scad").write_text("include <../model.scad>\ncube(1);\n")
+    root = model_dir(source / "parts" / "roof.scad", "parts/roof.scad")
+    assert root == source
+    assert "lobstertwo" in wanted_families(root, {})
+    assert model_dir(source / "model.scad", "model.scad") == source
+
+
+async def test_a_worker_without_the_volume_renders_a_preview_from_the_stored_snapshot(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """Final review C1: nothing is read from the worker's `models/`, which is empty;
+    the source comes from the snapshot, the font it names from the store."""
+    rev = "f" * 40
+    api_paths = DataPaths(tmp_path / "api")
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text('text("hi", font = "Lobster Two");')
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    await FontMirror(content, api_fonts).publish("Lobster Two")
+
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker_fonts = FontService(tmp_path / "worker")
+    deps = replace(
+        _worker_deps(tmp_path, pool, SnapshotStore(content, worker_paths, history=None)),
+        fonts_mirror=FontMirror(content, worker_fonts),
+    )
+    rendered: list[Path] = []
+
+    async def one_box(*args: object, **kwargs: object) -> object:
+        rendered.append(cast(Path, args[0]))
+        write_openscad_3mf(cast(Path, args[3]), [("Color 1", "#0047BB00", box())])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def no_parameters(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", one_box),
+        mock.patch.object(previews_module, "cached_schema", no_parameters),
+    ):
+        png = await ActivityEnvironment().run(
+            RenderActivities(deps).render_preview_png, "demo", rev
+        )
+
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert rendered == [worker_paths.model_revision_dir("demo", rev) / "model.scad"]
+    assert not worker_paths.model_source("demo").exists()
+    assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"ttf"
+
+
+async def test_a_preview_whose_snapshot_is_gone_fails_clearly_on_a_worker(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    worker = SnapshotStore(content, DataPaths(tmp_path / "worker"), history=None)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(
+            RenderActivities(_worker_deps(tmp_path, pool, worker)).render_preview_png,
+            "demo",
+            "0" * 40,
+        )
+    assert raised.value.non_retryable and raised.value.type == "SnapshotUnavailableError"
+
+
+async def test_an_export_a_worker_uses_again_is_not_pruned_within_the_ttl(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """Final re-review n1: a `materialize` hit is a use, so the prune's TTL runs from
+    the last render that read the export, not from when it was unpacked."""
+    rev = "9" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", rev)
+    export = worker_paths.model_revision_dir("demo", rev)
+    old = time.time() - 7 * 86400
+    os.utime(export, (old, old))
+    assert await worker.materialize("demo", rev)  # a hit
+    assert prune_revision_exports(worker_paths, 86400) == []
+    assert (export / "model.scad").is_file()
+
+
+async def test_ensure_marks_an_old_export_used_before_packing_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#688: `ensure` packs an existing export, so it touches it first; otherwise the
+    prune (its mtime past the TTL) could remove it mid-pack."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "7" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    old = time.time() - 7 * 86400
+    os.utime(export, (old, old))
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    assert prune_revision_exports(api_paths, 86400) == []
+
+
+async def test_concurrent_ensures_of_a_new_revision_store_it_once(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: debounced submits of a revision's first render all `pin` at once; one
+    packs and uploads, the others find its row."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "6" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(6);")
+    put = content.put
+    calls = 0
+
+    async def counting(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)  # an upload takes a while
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = counting  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None)
+    keys = await asyncio.gather(*(api.ensure("demo", rev) for _ in range(5)))
+    assert keys == [snapshot_key("demo", rev)] * 5
+    assert calls == 1
+
+
+def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
+    """The prune takes the export between `materialize`'s `is_dir` and its touch."""
+    left = [times]
+
+    def touch(directory: Path) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            shutil.rmtree(directory)
+
+    monkeypatch.setattr(snapshots_module, "touch_export", touch)
+
+
+async def test_an_export_pruned_as_it_is_used_is_not_reported_present(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: a hit the prune took is no hit, so `_materialize` fails clearly."""
+    worker_paths = DataPaths(tmp_path / "worker")
+    export = worker_paths.model_revision_dir("demo", "7" * 40)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    _pruned_on_touch(monkeypatch)
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", "7" * 40) is False
+
+
+async def test_an_export_pruned_as_it_is_used_comes_back_from_the_store(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rev = "6" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", rev)
+    _pruned_on_touch(monkeypatch)
+    assert await worker.materialize("demo", rev)
+    assert (worker_paths.model_revision_dir("demo", rev) / "model.scad").read_text() == "cube(4);"
+
+
+async def test_an_export_lost_to_the_prune_on_a_worker_without_git_fails_clearly(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SnapshotUnavailableError, match="demo@"):
+        await resolve_source("demo", "8" * 40, paths=DataPaths(tmp_path / "worker"), history=None)

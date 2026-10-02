@@ -22,6 +22,13 @@ async function seeded() {
   )
 }
 
+/** The render key's warning (#426) is a status too, so find the one that says `text`. */
+function findStatus(text: string) {
+  return screen.findByText(
+    (_, element) => element?.getAttribute('role') === 'status' && (element.textContent ?? '').includes(text),
+  )
+}
+
 describe('SettingsPage', () => {
   it('loads the stored connection without revealing the key', async () => {
     renderPage(<SettingsPage />)
@@ -56,7 +63,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(bambuddyTest())
-    expect(await screen.findByRole('status')).toHaveTextContent('3DP-31B-598')
+    expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
   })
 
   it('names the missing scope rather than the bare status code', async () => {
@@ -73,7 +80,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(bambuddyTest())
-    expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
+    expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
   })
 
   it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
@@ -170,7 +177,7 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add to Bambuddy sidebar' }))
     // Bambuddy renders the link in a sandboxed iframe at /external/{id}.
-    expect(await screen.findByRole('status')).toHaveTextContent('/external/3')
+    expect(await findStatus('/external/3')).toBeInTheDocument()
   })
 
   it('shows how much the upload store holds against its caps (#296)', async () => {
@@ -238,7 +245,7 @@ describe('SettingsPage, live (#269)', () => {
     await user.clear(field)
     await user.type(field, 'https://tested.test')
     await user.click(bambuddyTest())
-    await screen.findByRole('status')
+    await findStatus('3DP-31B-598')
 
     // The test saved the form; this is that save's own event.
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })

@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, delay, http } from 'msw'
+import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { GALLERY_SLUG, media, models } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { toSlides } from '../components/media/slides'
 import { renderPage } from '../test/utils'
@@ -89,17 +90,19 @@ describe('template page gallery (#280)', () => {
   })
 
   it('does not remount the preview when the media arrives', async () => {
+    // The viewer waits for the record (#425: the record says which layout holds it), so
+    // the media arrives later on the live record: the first answer has none.
     const record = models.find((model) => model.slug === GALLERY_SLUG)!
+    let withMedia = false
     server.use(
-      http.get('/api/v1/models/:slug', async () => {
-        await delay(150)
-        return HttpResponse.json(record)
-      }),
+      http.get('/api/v1/models/:slug', () => HttpResponse.json(withMedia ? record : { ...record, media: [] })),
     )
     render(GALLERY_SLUG)
     const preview = await screen.findByTestId('preview')
     expect(screen.queryByRole('list', { name: 'Gallery' })).not.toBeInTheDocument()
 
+    withMedia = true
+    emitRealtime('model.updated', [`model:${GALLERY_SLUG}`], { slug: GALLERY_SLUG })
     await strip()
 
     expect(screen.getByTestId('preview')).toBe(preview)

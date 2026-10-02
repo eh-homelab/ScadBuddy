@@ -69,3 +69,9 @@ class BlobMissingError(KeyError):
 class RefusedDeleteError(RuntimeError):
     """A delete aimed at a file outside a ScadBuddy `Work/` folder (spec §6.3). Raised
     by the Bambuddy backend (Task 4); here so `sweep_content` can catch it per key."""
+
+
+class ReuseLostError(LookupError):
+    """A put meant to reuse an existing object, but by the time its row was written no
+    row named that object any more: a concurrent put or delete freed it (and may be
+    removing it). The caller uploads its own copy."""

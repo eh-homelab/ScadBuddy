@@ -6,7 +6,10 @@ from psycopg_pool import ConnectionPool
 
 
 class BlobRefs:
-    """`blob_refs`: which holders (a job now; outputs and presets later) keep a blob."""
+    """`blob_refs`: which holders (a job now; outputs and presets later) keep a blob.
+
+    The pool must be autocommit, as the render queue's is: every write here is a bare
+    `execute`, with no transaction or commit of its own."""
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool

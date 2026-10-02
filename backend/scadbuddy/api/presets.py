@@ -6,6 +6,7 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Response, status
+from pydantic import ValidationError
 
 from scadbuddy.api.deps import (
     AssetsDep,
@@ -42,6 +43,7 @@ from scadbuddy.library.presets import (
     TooManyPresetsError,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
+from scadbuddy.render.inputs import InputsError, legacy_inputs
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
@@ -199,12 +201,18 @@ async def duplicate_preset(
         fonts=fonts,
     )
     # The original's details come along too (#327): only the name is the copy's own.
-    copy = ParamPresetCreate(
-        name=body.name,
-        params=source.params,
-        description=source.description,
-        tags=source.tags,
-    )
+    # Every write path checks inputs before storing them, so this should not fail; a
+    # stored value that slipped past those checks is a 422 here, never a 500.
+    try:
+        copy = ParamPresetCreate(
+            name=body.name,
+            inputs=source.inputs or legacy_inputs(source.params),
+            description=source.description,
+            tags=source.tags,
+        )
+    except (InputsError, ValidationError) as error:
+        detail = str(error.errors()[0]["msg"]) if isinstance(error, ValidationError) else str(error)
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
     try:
         return await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError:
@@ -251,6 +259,8 @@ async def update_preset(
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
     except PresetExistsError:

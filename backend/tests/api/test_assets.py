@@ -23,6 +23,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES, AssetStore
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.store.content import StoreFullError
 from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
 from tests.conftest import MODEL_SLUG, UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -475,8 +476,9 @@ def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
     assert [p.name for p in paths.assets.iterdir()] == [f"{uploaded['id']}.svg"]
 
 
-def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
-    """One store for the routes and the renders, caps and all (#390)."""
+def test_the_render_workers_use_the_apps_upload_store(client: TestClient, app: FastAPI) -> None:
+    """One store for the routes and the renders, caps and all (#390). With the app
+    started: the worker's deps read the store bundle the lifespan builds."""
     state = getattr(app.state, STATE_ATTR)
     deps = worker_deps_from_state(state)
     try:
@@ -531,3 +533,21 @@ def test_a_failed_mirror_fails_the_upload_with_its_problem(
     )
     assert response.status_code == 502
     assert response.json()["detail"] == "Bambuddy is unreachable"
+
+
+def test_an_upload_the_blob_store_has_no_room_for_is_a_507(
+    client: TestClient, app: FastAPI
+) -> None:
+    class Full:
+        async def mirror(self, *_: object, **__: object) -> None:
+            raise StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (10)")
+
+    state = getattr(app.state, STATE_ATTR)
+    # On the lifespan's own (local) bundle, which its shutdown closes.
+    state.store.remote_assets = Full()
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+    )
+    assert response.status_code == 507, response.text
+    assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]

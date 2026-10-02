@@ -1,13 +1,16 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
-import { BUILTIN_SLUG } from '../mocks/fixtures'
+import { BUILTIN_SLUG, keychainSchema } from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
 import { renderPage } from '../test/utils'
+import { defaultValues } from '../lib/params'
+import { PresetPicker } from './PresetPicker'
 
 // WebGL does not exist in jsdom; the page is under test here, not the viewer.
 vi.mock('./Preview', () => ({
@@ -27,14 +30,22 @@ async function picker() {
 }
 
 /** Every render request's params, so what was ASKED of the server can be asserted. */
-function watchRenders(): Promise<{ params: Record<string, unknown> }>[] {
-  const bodies: Promise<{ params: Record<string, unknown> }>[] = []
+function watchRenders(): Promise<{ inputs: { params: Record<string, unknown> } }>[] {
+  const bodies: Promise<{ inputs: { params: Record<string, unknown> } }>[] = []
   server.events.on('request:start', ({ request }) => {
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
-      bodies.push(request.clone().json() as Promise<{ params: Record<string, unknown> }>)
+      bodies.push(request.clone().json() as Promise<{ inputs: { params: Record<string, unknown> } }>)
     }
   })
   return bodies
+}
+
+/** Opens Save as preset, names it and saves. */
+async function savePresetNamed(user: ReturnType<typeof renderPage>['user'], name: string) {
+  await user.click(await screen.findByRole('button', { name: 'Save as preset…' }))
+  const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+  await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), name)
+  await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 }
 
 describe('PresetPicker', () => {
@@ -67,7 +78,7 @@ describe('PresetPicker', () => {
 
     await waitFor(async () => {
       const last = await renders.at(-1)
-      expect(last?.params).toMatchObject({ name: 'Mum', body_color: '#222222' })
+      expect(last?.inputs.params).toMatchObject({ name: 'Mum', body_color: '#222222' })
     }, { timeout: 4000 })
   })
 
@@ -86,15 +97,12 @@ describe('PresetPicker', () => {
     await user.clear(name)
     await user.type(name, 'Nova')
 
-    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
-    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
-    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Nova tag')
-    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await savePresetNamed(user, 'Nova tag')
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Nova tag',
-      params: { name: 'Nova' },
+      inputs: { params: { name: 'Nova' } },
       description: '',
       tags: [],
     })
@@ -129,7 +137,7 @@ describe('PresetPicker', () => {
 
     await waitFor(() => expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument())
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
-      params: { name: 'Mummy', body_color: '#222222', text_color: '#FFFFFF' },
+      inputs: { params: { name: 'Mummy', body_color: '#222222', text_color: '#FFFFFF' } },
     })
   })
 
@@ -250,7 +258,7 @@ describe('PresetPicker', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Bag tag',
-      params: {},
+      inputs: { params: {} },
       description: 'For **bags**.',
       tags: ['bags', 'big tag'],
     })
@@ -385,5 +393,72 @@ describe('PresetPicker', () => {
     render()
     await picker()
     expect(screen.queryByRole('button', { name: /^Duplicate preset/ })).not.toBeInTheDocument()
+  })
+
+  it('saves the UI state with the preset and hands it back on apply', async () => {
+    let saved: unknown
+    server.use(
+      http.post('/api/v1/models/:slug/presets', async ({ request }) => {
+        saved = await request.json()
+        return HttpResponse.json(
+          {
+            id: 'e'.repeat(32),
+            name: 'Lid',
+            origin: 'mine',
+            params: {},
+            inputs: { params: {}, tab: 'lid', v: 0 },
+            description: '',
+            tags: [],
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    const onApply = vi.fn()
+    const { user } = renderPage(
+      <PresetPicker slug="name-keychain" schema={keychainSchema} values={defaultValues(keychainSchema)} extra={{ tab: 'lid' }} onApply={onApply} />,
+    )
+    await savePresetNamed(user, 'Lid')
+    await waitFor(() => expect(saved).toEqual({ name: 'Lid', inputs: { params: {}, tab: 'lid' }, description: '', tags: [] }))
+    const select = await picker()
+    await user.selectOptions(select, 'Tiny')
+    await user.selectOptions(select, 'Lid')
+    expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+  })
+
+  it('Reset to defaults clears the UI state a preset brought', async () => {
+    const lid = {
+      id: 'f'.repeat(32),
+      name: 'Lid',
+      origin: 'mine',
+      params: { name: 'Kai' },
+      inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 },
+      description: '',
+      tags: [],
+    }
+    const saved: { inputs: Record<string, unknown> }[] = []
+    server.use(
+      http.get('/api/v1/models/:slug/presets', () => HttpResponse.json([lid])),
+      http.post('/api/v1/models/:slug/presets', async ({ request }) => {
+        const body = (await request.json()) as { name: string; inputs: Record<string, unknown> }
+        saved.push(body)
+        return HttpResponse.json(
+          { ...lid, id: String(saved.length).repeat(32), name: body.name, inputs: body.inputs },
+          { status: 201 },
+        )
+      }),
+    )
+    const { user } = render()
+    const select = await screen.findByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Lid' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Lid')
+    await savePresetNamed(user, 'With lid')
+    await waitFor(() => expect(saved[0]?.inputs).toMatchObject({ tab: 'lid' }))
+    const reset = screen.getByRole('button', { name: 'Reset to defaults' })
+    await waitFor(() => expect(reset).toBeEnabled())
+    await user.click(reset)
+    await savePresetNamed(user, 'After reset')
+    await waitFor(() => expect(saved).toHaveLength(2))
+    expect(saved[1]?.inputs).not.toHaveProperty('tab')
   })
 })

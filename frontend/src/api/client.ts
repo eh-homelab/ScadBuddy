@@ -11,6 +11,7 @@ import type {
   ChoicesView,
   ConnectionTest,
   CustomizerSchema,
+  RevisionSchema,
   DuplicateRequest,
   EditTarget,
   FilamentOptions,
@@ -43,7 +44,6 @@ import type {
   ParamPresetDuplicate,
   ParamPresetUpdate,
   PastedSource,
-  ParamValue,
   Plate,
   PlateCatalogue,
   PlateFit,
@@ -73,6 +73,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -87,6 +88,7 @@ import type {
 } from './mcpTokens'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
+import type { JsonObject } from '../lib/inputs'
 
 export const API_BASE = '/api/v1'
 
@@ -661,6 +663,7 @@ export const api = {
 
   /** #296 — the upload store's size against its caps, for Settings. */
   getAssetUsage: () => request<AssetUsage>('/assets/usage'),
+  getStoreUsage: () => request<StoreUsage>('/store/usage'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
@@ -688,13 +691,11 @@ export const api = {
     return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
   },
 
-  /** A `version` reads that revision's schema instead of the model's current one. */
-  getSchema: (slug: string, version?: string) =>
-    request<CustomizerSchema>(
-      version
-        ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
-        : `/models/${seg(slug)}/schema`,
-    ),
+  /** A `version` reads that revision's schema, and its `ui`, instead of the model's current one. */
+  getSchema: (slug: string, version?: string): Promise<CustomizerSchema | RevisionSchema> =>
+    version
+      ? request<RevisionSchema>(`/models/${seg(slug)}/versions/${seg(version)}/schema`)
+      : request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
 
   listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 
@@ -715,16 +716,11 @@ export const api = {
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
    * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
    */
-  render: (
-    slug: string,
-    params: Record<string, ParamValue>,
-    version?: string,
-    supersedes?: string,
-  ) =>
+  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
       body: JSON.stringify({
-        params,
+        inputs,
         version: version ?? null,
         ...(supersedes ? { supersedes } : {}),
       }),
@@ -734,10 +730,17 @@ export const api = {
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
-  createOutput: (slug: string, jobId: string, name?: string) =>
+  /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
+  uiFileUrl: (slug: string, version: string | undefined, path: string) =>
+    `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ''}/ui/${path
+      .split('/')
+      .map(seg)
+      .join('/')}`,
+
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
     request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null }),
+      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
     }),
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),

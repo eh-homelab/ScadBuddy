@@ -31,12 +31,18 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.previews import source_key
+from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
-from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
+from scadbuddy.render.jobs import (
+    INITIAL_RENDER_ESTIMATE,
+    SnapshotUnavailableError,
+    prune_revision_exports,
+)
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -128,17 +134,24 @@ class RenderService:
         *,
         model_version: str | None = None,
         supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
     ) -> Job:
         """Record the job (or join the waiting one it matches) and start its workflow."""
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
             model_version = await self.snapshots.pin(slug, model_version)
+            if model_version is None:
+                # Started without one, the worker would look for a live source it has not got.
+                raise SnapshotUnavailableError(
+                    f"no commit of {slug} to snapshot for its render: the API has no git"
+                    " history, or the template was never committed"
+                )
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,
             params=dict(params),
-            inputs={"params": dict(params)},
+            inputs=dict(inputs) if inputs is not None else legacy_inputs(params),
             model_version=model_version,
             created_at=now(),
         )
@@ -231,18 +244,44 @@ class RenderService:
         the run is shared, so it is not cancelled (another caller may still be waiting
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
-        includes any wait for a free worker."""
+        includes any wait for a free worker. On the bambuddy store the worker renders
+        the snapshot of the slug's last commit, which it may first have to bring in:
+        the caller then waits `PREVIEW_TRANSFER` longer. There the run's id names the
+        revision too, so a join never spans two commits: a newer commit's call starts its
+        own run while an older one finishes, and the scheduler (which stores the image
+        under the source key it read first) never gets an older commit's image. On the
+        local store the id names the source key the same way."""
+        revision: str | None = None
+        wait = timeout
+        if self.snapshots is not None:
+            # The bambuddy store: the worker has no volume, so it renders the snapshot
+            # of the last commit (as `submit`), and may first bring it and its fonts in.
+            revision = await self.snapshots.pin(slug, None)
+            if revision is None:
+                # Started without one, the worker would look for a live source it has not got.
+                raise SnapshotUnavailableError(
+                    f"no commit of {slug} to snapshot for its preview: the API has no git"
+                    " history, or the template was never committed"
+                )
+            wait += PREVIEW_TRANSFER.total_seconds()
+            run_id = f"preview-{slug}-{revision[:12]}"
+        else:
+            # The local store renders the live source, so the id names what it reads
+            # (the scheduler's `source_key`): a call after an edit does not join a run
+            # of the source before it (#903).
+            key = await asyncio.to_thread(source_key, self.paths, slug)
+            run_id = f"preview-{slug}" if key is None else f"preview-{slug}-{key[:12]}"
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
-            slug,
-            id=f"preview-{slug}",
+            args=[slug, revision],
+            id=run_id,
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
             rpc_timeout=RPC_TIMEOUT,
         )
-        png: bytes = await asyncio.wait_for(handle.result(), timeout)
+        png: bytes = await asyncio.wait_for(handle.result(), wait)
         return png
 
     def retry_after(self) -> int:
