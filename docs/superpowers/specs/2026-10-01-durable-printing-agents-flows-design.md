@@ -335,7 +335,10 @@ The same for every kind:
 
 ### 4.3 Queues follow what a worker holds
 
-The template spec §9's containment rule, applied to every command:
+The template spec §9 separates two workers by what they hold: render workers hold only
+the store key, and the `bambuddy` Deployment holds the fuller Bambuddy key and runs no
+template code. This spec extends that rule, as its own decision, to every queue below:
+each queue's worker holds only what its commands need.
 
 | Queue | Worker | Commands | Holds |
 |---|---|---|---|
@@ -379,6 +382,13 @@ two reasons, and both are answered here:
   the workflow.
   - `TemplatePipeline` is started as `render-<render_key>` with `USE_EXISTING`, so every
     request for the same content reaches the same execution.
+  - This changes the ID of a shipped workflow, which is `render-{job_id}` today
+    (`render/projection.py:74`). At the phase 2 rollout, executions already running as
+    `render-{job_id}` finish on the build they are pinned to (Worker Versioning, and the
+    old worker drains on SIGTERM, `worker.py`), with the reconciler of that build. New
+    requests start `render-<render_key>`. A request during the drain for content an old
+    execution is still rendering does not join it, so at most one extra render per
+    in-flight job happens once, and `piece_key` still dedupes its openscad work.
   - Its `accepted` Update adds one claim, in workflow state. A workflow's handlers run
     one at a time, so that count is exact, as the `claims + 1` row update was.
   - The row's `claims` column becomes a projection of that count, written with each
@@ -572,7 +582,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     with one select: Classic / Durable. After the first message it is gone, and the
     header shows a Durable badge on a durable session.
   - The last choice is remembered in `localStorage` key `scadbuddy.assistant.mode`,
-    wrapped in try/catch like `AssistantChat.tsx:42-67`. With nothing stored, the global
+    wrapped in try/catch like `frontend/src/components/assistant/AssistantChat.tsx:42-67`. With nothing stored, the global
     default is used.
   - Settings → Assistant gains "Default session mode", next to Session limits, through a
     `GET`/`PUT /api/v1/ai/settings/session-mode` route group (a `src/routes/` module).
