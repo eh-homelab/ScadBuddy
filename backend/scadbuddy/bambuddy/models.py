@@ -269,7 +269,8 @@ class NozzleRackSlot(NozzleInfo):
     filament_colour: str = Field(default="", alias="filament_color")
     #: The hotend's own serial (#836). It goes into the ``rack_nozzle_*`` tables and
     #: nowhere else (spec 2026-10-01 §7), so it is kept out of ``repr``. A firmware
-    #: ``null`` reads as ``""`` so it can never fail the whole status parse.
+    #: ``null`` reads as ``""`` and any other non-string is coerced to text, so it can
+    #: never fail the whole status parse or leak through a ValidationError's input.
     serial_number: str = Field(default="", repr=False)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -277,7 +278,7 @@ class NozzleRackSlot(NozzleInfo):
     @field_validator("serial_number", mode="before")
     @classmethod
     def _serial_text(cls, value: Any) -> Any:
-        return "" if value is None else value
+        return "" if value is None else str(value)
 
 
 class SlotChoice(BaseModel):

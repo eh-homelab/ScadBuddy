@@ -81,3 +81,12 @@ def test_a_null_serial_from_the_firmware_reads_as_empty() -> None:
     body["nozzle_rack"][2]["serial_number"] = None
     slot = PrinterStatus.model_validate(body).nozzle_rack[2]
     assert slot.serial_number == ""
+
+
+def test_a_numeric_serial_from_the_firmware_reads_as_text() -> None:
+    """Final review Important 1: a non-string serial must not fail the whole status parse
+    (and so cannot leak through a ValidationError's ``input_value``)."""
+    body = recording("printer-status-rack.json")
+    body["nozzle_rack"][2]["serial_number"] = 917  # invented
+    slot = PrinterStatus.model_validate(body).nozzle_rack[2]
+    assert slot.serial_number == "917"
