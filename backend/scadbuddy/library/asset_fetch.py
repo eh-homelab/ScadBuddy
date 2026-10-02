@@ -73,6 +73,13 @@ def host_allowed(host: str, domains: tuple[str, ...] | list[str]) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in domains)
 
 
+def _ascii_host(url: httpx.URL) -> str:
+    """The host as it is resolved and connected to: IDNA (punycode) for a non-ASCII
+    name. httpx's ``host`` is the Unicode form; ``raw_host`` is what goes on the wire,
+    so that is what the allowlist (ASCII entries only, :data:`DOMAIN_RE`) is held to."""
+    return url.raw_host.decode("ascii")
+
+
 class AssetFetchRefusedError(ImportRefusedError):
     """The host is not on the allowlist."""
 
@@ -106,7 +113,7 @@ async def fetch_file(
         raise ImportRefusedError(f"only https URLs can be fetched, and {str(url)!r} is not one")
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
-    if not host_allowed(url.host, domains):
+    if not host_allowed(_ascii_host(url), domains):
         raise _refuse(url.host)
     hop = url
 
@@ -114,7 +121,7 @@ async def fetch_file(
         nonlocal hop
         hop = request.url
         # Before the address is looked up: a host off the list is never resolved.
-        if not host_allowed(request.url.host, domains):
+        if not host_allowed(_ascii_host(request.url), domains):
             raise _refuse(request.url.host, redirected_from=url.host)
         await _vet_hop(request)
 
@@ -123,5 +130,7 @@ async def fetch_file(
             data = await _fetch(url, client, limit=limit)
     except (UnreachableError, TimeoutError, httpx.HTTPError):
         raise unreachable(hop.host, redirected_from=url.host) from None
+    # From the URL as given, not the last hop: a redirect usually ends on a CDN path
+    # whose last segment is a hash. It is a display name only (`display_name`).
     name = unquote(url.path.rstrip("/").rsplit("/", 1)[-1]) or None
     return FetchedFile(data=data, filename=name, source_url=str(url))
