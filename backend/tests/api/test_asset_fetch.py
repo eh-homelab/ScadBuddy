@@ -138,7 +138,8 @@ def test_the_allowlist_starts_on_the_defaults_and_the_user_can_replace_it(
 
 
 @pytest.mark.parametrize(
-    "domain", ["https://example.com", "example.com/path", "*.example.com", "localhost", ""]
+    "domain",
+    ["https://example.com", "example.com/path", "*.example.com", "localhost", "", "1.2.3.4"],
 )
 def test_an_allowlist_entry_that_is_not_a_domain_is_refused(
     client: TestClient, domain: str

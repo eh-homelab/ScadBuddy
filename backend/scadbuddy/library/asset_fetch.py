@@ -48,10 +48,12 @@ DEFAULT_ASSET_FETCH_DOMAINS: Final = (
     "openmoji.org",
 )
 
-#: A host name of at least two labels, each a letter-digit-hyphen label. No scheme,
-#: port, path or wildcard: an entry already allows its subdomains.
+#: A host name of at least two labels, each a letter-digit-hyphen label, ending in a
+#: top-level label that starts with a letter, so an IPv4 literal is not one. No
+#: scheme, port, path or wildcard: an entry already allows its subdomains.
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-DOMAIN_RE: Final = re.compile(rf"^(?=.{{1,253}}$)(?:{_LABEL}\.)+{_LABEL}$")
+_TOP_LABEL = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+DOMAIN_RE: Final = re.compile(rf"^(?=.{{1,253}}$)(?:{_LABEL}\.)+{_TOP_LABEL}$")
 
 
 def normalise_domain(entry: str) -> str:
