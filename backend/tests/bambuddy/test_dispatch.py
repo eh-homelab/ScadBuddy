@@ -11,13 +11,15 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import SlicePlan, slice_and_queue
+from scadbuddy.bambuddy.dispatch import RackChoice, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.rack.usage import PickedHotend
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -113,3 +115,84 @@ async def test_the_item_names_the_printer_and_carries_the_options(
     assert sent["required_filament_types"] == ["PETG"]
     assert (outcome.slice_job_id, outcome.sliced_library_file_id) == (9, 52)
     assert outcome.printer_id == 1
+
+
+@respx.mock
+async def test_the_rack_choice_rides_on_the_queue_item(bambuddy: BambuddyClient) -> None:
+    _, queued = routes()
+    asked: list[int] = []
+
+    async def choose(sliced: int) -> RackChoice | None:
+        asked.append(sliced)
+        return RackChoice(
+            nozzle_rack_choice={"0": 4},
+            picks=[PickedHotend(group_id=0, position=4, serial="TEST-HOTEND-19")],
+        )
+
+    outcome = await slice_and_queue(
+        bambuddy, library_file_id=41, plan=PLAN, printer_id=1, choose_rack=choose
+    )
+
+    assert asked == [52]
+    assert json.loads(queued.calls.last.request.read())["nozzle_rack_choice"] == {"0": 4}
+    assert [(p.group_id, p.position) for p in outcome.rack_picks] == [(0, 4)]
+    assert "TEST-HOTEND-19" not in repr(outcome)
+
+
+@respx.mock
+async def test_no_rack_choice_sends_no_field(bambuddy: BambuddyClient) -> None:
+    _, queued = routes()
+
+    async def choose(sliced: int) -> RackChoice | None:
+        return None
+
+    outcome = await slice_and_queue(
+        bambuddy, library_file_id=41, plan=PLAN, printer_id=1, choose_rack=choose
+    )
+
+    assert "nozzle_rack_choice" not in json.loads(queued.calls.last.request.read())
+    assert outcome.rack_picks == []
+
+
+@respx.mock
+async def test_the_rack_is_chosen_after_the_slice_and_before_before_enqueue(
+    bambuddy: BambuddyClient,
+) -> None:
+    sliced, _ = routes()
+    order: list[str] = []
+
+    async def choose(file_id: int) -> RackChoice | None:
+        order.append(f"choose after {sliced.call_count} slice")
+        return None
+
+    async def before() -> None:
+        order.append("before_enqueue")
+
+    await slice_and_queue(
+        bambuddy,
+        library_file_id=41,
+        plan=PLAN,
+        printer_id=1,
+        choose_rack=choose,
+        before_enqueue=before,
+    )
+
+    assert order == ["choose after 1 slice", "before_enqueue"]
+
+
+@respx.mock
+async def test_a_choose_rack_that_raises_fails_the_plate_with_nothing_queued(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Spec section 5: awaited bare, like ``before_enqueue``. The callback the run builds
+    never raises (Task 9 tests that); this pins that ``slice_and_queue`` adds no ``try``."""
+    _, queued = routes()
+
+    async def choose(sliced: int) -> RackChoice | None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await slice_and_queue(
+            bambuddy, library_file_id=41, plan=PLAN, printer_id=1, choose_rack=choose
+        )
+    assert not queued.called
