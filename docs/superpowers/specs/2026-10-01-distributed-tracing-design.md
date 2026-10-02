@@ -321,8 +321,33 @@ mocked e2e never export.
 
 `src/telemetry.ts`, loaded before the app with `node --import
 ./dist/telemetry.js dist/main.js` (ESM needs the loader hook for
-instrumentation to patch modules; the Dockerfile's agent `CMD` changes to
-match). `@opentelemetry/sdk-node` with the HTTP instrumentation for
+instrumentation to patch modules). Every entry point that runs
+`dist/main.js` changes together, so tracing is never something only Docker
+knows how to start:
+- the Dockerfile's agent `CMD`;
+- `agent/package.json`'s `start` script;
+- the manual setup comments in `frontend/e2e/agent-link.real.spec.ts`.
+
+`src/telemetry.ts` registers `@opentelemetry/instrumentation/hook.mjs` with
+`node:module`'s `register()` before starting the SDK. The agent compiles to
+ESM (`"type": "module"`, `module: NodeNext`), so CommonJS hooks alone would
+patch nothing.
+
+**Verified against npm on 2026-10-01** (every package declares
+`node ^18.19.0 || >=20.6.0`, which covers the pinned Node 24):
+- `@opentelemetry/sdk-node`, `@opentelemetry/instrumentation-http`,
+  `@opentelemetry/instrumentation`, `@opentelemetry/otlp-transformer` and
+  `@opentelemetry/instrumentation-fetch` are at 0.222.0;
+- `@opentelemetry/sdk-trace-web` is at 2.11.0;
+- `@opentelemetry/instrumentation-document-load` is at 0.67.0;
+- `@opentelemetry/instrumentation` 0.222.0 ships `hook.mjs` and depends on
+  `import-in-the-middle` ^3.
+
+These packages do not touch the Claude Agent SDK. They patch `node:http`
+only, and the SDK's bundled CLI runs as a child process the hook never
+loads into. The implementing PRs pin exact versions, as `package.json`
+already does for `@anthropic-ai/claude-agent-sdk`, and record their own
+check if the versions have moved by then. `@opentelemetry/sdk-node` with the HTTP instrumentation for
 **incoming** requests only (`ignoreOutgoingRequestHook: () => true`, so no
 outgoing `node:http`/`https` request is touched, the pinned plugin
 forwarder's included). The undici instrumentation is not installed, so
