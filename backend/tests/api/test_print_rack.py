@@ -134,17 +134,7 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
     assert response.status_code == 200, response.text
     assert asyncio.run(rack_usage(client).picked_items([51])) == {51}
     # Spec §5/§7: the result reports the picks sent, by position, never by serial.
-    assert response.json()["rack_picks"] == [
-        {
-            "plate_id": 1,
-            "group_id": 0,
-            "position": 4,
-            "reason": None,
-            "unsafe_material": False,
-            "glow_unchecked": False,
-            "options": [],
-        }
-    ]
+    assert response.json()["rack_picks"] == [{"plate_id": 1, "group_id": 0, "position": 4}]
     assert serial(19) not in response.text
 
 
@@ -205,7 +195,7 @@ def test_the_check_previews_the_rack_sides_eligible_positions(
     assert [option["position"] for option in rack["options"]] == [2, 4, 6]
     assert {option["flow"] for option in rack["options"]} == {"standard"}
     assert rack["position"] in (2, 4, 6) and rack["reason"]
-    assert (rack["group_id"], rack["plate_id"]) == (None, None)
+    assert rack["group_id"] is None and "plate_id" not in rack
 
 
 @respx.mock
@@ -335,3 +325,46 @@ def test_no_serial_appears_anywhere_in_the_check_body(client: TestClient, model:
     assert response.status_code == 200, response.text
     assert response.json()["rack"]["options"], "the check must have ranked a rack to be a real test"
     assert not [s for s in INVENTED_SERIALS if s in response.text]
+
+
+@respx.mock
+def test_a_refused_manual_pick_is_an_error_and_not_also_a_warning(
+    client: TestClient, model: str
+) -> None:
+    """Review M2: the refusal is said once, in ``errors``; no ``rack-manual-partial``
+    repeats it beside the preview."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    result = check(client, output_id, rack_position=1)
+
+    assert len(result["errors"]) == 1
+    assert "rack-manual-partial" not in {w["kind"] for w in result["warnings"]}
+    assert result["rack"] is not None
+
+
+@respx.mock
+def test_an_empty_rack_previews_nothing_and_refuses_a_manual_position(
+    client: TestClient, model: str
+) -> None:
+    """Review M3, kept as is: a readable status with an empty ``nozzle_rack`` has no rack
+    to preview, and a position on it holds no hotend, on /check and /run alike."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    status = recording("printer-status-rack.json")
+    status["nozzle_rack"] = []
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+    message = (
+        "Rack position 2 holds no hotend, and this prints with a 0.4 mm Standard nozzle. "
+        "Choose another position, or Automatic."
+    )
+
+    result = check(client, output_id, rack_position=2)
+    response = run_print(client, output_id, json={**body(**CHECK_04), "rack_position": 2})
+
+    assert (result["rack"], result["errors"]) == (None, [message])
+    assert (response.status_code, response.json()["detail"]) == (422, message)
+    assert not sliced.called

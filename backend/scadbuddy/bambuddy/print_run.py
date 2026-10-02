@@ -158,14 +158,21 @@ class RackOption(BaseModel):
     print_seconds: int = 0
 
 
-class RackPickView(BaseModel):
-    """A rack pick (spec 2026-10-01 §5), never with the hotend's serial (§7): one the run
-    sent, or the check's preview of the rack side. A preview ranks the side as one group;
-    the real pick is made per sliced group and can differ when the slicer splits it."""
+class RackSentPick(BaseModel):
+    """A rack position the run sent for one filament group of one plate (spec 2026-10-01
+    §5), never with the hotend's serial (§7). Group ids repeat across plates."""
 
-    #: The plate the pick was sent for; ``None`` in the preview, which has no plate yet.
-    plate_id: int | None = None
-    #: ``None`` in the preview, which ranks the side as one group.
+    plate_id: int
+    group_id: int
+    position: int
+
+
+class RackPickView(BaseModel):
+    """The check's preview of the rack side's pick (spec 2026-10-01 §5), never with the
+    hotend's serial (§7). It ranks the side as one group; the real pick is made per
+    sliced group and can differ when the slicer splits it."""
+
+    #: Always ``None``: the preview ranks the side as one group.
     group_id: int | None = None
     position: int | None = None
     reason: str | None = None
@@ -202,7 +209,7 @@ class PrintRunResult(BaseModel):
     #: The rack positions actually sent, one per filament group that printed from the
     #: rack (#836). A pick can go stale before the print starts; that shows in progress,
     #: not here (spec §10).
-    rack_picks: list[RackPickView] = Field(default_factory=list)
+    rack_picks: list[RackSentPick] = Field(default_factory=list)
 
 
 async def filament_options(
@@ -453,11 +460,13 @@ async def check_print(
         status=prepared.printer_status,
         rack=rack,
     )
-    # A refused manual pick still previews the rack, so the dialog can offer another.
+    # A refused manual pick still previews the rack, so the dialog can offer another,
+    # and is said once: as the error, not again as a rack-manual-partial warning.
     try:
         _check_manual_pick(request, prepared.printer_status)
     except RunRefusalError as refused:
         errors = [refused.detail]
+        rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
     # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
@@ -924,7 +933,7 @@ def _queued(
         bambuddy_url=client.config.web_url(QUEUE_PATH),
         # Group ids repeat across plates, so each pick names its plate.
         rack_picks=[
-            RackPickView(plate_id=plate_id, group_id=pick.group_id, position=pick.position)
+            RackSentPick(plate_id=plate_id, group_id=pick.group_id, position=pick.position)
             for plate_id, outcome in zip(plate_ids, outcomes, strict=True)
             for pick in outcome.rack_picks
         ],
