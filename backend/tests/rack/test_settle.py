@@ -1,0 +1,226 @@
+"""``record_settled`` and the rack's settle hook (#836, spec 2026-10-01 §4), on Postgres."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.models import ArchiveDetail
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
+from tests.bambuddy.conftest import BASE_URL, recording
+from tests.bambuddy.test_watcher import kinds, until_idle, watcher_for, write_output
+from tests.conftest import PgPool, open_pg_pool
+from tests.rack.helpers import serial
+
+pytestmark = pytest.mark.requires_postgres
+
+OUTPUT = "c" * 32
+AT = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+A = serial(19)
+API = f"{BASE_URL}/api/v1"
+
+
+class Links:
+    def __init__(self, *links: PrintLink) -> None:
+        self.links = list(links)
+
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        return self.links
+
+
+class Archives:
+    def __init__(self, *archives: ArchiveDetail, failing: set[int] | None = None) -> None:
+        self.by_id = {archive.id: archive for archive in archives}
+        self.failing = failing or set()
+
+    async def archive(self, archive_id: int) -> ArchiveDetail:
+        if archive_id in self.failing:
+            raise ApiError(503, f"archive {archive_id} unreadable near {A}")
+        return self.by_id[archive_id]
+
+
+def link(archive_id: int, queue_item_id: int | None) -> PrintLink:
+    if queue_item_id is None:
+        return PrintLink(archive_id=archive_id, matched_by="content_hash")
+    return PrintLink(archive_id=archive_id, matched_by="queue_item", queue_item_id=queue_item_id)
+
+
+@pytest.fixture
+async def store(pg_conninfo: str) -> AsyncIterator[RackUsageStore]:
+    opened = RackUsageStore(pg_conninfo)
+    await opened.record_picks(51, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
+async def settle(store: RackUsageStore, links: Links, archives: Archives) -> int:
+    return await record_settled(OUTPUT, client=archives, links=links, store=store, now=lambda: AT)
+
+
+async def test_each_linked_archive_of_a_picked_item_is_one_print(store: RackUsageStore) -> None:
+    """A ``quantity`` 2 item: two archives, two prints."""
+    archives = Archives(
+        ArchiveDetail(
+            id=101, actual_time_seconds=600, print_time_seconds=900, filament_used_grams=5.0
+        ),
+        ArchiveDetail(
+            id=102, actual_time_seconds=None, print_time_seconds=900, filament_used_grams=None
+        ),
+    )
+    assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 2
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.print_seconds, usage.grams) == (2, 1500, 5.0)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_a_failed_or_cancelled_print_with_an_archive_still_counts(
+    store: RackUsageStore, outcome: str
+) -> None:
+    """Spec §10: the hotend wore whatever the outcome."""
+    archives = Archives(ArchiveDetail(id=101, status=outcome, actual_time_seconds=120))
+    assert await settle(store, Links(link(101, 51)), archives) == 1
+    assert (await store.usage([A]))[A].print_seconds == 120
+
+
+async def test_a_second_settle_of_the_same_print_changes_nothing(store: RackUsageStore) -> None:
+    archives = Archives(ArchiveDetail(id=101, actual_time_seconds=600))
+    await settle(store, Links(link(101, 51)), archives)
+    assert await settle(store, Links(link(101, 51)), archives) == 0
+    assert (await store.usage([A]))[A].prints == 1
+
+
+async def test_an_archive_with_no_queue_item_or_no_picks_is_not_counted(
+    store: RackUsageStore,
+) -> None:
+    archives = Archives(ArchiveDetail(id=101), ArchiveDetail(id=103))
+    assert await settle(store, Links(link(101, None), link(103, 99)), archives) == 0
+
+
+async def test_a_second_print_of_one_output_counts_only_its_own_archives(
+    store: RackUsageStore,
+) -> None:
+    """Review Focus 5: the second settle walks the first print's archive too."""
+    await settle(
+        store, Links(link(101, 51)), Archives(ArchiveDetail(id=101, actual_time_seconds=60))
+    )
+    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    archives = Archives(
+        ArchiveDetail(id=101, actual_time_seconds=9999),
+        ArchiveDetail(id=102, actual_time_seconds=40),
+    )
+    assert await settle(store, Links(link(101, 51), link(102, 52)), archives) == 1
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.print_seconds) == (2, 100)
+
+
+async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    archives = Archives(ArchiveDetail(id=102, actual_time_seconds=40), failing={101})
+    with caplog.at_level(logging.DEBUG):
+        assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 1
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
+    assert record.getMessage() == "could not record a rack nozzle's print"
+    assert (
+        getattr(record, "output_id", None),
+        getattr(record, "archive_id", None),
+        getattr(record, "error", None),
+    ) == (OUTPUT, 101, "ApiError")
+    assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+class FailingLinks:
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        raise RuntimeError(f"connection lost near {A}")
+
+
+async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG):
+        written = await record_settled(
+            OUTPUT, client=Archives(), links=FailingLinks(), store=store, now=lambda: AT
+        )
+    assert written == 0
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
+    assert getattr(record, "error", None) == "RuntimeError"
+    assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+# --- The fast print (revised P3): dispatched and settled inside one backed-off poll ---
+
+
+@pytest.fixture
+def pool(pg_conninfo: str) -> Iterator[PgPool]:
+    opened = open_pg_pool(pg_conninfo, size=2)
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
+@pytest.fixture
+def paths(tmp_path: Path) -> DataPaths:
+    data = DataPaths(tmp_path)
+    data.ensure()
+    return data
+
+
+@respx.mock
+async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
+    store: RackUsageStore, pool: PgPool, paths: DataPaths
+) -> None:
+    """The first read the watcher makes finds the item already finished. That read is
+    also the one that links its archive: ``progress_for`` records the queue item's
+    ``archive_id`` before it returns the settled progress, so the hook, which runs after,
+    finds the link though nothing linked the print before."""
+    links = PrintLinkStore(pool)
+    uploads = BambuddyUploadStore(pool)
+    settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **recording("queue-item.json"),
+                "id": 51,
+                "status": "completed",
+                "archive_id": 101,
+            },
+        )
+    )
+    respx.get(f"{API}/archives/101").mock(
+        return_value=httpx.Response(
+            200, json={"id": 101, "actual_time_seconds": 75, "filament_used_grams": 1.5}
+        )
+    )
+
+    async def read(meta: OutputMeta) -> PrintProgress | None:
+        async with client_for(settings) as client:
+            return await progress_for(client, meta, uploads=uploads, links=links)
+
+    write_output(paths)
+    assert await links.for_output(OUTPUT) == []
+    watcher, seen = watcher_for(paths, read)
+    watcher.on_settled.append(settle_hook(store, links, lambda: settings))
+    watcher.watch(OUTPUT)
+    await until_idle(watcher)
+
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)

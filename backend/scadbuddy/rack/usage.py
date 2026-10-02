@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Iterable, Sequence
-from datetime import datetime
+from collections.abc import Callable, Iterable, Sequence
+from datetime import UTC, datetime
 from typing import Protocol
 
 from psycopg import Connection
@@ -20,7 +20,12 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.watcher import SettledHook
+from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
 from scadbuddy.render.pg_store import migrate
 
@@ -262,3 +267,90 @@ async def save_picks(
             "could not record the rack picks",
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
+
+
+class ArchiveReader(Protocol):
+    async def archive(self, archive_id: int) -> ArchiveDetail: ...
+
+
+class LinkReader(Protocol):
+    async def for_output(self, output_id: str) -> list[PrintLink]: ...
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def record_settled(
+    output_id: str,
+    *,
+    client: ArchiveReader,
+    links: LinkReader,
+    store: RackUsage,
+    now: Callable[[], datetime] = _now,
+) -> int:
+    """One ``rack_nozzle_prints`` row per linked archive and picked group (spec §4); the
+    rows written. Every archive counts, whatever the print's outcome: the hotend wore
+    either way (spec §10). An archive linked by hash has no queue item and is not
+    counted. Idempotent, so a settle seen twice writes nothing the second time. Each
+    failure is logged by type and ids and skipped; nothing is retried."""
+    try:
+        linked = [
+            (link.archive_id, link.queue_item_id)
+            for link in await links.for_output(output_id)
+            if link.queue_item_id is not None
+        ]
+        picked = await store.picked_items(item for _, item in linked)
+    except Exception as exc:
+        logger.warning(
+            "could not read a settled print's rack picks",
+            extra={"output_id": output_id, "error": type(exc).__name__},
+        )
+        return 0
+    written = 0
+    for archive_id, queue_item_id in linked:
+        if queue_item_id not in picked:
+            continue
+        try:
+            archive = await client.archive(archive_id)
+            seconds = (
+                archive.actual_time_seconds
+                if archive.actual_time_seconds is not None
+                else archive.print_time_seconds
+            )
+            written += await store.record_prints(
+                archive_id=archive_id,
+                queue_item_id=queue_item_id,
+                settled_at=now(),
+                print_seconds=seconds,
+                grams=archive.filament_used_grams,
+            )
+        except Exception as exc:
+            logger.warning(
+                "could not record a rack nozzle's print",
+                extra={
+                    "output_id": output_id,
+                    "archive_id": archive_id,
+                    "error": type(exc).__name__,
+                },
+            )
+    return written
+
+
+def settle_hook(
+    store: RackUsage, links: PrintLinkStore, load: Callable[[], StoredSettings]
+) -> SettledHook:
+    """The watcher's ``on_settled`` hook for the rack (spec §4).
+
+    It links nothing itself: the watcher's settled read is a ``progress_for`` call, which
+    records each queue item's ``archive_id`` before it returns the settled progress, and
+    the hook runs after that read. So a print dispatched and settled between two polls is
+    linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
+
+    async def hook(meta: OutputMeta) -> None:
+        if not links.available:
+            return
+        async with client_for(load()) as client:
+            await record_settled(meta.id, client=client, links=links, store=store)
+
+    return hook

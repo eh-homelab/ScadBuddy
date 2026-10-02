@@ -674,3 +674,10 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
 - `watcher.py` does not import or call the rack code. The rack component registers an
   `on_settled` hook (`settle_hook`) on `PrintWatcher`, which keeps `watcher.py` free of
   feature imports and SQL, §6's intent.
+- The settle write counts every settled print that has an archive, whether it completed,
+  failed or was cancelled: the hotend wore either way. A print that never dispatched has
+  no archive and is not counted.
+- A print dispatched and settled between two of the watcher's polls is still counted: the
+  read that finds it settled is a `progress_for` call, which links the queue item's
+  `archive_id` before it returns, and the hook runs after that read. So the hook links
+  nothing itself (pinned in `tests/rack/test_settle.py`).
