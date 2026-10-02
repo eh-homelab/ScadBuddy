@@ -205,9 +205,22 @@ The same for every kind:
    - The key hashes the subject (the model slug, output id, library file id, etc.), the
      canonical body, and a client `request_id` (one per deliberate press, as #470 made
      for prints).
-   - It is started with `id_conflict_policy = USE_EXISTING`, so a retry after a lost
-     answer (a proxy 502/504/524, a dropped connection) attaches to the same execution
-     and never repeats the effect.
+   - **A repeat never repeats the effect, whether the first execution is still running
+     or already closed.** Two SDK policies do this together:
+     - `id_conflict_policy = USE_EXISTING`: a retry while the execution is running
+       attaches to it.
+     - `id_reuse_policy = REJECT_DUPLICATE` for every `request_id`-keyed kind: a retry
+       after it closed (a `done` command finishes in under a second, so this is the
+       usual case after a dropped answer) cannot start a second execution. The start
+       fails with `WorkflowAlreadyStartedError`.
+     - On that error the route reads our record by `workflow_id` and answers with it,
+       as the original answer would have been (`repeated: true`).
+     - The route also reads the record first, before calling Temporal. That makes a
+       repeat cheap, and it still holds after the namespace's 168h retention has
+       forgotten the ID.
+   - A body-only print key (a client that sends no `request_id`) keeps #470's rule
+     instead: a repeat within `REPEAT_WINDOW` is the same run, and after it a new one
+     (§5.2). Such a print uses `ALLOW_DUPLICATE` with the window.
    - **The one exception is a command that is idempotent by content**, whose repeat
      *should* join the first rather than be a second effect. Its key is the content alone,
      with no `request_id`.
@@ -404,6 +417,11 @@ shape with answer `accepted`; renders take the same shape (§4.5).
   and the same key later starts a new run. A run refused or failed before any enqueue
   completes at once, so a retry is a new run. This is #470's rule, kept by the workflow
   instead of `PrintRunStore.find`.
+- The window and `ALLOW_DUPLICATE` apply to body-only keys. A key with a `request_id`
+  (every current client sends one) is `REJECT_DUPLICATE` with the record lookup of
+  §4.2. A retry of the same press, however late, gets its run, and the next press has
+  a new `request_id`, so it is a new print. A refused run writes no record, so its
+  retry is a new start; it is refused again, or runs.
 
 ### 5.3 The workflow
 
@@ -819,6 +837,13 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
 
 ## 8. Errors and testing
 
+- **The command shape** (phase 1, before any `done` kind exists, against a test-only
+  `done` kind):
+  - a retry while running attaches;
+  - a retry after the execution closed returns the record and does not run the effect
+    again (`REJECT_DUPLICATE` + record lookup);
+  - a retry after the workflow ID has been forgotten (the record exists, the history
+    does not) returns the record.
 - **Print** (backend, `requires_temporal` and `requires_postgres`):
   - the 422 through update-with-start;
   - a repeat while running, within the window, and after it;
