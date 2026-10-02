@@ -363,6 +363,66 @@ describe('PrintsPage (#310): the global print history', () => {
   })
 })
 
+describe('a sent output Bambuddy has forgotten (#898)', () => {
+  const sent = (id: string, name: string, queueItemId: number): Output => ({
+    ...(outputs[0] as Output),
+    id: id.repeat(32),
+    name,
+    created_at: '2026-09-28T10:00:00Z',
+    queue_item_id: queueItemId,
+  })
+
+  it('says a print that finished, but whose queue entry is gone, completed', async () => {
+    const done = sent('3', 'Bang', 106)
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([done, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({
+          ...queuedSliceProgress,
+          stage: 'done',
+          settled: true,
+          queue_item_id: 106,
+          copies_completed: 1,
+        } satisfies PrintProgress),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(await within(list).findByText('Completed in Bambuddy')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('No longer in Bambuddy')
+  })
+
+  it('stops waiting once its progress has settled, and says why', async () => {
+    const expired = sent('1', 'Acceptance', 104)
+    const pending = sent('2', 'Luna', 4500)
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([expired, pending, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', ({ params }) =>
+        HttpResponse.json(
+          params['id'] === expired.id
+            ? ({
+                ...queuedSliceProgress,
+                stage: 'unknown',
+                settled: true,
+                queue_item_id: null,
+                slice_job_id: 1,
+                error_message: 'Slice job not found or expired',
+              } satisfies PrintProgress)
+            : ({ ...queuedSliceProgress, queue_item_id: 4500 } satisfies PrintProgress),
+        ),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    const [first, second] = within(list).getAllByRole('listitem')
+    expect(first).toHaveTextContent('Acceptance')
+    expect(await within(first as HTMLElement).findByText('No longer in Bambuddy')).toBeInTheDocument()
+    expect(first).not.toHaveTextContent('Waiting for Bambuddy')
+    expect(second).toHaveTextContent('Luna')
+    expect(second).toHaveTextContent('Waiting for Bambuddy')
+  })
+})
+
 describe('waiting for Bambuddy, with more pages to load (#310)', () => {
   const luna: Output = {
     ...(outputs[0] as Output),

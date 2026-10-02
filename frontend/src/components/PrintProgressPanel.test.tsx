@@ -35,6 +35,25 @@ describe('PrintProgressPanel', () => {
     expect(link).toHaveAttribute('target', '_blank')
   })
 
+  it('does not claim to be slicing a job Bambuddy no longer has (#898)', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.failedSliceProgress,
+          stage: 'unknown',
+          copies_failed: 0,
+          fix: null,
+          error_message: 'Slice job not found or expired',
+        }}
+        polling={false}
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('Slice job no longer in Bambuddy')
+    expect(panel).not.toHaveTextContent('Slicing…')
+  })
+
   it('shows a failed slice verbatim, with the fix the backend chose', () => {
     const progress = fixtures.failedSliceProgress
     render(<PrintProgressPanel progress={progress} polling={false} />)

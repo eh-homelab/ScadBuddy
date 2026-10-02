@@ -64,6 +64,8 @@ function headline(progress: PrintProgress): string {
     if (progress.stage === 'failed' || progress.stage === 'cancelled') {
       return `Slice — ${progress.stage}`
     }
+    // Settled with nothing ended: Bambuddy has dropped the slice job (#898).
+    if (progress.settled) return 'Slice job no longer in Bambuddy'
     return 'Slicing…'
   }
   return `Queue entry #${progress.queue_item_id}`
