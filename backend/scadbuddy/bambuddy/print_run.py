@@ -53,6 +53,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.rack.usage import RackUsage, record_seen
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,8 @@ async def check_print(
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -278,7 +281,7 @@ async def check_print(
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
-        prepared = await prepare_run(client, source, settings, request)
+        prepared = await prepare_run(client, source, settings, request, rack=rack)
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
     # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
@@ -292,18 +295,27 @@ async def check_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered."""
     return await check_print(
-        client, OutputSource(store, uploads, meta, settings), settings, request
+        client, OutputSource(store, uploads, meta, settings), settings, request, rack=rack
     )
 
 
 async def check_for_library(
-    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
+    client: BambuddyClient,
+    settings: StoredSettings,
+    file_id: int,
+    request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in Bambuddy's library."""
-    return await check_print(client, await LibrarySource.load(client, file_id), settings, request)
+    return await check_print(
+        client, await LibrarySource.load(client, file_id), settings, request, rack=rack
+    )
 
 
 @dataclass(frozen=True)
@@ -324,6 +336,8 @@ async def prepare_run(
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -359,11 +373,13 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
+    printer_status = await _read_status(client, printer_id)
+    await record_seen(rack, printer_id, printer_status)
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
         catalogue=catalogue,
-        printer_status=await _read_status(client, printer_id),
+        printer_status=printer_status,
     )
 
 
@@ -374,6 +390,8 @@ async def execute_run(
     request: PrintRunRequest,
     prepared: PreparedRun,
     before_enqueue: Callable[[], Awaitable[None]] | None = None,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
 

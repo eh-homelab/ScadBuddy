@@ -9,6 +9,7 @@ public method is a coroutine that runs its query in a worker thread.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Iterable, Sequence
 from datetime import datetime
@@ -19,8 +20,11 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
-from scadbuddy.rack.rank import Usage
+from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.rack.rank import Usage, rack_serials
 from scadbuddy.render.pg_store import migrate
+
+logger = logging.getLogger(__name__)
 
 #: As the decision store's: a request is told the store is unavailable rather than hang.
 CONNECT_TIMEOUT = 5.0
@@ -210,3 +214,19 @@ class RackUsageStore:
                 (archive_id, settled_at, print_seconds, grams, queue_item_id),
             )
         return cursor.rowcount
+
+
+async def record_seen(
+    store: RackUsage | None, printer_id: int, status: PrinterStatus | None
+) -> None:
+    """Record the rack's hotends as seen by the print flow (spec §4). Advisory: a failure
+    is logged by exception type and never stops the read that called it."""
+    if store is None or status is None:
+        return
+    try:
+        await store.seen(printer_id, rack_serials(status.nozzle_rack))
+    except Exception as exc:
+        logger.warning(
+            "could not record the rack's hotends",
+            extra={"printer_id": printer_id, "error": type(exc).__name__},
+        )

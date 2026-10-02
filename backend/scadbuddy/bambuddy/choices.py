@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.rack.usage import RackUsage, record_seen
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ async def choices_for(
     *,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
+    rack: RackUsage | None = None,
 ) -> ChoicesView:
     printers = [row for row in await client.printers() if row.is_active]
     active = {row.id for row in printers}
@@ -126,6 +128,7 @@ async def choices_for(
             status = await client.printer_status(printer_id)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; offering every nozzle size unmarked")
+        await record_seen(rack, printer_id, status)
         # Advisory, like the run's plate warning: an archive list that cannot be read or
         # ordered preselects nothing rather than failing the dialog.
         try:
@@ -177,6 +180,7 @@ async def choices_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None,
+    rack: RackUsage | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -184,4 +188,5 @@ async def choices_for_output(
         settings,
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
+        rack=rack,
     )
