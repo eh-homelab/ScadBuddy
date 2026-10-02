@@ -68,11 +68,13 @@ class Metrics:
         self.render_submitted = Counter(
             "scadbuddy_render_jobs_submitted",
             "Render requests accepted onto the queue as a new job.",
+            ["kind"],
             registry=r,
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
             "Render requests answered with an identical job already waiting.",
+            ["kind"],
             registry=r,
         )
         self.store_info = Gauge(
@@ -136,8 +138,14 @@ class Metrics:
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            ["kind"],
             registry=r,
         )
+        # `kind` is "render" or "arrange" (spec 2026-09-27 §7): an arrange shares the
+        # queue but is no render, so the render rate leaves it out.
+        for kind in ("render", "arrange"):
+            for counter in (self.render_submitted, self.render_coalesced, self.render_rejected):
+                counter.labels(kind)
         self.render_retried = Counter(
             "scadbuddy_render_jobs_retried",
             "Running jobs requeued because their worker stopped heartbeating.",

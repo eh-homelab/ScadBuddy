@@ -33,6 +33,7 @@ from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content import BlobScope
 from scadbuddy.template import ACTIVITY_RESULT_NAME
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
+from scadbuddy.workflows.arrange import arrange
 from scadbuddy.workflows.models import (
     Failure,
     Layout,
@@ -46,7 +47,7 @@ from scadbuddy.workflows.models import (
     TemplateCall,
 )
 from scadbuddy.workflows.outputs import build_output
-from scadbuddy.workflows.packing import PackError, shelf_pack
+from scadbuddy.workflows.packing import PackError
 from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
 
 #: `migrate`'s own bound: under the `SHORT` (60 s) that the activity's budget gives it
@@ -87,14 +88,15 @@ def plate_size(model: str | None) -> PlateSize:
 
 
 def pack_layout(req: PackRequest) -> Layout:
-    if req.goal != "fewest_plates":
-        raise ApplicationError(
-            f"pack goal {req.goal!r} arrives with Arrange (phase 5); use 'fewest_plates'",
-            type="PackError",
-            non_retryable=True,
-        )
     try:
-        return shelf_pack(req.items, req.plate)
+        return arrange(
+            req.items,
+            req.plate,
+            goal=req.goal,
+            plan=req.filament_plan,
+            colours=req.colours,
+            allow_own=req.allow_own,
+        )
     except PackError as error:
         raise ApplicationError(str(error), type="PackError", non_retryable=True) from None
 

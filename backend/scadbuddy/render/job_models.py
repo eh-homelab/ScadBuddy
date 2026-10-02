@@ -112,6 +112,34 @@ class OutputRecord(BaseModel):
 FILE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 
 
+class ManifestObject(BaseModel):
+    """One object of an output (spec 2026-09-27 §7): what Arrange lays out again.
+
+    ``part`` is the Part's store key (its `piece_key`), held by the output's
+    `blob_refs` so it outlives the job that rendered it.
+    """
+
+    part: str
+    file: str
+    slug: str
+    revision: str | None
+    bbox: BoundingBox
+    #: Width and depth on the plate, mm: the rectangle the packer places.
+    footprint: tuple[float, float]
+    #: The part's colours, `#RRGGBB`, in its own slot order.
+    colours: list[str]
+    #: Copies of this object in this output's layout.
+    count: int = Field(ge=1)
+    #: More than one: the part lays out its own plates (base spec §6.4) and is only
+    #: ever written alone.
+    plates: int = 1
+    #: The BOM entry naming this Part, when the pipeline wrote one.
+    bom_piece: str | None = None
+    #: The output an arranged object came from.
+    source_output: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class PipelineOutput(BaseModel):
     """One `ctx.output` (§5.2): Generate saves each as an output."""
 
@@ -125,6 +153,8 @@ class PipelineOutput(BaseModel):
     #: The blobs this output reads; the job holds a ref on each.
     blob_keys: list[str]
     record: OutputRecord
+    #: The output's objects, each once with its count (§7): what Arrange reads.
+    manifest: list[ManifestObject] = Field(default_factory=list)
 
 
 class Job(BaseModel):

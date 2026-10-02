@@ -39,7 +39,7 @@ from scadbuddy.core.tracing import (
     use_traceparent,
 )
 from scadbuddy.library.previews import source_key
-from scadbuddy.render.inputs import InputsError, inputs_key, legacy_inputs
+from scadbuddy.render.inputs import InputsError, arrange_key, inputs_key, legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import (
     INITIAL_RENDER_ESTIMATE,
@@ -49,10 +49,11 @@ from scadbuddy.render.jobs import (
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.models import MigrateRequest, MigrateResult
+from scadbuddy.workflows.models import ArrangeInputs, MigrateRequest, MigrateResult
 from scadbuddy.workflows.pipelines import (
     MIGRATE_EXECUTION_TIMEOUT,
     PREVIEW_TRANSFER,
+    Arrange,
     MigrateInputs,
     RenderPreview,
     TemplatePipeline,
@@ -226,15 +227,15 @@ class RenderService:
                 max_pending=self.config.render_queue_max,
             )
         except QueueFullError as error:
-            self.metrics.render_rejected.inc()
+            self.metrics.render_rejected.labels("render").inc()
             raise QueueFullError(error.depth, self.retry_after()) from None
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
             await self._cancel_workflow(submitted.superseded)
         if submitted.coalesced:
-            self.metrics.render_coalesced.inc()
+            self.metrics.render_coalesced.labels("render").inc()
             return submitted.job, True
-        self.metrics.render_submitted.inc()
+        self.metrics.render_submitted.labels("render").inc()
         try:
             await self._start(submitted.job)
         except Exception as error:
@@ -248,6 +249,47 @@ class RenderService:
                     extra={"job_id": submitted.job.id},
                 )
         return submitted.job, False
+
+    async def arrange(self, slug: str, inputs: ArrangeInputs) -> Job:
+        """Insert an `arrange` row (or coalesce onto an identical one), then start it:
+        the same insert, start, reconcile path as a render (spec §3.3, §3.4)."""
+        payload = inputs.model_dump(mode="json")
+        job = Job(id=uuid.uuid4().hex, slug=slug, kind="arrange", inputs=payload, created_at=now())
+        # Before the row, as a render's submit: Temporal refuses an input this large
+        # outright, so the row could never start.
+        size = len(pydantic_data_converter.payload_converter.to_payload(job).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these objects make an arrange request of {size} bytes; the most a job can"
+                f" carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
+        try:
+            submitted = await asyncio.to_thread(
+                self.store.submit,
+                job,
+                arrange_key(slug, payload),
+                max_pending=self.config.render_queue_max,
+            )
+        except QueueFullError as error:
+            self.metrics.render_rejected.labels("arrange").inc()
+            raise QueueFullError(error.depth, self.retry_after()) from None
+        if submitted.coalesced:
+            self.metrics.render_coalesced.labels("arrange").inc()
+            return submitted.job
+        self.metrics.render_submitted.labels("arrange").inc()
+        try:
+            await self._start(submitted.job)
+        except Exception as error:
+            self.metrics.store_errors.labels("start_workflow").inc()
+            if _unstartable(error):
+                await self._fail_unstartable(submitted.job, error)
+            else:
+                logger.exception(
+                    "could not start an arrange's workflow; the reconciler will",
+                    extra={"job_id": submitted.job.id},
+                )
+        return submitted.job
 
     async def cancel(self, job_id: str, *, slug: str) -> Job | None:
         """Withdraw one request for the job; the last one cancels it and its workflow."""
@@ -433,6 +475,19 @@ class RenderService:
         job: Job,
         conflict: WorkflowIDConflictPolicy = WorkflowIDConflictPolicy.USE_EXISTING,
     ) -> None:
+        if job.kind == "arrange":
+            # The row runs its own kind's workflow, so the reconciler restarts it as one.
+            await self.client.start_workflow(
+                Arrange.run,
+                job,
+                id=workflow_id_for(job.id),
+                task_queue=self.task_queue,
+                id_conflict_policy=conflict,
+                memo=self._memo(),
+                execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
+                rpc_timeout=RPC_TIMEOUT,
+            )
+            return
         await self.client.start_workflow(
             TemplatePipeline.run,
             job,

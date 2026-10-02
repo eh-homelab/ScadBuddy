@@ -758,6 +758,34 @@ describe('CustomizePage', () => {
     expect(await screen.findByTestId('gone')).toBeInTheDocument()
   })
 
+  it('hands an arranged output to /edit rather than opening it', async () => {
+    // spec 2026-09-27 §7: an arranged output has no one set of inputs to reopen, and
+    // /edit/{id} owns the page that says so.
+    const id = 'f'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Batch',
+          params: {},
+          inputs: {},
+          model_version: null,
+          source: 'record',
+          arranged_from: ['a'.repeat(32)],
+        }),
+      ),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+        <Route path="/edit/:outputId" element={<div data-testid="arranged" />} />
+      </Routes>,
+      { route: `/m/name-keychain?from=${id}` },
+    )
+    expect(await screen.findByTestId('arranged')).toBeInTheDocument()
+  })
+
   it('renders nothing for a page it is only passing through', async () => {
     // The hooks run before the redirects below them, so without a guard the wrong
     // model gets a real OpenSCAD job — one render-concurrency slot for nothing.

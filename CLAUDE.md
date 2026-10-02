@@ -159,6 +159,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
+  quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
+  `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,

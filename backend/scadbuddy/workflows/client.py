@@ -33,6 +33,7 @@ from scadbuddy.workflows.commands import (
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import (
+    Arrange,
     MigrateInputs,
     RenderPiece,
     RenderPreview,
@@ -91,7 +92,7 @@ def render_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
+        workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs, Arrange],
         activities=[*activities.all(), *pipeline.all()],
         # The interceptor's workflow spans run inside the sandbox; OpenTelemetry's
         # module state must be the process's, not a sandboxed copy.

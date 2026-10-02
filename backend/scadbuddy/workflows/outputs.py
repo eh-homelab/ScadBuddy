@@ -4,17 +4,20 @@ from the pieces' own solids, placed as the layout says, plus the extra files."""
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import trimesh
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.paths import BUILTIN_PREFIX
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
-from scadbuddy.render.glb import bounding_box, write_glb
-from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, PipelineOutput
+from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
+from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, ManifestObject, PipelineOutput
 from scadbuddy.render.jobs import (
     LAYOUT_NAME,
     MODEL_NAME,
@@ -133,7 +136,39 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
         files_key=key if req.files else None,
         blob_keys=keys,
         record=record,
+        manifest=manifest_of(req),
     )
+
+
+def manifest_of(req: OutputRequest) -> list[ManifestObject]:
+    """The output's objects, from the layout it is written from (spec §7)."""
+    if req.layout.own is not None:
+        counts = Counter([req.layout.own])
+    else:
+        counts = Counter(p.piece_key for plate in req.layout.plates for p in plate.items)
+    named = {entry.part: entry.piece for entry in req.bom if entry.part}
+    objects: list[ManifestObject] = []
+    for part in req.parts:
+        if not counts[part.piece_key]:
+            continue
+        earlier = req.provenance.get(part.piece_key)
+        objects.append(
+            ManifestObject(
+                part=part.piece_key,
+                file=part.file,
+                slug=earlier.slug if earlier else req.slug,
+                revision=earlier.revision if earlier else req.record.revision,
+                bbox=part.bbox,
+                footprint=(part.bbox.size[0], part.bbox.size[1]),
+                colours=list(part.colours),
+                count=counts[part.piece_key],
+                plates=part.plates,
+                bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
+                source_output=earlier.source_output if earlier else None,
+                notes=list(part.notes),
+            )
+        )
+    return objects
 
 
 def _joined(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
@@ -144,11 +179,27 @@ def _joined(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
     return joined
 
 
+def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.ndarray:
+    """Turn a part ``rot`` degrees about Z, then move it so its turned box's low corner
+    is at ``(x, y)`` and it sits on the plate (z = 0)."""
+    turn = trimesh.transformations.rotation_matrix(math.radians(rot), (0, 0, 1))
+    corners = np.array(
+        [[bx, by, 0.0, 1.0] for bx in (box.min[0], box.max[0]) for by in (box.min[1], box.max[1])]
+    ).T
+    turned = turn @ corners
+    move = trimesh.transformations.translation_matrix(
+        (x - float(turned[0].min()), y - float(turned[1].min()), -float(box.min[2]))
+    )
+    matrix: np.ndarray = move @ turn
+    return matrix
+
+
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
     layouts: dict[str, PlateLayout] = {}
-    colours: list[str] = []
+    # One slot per colour: a plan that spells it twice (in two cases) still gets one.
+    colours: list[str] = list(dict.fromkeys(c.upper() for c in req.colours))
     plates: list[PlateParts] = []
     for plate in req.layout.plates:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
@@ -162,15 +213,15 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 layouts[placed.piece_key] = await asyncio.to_thread(
                     PlateLayout.load, blobs.dir_for(placed.piece_key) / LAYOUT_NAME
                 )
-            box = parts[placed.piece_key].bbox
-            offset = (placed.x - box.min[0], placed.y - box.min[1], -box.min[2])
+            matrix = placement_matrix(parts[placed.piece_key].bbox, placed.x, placed.y, placed.rot)
             for part in layouts[placed.piece_key].plates[0].parts:
                 mesh = part.mesh.copy()
-                mesh.apply_translation(offset)
-                by_colour.setdefault(part.colour, []).append(mesh)
-                names.setdefault(part.colour, part.name)
-                if part.colour not in colours:
-                    colours.append(part.colour)
+                mesh.apply_transform(matrix)
+                colour = part.colour.upper()
+                by_colour.setdefault(colour, []).append(mesh)
+                names.setdefault(colour, part.name)
+                if colour not in colours:
+                    colours.append(colour)
         ordered = sorted(by_colour, key=colours.index)
         plates.append(
             PlateParts(

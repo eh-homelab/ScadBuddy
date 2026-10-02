@@ -28,6 +28,7 @@ from scadbuddy.render.projection import (
     workflow_id_for,
 )
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.refs import BlobRefs
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -420,6 +421,55 @@ def test_a_result_stored_before_its_newer_fields_still_reads(
 
     assert stored is not None
     assert (stored.diagnostics, stored.source_version) == ([], "")
+
+
+def test_the_latest_finished_render_is_never_an_arrange(projection: JobProjection) -> None:
+    # An arrange row carries a source output's slug; the model's diagnostics must still
+    # read its last render (final review M1).
+    render = projection.submit(_job(width=2), render_key("demo", {"width": 2}, None)).job
+    render.state, render.result, render.finished_at = "done", _result(), datetime.now(UTC)
+    assert projection.finish(render)
+    arrange = Job(
+        id=uuid.uuid4().hex, slug="demo", kind="arrange", inputs={}, created_at=datetime.now(UTC)
+    )
+    arrange = projection.submit(arrange, "arrange-key").job
+    arrange.state, arrange.error = "failed", "piece is not in the store"
+    arrange.finished_at = datetime.now(UTC) + timedelta(seconds=5)
+    assert projection.finish(arrange)
+    latest = projection.latest_finished("demo")
+    assert latest is not None and latest.id == render.id
+
+
+def test_a_pending_arrange_holds_its_parts_from_insertion(
+    projection: JobProjection, pg_conninfo: str
+) -> None:
+    # Deleting a source output while the arrange waits for a worker must not let a sweep
+    # take the Parts it will place (final review M2); the prune releases the hold.
+    refs = BlobRefs(projection.pool)
+    refs.add("pieces/a", "output", "o-1")
+    inputs = {"items": [{"part": {"piece_key": "pieces/a"}}, {"part": {"piece_key": "pieces/b"}}]}
+    job = Job(
+        id=uuid.uuid4().hex,
+        slug="demo",
+        kind="arrange",
+        inputs=inputs,
+        created_at=datetime.now(UTC),
+    )
+    first = projection.submit(job, "arrange-key")
+    again = projection.submit(job.model_copy(update={"id": uuid.uuid4().hex}), "arrange-key")
+    assert again.coalesced
+    refs.drop_holder("output", "o-1")
+    assert {"pieces/a", "pieces/b"} <= refs.referenced()
+    with psycopg.connect(pg_conninfo) as conn:
+        holders = conn.execute(
+            "SELECT DISTINCT holder_id FROM blob_refs WHERE holder_kind = 'job'"
+        ).fetchall()
+    assert holders == [(first.job.id,)]
+    first.job.state, first.job.finished_at = "failed", datetime.now(UTC) - timedelta(days=30)
+    first.job.error = "x"
+    assert projection.finish(first.job)
+    projection.prune(1.0)
+    assert not {"pieces/a", "pieces/b"} & refs.referenced()
 
 
 def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjection) -> None:
