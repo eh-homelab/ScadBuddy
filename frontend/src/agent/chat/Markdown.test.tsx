@@ -35,6 +35,7 @@ describe('Markdown', () => {
     const table = screen.getByRole('table')
     expect(table.parentElement).toHaveClass('overflow-x-auto')
     expect(screen.getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Part', 'Spool', 'Loaded'])
+    for (const th of screen.getAllByRole('columnheader')) expect(th).toHaveAttribute('scope', 'col')
     const rows = screen.getAllByRole('row')
     expect(rows).toHaveLength(3)
     const cells = screen.getAllByRole('cell')

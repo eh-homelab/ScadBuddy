@@ -60,6 +60,7 @@ function blocks(text: string): ReactNode[] {
                 <tr>
                   {block.header.map((cell, c) => (
                     <th
+                      scope="col"
                       key={c}
                       style={{ textAlign: block.align[c] ?? undefined }}
                       className="border border-line bg-surface-3 px-2 py-1 font-semibold"
