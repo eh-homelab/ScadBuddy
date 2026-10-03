@@ -13,9 +13,12 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -27,6 +30,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import libraries as libraries_api
+from scadbuddy.api import library_pins
+from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import (
     DEPENDENCY_CHECK_CONCURRENCY,
     STATE_ATTR,
@@ -36,6 +41,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.includes import resolve_dependencies
@@ -48,6 +54,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream
 from tests.test_library_processes import _age
@@ -84,6 +91,9 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
         protocols=("file",),
     )
     app.dependency_overrides[get_libraries] = lambda: store
+    # The pin commands run on the library worker, which reads the state, not the route's
+    # dependencies.
+    state.libraries = store
     return app
 
 
@@ -1692,3 +1702,67 @@ def test_resolving_the_dependencies_of_a_model_that_does_not_exist_is_a_404(
     lib_client: TestClient,
 ) -> None:
     assert lib_client.post("/api/v1/models/nope/dependencies").status_code == 404
+
+
+def _commits(app: FastAPI, slug: str = SLUG) -> int:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    counted = subprocess.run(
+        [GIT, "-C", str(state.paths.model_dir(slug)), "rev-list", "--count", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
+    )
+    return int(counted.stdout)
+
+
+def test_a_repeated_pin_answers_the_recorded_model_without_a_second_commit(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """§4.2: a re-send of the same press (a lost answer) never commits twice."""
+    create_model(lib_client)
+    key = uuid.uuid4().hex
+    first = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    commits = _commits(libraries_app)
+    again = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    assert first.status_code == again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert _commits(libraries_app) == commits
+
+
+def test_a_refused_removal_keeps_its_models_extension(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    refused = lib_client.delete("/api/v1/libraries/BOSL2")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["models"] == [SLUG]
+
+
+def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
+    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone past the answer deadline never holds the request (§4.2 step 4)."""
+    create_model(lib_client)
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    resolve = library_pins.resolve_pin
+
+    async def slowly(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(3)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(library_operations, "resolve_pin", slowly)
+    started = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+    assert started.status_code == 202, started.text
+    deadline = time.monotonic() + 60
+    op = started.json()
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]

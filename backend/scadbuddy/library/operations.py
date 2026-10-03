@@ -1,0 +1,197 @@
+"""The library pin writes as operations (#1054, spec 2026-10-01 §4.3, the ``library``
+row): each route's refusals as its kind's check, and its effect as its run, moved here
+unchanged.
+
+They run on the ``library`` worker, which is in the API process and holds the data
+volume (phase 3a), so they share the API's checkout gate and install semaphore. Every
+kind runs once: a git commit is not deduped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from functools import partial
+from typing import TYPE_CHECKING, Any
+
+from fastapi import status
+
+from scadbuddy.api.library_pins import resolve_pin
+from scadbuddy.api.models import require_model_exists
+from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import (
+    LibraryNotDeclaredError,
+    LibraryPinChangedError,
+    ModelNotFoundError,
+    ModelRecord,
+)
+from scadbuddy.library.history import GitError
+from scadbuddy.library.libraries import (
+    LibraryCheckoutNotFoundError,
+    LibraryDeclarationError,
+    LibraryError,
+    ModelLibrary,
+    declared_libraries,
+)
+from scadbuddy.operations.kinds import OperationKind
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
+
+
+def library_changed(events: EventBus, slug: str, name: str) -> None:
+    emit(events, LibraryChanged(slug=slug, name=name))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+
+
+def library_kinds(state: AppState) -> dict[str, OperationKind]:
+    """The pin kinds, bound to this process's state (read at each call, so a test's
+    replaced store is the one used)."""
+
+    def _record(record: ModelRecord) -> dict[str, Any]:
+        dumped: dict[str, Any] = record.model_dump(mode="json")
+        return dumped
+
+    async def _declared(slug: str, name: str) -> ModelLibrary:
+        try:
+            declared = await asyncio.to_thread(declared_libraries, state.paths.model_dir(slug))
+        except LibraryDeclarationError as error:
+            # The 409 every other reader of a malformed declaration gives.
+            raise ApiError(
+                status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
+            ) from None
+        current = next((entry for entry in declared if entry.name == name), None)
+        if current is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
+            )
+        return current
+
+    async def _pin(
+        slug: str,
+        name: str,
+        *,
+        url: str | None,
+        ref: str | None,
+        replacing: ModelLibrary | None = None,
+    ) -> dict[str, Any]:
+        """Clone ``name`` and record the pin in ``slug``, with the same checks and status
+        codes for a first pin and a re-pin. ``replacing`` is the entry a re-pin read:
+        the record is refused, a 409, if it changed while the clone ran."""
+        try:
+            # Held from the clone to the record, so no removal lands in between.
+            async with state.checkouts.pinning():
+                pin = await resolve_pin(
+                    name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
+                )
+                record = await asyncio.to_thread(
+                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
+                )
+        except LibraryPinChangedError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{slug!r}'s {name!r} was changed or removed while this re-pin ran; "
+                "nothing was recorded",
+            ) from None
+        except ModelNotFoundError:
+            # A concurrent delete of the same slug got there first.
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+        except GitError as error:
+            raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+        library_changed(state.events, slug, name)
+        return _record(record)
+
+    async def model_check(request: dict[str, Any]) -> dict[str, Any]:
+        require_model_exists(state.catalogue, request["slug"])
+        return {}
+
+    async def pin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return await _pin(request["slug"], request["name"], url=request["url"], ref=request["ref"])
+
+    async def repin_check(request: dict[str, Any]) -> dict[str, Any]:
+        require_model_exists(state.catalogue, request["slug"])
+        current = await _declared(request["slug"], request["name"])
+        return {"current": current.model_dump(mode="json")}
+
+    async def repin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        current = ModelLibrary.model_validate(checked["current"])
+        return await _pin(
+            request["slug"],
+            request["name"],
+            url=current.url,
+            ref=request["ref"] or current.ref,
+            replacing=current,
+        )
+
+    async def unpin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        slug, name, index = request["slug"], request["name"], request["index"]
+        try:
+            record = await asyncio.to_thread(
+                partial(state.catalogue.unpin_library, slug, name, index=index)
+            )
+        except LibraryPinChangedError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{slug!r}'s entry {index} is no longer an invalid {name!r}; nothing was removed",
+            ) from None
+        except LibraryNotDeclaredError:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
+            ) from None
+        except ModelNotFoundError:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+        except GitError as error:
+            raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+        library_changed(state.events, slug, name)
+        return _record(record)
+
+    async def no_check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def remove_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        name: str = request["name"]
+        commit: str | None = request["commit"]
+        libraries, checkouts = state.libraries, state.checkouts
+        what = name if commit is None else f"{name} at {commit[:7]}"
+        directory = libraries.paths.libraries / name
+        if commit is not None:
+            directory /= commit
+        # Alone: no pin can find this checkout and record it while it goes, and no
+        # render can take a lease on it.
+        async with checkouts.removing():
+            jobs = checkouts.leased(directory)
+            if jobs:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"{what} is being read by render job {', '.join(jobs)}; "
+                    "try again once it has finished",
+                    jobs=jobs,
+                )
+            users = await asyncio.to_thread(state.catalogue.library_users, name, commit)
+            if users:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"{what} is still pinned by {', '.join(users)}; remove it from "
+                    f"{'that model' if len(users) == 1 else 'those models'} first",
+                    models=users,
+                )
+            try:
+                removed = await asyncio.to_thread(libraries.remove, name, commit)
+            except LibraryCheckoutNotFoundError:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
+                ) from None
+            except LibraryError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        # No model changes -- a removal is refused while one pins it -- so no
+        # `model.updated`: only the checkouts on the volume moved.
+        emit(state.events, LibraryRemoved(name=name, commits=removed))
+        return {}
+
+    kinds = [
+        OperationKind("library_pin", model_check, pin_run, queue="library"),
+        OperationKind("library_repin", repin_check, repin_run, queue="library"),
+        OperationKind("library_unpin", model_check, unpin_run, queue="library"),
+        OperationKind("library_remove", no_check, remove_run, queue="library"),
+    ]
+    return {kind.name: kind for kind in kinds}
