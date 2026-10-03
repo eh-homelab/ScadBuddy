@@ -530,7 +530,10 @@ before it leaves the process. It:
 - replaces `exception.stacktrace` with its frame lines only (Python: the
   `File "…", line N, in f` lines; Node: the `at …` lines). A formatted
   traceback otherwise ends with, and for chained exceptions repeats, the
-  messages;
+  messages. A message can hold frame-shaped text, so a Python frame is kept only
+  when its file exists, its line is in that file, and its function name is
+  `<module>`, a lambda or comprehension, or a `def`/`class` name in that file's
+  source (a `<frozen …>`, `<string>` or `<stdin>` frame keeps only path and line);
 - keeps `exception.type`;
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.

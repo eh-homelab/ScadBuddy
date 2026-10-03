@@ -128,13 +128,13 @@ def test_no_query_string_or_user_agent_survives() -> None:
 def test_a_frame_line_with_anything_but_a_function_name_does_not_survive() -> None:
     text = (
         "Traceback (most recent call last):\n"
-        f'  File "{__file__}", line 3, in fine_name\n'
+        f'  File "{__file__}", line 3, in _everything\n'
         f'  File "{__file__}", line 1, in {SENTINEL}-detail with spaces\n'
         "ValueError: boom"
     )
     kept = frames_only(text)
     assert SENTINEL not in kept
-    assert f'File "{__file__}", line 3, in fine_name' in kept
+    assert f'File "{__file__}", line 3, in _everything' in kept
 
 
 def test_a_message_shaped_like_frames_does_not_survive() -> None:
@@ -169,3 +169,58 @@ def test_frames_inside_nested_exception_groups_are_kept() -> None:
     kept = frames_only(formatted)
     assert SENTINEL not in kept
     assert "in inner" in kept
+
+
+def test_a_message_cannot_open_a_traceback_of_its_own() -> None:
+    # Review of #1064: a fake header inside a message, then a frame on a real file
+    # whose "function name" is message text.
+    text = (
+        "ApiError: something failed\n"
+        "Traceback (most recent call last):\n"
+        '  File "/usr/lib/python3.12/os.py", line 1, in LEAKEDTOKEN\n'
+    )
+    assert "LEAKEDTOKEN" not in frames_only(text)
+
+
+def test_a_real_frame_from_a_real_traceback_is_kept() -> None:
+    def raises_here() -> None:
+        raise ValueError(SENTINEL)
+
+    try:
+        raises_here()
+    except ValueError as error:
+        formatted = "".join(traceback.format_exception(error))
+    kept = frames_only(formatted).splitlines()
+    assert any(line.endswith("in raises_here") for line in kept)
+    assert any(line.endswith("in test_a_real_frame_from_a_real_traceback_is_kept") for line in kept)
+
+
+def test_a_pseudo_file_frame_keeps_only_its_path_and_line() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "<frozen importlib._bootstrap>", line 7, in {SENTINEL}\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text) == 'File "<frozen importlib._bootstrap>", line 7'
+
+
+def test_a_dotted_name_is_checked_by_its_last_segment() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{__file__}", line 1, in Thing._exported\n'
+        f'  File "{__file__}", line 1, in _exported.{SENTINEL}\n'
+        "ValueError: boom"
+    )
+    kept = frames_only(text)
+    assert SENTINEL not in kept
+    assert kept == f'File "{__file__}", line 1, in Thing._exported'
+
+
+def test_a_frozen_module_must_be_one() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "<frozen LEAKEDTOKEN>", line 7, in f\n'
+        f'  File "{__file__}", line 999999, in _exported\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text) == ""
