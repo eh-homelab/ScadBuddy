@@ -35,7 +35,7 @@ import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents
 import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
-import { shutdownTelemetry } from './telemetry/setup.js'
+import { shutdownTelemetry, traceListener } from './telemetry/setup.js'
 import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -338,6 +338,7 @@ const app = createApp({
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
 const stopHeartbeat = startHeartbeat(wss)
 
+traceListener(PORT)
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +

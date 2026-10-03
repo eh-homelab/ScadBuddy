@@ -70,10 +70,25 @@ export function untracedIncoming(method: string | undefined, url: string | undef
   return method === 'GET' && (path === '/mcp' || /^\/api\/v1\/ai\/sessions\/[^/]+\/events$/.test(path))
 }
 
+/** The app's own listener (main.ts); requests on any other port are not traced. */
+let tracedPort: number | undefined
+
+/**
+ * Names the one listener whose requests are traced (main.ts, before it
+ * listens). Every other node:http server in the process, the plugin
+ * forwarder's loopback server above all (plugins/forwarder.ts: Claude Code
+ * sends no traceparent, and its path `/p/<token>` is a capability), is left
+ * untraced, as is everything before a listener is named.
+ */
+export function traceListener(port: number): void {
+  tracedPort = port
+}
+
 export function httpInstrumentation(): HttpInstrumentation {
   return new HttpInstrumentation({
     ignoreOutgoingRequestHook: () => true,
-    ignoreIncomingRequestHook: (request) => untracedIncoming(request.method, request.url),
+    ignoreIncomingRequestHook: (request) =>
+      request.socket?.localPort !== tracedPort || untracedIncoming(request.method, request.url),
   })
 }
 

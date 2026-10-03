@@ -7,6 +7,7 @@ import {
   httpInstrumentation,
   SERVICE_NAME,
   spanProcessors,
+  traceListener,
   tracingDisabled,
   untracedIncoming,
 } from '../src/telemetry/setup.js'
@@ -55,8 +56,14 @@ describe('telemetry setup', () => {
     try {
       const config = instrumentation.getConfig()
       expect(config.ignoreOutgoingRequestHook?.({})).toBe(true)
-      expect(config.ignoreIncomingRequestHook?.({ method: 'GET', url: '/healthz' } as never)).toBe(true)
-      expect(config.ignoreIncomingRequestHook?.({ method: 'POST', url: '/mcp' } as never)).toBe(false)
+      traceListener(8081)
+      const on = (localPort: number, method: string, url: string) =>
+        config.ignoreIncomingRequestHook?.({ method, url, socket: { localPort } } as never)
+      expect(on(8081, 'GET', '/healthz')).toBe(true)
+      expect(on(8081, 'POST', '/mcp')).toBe(false)
+      // Any other listener: the plugin forwarder's loopback server.
+      expect(on(40123, 'POST', '/p/token')).toBe(true)
+      expect(on(40123, 'POST', '/mcp')).toBe(true)
       expect(config.headersToSpanAttributes).toBeUndefined()
     } finally {
       instrumentation.disable()

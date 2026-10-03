@@ -19,11 +19,13 @@ const AGENT = fileURLToPath(new URL('..', import.meta.url))
 const OUT = path.join(AGENT, 'node_modules', '.cache', 'scadbuddy-telemetry-test', String(process.pid))
 const TSC = path.join(AGENT, 'node_modules', 'typescript', 'bin', 'tsc')
 
+const FORWARDER_TOKEN = 'f0rw4rd3r-c4p4b1l1ty'
+
 const CHILD = `
 import http from 'node:http'
 import { trace } from '@opentelemetry/api'
 const { createBackendClient } = await import('./api/backend.js')
-const { shutdownTelemetry } = await import('./telemetry/setup.js')
+const { shutdownTelemetry, traceListener } = await import('./telemetry/setup.js')
 
 const target = process.argv[2]
 const get = (url, headers = {}) =>
@@ -42,7 +44,18 @@ const server = http.createServer((_req, res) => {
   res.end(JSON.stringify({ traceId: trace.getActiveSpan()?.spanContext().traceId ?? null }))
 })
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+// Like main.ts: only the app's own listener is traced.
+traceListener(server.address().port)
 const incoming = JSON.parse(await get('http://127.0.0.1:' + server.address().port + '/', { traceparent: '${TRACEPARENT}' }))
+
+// Another listener in the process, as the plugin forwarder's loopback server
+// (plugins/forwarder.ts): its requests are not the app's, and its path is a capability.
+const forwarder = http.createServer((_req, res) => {
+  res.end(JSON.stringify({ traceId: trace.getActiveSpan()?.spanContext().traceId ?? null }))
+})
+await new Promise((resolve) => forwarder.listen(0, '127.0.0.1', resolve))
+const forwarded = JSON.parse(await get('http://127.0.0.1:' + forwarder.address().port + '/p/${FORWARDER_TOKEN}', { traceparent: '${TRACEPARENT}' }))
+forwarder.close()
 
 const client = createBackendClient(target)
 const work = await trace.getTracer('child').startActiveSpan('work', async (span) => {
@@ -56,10 +69,12 @@ server.close()
 await shutdownTelemetry()
 // Like main.ts, exit explicitly: a pending export retry to an unreachable
 // collector would otherwise keep the loop alive past shutdownTelemetry's budget.
-process.stdout.write(JSON.stringify({ incoming: incoming.traceId, work }) + '\\n', () => process.exit(0))
+process.stdout.write(JSON.stringify({ incoming: incoming.traceId, forwarded: forwarded.traceId, work }) + '\\n', () => process.exit(0))
 `
 
-type Hit = { path: string; traceparent: string | undefined; contentType: string | undefined }
+type Hit = { path: string; traceparent: string | undefined; contentType: string | undefined; body: Buffer }
+
+type Out = { incoming: string | null; forwarded: string | null; work: string }
 
 let target: Server
 let url: string
@@ -89,13 +104,17 @@ beforeAll(async () => {
   )
   await writeFile(path.join(OUT, 'child.mjs'), CHILD)
   target = createServer((req, res) => {
-    hits.push({
+    const chunks: Buffer[] = []
+    const hit: Hit = {
       path: (req.url ?? '').split('?')[0] ?? '',
       traceparent: req.headers.traceparent as string | undefined,
       contentType: req.headers['content-type'],
-    })
-    req.resume()
+      body: Buffer.alloc(0),
+    }
+    hits.push(hit)
+    req.on('data', (chunk: Buffer) => chunks.push(chunk))
     req.on('end', () => {
+      hit.body = Buffer.concat(chunks)
       if (req.url === '/v1/traces') {
         res.writeHead(200, { 'content-type': 'application/x-protobuf' }).end()
         return
@@ -116,7 +135,7 @@ beforeEach(() => {
   hits.length = 0
 })
 
-async function runChild(env: Record<string, string>): Promise<{ code: number | null; out: { incoming: string | null; work: string } }> {
+async function runChild(env: Record<string, string>): Promise<{ code: number | null; out: Out }> {
   const child = spawn(
     process.execPath,
     ['--import', pathToFileURL(path.join(OUT, 'telemetry.js')).href, path.join(OUT, 'child.mjs'), url],
@@ -129,7 +148,7 @@ async function runChild(env: Record<string, string>): Promise<{ code: number | n
   })
   const code = await new Promise<number | null>((resolve) => child.on('exit', resolve))
   const last = stdout.trim().split('\n').at(-1) ?? '{}'
-  return { code, out: JSON.parse(last) as { incoming: string | null; work: string } }
+  return { code, out: JSON.parse(last) as Out }
 }
 
 const hit = (p: string) => hits.find((h) => h.path === p)
@@ -143,6 +162,17 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     expect(hit('/plain')).toMatchObject({ traceparent: undefined })
     expect(hit('/node')).toMatchObject({ traceparent: undefined })
     expect(hit('/v1/traces')?.contentType).toBe('application/x-protobuf')
+  }, 30_000)
+
+  it('leaves every listener but the app’s untraced: the forwarder’s token reaches no span', async () => {
+    const { code, out } = await runChild({ OTEL_EXPORTER_OTLP_ENDPOINT: url })
+    expect(code).toBe(0)
+    expect(out.incoming).toBe(TRACE_ID)
+    expect(out.forwarded).toBeNull()
+    const exported = Buffer.concat(hits.filter((h) => h.path === '/v1/traces').map((h) => h.body))
+    expect(exported.length).toBeGreaterThan(0)
+    expect(exported.includes(FORWARDER_TOKEN)).toBe(false)
+    expect(exported.includes('/p/')).toBe(false)
   }, 30_000)
 
   it('without an endpoint still propagates, and exports nothing', async () => {
