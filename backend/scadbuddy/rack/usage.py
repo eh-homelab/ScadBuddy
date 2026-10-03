@@ -381,7 +381,10 @@ def settle_hook(
     async def hook(meta: OutputMeta) -> None:
         if not links.available:
             return
-        async with client_for(load()) as client:
+        # A settings read is a database read: off the event loop, so the watcher's
+        # timeout on this hook can cut it short (#1083).
+        settings = await asyncio.to_thread(load)
+        async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 
     return hook

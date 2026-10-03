@@ -83,6 +83,9 @@ ERROR_INTERVAL = 60.0
 MAX_AGE = timedelta(hours=24)
 #: How often the prints a dead replica held are looked for.
 RESCAN_INTERVAL = 300.0
+#: How long one settled-print hook may run (#1083). Hooks are awaited inside the
+#: watch loop, so one that never returns would hold the watch open.
+SETTLE_TIMEOUT = 60.0
 
 #: The first key of the two-key advisory lock: "SBPW", so it can't collide with the
 #: migration lock (``render/pg_store.py`` ``MIGRATION_LOCK``, a one-key lock).
@@ -261,6 +264,7 @@ class PrintWatcher:
         rescan_interval: float = RESCAN_INTERVAL,
         now: Callable[[], datetime] = _now,
         on_settled: Sequence[SettledHook] = (),
+        settle_timeout: float = SETTLE_TIMEOUT,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -277,6 +281,7 @@ class PrintWatcher:
         #: Each runs on the settled branch only; what one raises is logged by type and the
         #: watch ends as before. A feature registers itself here (``rack/component.py``).
         self.on_settled: list[SettledHook] = list(on_settled)
+        self.settle_timeout = settle_timeout
         self._tasks: dict[str, asyncio.Task[None]] = {}
         #: Set to cut a follower's wait short: a new print of an output already followed.
         self._pokes: dict[str, asyncio.Event] = {}
@@ -391,7 +396,7 @@ class PrintWatcher:
     async def _settled(self, meta: OutputMeta) -> None:
         for hook in self.on_settled:
             try:
-                await hook(meta)
+                await asyncio.wait_for(hook(meta), timeout=self.settle_timeout)
             except Exception as exc:
                 # Type only: a hook's error can carry data it must not log (#836, spec §7).
                 logger.warning(
