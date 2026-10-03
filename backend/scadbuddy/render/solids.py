@@ -11,6 +11,7 @@ from typing import cast
 import trimesh
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.tracing import span
 from scadbuddy.render.colours import CSS_COLOURS
 from scadbuddy.render.runner import OpenSCADError, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -125,14 +126,15 @@ async def render_solids(
             if stopping:
                 raise asyncio.CancelledError
             try:
-                await render_3mf(
-                    wrapper,
-                    schema,
-                    params,
-                    out_path,
-                    config=config,
-                    extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
-                )
+                with span("render.solid", attributes={"scadbuddy.colour_index": index}):
+                    await render_3mf(
+                        wrapper,
+                        schema,
+                        params,
+                        out_path,
+                        config=config,
+                        extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
+                    )
                 # Parsing and joining the mesh is CPU work: off the loop, which every
                 # other job's drain, the queue and /healthz share -- and several colours
                 # can now finish their `openscad` at nearly the same moment.

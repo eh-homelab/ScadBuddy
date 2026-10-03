@@ -16,6 +16,7 @@ from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
+from scadbuddy.core.tracing import span
 from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
 from scadbuddy.render.schema import (
     CustomizerSchema,
@@ -310,7 +311,7 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
 
-async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
@@ -379,6 +380,31 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         notes=tuple(notes),
         plates=plates[-1] if plates else None,
     )
+
+
+def _export_attributes(args: Sequence[str]) -> dict[str, str]:
+    """What the call renders, never its defines: those carry parameter values."""
+    attributes: dict[str, str] = {}
+    if "-o" in args:
+        index = args.index("-o")
+        if index + 1 < len(args):
+            attributes["scadbuddy.openscad.format"] = Path(args[index + 1]).suffix.lstrip(".")
+    for arg in args:
+        if arg.startswith("--backend="):
+            attributes["scadbuddy.openscad.backend"] = arg.removeprefix("--backend=")
+    return attributes
+
+
+async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+    with span("openscad.export", attributes=_export_attributes(args)) as current:
+        try:
+            output = await _run_openscad(args, cwd=cwd, config=config)
+        except OpenSCADError as error:
+            if error.returncode is not None:
+                current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
+            raise
+        current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
+        return output
 
 
 async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
