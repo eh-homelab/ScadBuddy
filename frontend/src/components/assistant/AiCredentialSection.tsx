@@ -49,8 +49,12 @@ function retryAfter(cause: unknown): number | undefined {
   return typeof seconds === 'number' ? seconds : undefined
 }
 
-function clock(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+/** The time, with the date when it is not today (a provider's limit can last days). */
+function clock(iso: string, now = new Date()): string {
+  const at = new Date(iso)
+  return at.toDateString() === now.toDateString()
+    ? at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 /** How a credential is named in messages: "Anthropic API key ••••abcd", no secret. */
@@ -58,12 +62,15 @@ function nameOf(entry: AiCredentialEntry): string {
   return `${KIND_LABEL[entry.kind]}${entry.last4 ? ` ••••${entry.last4}` : ''}`
 }
 
-type Busy = { id: string; action: 'up' | 'down' | 'test' | 'reset' | 'replace' | 'delete' } | null
+type Busy = { id: string; action: 'add' | 'up' | 'down' | 'test' | 'reset' | 'replace' | 'delete' } | null
 
 /** How long after a cooldown ends the list is read again, so the agent sees it ended too. */
 const REFRESH_SLACK_MS = 500
 /** setTimeout's ceiling (about 24.8 days); a later cooldown is read again then. */
 const MAX_TIMER_MS = 2 ** 31 - 1
+/** The back-off for a cooldown the agent still reports after it ended by this clock. */
+const OVERDUE_FIRST_MS = 1000
+const OVERDUE_MAX_MS = 30_000
 
 /** What deleting `entry` does to the assistant, for the confirmation. */
 function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[]): string {
@@ -96,7 +103,6 @@ export function AiCredentialSection() {
   const [kind, setKind] = useState<AiCredentialKind>('anthropic_api_key')
   const [baseUrl, setBaseUrl] = useState('')
   const [secret, setSecret] = useState('')
-  const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<Busy>(null)
   const [replacing, setReplacing] = useState<string | null>(null)
   const [replacement, setReplacement] = useState('')
@@ -117,14 +123,27 @@ export function AiCredentialSection() {
   }, [ai.state, loadError, reload])
 
   // The agent works a cooldown out at read time, so read again just after the earliest one ends.
+  // This browser's clock may run ahead of the database's, which decides: a cooldown that has
+  // passed here but still comes back is read again after 1 s, 2 s, 4 s… up to 30 s.
   const { data: listed, refresh } = list
+  const overdue = useRef({ until: Number.NaN, tries: 0 })
   useEffect(() => {
     const ends = (listed?.credentials ?? [])
       .filter((c) => c.status === 'cooling_down' && c.cooldown_until)
       .map((c) => Date.parse(c.cooldown_until!))
       .filter((t) => Number.isFinite(t))
     if (ends.length === 0) return
-    const wait = Math.min(Math.max(Math.min(...ends) - Date.now(), 0) + REFRESH_SLACK_MS, MAX_TIMER_MS)
+    const earliest = Math.min(...ends)
+    const left = earliest - Date.now()
+    let wait: number
+    if (left > 0) {
+      overdue.current = { until: Number.NaN, tries: 0 }
+      wait = Math.min(left + REFRESH_SLACK_MS, MAX_TIMER_MS)
+    } else {
+      const tries = overdue.current.until === earliest ? overdue.current.tries + 1 : 0
+      overdue.current = { until: earliest, tries }
+      wait = Math.min(OVERDUE_FIRST_MS * 2 ** tries, OVERDUE_MAX_MS)
+    }
     const timer = setTimeout(() => refresh(), wait)
     return () => clearTimeout(timer)
   }, [listed, refresh])
@@ -150,8 +169,9 @@ export function AiCredentialSection() {
     )
   }
   const credentials = current.credentials
+  const adding = busy?.action === 'add'
   const canAdd =
-    !adding && current.can_save && secret.trim() !== '' && (kind !== 'gateway' || baseUrl.trim() !== '')
+    busy === null && current.can_save && secret.trim() !== '' && (kind !== 'gateway' || baseUrl.trim() !== '')
 
   /** Runs one action, then shows the list as the agent now has it; true when it worked. */
   async function act<T extends AiCredentialList | AiCredentialEntry>(
@@ -167,7 +187,7 @@ export function AiCredentialSection() {
       const answer = await run()
       if ('credentials' in answer) list.setData(answer)
       else list.refresh()
-      if (next && next.action !== 'up' && next.action !== 'down') forgetTest(next.id)
+      if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
       if (done) setNotice(typeof done === 'function' ? done(answer) : done)
       void recheckAiAvailability({ force: true })
       return true
@@ -187,7 +207,7 @@ export function AiCredentialSection() {
 
   async function add(event: FormEvent) {
     event.preventDefault()
-    setAdding(true)
+    setBusy({ id: '', action: 'add' })
     setError(null)
     setNotice(null)
     try {
@@ -206,7 +226,7 @@ export function AiCredentialSection() {
     } catch (caught) {
       setError(describeError(caught, 'Could not save the credential'))
     } finally {
-      setAdding(false)
+      setBusy(null)
     }
   }
 
@@ -258,7 +278,7 @@ export function AiCredentialSection() {
   }
 
   async function remove(entry: AiCredentialEntry) {
-    await act(
+    const deleted = await act(
       { id: entry.id, action: 'delete' },
       () => api.deleteAiCredential(entry.id),
       credentials.length === 1
@@ -266,7 +286,7 @@ export function AiCredentialSection() {
         : `Deleted ${nameOf(entry)}.`,
       'Could not delete the credential',
     )
-    setConfirmDelete(null)
+    if (deleted) setConfirmDelete(null)
   }
 
   const isBusy = (id: string, action?: NonNullable<Busy>['action']) =>
@@ -505,10 +525,20 @@ export function AiCredentialSection() {
       <Dialog
         open={confirmDelete !== null}
         title={`Delete ${confirmDelete ? nameOf(confirmDelete) : 'the credential'}?`}
-        onClose={() => setConfirmDelete(null)}
+        onClose={() => {
+          setConfirmDelete(null)
+          setError(null)
+        }}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setConfirmDelete(null)} disabled={busy !== null}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setConfirmDelete(null)
+                setError(null)
+              }}
+              disabled={busy !== null}
+            >
               Cancel
             </Button>
             <Button
@@ -523,6 +553,11 @@ export function AiCredentialSection() {
         }
       >
         <p className="text-[13px] text-muted">{confirmDelete && afterDelete(confirmDelete, credentials)}</p>
+        {error && (
+          <p role="alert" className="mt-3 text-[13px] text-warn">
+            {error}
+          </p>
+        )}
       </Dialog>
     </Frame>
   )

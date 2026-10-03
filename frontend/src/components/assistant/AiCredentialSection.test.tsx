@@ -293,6 +293,76 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
   })
 
+  it('backs off when the agent still reports a cooldown this clock says has ended', async () => {
+    let reads = 0
+    const past = new Date(Date.now() - 60_000).toISOString()
+    server.use(
+      http.get(entries, () => {
+        reads += 1
+        return HttpResponse.json({
+          credentials: [
+            credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: past }),
+          ],
+          usable_now: false,
+          recovers_at: past,
+          can_save: true,
+          cannot_save_reason: null,
+        })
+      }),
+    )
+    renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    // 1 s, then 2 s: three reads in the first 3.5 s, not one every half second.
+    await new Promise((resolve) => setTimeout(resolve, 3500))
+    expect(reads).toBeGreaterThanOrEqual(2)
+    expect(reads).toBeLessThanOrEqual(3)
+  }, 10_000)
+
+  it('shows the date of a cooldown that ends on another day', async () => {
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-02T12:30:00Z' }),
+    ])
+    renderPage(<AiCredentialSection />)
+    expect((await screen.findAllByTestId('ai-credential'))[0]).toHaveTextContent(/Rate limited until .*2099/)
+    expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent(/2099/)
+  })
+
+  it('keeps the row actions off while a credential is being added', async () => {
+    let finish: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    server.use(
+      http.post(entries, async () => {
+        await held
+        return HttpResponse.json(credentialEntry({ id: 'c9', last4: 'NEW9' }), { status: 201 })
+      }),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-ant-adding-NEW9')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: `Move ${GATEWAY} up` })).toBeDisabled())
+    expect(screen.getByRole('button', { name: `Test ${KEY}` })).toBeDisabled()
+    expect(screen.getByRole('button', { name: `Delete ${KEY}` })).toBeDisabled()
+    finish()
+    expect(await screen.findByText(/Added last/)).toBeInTheDocument()
+  })
+
+  it('keeps the delete dialog open with the error when the delete fails', async () => {
+    server.use(
+      http.delete(`${entries}/default`, () =>
+        HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(rows()).toHaveLength(2)
+  })
+
   it('says why it cannot save, and disables Add and Replace', async () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })], false)
     const { user } = renderPage(<AiCredentialSection />)
