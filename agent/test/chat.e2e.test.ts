@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -74,7 +75,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     return manager({
       sql: pool.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       tierOf: (name) => tiers[name],
       mcpServers: () => ({ stub: stubServer() }),

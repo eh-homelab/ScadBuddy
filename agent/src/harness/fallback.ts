@@ -1,0 +1,544 @@
+import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import { type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
+import {
+  type Credential,
+  type CredentialEvent,
+  type CredentialRepo,
+  credentialLabel,
+  describeUnusable,
+  opensWith,
+  soonestRecovery,
+} from '../credentials.js'
+import { type KekStatus, redact, SealError } from '../secrets.js'
+import {
+  classifyFailure,
+  type FailureClass,
+  type FailureEvidence,
+  type ProbeVerdict,
+  cooldownUntil,
+  probeCredential,
+} from './credentialErrors.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
+
+// Several Claude credentials, in priority order, with fallback (#1093).
+//
+// Each credential is a separate Claude Code process env (run.ts
+// `credentialEnv`), so fallback is per query(): `runWithFallback` runs the
+// turn on the first usable credential and, when it fails for a reason that
+// is the credential's (credentialErrors.ts `classifyFailure`), runs it again
+// on the next. Each credential is tried at most once per turn, which is the
+// cap on how many keys spend on one failing turn; one whose failure is not
+// the credential's (a bad request, a turn or budget limit) is not retried at
+// all, since the next key would fail the same way.
+//
+// MID-TURN FAILURES RESUME, THEY DO NOT RESTART. Claude Code writes the
+// session transcript as the turn goes: the user's prompt before the first
+// model request, then every tool call and result. Measured on Claude Code
+// 2.1.283 against the fake endpoint (test/fallback.e2e.test.ts): after a
+// failed request, a query with `resume` and the prompt CONTINUE_PROMPT sends
+// the model the original prompt, every finished tool call and its result,
+// and then CONTINUE_PROMPT; the synthetic "API Error" message is left out.
+// No tool runs twice. Sending the original prompt again instead would put it
+// in the context twice. So the next credential always resumes the session
+// Claude Code reported in its init message, when there was one; a query that
+// never got that far runs again as it was.
+//
+// What the caller sees: the failed attempt's messages up to the failure
+// (text and tool calls that did happen), never its synthetic error message
+// or its error result; only the first init message; and one result, whose
+// cost and turn count include the attempts before it.
+//
+// When to give up on an attempt:
+//   - permanent (401, 403, billing) at Claude Code's first retry, before the
+//     attempt made any progress: it retries a 401 with backoff, which only
+//     delays the verdict. After progress the attempt is left to end on its
+//     own, so its result reports what it spent.
+//   - rate limited at the first retry, likewise, but only when there is a
+//     credential to fall back to. With none, Claude Code's own waiting is
+//     the best there is.
+//   - transient (5xx, 529, network): Claude Code retries on the same
+//     credential, at most `transientRetries` times when there is another
+//     credential (CLAUDE_CODE_MAX_RETRIES), as many as it likes otherwise;
+//     then the turn falls back for this call only. The credential is not
+//     marked.
+//
+// A REFUSAL IS CONFIRMED BEFORE IT DISABLES. A 401/403 can be about one
+// request rather than the key (a WAF or gateway refusing one body, a model
+// the organisation may not use); disabling on it would disable every
+// credential in one turn. So the credential is asked once more with a
+// one-token request (credentialErrors.ts `probeCredential`): refused again,
+// it is disabled and the turn falls back; answered, the refusal was the
+// request's, and the turn ends there with no fallback and nothing recorded;
+// rate limited, it cools down; no clear answer, it falls back for this call
+// without being marked.
+//
+// A RATE LIMIT DOES NOT WAIT FOR ITS PROBE. The credential is recorded as
+// cooling down for the default time at once and the next attempt starts; the
+// probe's answer then replaces that time (or disables the credential), and
+// the generator does not return before that record is written.
+//
+// No attempt starts once the turn's `maxTurns` or `maxBudgetUsd` is used up:
+// the last failure is shown as it came.
+
+/** A credential ready for a query, with the row facts its outcome is recorded against. */
+export type PooledCredential = {
+  id: string
+  /** The row's epoch when read; a failure recorded against an older one is ignored. */
+  epoch: number
+  /** For logs and audit: kind and last four characters, never the secret. */
+  label: string
+  credential: Credential
+}
+
+export type AttemptOutcome =
+  | { class: 'ok' }
+  | { class: 'permanent' | 'transient'; reason: string }
+  /** `replacing`: the provisional time an earlier report of this rate limit recorded (fallback.ts). */
+  | { class: 'rate_limited'; reason: string; until: Date; replacing?: Date }
+
+/** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
+export type CredentialSource = {
+  /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
+  candidates(): Promise<PooledCredential[]>
+  /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
+  reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
+}
+
+/** Thrown when no credential can be used now; `recoversAt` is the soonest one usable again, if any will be on its own. */
+export class NoUsableCredentialError extends Error {
+  override name = 'NoUsableCredentialError'
+  readonly recoversAt: Date | undefined
+  constructor(message: string, recoversAt: Date | undefined) {
+    super(message)
+    this.recoversAt = recoversAt
+  }
+}
+
+/** Sent as the next credential's prompt when it resumes a turn another one started. */
+export const CONTINUE_PROMPT =
+  'The request to the model failed and was sent again with another Claude credential. Continue where you left off.'
+
+/** Claude Code's retries of a transient failure on one credential, when there is another to fall back to. */
+export const DEFAULT_TRANSIENT_RETRIES = 2
+
+export type FallbackOptions = {
+  /** Usable credentials, in priority order (`CredentialPool.candidates`). */
+  candidates: readonly PooledCredential[]
+  /** What each attempt learned about its credential; `next` is the one the turn falls back to. */
+  report: (attempt: PooledCredential, outcome: AttemptOutcome, next: PooledCredential | undefined) => Promise<void>
+  /** Runs one query; runHarness by default. */
+  run?: (run: HarnessRun) => AsyncIterable<SDKMessage>
+  /**
+   * Asks the endpoint once more about a refused or rate-limited credential
+   * (credentialErrors.ts `probeCredential` by default).
+   */
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
+  transientRetries?: number
+  /**
+   * What the session had spent before this turn, when `resume` is set: a
+   * resumed query's `total_cost_usd` includes it (see `Spend`). 0 by default.
+   */
+  priorCostUsd?: number
+}
+
+function linked(signal: AbortSignal | undefined): AbortController {
+  const controller = new AbortController()
+  if (signal?.aborted) controller.abort(signal.reason)
+  else signal?.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  return controller
+}
+
+function textOf(message: Extract<SDKMessage, { type: 'assistant' }>): string {
+  const content = message.message.content as unknown
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((b: unknown) => (typeof b === 'object' && b !== null && 'text' in b && typeof b.text === 'string' ? b.text : ''))
+    .join(' ')
+    .trim()
+}
+
+/** The failed model request a result reports, if it reports one. */
+function apiFailure(
+  result: SDKResultMessage | undefined,
+  synthetic: FailureEvidence | undefined,
+  lastRetry: FailureEvidence | undefined,
+): FailureEvidence | undefined {
+  if (!result) return synthetic
+  if (result.subtype !== 'success' || !result.is_error) return undefined
+  const status = result.api_error_status
+  if (typeof status !== 'number' && result.terminal_reason !== 'api_error' && !synthetic) return undefined
+  return {
+    status: typeof status === 'number' ? status : (lastRetry?.status ?? null),
+    category: synthetic?.category ?? lastRetry?.category,
+    message: synthetic?.message || result.result,
+  }
+}
+
+/**
+ * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
+ * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * already includes everything the session spent before it, restored from the
+ * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
+ * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check
+ * are the query's own (a resumed query with maxBudgetUsd 0.00015 ran to 0.00021
+ * total without stopping; with 0.00005 it stopped). So the earlier attempts'
+ * spend is never added to a resumed total, but their turns are, and it is
+ * taken off the next attempt's budget.
+ */
+type Spend = {
+  /** What the session had spent before this turn, as a resumed total counts it. */
+  prior: number
+  /** What this turn's earlier attempts spent themselves. */
+  usd: number
+  turns: number
+}
+
+/** What a result's total says this attempt spent itself. */
+function ownCost(result: SDKResultMessage, spend: Spend, resumed: boolean): number {
+  const carried = resumed ? spend.prior + spend.usd : 0
+  // A total below what it should have carried in: the restore did not happen.
+  return result.total_cost_usd >= carried ? result.total_cost_usd - carried : result.total_cost_usd
+}
+
+/** The final result, with the earlier attempts' turns, and their cost when its total does not already hold it. */
+function withSpent(message: SDKMessage, spend: Spend, resumed: boolean): SDKMessage {
+  if (message.type !== 'result' || (spend.usd === 0 && spend.turns === 0)) return message
+  const carried = resumed ? spend.prior + spend.usd : 0
+  const total = resumed && message.total_cost_usd >= carried ? message.total_cost_usd : message.total_cost_usd + spend.usd
+  return { ...message, total_cost_usd: total, num_turns: message.num_turns + spend.turns }
+}
+
+const isCredentialFailure = (c: FailureClass | undefined): c is 'permanent' | 'rate_limited' | 'transient' =>
+  c === 'permanent' || c === 'rate_limited' || c === 'transient'
+
+/**
+ * Runs one turn on `candidates[0]`, falling back along the list as described
+ * at the top of this file. Yields the SDK messages the caller should see; the
+ * caller's `signal` stops every attempt.
+ */
+export async function* runWithFallback(
+  base: Omit<HarnessRun, 'credential'>,
+  options: FallbackOptions,
+): AsyncGenerator<SDKMessage, void, undefined> {
+  const runOne = options.run ?? runHarness
+  const probe = options.probe ?? ((credential, model) => probeCredential(credential, { model }))
+  /** Rate-limit probes still running; their records are written before the generator returns. */
+  const pending: Promise<void>[] = []
+  try {
+    yield* attempts()
+  } finally {
+    await Promise.all(pending)
+  }
+
+  async function* attempts(): AsyncGenerator<SDKMessage, void, undefined> {
+  const { candidates } = options
+  if (candidates.length === 0) throw new NoUsableCredentialError('no Claude credential is usable', undefined)
+
+  let prompt = base.prompt
+  let session: Pick<HarnessRun, 'resume' | 'sessionId'> = {
+    ...(base.resume === undefined ? {} : { resume: base.resume }),
+    ...(base.sessionId === undefined ? {} : { sessionId: base.sessionId }),
+  }
+  const spend: Spend = { prior: options.priorCostUsd ?? 0, usd: 0, turns: 0 }
+  let sawInit = false
+  /** Whether this attempt resumes a session, so its total carries what came before. */
+  let resumed = base.resume !== undefined
+
+  for (let i = 0; i < candidates.length; i++) {
+    const current = candidates[i] as PooledCredential
+    const next = candidates[i + 1]
+    const controller = linked(base.signal)
+    const { resume: _resume, sessionId: _sessionId, ...rest } = base
+    const run: HarnessRun = {
+      ...rest,
+      ...session,
+      prompt,
+      credential: current.credential,
+      signal: controller.signal,
+      ...(i > 0
+        ? {
+            maxTurns: (base.maxTurns ?? DEFAULT_MAX_TURNS) - spend.turns,
+            maxBudgetUsd: (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD) - spend.usd,
+          }
+        : {}),
+      ...(next ? { maxRetries: options.transientRetries ?? DEFAULT_TRANSIENT_RETRIES } : {}),
+    }
+
+    /**
+     * A synthetic error message, and an error result with anything after it:
+     * shown only if the turn ends here. Any other result is passed on at once
+     * (the session manager settles the turn on it).
+     */
+    const held: SDKMessage[] = []
+    let result: SDKResultMessage | undefined
+    let resultHeld = false
+    let synthetic: FailureEvidence | undefined
+    let lastRetry: FailureEvidence | undefined
+    /** The retry this attempt was stopped at. */
+    let refused: FailureEvidence | undefined
+    let progressed = false
+    let sessionSeen: string | undefined
+    let model: string | undefined
+    let thrown: unknown
+    try {
+      for await (const message of runOne(run)) {
+        if (result) {
+          if (resultHeld) held.push(message)
+          else yield message
+          continue
+        }
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionSeen = message.session_id
+          model = message.model
+          if (sawInit) continue
+          sawInit = true
+          yield message
+          continue
+        }
+        if (message.type === 'system' && message.subtype === 'api_retry') {
+          const evidence: FailureEvidence = {
+            status: message.error_status,
+            category: message.error,
+            message: `HTTP ${message.error_status ?? 'no response'}: ${message.error}`,
+          }
+          lastRetry = evidence
+          const verdict = classifyFailure(evidence)
+          if (!progressed && (verdict === 'permanent' || (verdict === 'rate_limited' && next))) {
+            refused = evidence
+            // Before `break`, whose return() would wait on the process. The
+            // SDK closes Claude Code's input and sends SIGTERM 2 s later
+            // (sdk.mjs 0.3.283), so a retry or two may still go out in that
+            // grace; they are refused like the first and cost nothing.
+            controller.abort(new Error(`the credential was refused (${evidence.message})`))
+            break
+          }
+          yield message
+          continue
+        }
+        if (message.type === 'assistant' && message.error) {
+          synthetic ??= { category: message.error, message: textOf(message) }
+          held.push(message)
+          continue
+        }
+        if (message.type === 'result') {
+          result = message
+          resultHeld = apiFailure(message, synthetic, lastRetry) !== undefined
+          if (resultHeld) {
+            held.push(message)
+            continue
+          }
+          for (const h of held) yield h
+          held.length = 0
+          yield withSpent(message, spend, resumed)
+          continue
+        }
+        // Anything else is the turn going on: whatever was held was not its end.
+        for (const h of held) yield h
+        held.length = 0
+        synthetic = undefined
+        if (message.type === 'assistant' || message.type === 'user' || message.type === 'stream_event') progressed = true
+        yield message
+      }
+    } catch (err) {
+      thrown = err
+    } finally {
+      // Stops the Claude Code process when the attempt was left early.
+      controller.abort()
+    }
+
+    const release = function* (): Generator<SDKMessage> {
+      for (const m of held) yield withSpent(m, spend, resumed)
+    }
+    if (base.signal?.aborted) {
+      yield* release()
+      if (thrown !== undefined) throw thrown
+      return
+    }
+
+    const failure = refused ?? apiFailure(result, synthetic, lastRetry)
+    const verdict = failure ? classifyFailure(failure) : undefined
+    if (!failure || !isCredentialFailure(verdict)) {
+      // The endpoint answered: the credential works, whatever became of the turn.
+      if (result) await options.report(current, { class: 'ok' }, undefined)
+      yield* release()
+      if (thrown !== undefined) throw thrown
+      return
+    }
+
+    const secret = current.credential.secret
+    const reason = redact(failure.message || verdict, [secret])
+    let outcome: AttemptOutcome
+    if (verdict === 'permanent') {
+      // Confirmed before it disables (see the top of this file).
+      const check = await probe(current.credential, model)
+      if (check.verdict === 'answered') {
+        yield* release()
+        if (thrown !== undefined) throw thrown
+        throw new Error(`the model endpoint refused this request (${reason}); the credential itself works`)
+      }
+      outcome =
+        check.verdict === 'refused'
+          ? { class: 'permanent', reason }
+          : check.verdict === 'rate_limited'
+            ? { class: 'rate_limited', reason, until: check.until }
+            : { class: 'transient', reason }
+    } else if (verdict === 'rate_limited') {
+      // Recorded now with the default; the probe's answer replaces it below.
+      outcome = { class: 'rate_limited', reason, until: cooldownUntil(undefined, Date.now()) }
+    } else {
+      outcome = { class: 'transient', reason }
+    }
+
+    const own = result ? ownCost(result, spend, resumed) : 0
+    const turns = result?.num_turns ?? 0
+    const exhausted =
+      spend.turns + turns >= (base.maxTurns ?? DEFAULT_MAX_TURNS) ||
+      spend.usd + own >= (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD)
+    const fallTo = exhausted ? undefined : next
+    await options.report(current, outcome, fallTo)
+    if (verdict === 'rate_limited' && outcome.class === 'rate_limited') {
+      const provisional = outcome.until
+      pending.push(
+        probe(current.credential, model).then((answer) =>
+          options.report(
+            current,
+            answer.verdict === 'refused'
+              ? { class: 'permanent', reason: redact(answer.reason, [secret]) }
+              : { class: 'rate_limited', reason, until: answer.until, replacing: provisional },
+            undefined,
+          ),
+        ),
+      )
+    }
+    if (!fallTo) {
+      if (held.length === 0) throw new Error(`the Claude credential (${current.label}) was refused: ${reason}`)
+      // With the totals as they were before this attempt: its result already counts itself.
+      yield* release()
+      if (thrown !== undefined) throw thrown
+      return
+    }
+    spend.usd += own
+    spend.turns += turns
+    if (sessionSeen !== undefined) {
+      session = { resume: sessionSeen }
+      prompt = CONTINUE_PROMPT
+      resumed = true
+    }
+  }
+  }
+}
+
+/**
+ * The credentials a turn can use, and the record of what each attempt learned
+ * (#1093). Audits every disable, cooldown, recovery and fallback as a
+ * `credential` row (audit/log.ts), with no secret: credentials are named by
+ * `credentialLabel`, and reasons are redacted before they get here.
+ */
+export class CredentialPool implements CredentialSource {
+  private readonly repo: CredentialRepo
+  private readonly kek: KekStatus
+  private readonly audit: AuditSink | undefined
+  private readonly log: (line: string) => void
+
+  constructor(options: { repo: CredentialRepo; kek: KekStatus; audit?: AuditSink | undefined; log?: (line: string) => void }) {
+    this.repo = options.repo
+    this.kek = options.kek
+    this.audit = options.audit
+    this.log = options.log ?? ((line) => console.warn(line))
+  }
+
+  /** Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none. */
+  async candidates(): Promise<PooledCredential[]> {
+    const kek = this.kek
+    if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
+    const list = await this.repo.list()
+    const out: PooledCredential[] = []
+    for (const c of list) {
+      if (c.status !== 'active' || !opensWith(c, kek)) continue
+      // The epoch comes with the secret, from one SELECT: a save committing
+      // after list() would otherwise run the turn on the new secret while
+      // recording its failures against the old epoch.
+      let entry: { credential: Credential; epoch: number } | undefined
+      try {
+        entry = await this.repo.revealEntry(kek.kek, c.id)
+      } catch (err) {
+        if (err instanceof SealError) continue
+        throw err
+      }
+      if (entry) out.push({ id: c.id, epoch: entry.epoch, label: credentialLabel(c), credential: entry.credential })
+    }
+    if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))
+    return out
+  }
+
+  /** `runWithFallback`'s `report`, with the turn it belongs to for the audit rows. */
+  reporter(context: { sessionId?: string; turnId?: string } = {}): FallbackOptions['report'] {
+    return (attempt, outcome, next) => this.report(attempt, outcome, next, context)
+  }
+
+  async report(
+    attempt: PooledCredential,
+    outcome: AttemptOutcome,
+    next: PooledCredential | undefined,
+    context: { sessionId?: string; turnId?: string } = {},
+  ): Promise<void> {
+    const event: CredentialEvent =
+      outcome.class === 'ok'
+        ? { kind: 'used' }
+        : outcome.class === 'permanent'
+          ? { kind: 'disabled', reason: outcome.reason }
+          : outcome.class === 'rate_limited'
+            ? {
+                kind: 'cooling_down',
+                until: outcome.until,
+                reason: outcome.reason,
+                ...(outcome.replacing ? { replacing: outcome.replacing } : {}),
+              }
+            : { kind: 'transient', reason: outcome.reason }
+    let action: string | undefined
+    let detail = ''
+    try {
+      const change = await this.repo.record(attempt.id, attempt.epoch, event)
+      if (change?.recovered) {
+        action = 'recover'
+        detail = `${attempt.label} is usable again: its rate limit has passed`
+      } else if (change && change.after === 'disabled' && change.before !== 'disabled') {
+        action = 'disable'
+        detail = `${attempt.label} is disabled until it is reset: ${'reason' in outcome ? outcome.reason : ''}`
+      } else if (change && change.after === 'cooling_down' && outcome.class === 'rate_limited') {
+        action = 'cooldown'
+        detail = `${attempt.label} is rate limited until ${outcome.until.toISOString()}: ${outcome.reason}`
+      }
+    } catch (err) {
+      this.log(`credentials: could not record ${outcome.class} for ${attempt.label}: ${(err as Error).message}`)
+    }
+    if (action) await this.record(action, detail, outcome.class === 'ok' ? 'ok' : 'error', context)
+    if (next && outcome.class !== 'ok') {
+      await this.record(
+        'fallback',
+        `${attempt.label} failed (${outcome.class}: ${outcome.reason}); this turn continues on ${next.label}`,
+        'error',
+        context,
+      )
+    }
+  }
+
+  private async record(
+    action: string,
+    detail: string,
+    outcome: 'ok' | 'error',
+    context: { sessionId?: string; turnId?: string },
+  ): Promise<void> {
+    this.log(`credentials: ${action}: ${detail}`)
+    await this.audit?.record({
+      kind: 'credential',
+      action,
+      surface: 'harness',
+      actor: SYSTEM_ACTOR,
+      outcome,
+      sessionId: context.sessionId,
+      turnId: context.turnId,
+      detail,
+    })
+  }
+}

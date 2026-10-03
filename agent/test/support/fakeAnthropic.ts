@@ -18,7 +18,7 @@ export type Reply =
   | { text: string }
   | { toolUse: { name: string; input: Record<string, unknown> } }
   /** An API error response, e.g. 401 authentication_error. */
-  | { error: { status: number; type: string; message: string } }
+  | { error: { status: number; type: string; message: string; headers?: Record<string, string> } }
   /** Never answer (until the server closes): a model that is still thinking. */
   | { hang: true }
 
@@ -130,7 +130,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
         const answer = reply(recorded)
         if ('hang' in answer) return
         if ('error' in answer) {
-          res.writeHead(answer.error.status, { 'content-type': 'application/json' })
+          res.writeHead(answer.error.status, { ...answer.error.headers, 'content-type': 'application/json' })
           res.end(JSON.stringify({ type: 'error', error: { type: answer.error.type, message: answer.error.message } }))
           return
         }

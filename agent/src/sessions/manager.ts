@@ -10,6 +10,8 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { ProbeVerdict } from '../harness/credentialErrors.js'
+import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import {
@@ -309,8 +311,14 @@ export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
 export type SessionManagerDeps = {
   sql: Sql
   paths: HarnessPaths
-  /** The Claude credential for a query; throws when there is none. */
-  credential: () => Promise<Credential>
+  /**
+   * The Claude credentials a turn may use, in priority order, and where what
+   * each attempt learned goes (harness/fallback.ts, #1093). `candidates`
+   * throws when none is usable now.
+   */
+  credentials: CredentialSource
+  /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
@@ -951,10 +959,11 @@ export class SessionManager {
     /** Whether this turn wrote headless-browser folders, removed when it ends. */
     let browserDirs = false
     try {
-      // The credential first, and into `secrets` at once: whatever fails
-      // after this point is redacted before it reaches the event log.
-      const credential = await this.deps.credential()
-      secrets = [credential.secret]
+      // The credentials first, and into `secrets` at once: whatever fails
+      // after this point is redacted before it reaches the event log. Every
+      // candidate's, since the turn may fall back to any of them.
+      const candidates = await this.deps.credentials.candidates()
+      secrets = candidates.map((c) => c.credential.secret)
       forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
       const remotePlugins = forwarded?.plugins ?? []
       // Plugin header values (and their bare tokens) are redacted from the
@@ -1064,9 +1073,8 @@ export class SessionManager {
             }
           : undefined
       browserDirs = browser !== undefined
-      const run: HarnessRun = {
+      const run: Omit<HarnessRun, 'credential'> = {
         paths: this.deps.paths,
-        credential,
         prompt,
         cwd,
         sessionStore: this.store,
@@ -1116,7 +1124,15 @@ export class SessionManager {
         ...(memory ? { memoryHooks: memory.hooks } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
-      for await (const message of this.run(run)) {
+      const turn = runWithFallback(run, {
+        candidates,
+        report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+        run: this.run,
+        ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+        // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
+        ...(resume ? { priorCostUsd: session.costUsd } : {}),
+      })
+      for await (const message of turn) {
         if (message.type === 'result') {
           result = message
           local.settling = true

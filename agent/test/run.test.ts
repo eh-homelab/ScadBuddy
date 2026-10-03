@@ -74,6 +74,11 @@ describe('buildHarnessOptions', () => {
     })
   })
 
+  it('bounds Claude Code’s retries only when asked (#1093: there is a credential to fall back to)', () => {
+    expect(buildHarnessOptions(base).env?.CLAUDE_CODE_MAX_RETRIES).toBeUndefined()
+    expect(buildHarnessOptions({ ...base, maxRetries: 2 }).env?.CLAUDE_CODE_MAX_RETRIES).toBe('2')
+  })
+
   it('links the abort signal', () => {
     const stop = new AbortController()
     const options = buildHarnessOptions({ ...base, signal: stop.signal })
