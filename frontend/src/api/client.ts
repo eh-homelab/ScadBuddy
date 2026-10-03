@@ -274,6 +274,8 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  // Its run may be checking still, and will print once it is accepted (#1052).
+  if (error.problem.type === STILL_ACCEPTING) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -295,10 +297,12 @@ function bambuddyUnanswered(problem: Problem): boolean {
 const seg = encodeURIComponent
 
 /**
- * How often `runPrint` reads a running print run (#470), and how many times it tries a
- * request no ScadBuddy answer described again before giving up; tests shorten it.
+ * How often `runPrint` reads a running print run (#470), how many times it tries a
+ * request no ScadBuddy answer described again before giving up, and how long it keeps
+ * sending one the server is still accepting (#1052: past the accept's own worst case,
+ * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000 }
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -345,11 +349,16 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 
 /** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
 async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  for (let tries = 0; ; tries++) {
+  const began = Date.now()
+  for (let tries = 0; ; ) {
     try {
       return await attempt()
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
+      if (signal?.aborted || !unanswered(caught)) throw caught
+      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+        throw caught
+      }
       await wait(printRunPoll.intervalMs, signal)
     }
   }

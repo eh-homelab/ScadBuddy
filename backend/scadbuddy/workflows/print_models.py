@@ -55,6 +55,18 @@ class PrintRunInput(BaseModel):
     search_attributes: bool = False
 
 
+class Checked(BaseModel):
+    """``print_check``'s answer: Bambuddy's checks passed; nothing written yet."""
+
+    source: SourceSpec
+    prepared: PreparedPlates
+
+
+class InsertInput(BaseModel):
+    input: PrintRunInput
+    checked: Checked
+
+
 class Accepted(BaseModel):
     run: PrintRun
     source: SourceSpec

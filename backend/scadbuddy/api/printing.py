@@ -7,7 +7,9 @@ than about an output, and only some of them are output-scoped at all. ``POST
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -50,7 +52,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
 )
-from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRun, run_key
+from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.workflows.commands import (
@@ -213,6 +215,10 @@ async def post_run(
     )
 
 
+#: How long a request waits for an execution past its repeat window to close.
+CLOSING_WAIT = 5.0
+
+
 async def accept_run(
     runs: PrintCommands,
     response: Response,
@@ -243,15 +249,18 @@ async def accept_run(
         key=key,
         source=source,
         request=request,
-        repeat_window_s=REPEAT_WINDOW.total_seconds(),
+        # The store's window, so a repeat the record no longer matches starts anew.
+        repeat_window_s=runs.store.repeat_window.total_seconds(),
         search_attributes=runs.search_attributes,
     )
-    try:
-        answer = await start_command(
+    workflow_id = f"print-{key}"
+
+    async def start() -> AcceptAnswer:
+        return await start_command(
             runs.client,
             PRINT_RUN_WORKFLOW,
             arg,
-            id=f"print-{key}",
+            id=workflow_id,
             task_queue=runs.task_queue,
             update=ACCEPTED_UPDATE,
             result_type=AcceptAnswer,
@@ -261,6 +270,22 @@ async def accept_run(
                 else WorkflowIDReusePolicy.ALLOW_DUPLICATE
             ),
         )
+
+    try:
+        answer = await start()
+        if (
+            not has_request_id
+            and answer.repeated
+            and answer.run is not None
+            and answer.run.status != "running"
+        ):
+            # Our record no longer repeats this ended run: its window is over and the
+            # execution is closing. Let it close, then this request starts its own.
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    runs.client.get_workflow_handle(workflow_id).result(), CLOSING_WAIT
+                )
+            answer = await start()
     except AlreadyClosedError:
         # The press's execution closed after recording its run (§4.2): that run.
         closed = await runs.store.find(key, has_request_id=True)

@@ -409,11 +409,17 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         watcher=state.print_watcher,
     )
-    worker = print_worker(
-        client, settings.temporal_task_queue_bambuddy, PrintActivities(deps).all()
-    )
-    async with worker:
-        await stop.wait()
+    activities = PrintActivities(deps).all()
+    while not stop.is_set():
+        # A worker that fails is said at once and started again: until then every
+        # print run waits on a queue nothing polls.
+        try:
+            async with print_worker(client, settings.temporal_task_queue_bambuddy, activities):
+                await stop.wait()
+        except Exception:
+            logger.exception("the print worker failed; starting it again")
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
 async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:

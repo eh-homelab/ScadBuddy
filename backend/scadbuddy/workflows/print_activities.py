@@ -14,12 +14,14 @@ source reads and records on the data volume.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -41,22 +43,25 @@ from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PrintWatcher
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputStore, PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
-    Accepted,
+    Checked,
     EnqueueInput,
     FailInput,
     FinishInput,
+    InsertInput,
     PlanInput,
     PrintRunInput,
     RecordInput,
     SliceStartInput,
     SourceSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 #: How often a slice wait tells Temporal it is alive (its heartbeat timeout is 30 s).
 HEARTBEAT_EVERY = 10.0
@@ -124,9 +129,9 @@ class PrintActivities:
             print_settings=spec.print_settings,
         )
 
-    @activity.defn(name="print_accept")
-    async def accept(self, input: PrintRunInput) -> Accepted:
-        """Today's refusals before the 202, then the record (§5.1 step 2)."""
+    @activity.defn(name="print_check")
+    async def check(self, input: PrintRunInput) -> Checked:
+        """Today's refusals before the 202 (§5.1 step 2); nothing is written."""
         settings = self._settings()
         spec = input.source
         try:
@@ -152,19 +157,27 @@ class PrintActivities:
                 prepared = await prepare_run(client, source, settings, input.request)
         except ApiError as error:
             raise _raised(error, REFUSED) from None
+        except InvalidModelMetaError as error:
+            # As every route that reads a broken model.json answers it (`api/models.py`).
+            invalid = ApiError(status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata")
+            raise _raised(invalid, REFUSED) from None
+        return Checked(source=spec, prepared=PreparedPlates.of(prepared))
+
+    @activity.defn(name="print_insert")
+    async def insert(self, input: InsertInput) -> PrintRun:
+        """The record, idempotent on this execution: a retry returns the same row."""
         info = activity.info()
         assert info.workflow_id is not None and info.workflow_run_id is not None
-        retention = settings.print_run_retention_seconds
-        run = await self.d.store.insert_accepted(
+        retention = self._settings().print_run_retention_seconds
+        return await self.d.store.insert_accepted(
             uuid.uuid4().hex,
-            subject=input.subject,
-            key=input.key,
-            slug=input.slug,
+            subject=input.input.subject,
+            key=input.input.key,
+            slug=input.input.slug,
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
             retention=timedelta(seconds=retention) if retention is not None else None,
         )
-        return Accepted(run=run, source=spec, prepared=PreparedPlates.of(prepared))
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -255,9 +268,14 @@ class PrintActivities:
             raise _raised(error, FAILED) from None
         run = await self.d.store.succeed(input.run_id, input.input.slug, result)
         if spec.kind == "output" and spec.output_id is not None:
-            meta = require_output(self.d.outputs, spec.output_id)
-            self.d.observer.started(meta)
-            await self.d.watcher.started(meta.id)
+            # Best effort: the run is recorded, and a retry would not change it. An
+            # output deleted while it printed has nothing left to follow.
+            try:
+                meta = require_output(self.d.outputs, spec.output_id)
+                self.d.observer.started(meta)
+                await self.d.watcher.started(meta.id)
+            except Exception:
+                logger.exception("could not follow print run %s", input.run_id)
         return run
 
     @activity.defn(name="print_fail")
@@ -266,7 +284,8 @@ class PrintActivities:
 
     def all(self) -> list[Callable[..., Any]]:
         return [
-            self.accept,
+            self.check,
+            self.insert,
             self.plan,
             self.slice_start,
             self.slice_wait,

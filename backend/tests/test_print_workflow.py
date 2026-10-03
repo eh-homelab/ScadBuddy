@@ -36,10 +36,11 @@ from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
     AcceptAnswer,
-    Accepted,
+    Checked,
     EnqueueInput,
     FailInput,
     FinishInput,
+    InsertInput,
     PlanInput,
     PrintRunInput,
     RecordInput,
@@ -74,6 +75,9 @@ class Fake:
         self.enqueue_error: ApplicationError | None = None
         self.enqueue_attempted = False
         self.plates = [1]
+        #: How many of the next `print_insert` attempts fail before one succeeds.
+        self.insert_failures = 0
+        self.record_error: Exception | None = None
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -84,16 +88,22 @@ class Fake:
             **fields,  # type: ignore[arg-type]
         )
 
-    @activity.defn(name="print_accept")
-    async def accept(self, input: PrintRunInput) -> Accepted:
-        self.calls.append("accept")
+    @activity.defn(name="print_check")
+    async def check(self, input: PrintRunInput) -> Checked:
+        self.calls.append("check")
         if self.refuse:
             raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)
-        return Accepted(
-            run=self._run(),
-            source=input.source,
-            prepared=PreparedPlates(plate_ids=self.plates, printer_id=1),
+        return Checked(
+            source=input.source, prepared=PreparedPlates(plate_ids=self.plates, printer_id=1)
         )
+
+    @activity.defn(name="print_insert")
+    async def insert(self, input: InsertInput) -> PrintRun:
+        self.calls.append("insert")
+        if self.insert_failures:
+            self.insert_failures -= 1
+            raise RuntimeError("the database blinked")
+        return self._run()
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -134,6 +144,8 @@ class Fake:
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
         self.calls.append("record")
+        if self.record_error is not None:
+            raise self.record_error
         return input.sent
 
     @activity.defn(name="print_finish")
@@ -152,7 +164,8 @@ class Fake:
 
     def all(self) -> list[Callable[..., Any]]:
         return [
-            self.accept,
+            self.check,
+            self.insert,
             self.plan,
             self.slice_start,
             self.slice_wait,
@@ -223,7 +236,7 @@ async def test_a_refusal_answers_the_update_and_fails_the_execution_with_no_reco
     assert answer.run is None and answer.refusal == REFUSAL
     with pytest.raises(WorkflowFailureError):
         await ended(client, arg)
-    assert fake.calls == ["accept"]
+    assert fake.calls == ["check"]
 
 
 async def test_an_accepted_run_answers_the_row_then_succeeds(
@@ -237,7 +250,8 @@ async def test_an_accepted_run_answers_the_row_then_succeeds(
     assert run.status == "succeeded" and run.result is not None
     assert run.result.queue_item_ids == [51, 52]
     assert fake.calls == [
-        "accept",
+        "check",
+        "insert",
         "plan",
         "slice_start:1",
         "slice_wait",
@@ -260,7 +274,7 @@ async def test_a_second_update_is_a_repeat_with_the_same_row(
     second = await start(client, worker, arg)
     assert first.run is not None and second.run is not None
     assert second.repeated and second.run.id == first.run.id
-    assert fake.calls.count("accept") == 1
+    assert fake.calls.count("check") == 1
     await client.get_workflow_handle(f"print-{arg.key}").terminate()
 
 
@@ -295,9 +309,11 @@ async def test_an_enqueue_failure_records_may_have_queued_and_holds_the_window(
     arg = run_input(window=30)
     first = await start(client, worker, arg)
     handle = client.get_workflow_handle(f"print-{arg.key}")
-    while not any(call.startswith("fail") for call in fake.calls):
-        await asyncio.sleep(0.05)
+    # The fake records `fail` before the workflow holds its answer: repeat until it does.
     again = await start(client, worker, arg)
+    while again.run is not None and again.run.status == "running":
+        await asyncio.sleep(0.05)
+        again = await start(client, worker, arg)
     assert again.repeated and again.run is not None and first.run is not None
     assert again.run.id == first.run.id and again.run.may_have_queued
     assert (await handle.describe()).status is not None  # still open: the window holds
@@ -347,6 +363,33 @@ async def test_a_failure_before_any_enqueue_closes_at_once(
     await start(client, worker, arg)
     run = await asyncio.wait_for(ended(client, arg), timeout=10)
     assert run.status == "failed" and not run.may_have_queued
+
+
+async def test_the_insert_is_retried_alone_so_a_refusal_never_follows_a_record(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """A retried insert does not run Bambuddy's checks again: a blip there after the
+    row committed would fail the execution and strand the row `running` (#1052 review)."""
+    fake.insert_failures = 1
+    arg = run_input()
+    answer = await start(client, worker, arg)
+    assert answer.run is not None and answer.refusal is None
+    await ended(client, arg)
+    assert fake.calls[:3] == ["check", "insert", "insert"]
+    assert fake.calls.count("check") == 1
+
+
+async def test_a_record_that_keeps_failing_ends_the_run_failed(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """§4.2: every outcome after the record completes the execution, so an activity
+    that does more than a database write is not retried forever."""
+    fake.record_error = RuntimeError("the data volume is gone")
+    arg = run_input()
+    await start(client, worker, arg)
+    run = await asyncio.wait_for(ended(client, arg), timeout=60)
+    assert run.status == "failed" and run.may_have_queued
+    assert fake.calls[-1] == f"fail:500:{UNEXPECTED_DETAIL}"
 
 
 def test_outcomes_are_plain_models() -> None:

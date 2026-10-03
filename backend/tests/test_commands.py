@@ -3,6 +3,7 @@ update-with-start, attaches to a running execution and keeps the reuse policy.""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
@@ -21,7 +23,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     start_command,
 )
-from tests.support.temporal import temporal_client
+from tests.support.temporal import current_address, temporal_client
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -171,3 +173,52 @@ async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue:
             deadline=timedelta(seconds=1),
         )
     assert time.monotonic() - began < 10
+
+
+class Proxy:
+    """A TCP proxy to Temporal that can be cut, as a frontend going down would be."""
+
+    def __init__(self, target: str) -> None:
+        host, port = target.rsplit(":", 1)
+        self.target = (host, int(port))
+        self.writers: list[asyncio.StreamWriter] = []
+
+    async def start(self) -> str:
+        self.server = await asyncio.start_server(self._pipe, "127.0.0.1", 0)
+        return f"127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        up_reader, up_writer = await asyncio.open_connection(*self.target)
+        self.writers += [writer, up_writer]
+
+        async def copy(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while data := await src.read(65536):
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                dst.close()
+
+        await asyncio.gather(copy(reader, up_writer), copy(up_reader, writer))
+
+    async def cut(self) -> None:
+        self.server.close()
+        for writer in self.writers:
+            writer.close()
+        await self.server.wait_closed()
+
+
+async def test_temporal_lost_after_connecting_is_unavailable_not_still_accepting(
+    client: Client, queue: str
+) -> None:
+    """Once connected, an outage surfaces as the Update's RPC timeout: nothing started,
+    so the route must say Temporal is unavailable (#1052 review)."""
+    proxy = Proxy(current_address(client))
+    via = await Client.connect(await proxy.start(), data_converter=pydantic_data_converter)
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        await echo(via, queue, f"echo-{uuid.uuid4().hex}", EchoInput(finish_at_once=True))
+        await proxy.cut()
+        with pytest.raises(TemporalUnavailableError):
+            await echo(via, queue, f"echo-{uuid.uuid4().hex}", deadline=timedelta(seconds=4))

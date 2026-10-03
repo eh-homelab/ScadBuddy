@@ -1,15 +1,18 @@
 """``PrintRun``: the print dialog's run as a Temporal workflow (#1052, spec 2026-10-01
 §5.3), the command shape of §4.2 that every later command copies.
 
-1. ``print_accept`` makes today's cheap refusals and inserts the run. A refusal answers
-   the ``accepted`` Update and *fails* the execution: no record, so a retry may start.
+1. ``print_check`` makes today's cheap refusals; ``print_insert`` then writes the run,
+   retried on its own so a refusal never follows a committed row. A refusal answers the
+   ``accepted`` Update and *fails* the execution: no record, so a retry may start.
 2. From the record on, every outcome *completes* the execution and is recorded: one
    ``try`` holds the rest, and whatever an activity raised becomes ``print_fail``.
 3. A run that succeeded or may have queued stays open for its repeat window, so a
    repeat (``USE_EXISTING``) gets the same row (§5.2).
 
 ``print_slice_start`` and ``print_enqueue`` each start something Bambuddy does not
-dedupe, so they run once (``maximum_attempts = 1``).
+dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
+without limit; ``print_record`` and ``print_finish`` also touch the data volume and
+Bambuddy, so they give up and the run is recorded as failed.
 """
 
 from __future__ import annotations
@@ -34,9 +37,11 @@ with workflow.unsafe.imports_passed_through():
         REFUSED,
         AcceptAnswer,
         Accepted,
+        Checked,
         EnqueueInput,
         FailInput,
         FinishInput,
+        InsertInput,
         PlanInput,
         PrintRunInput,
         RecordInput,
@@ -49,7 +54,11 @@ READ_RETRY = RetryPolicy(
 )
 #: What starts something Bambuddy does not dedupe runs once (§5.3).
 ONCE = RetryPolicy(maximum_attempts=1)
-#: The record's writes: a Postgres blip must not lose an outcome.
+#: Writes that touch more than Postgres: retried a while, then the run fails (§4.2).
+BOUNDED_RETRY = RetryPolicy(
+    maximum_attempts=5, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+)
+#: The record's own writes: a Postgres blip must not lose an outcome.
 RECORD_RETRY = RetryPolicy(
     maximum_attempts=0,
     initial_interval=timedelta(seconds=1),
@@ -104,10 +113,10 @@ class PrintRunWorkflow:
         self.search_attributes = input.search_attributes
         self._upsert(kind="print", subject=input.subject, status="accepting")
         try:
-            accepted = await workflow.execute_activity(
-                "print_accept",
+            checked = await workflow.execute_activity(
+                "print_check",
                 input,
-                result_type=Accepted,
+                result_type=Checked,
                 start_to_close_timeout=ACCEPT_TIMEOUT,
                 retry_policy=READ_RETRY,
             )
@@ -117,6 +126,14 @@ class PrintRunWorkflow:
             self._upsert(status="refused")
             await workflow.wait_condition(workflow.all_handlers_finished)
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
+        run = await workflow.execute_activity(
+            "print_insert",
+            InsertInput(input=input, checked=checked),
+            result_type=PrintRun,
+            start_to_close_timeout=SHORT,
+            retry_policy=RECORD_RETRY,
+        )
+        accepted = Accepted(run=run, source=checked.source, prepared=checked.prepared)
         self.row = accepted.run
         self._upsert(status="running")
         try:
@@ -213,14 +230,14 @@ class PrintRunWorkflow:
                 ),
                 result_type=list[PlateSend],
                 start_to_close_timeout=SHORT,
-                retry_policy=RECORD_RETRY,
+                retry_policy=BOUNDED_RETRY,
             )
         finished: PrintRun = await workflow.execute_activity(
             "print_finish",
             FinishInput(input=input, run_id=accepted.run.id, planned=planned, outcomes=outcomes),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
-            retry_policy=RECORD_RETRY,
+            retry_policy=BOUNDED_RETRY,
         )
         return finished
 
