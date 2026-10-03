@@ -11,9 +11,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_serializer
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
-from scadbuddy.bambuddy.filaments import QueueFilaments
-from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_run import PlannedRun, PreparedPlates, PrintRunRequest
+from scadbuddy.bambuddy.print_run import (
+    PlannedRun,
+    PlatePlan,
+    PreparedPlates,
+    PrintRunRequest,
+    QueuedPlate,
+)
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
 
@@ -100,13 +104,18 @@ class SliceStartInput(BaseModel):
 
 
 class EnqueueInput(BaseModel):
+    """One sliced plate to queue: the rack pick (#836) runs in the same activity, so a
+    hotend's serial never enters the history (spec 2026-10-01 §7)."""
+
+    planned: PlannedRun
+    plate: PlatePlan
     sliced: int
-    printer_id: int
-    plate_id: int
-    copies: int
-    project_id: int | None = None
-    options: PrintOptions
-    filaments: QueueFilaments | None = None
+    #: Only an output's print is ever settled, so only its picks are saved (#836).
+    credit: bool = False
+
+    @property
+    def plate_id(self) -> int:
+        return self.plate.plate_id
 
 
 class RecordInput(BaseModel):
@@ -123,6 +132,7 @@ class FinishInput(BaseModel):
     run_id: str
     planned: PlannedRun
     outcomes: list[QueueOutcome]
+    queued: list[QueuedPlate] = Field(default_factory=list)
 
 
 class FailInput(BaseModel):

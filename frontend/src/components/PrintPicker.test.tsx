@@ -184,6 +184,9 @@ describe('PrintPicker', () => {
       all_plates: false,
       project_id: null,
       options: {},
+      rack_position: null,
+      // Not chosen in this dialog, so the backend applies the printer's remembered one.
+      rack_algorithm: null,
       request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
@@ -1817,5 +1820,197 @@ describe('PrintPicker · A library file (#313)', () => {
       choices: { filament_overrides: {} },
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 27 }]) },
     })
+  })
+})
+
+describe('PrintPicker · rack nozzle (#836)', () => {
+  const rack = {
+    group_id: null,
+    position: 3,
+    reason: 'already loaded with this color',
+    unsafe_material: false,
+    glow_unchecked: false,
+    options: [
+      { position: 2, nozzle_diameter: '0.4', flow: 'standard', color: '#00629B', nozzle_type: 'HS01', material: null, prints: 4, print_seconds: 7200 },
+      { position: 3, nozzle_diameter: '0.4', flow: 'standard', color: '#FF6A13', nozzle_type: 'HS01', material: null, prints: 0, print_seconds: 0 },
+    ],
+  }
+
+  it('shows the pick and the unsafe-material warning in Simple mode without holding Print', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [{ kind: 'rack-unsafe-material', slot_id: null, message: 'No hardened 0.4 nozzle in the rack for PLA-CF; position 3 is not known to be hardened.' }],
+          rack: { ...rack, unsafe_material: true },
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    expect(await screen.findByTestId('rack-nozzle-line')).toHaveTextContent('position 3 (0.4 Standard)')
+    expect(await screen.findByTestId('print-verdict-warning')).toHaveTextContent('No hardened 0.4 nozzle')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+  })
+
+  it('sends a hand-picked position and the chosen algorithm, and remembers the algorithm', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const runs = watch('POST', '/run')
+    const checks = watch('POST', '/check')
+    const puts = watch('PUT', '/rack-algorithm')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'newest_first' } })
+    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() =>
+      expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2, rack_algorithm: 'newest_first' }),
+    )
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_position: 2, rack_algorithm: 'newest_first' })
+    expect(puts.bodies).toEqual([{ algorithm: 'newest_first' }])
+  })
+
+  it('goes back to Automatic when the nozzle size changes', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('2')
+    fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() => expect(screen.getByLabelText('Rack nozzle position')).toHaveValue(''))
+  })
+
+  it('keeps the rack step on screen when the hand pick is refused, and holds Print', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as { rack_position?: number | null }
+        return HttpResponse.json(
+          body.rack_position === 2
+            ? { errors: ['Rack position 2 holds a 0.4 Standard nozzle, not the 0.2 this print needs.'], warnings: [], rack }
+            : { errors: [], warnings: [], rack },
+        )
+      }),
+    )
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
+    await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
+  it('drops a hand pick the check no longer offers, so it is never sent unseen', async () => {
+    // claude-review on #1043, finding 3: the re-check with the pick comes back without
+    // the rack (unreadable this time), so the step and its select vanish.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as { rack_position?: number | null }
+        return HttpResponse.json({ errors: [], warnings: [], rack: body.rack_position === 2 ? null : rack })
+      }),
+    )
+    const runs = watch('POST', '/run')
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+  })
+
+  it('drops a hand pick whose position a re-check no longer lists', async () => {
+    let options = rack.options
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack: { ...rack, options } })))
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    options = rack.options.filter((option) => option.position !== 2)
+    fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('')
+  })
+
+  it('says when the algorithm could not be remembered, and still prints with it', async () => {
+    // claude-review on #1043, finding 3: a failed PUT was swallowed.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', () =>
+        HttpResponse.json({ title: 'Service Unavailable', status: 503 }, { status: 503 }),
+      ),
+    )
+    const runs = watch('POST', '/run')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    expect(await screen.findByTestId('rack-algorithm-unsaved')).toHaveTextContent(
+      'Not remembered for this printer',
+    )
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_algorithm: 'oldest_first' })
+  })
+
+  it("never sends one printer's algorithm for another", async () => {
+    // claude-review on #1043, finding 4: after a printer switch, the old printer's
+    // algorithm went out until the new choices arrived, overriding the remembered one.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      // Printer 2's choices arrive late: the window the old algorithm leaked through.
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        if (asked === '2') await delay(400)
+        return HttpResponse.json({ ...choicesView, printer_id: asked === null ? choicesView.printer_id : Number(asked) })
+      }),
+    )
+    const checks = watch('POST', '/check')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer_id: 2 }))
+    expect(checks.bodies.filter((b) => (b as { printer_id?: number }).printer_id === 2)).toEqual(
+      expect.not.arrayContaining([expect.objectContaining({ rack_algorithm: 'oldest_first' })]),
+    )
+  })
+
+  it('drops the hand pick when going back to Simple, which cannot show it', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const runs = watch('POST', '/run')
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_position: null })
   })
 })

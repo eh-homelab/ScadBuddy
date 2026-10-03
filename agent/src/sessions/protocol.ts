@@ -29,6 +29,15 @@ export type Owner = {
   label: string
 }
 
+/** A question as the panel shows it (#940, harness/questions.ts `UserQuestion`). */
+export type QuestionView = {
+  question: string
+  header: string
+  multiSelect: boolean
+  /** `preview`: Markdown the option shows, e.g. a draft to approve. */
+  options: { label: string; description: string; preview?: string }[]
+}
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -54,11 +63,30 @@ export type ServerEvent = V &
     | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
     /** Expired and cancelled approvals resolve as not approved, without `by`. */
     | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
+    /**
+     * The agent asks the user (#940): `tool` is the AskUserQuestion tool.call id.
+     * The turn waits (`waiting_input`) until `question.resolved`.
+     */
+    | { type: 'question.asked'; sessionId: string; id: string; tool: string; questions: QuestionView[] }
+    /**
+     * Answered (`answers`: one per question, in order, and who answered), or
+     * not: cancelled with its turn, with `reason`. Never answered by itself.
+     */
+    | {
+        type: 'question.resolved'
+        sessionId: string
+        id: string
+        answered: boolean
+        answers?: string[]
+        by?: Owner
+        reason?: string
+      }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
-    | { type: 'error'; sessionId?: string; code?: string; message: string }
+    /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
+    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
     /**
      * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A
      * retain finishes after its turn, so this can follow the turn's last
@@ -160,3 +188,6 @@ export function ownerSeenBy(viewer: Pick<Owner, 'kind' | 'id'>, owner: Owner): S
  * (#258; the socket that carries it is #266's).
  */
 export type ApprovalDecisionMessage = V & { type: 'approval.decision'; sessionId: string; id: string; approve: boolean }
+
+/** The panel's `question.answer` (#940): one answer per question, in the order asked. */
+export type QuestionAnswerMessage = V & { type: 'question.answer'; sessionId: string; id: string; answers: string[] }

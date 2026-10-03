@@ -167,7 +167,7 @@ export const handlers = [
   http.post(`${base}/print/library/:id/check`, ({ params }) => {
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
-    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
+    return HttpResponse.json({ errors: [], warnings: [], rack: null } satisfies PrintCheck)
   }),
 
   http.post(`${base}/print/library/:id/run`, async ({ params, request }) => {

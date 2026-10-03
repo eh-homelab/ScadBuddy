@@ -105,10 +105,11 @@ class PrintRun(BaseModel):
 def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The output plus the request as parsed, so key order and spacing do not matter.
 
-    ``request_id`` and ``print_sequence`` are part of it when sent; without them the key
-    is what it was before the fields existed.
+    ``request_id``, ``print_sequence``, ``rack_position`` and ``rack_algorithm`` are part
+    of it when sent; without them the key is what it was before the fields existed.
     """
-    exclude = {name for name in ("request_id", "print_sequence") if getattr(request, name) is None}
+    optional = ("request_id", "print_sequence", "rack_position", "rack_algorithm")
+    exclude = {name for name in optional if getattr(request, name) is None}
     body = request.model_dump(mode="json", exclude=exclude or None)
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
