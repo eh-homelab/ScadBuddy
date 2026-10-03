@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import httpx
 import psycopg
 import psycopg.errors  # the SQLSTATE subclasses counted below
+import psycopg_pool  # noqa: F401  (PoolTimeout, counted below whatever else imports)
 
 from scadbuddy.bambuddy.print_run import RACK_FALLBACKS, RACK_USAGE_FALLBACK
 from scadbuddy.core.problems import ApiError

@@ -33,6 +33,27 @@ function renderPicker(
   )
 }
 
+/** The picker as a page holds it: Cancel really closes it, and Reopen opens it again. */
+function renderReopenable() {
+  function Reopenable() {
+    const [open, setOpen] = useState(true)
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Reopen
+        </button>
+        <PrintPicker
+          open={open}
+          source={{ kind: 'output', output }}
+          onClose={() => setOpen(false)}
+          onRan={vi.fn()}
+        />
+      </>
+    )
+  }
+  return renderPage(<Reopenable />)
+}
+
 /** The dialog has read its choices once the Advanced switch and the spools are on screen. */
 async function loaded() {
   await screen.findByRole('switch', { name: 'Advanced' })
@@ -2063,10 +2084,14 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     // it labelled one the backend no longer used.
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
+    // The printer's stored algorithm, as the choices read reports it.
+    let stored = 'least_used'
     server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () => HttpResponse.json({ ...choicesView, rack_algorithm: stored })),
       http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
       http.put('/api/v1/print/printers/:id/rack-algorithm', async () => {
         await held
+        stored = 'oldest_first'
         return HttpResponse.json({ algorithm: 'oldest_first' })
       }),
     )
@@ -2078,13 +2103,14 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       return save
     })
     const checks = watch('POST', '/check')
-    const { user } = renderPicker()
+    const { user } = renderReopenable()
     await loaded()
     await showAdvanced()
     fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
     await waitFor(() => expect(saves.length).toBe(1))
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
     await loaded()
     await showAdvanced()
     const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
@@ -2094,6 +2120,14 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(select.value).toBe('oldest_first'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+
+    // A third open reads the choices again, which now carry the saved algorithm.
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    await showAdvanced()
+    const third = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
+    await waitFor(() => expect(third.value).toBe('oldest_first'))
   })
 
   /** Holds each algorithm PUT until the test answers it, in any order. */
