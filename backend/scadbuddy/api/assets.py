@@ -55,11 +55,19 @@ AssetIdPath = Annotated[str, Path(pattern=ASSET_ID_PATTERN)]
 #: fence; membership in that list is what actually decides.
 SampleNamePath = Annotated[str, Path(pattern=BARE_FILENAME_PATTERN)]
 
+#: What makes a browser that opens an image's URL directly treat it as an inert image,
+#: an SVG included: no script, no fetch, no sniffing it into a document. Every route
+#: serving an image a user or a template supplied sends these (here, and a model's
+#: own images in `api/lsp.py`, #951).
+INERT_IMAGE_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+}
+
 #: Served back for the customizer's preview. The SVG is already sanitised; these
 #: make a browser that opens the URL directly treat it as an inert image anyway.
 CONTENT_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-    "X-Content-Type-Options": "nosniff",
+    **INERT_IMAGE_HEADERS,
     "Cache-Control": "public, max-age=31536000, immutable",
 }
 

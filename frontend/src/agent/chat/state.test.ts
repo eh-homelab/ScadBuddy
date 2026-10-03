@@ -95,6 +95,68 @@ describe('chatReducer', () => {
     expect(resolved.sessions.s1?.items[0]).toMatchObject({ state: 'approved', by: you })
   })
 
+  it('moves a question pending → sent → answered, and shows a cancelled one as not answered (#940)', () => {
+    const questions = [
+      {
+        question: 'Approve the draft?',
+        header: 'Draft',
+        multiSelect: false,
+        options: [
+          { label: 'Approve', description: 'File it', preview: '## Title' },
+          { label: 'Cancel', description: 'Do not' },
+        ],
+      },
+    ]
+    const waiting = run(
+      [
+        server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions }),
+        server({ type: 'session.status', sessionId: 's1', status: 'waiting_input' }),
+      ],
+      started,
+    )
+    expect(waiting.sessions.s1?.items[0]).toEqual({ kind: 'question', id: 'q1', tool: 't3', questions, state: 'pending' })
+    expect(isBusy(waiting.sessions.s1)).toBe(true)
+
+    const sent = run([{ type: 'answered', sessionId: 's1', questionId: 'q1' }], waiting)
+    expect(sent.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    const answered = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
+      sent,
+    )
+    expect(answered.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'], by: you })
+
+    const cancelled = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'interrupted by You' })],
+      waiting,
+    )
+    expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
+    expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
+
+    // Answered while offline: queued, and still not live after the reconnect's replay.
+    const queued = run([{ type: 'answered', sessionId: 's1', questionId: 'q1', queued: true }], waiting)
+    expect(queued.sessions.s1?.items[0]).toMatchObject({ state: 'queued' })
+    const replayed = run(
+      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
+      queued,
+    )
+    expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+
+    // Refused by the agent: answerable again, with the error beside it.
+    const refused = run(
+      [server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each', questionId: 'q1' })],
+      sent,
+    )
+    expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each' })
+    // An unrelated error in the session leaves a sent answer alone.
+    const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
+    expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    // Another malformed frame (a session.send, say) refused while the answer is in
+    // flight names no question: the answer may already be accepted, so the card stays sent.
+    const unparsed = run([server({ type: 'error', code: 'invalid', message: 'ignored a malformed message' })], sent)
+    expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+  })
+
   it('closes a half-streamed message when the session settles (an interrupt)', () => {
     const state = run(
       [

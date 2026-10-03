@@ -425,10 +425,12 @@ The user passed it with notes, from nine photos (in the template's media on [`na
   mapping (`check-eligibility` is pipeline-only and reports issues, not placements). A
   placement preview is not requested upstream for now; ScadBuddy shows only facts it can
   read (loaded or not, installed or not).
-- **Which rack nozzle is used.** The printer picks the physical nozzle matching the
-  sliced size and flow type; ScadBuddy does not set `nozzle_rack_choice`. The slicer
-  still decides which extruders the file prints on. ScadBuddy only tells it which sides
-  have the size (`extruder_nozzle_stats`, §4.3, #834).
+- **Which rack nozzle is used.** Superseded by
+  `2026-10-01-rack-nozzle-selection-design.md` (#836): ScadBuddy ranks the H2C's rack per
+  sliced filament group and sends `nozzle_rack_choice`, keyed by group id, on every
+  slice-and-queue print; "Let Bambuddy pick" in Advanced mode restores Bambuddy's own
+  choice. The slicer still decides which extruders the file prints on; ScadBuddy only
+  tells it which sides have the size (`extruder_nozzle_stats`, §4.3, #834).
 - **Queue behavior.** Manual start, waiting for filament, order: Bambuddy's options,
   Bambuddy's defaults.
 

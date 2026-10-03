@@ -685,7 +685,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   activity per tool, registered under the tool's name. Each runs
   `runToolWithOutcome(tool, args, ctx)` (`agent/src/tools/registry.ts:267`), the entry
   point `/mcp` uses, so parsing, tiers, scope and audit are unchanged. The `ctx`
-  principal is the session's owner.
+  principal is the session's owner, and `ctx.session` is the session's id, exactly as
+  `createHarnessServer` sets it for a classic session (`agent/src/tools/harness.ts`).
+  Revision commits take their session trailer from it (#252), and the record of what a
+  session touched (#931) is written from it, so an activity without it attributes nothing.
 - **A build step** exports `ALL_TOOLS` as `[{name, description, input_schema, tier}]`
   JSON, generated like `gen:api`. The Python worker declares each one as
   `activity_as_tool(activity.defn(name=<name>)(_remote), description=…, input_schema=…,

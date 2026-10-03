@@ -9,6 +9,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
+from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
 from scadbuddy.bambuddy.filaments import (
@@ -25,6 +26,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
     FilamentWarning,
     QueueFilaments,
+    SpoolOption,
     across_plates,
     check,
     every_plate,
@@ -37,7 +39,13 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import (
+    FilamentRequirements,
+    FlowType,
+    PrinterStatus,
+    RackAlgorithm,
+    Spool,
+)
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import (
@@ -53,6 +61,24 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.rack.rank import (
+    SLICED_VOLUME_TYPE,
+    RackCandidate,
+    RackGroup,
+    Usage,
+    abrasive_type,
+    candidates_for,
+    eligible,
+    glow,
+    manual_for,
+    rack_color,
+    rack_groups,
+    rack_positions,
+    rack_serials,
+    rack_warnings,
+    rank_rack,
+)
+from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen, save_picks
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +137,51 @@ class PrintRunRequest(BaseModel):
     #: Bambu's ``print_sequence`` for this print (#907), a process override over the
     #: template's ``print_settings``. Omitted means whatever those and the process say.
     print_sequence: PrintSequence | None = None
+    #: A rack position (1-6) chosen by hand for the rack side (#836, spec 2026-10-01 §5).
+    #: Omitted is Automatic: ScadBuddy ranks the rack.
+    rack_position: int | None = Field(default=None, ge=1, le=6)
+    #: How to rank the rack for this print (#836). Omitted means the printer's remembered
+    #: algorithm, else Least used.
+    rack_algorithm: RackAlgorithm | None = None
+
+
+class RackOption(BaseModel):
+    """One eligible rack position, as the dialog lists it (spec 2026-10-01 §5). Built
+    field by field from a :class:`RackCandidate`, which carries no serial (§7)."""
+
+    position: int
+    nozzle_diameter: str
+    flow: FlowType
+    color: str | None = None
+    nozzle_type: str
+    #: Decoded from the code through ``rack.rank.NOZZLE_MATERIALS``; ``None`` is unknown.
+    material: str | None = None
+    prints: int = 0
+    print_seconds: int = 0
+
+
+class RackSentPick(BaseModel):
+    """A rack position the run sent for one filament group of one plate (spec 2026-10-01
+    §5), never with the hotend's serial (§7). Group ids repeat across plates."""
+
+    plate_id: int
+    group_id: int
+    position: int
+
+
+class RackPickView(BaseModel):
+    """The check's preview of the rack side's pick (spec 2026-10-01 §5), never with the
+    hotend's serial (§7). It ranks the side as one group; the real pick is made per
+    sliced group and can differ when the slicer splits it."""
+
+    #: Always ``None``: the preview ranks the side as one group.
+    group_id: int | None = None
+    position: int | None = None
+    reason: str | None = None
+    unsafe_material: bool = False
+    #: A chosen spool is not in the inventory, so Glow could not be checked (spec §3).
+    glow_unchecked: bool = False
+    options: list[RackOption] = Field(default_factory=list)
 
 
 class PrintRunResult(BaseModel):
@@ -137,6 +208,10 @@ class PrintRunResult(BaseModel):
     project_id: int | None = None
     folder_id: int | None = None
     bambuddy_url: str
+    #: The rack positions actually sent, one per filament group that printed from the
+    #: rack (#836). A pick can go stale before the print starts; that shows in progress,
+    #: not here (spec §10).
+    rack_picks: list[RackSentPick] = Field(default_factory=list)
 
 
 async def filament_options(
@@ -253,6 +328,121 @@ class PrintCheck(BaseModel):
 
     errors: list[str] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: The rack side's preview (#836); ``None`` with no readable rack.
+    rack: RackPickView | None = None
+
+
+ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
+
+
+class RackReads(Protocol):
+    """The two reads ``choose_rack`` makes; ``BambuddyClient`` is one."""
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements: ...
+
+    async def printer_status(self, printer_id: int) -> PrinterStatus: ...
+
+
+async def _usage_or_empty(
+    rack: RackUsage | None, status: PrinterStatus, printer_id: int
+) -> dict[str, Usage]:
+    """The rack's usage, or none when it cannot be read: usage only ranks, so a failed
+    read ranks as if no hotend had printed and keeps a hand pick (claude-review on #1043).
+    Logged by type only, since a database error's text can carry a serial (§7)."""
+    if rack is None:
+        return {}
+    try:
+        return await rack.usage(rack_serials(status.nozzle_rack))
+    except Exception as exc:
+        logger.warning(
+            "rack usage unreadable; ranked without it",
+            extra={"printer_id": printer_id, "error": type(exc).__name__},
+        )
+        return {}
+
+
+def rack_chooser(
+    client: RackReads,
+    *,
+    printer_id: int,
+    plate_id: int,
+    spools: Mapping[int, SpoolOption],
+    algorithm: RackAlgorithm,
+    manual_position: int | None,
+    rack: RackUsage | None,
+    warnings: list[FilamentWarning],
+) -> ChooseRack:
+    """The plate's ``choose_rack`` (spec 2026-10-01 §5). It reads the sliced file's
+    requirements for ``plate_id`` and then, only when a group prints from the rack, a
+    fresh status, once per plate and never ``PreparedRun.printer_status``. It ranks, and
+    appends its warnings to ``warnings``, the plate's list. It **never raises**: the whole
+    body is one ``try``, and on any exception it logs a fixed message with the exception's
+    type, appends ``rack-left-to-bambuddy`` and returns ``None``, so Bambuddy picks."""
+
+    async def choose(sliced: int) -> RackChoice | None:
+        stage = "requirements unreadable"
+        try:
+            requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+            stage = "rack pick failed"
+            groups = rack_groups(requirements.filaments, spools)
+            manual, notes = manual_for(groups, manual_position, algorithm)
+            if not groups:
+                warnings.extend(notes)
+                return None
+            stage = "status unreadable"
+            status_read = await client.printer_status(printer_id)
+            # Read before this read is recorded as seen (#1015).
+            usage = (
+                await _usage_or_empty(rack, status_read, printer_id)
+                if algorithm != "bambuddy"
+                else {}
+            )
+            await record_seen(rack, printer_id, status_read)
+            stage = "rack pick failed"
+            picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
+            found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
+            if any(g not in picks or not picks[g].manual for g in manual):
+                # ``rack_warnings`` says the manual position was refused, so drop
+                # ``manual_for``'s "group N got position P" (final review minor 1).
+                notes = [note for note in notes if note.kind != "rack-manual-partial"]
+            ordered = sorted(picks.items())
+            choice = (
+                RackChoice(
+                    nozzle_rack_choice={str(group_id): pick.position for group_id, pick in ordered},
+                    picks=[
+                        PickedHotend(group_id=group_id, position=pick.position, serial=pick.serial)
+                        for group_id, pick in ordered
+                    ],
+                )
+                if ordered
+                else None
+            )
+        except Exception as exc:
+            # Never str(exc) or a traceback: an error's text can carry a serial (§7).
+            logger.warning(
+                "rack pick left to Bambuddy",
+                extra={"printer_id": printer_id, "stage": stage, "error": type(exc).__name__},
+            )
+            warnings.append(
+                FilamentWarning(
+                    kind="rack-left-to-bambuddy", message=f"Rack pick left to Bambuddy: {stage}."
+                )
+            )
+            return None
+        # Only once the pick is made: a read that failed above says only why (F8).
+        warnings.extend(notes)
+        warnings.extend(found)
+        return choice
+
+    return choose
+
+
+def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, SpoolOption]:
+    """Each plate slot's chosen inventory spool, for the Glow test (spec §3)."""
+    by_id = {spool.spool_id: spool for spool in options.spools}
+    return {slot.slot_id: by_id[slot.spool_id] for slot in plan.slots if slot.spool_id in by_id}
 
 
 async def check_print(
@@ -260,6 +450,8 @@ async def check_print(
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -278,11 +470,143 @@ async def check_print(
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
-        prepared = await prepare_run(client, source, settings, request)
+        prepared = await prepare_run(
+            client, source, settings, request, rack=rack, refuse_manual_pick=False
+        )
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
+    rack_view, rack_notes = await rack_preview(
+        client,
+        request,
+        settings,
+        printer_id=prepared.printer_id,
+        status=prepared.printer_status,
+        rack=rack,
+    )
+    # A refused manual pick still previews the rack, so the dialog can offer another,
+    # and is said once: as the error, not again as a rack-manual-partial warning.
+    try:
+        _check_manual_pick(request, prepared.printer_status)
+    except RunRefusalError as refused:
+        errors = [refused.detail]
+        rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
+    else:
+        errors = []
     # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
-    return PrintCheck(warnings=high_flow_warnings(prepared.printer_status, request.choices.nozzles))
+    return PrintCheck(
+        errors=errors,
+        warnings=[
+            *high_flow_warnings(prepared.printer_status, request.choices.nozzles),
+            *rack_notes,
+        ],
+        rack=rack_view,
+    )
+
+
+def _rack_option(candidate: RackCandidate) -> RackOption:
+    return RackOption(
+        position=candidate.position,
+        nozzle_diameter=candidate.nozzle_diameter,
+        flow="high_flow" if candidate.high_flow else "standard",
+        color=candidate.color,
+        nozzle_type=candidate.nozzle_type,
+        material=candidate.material,
+        prints=candidate.prints,
+        print_seconds=candidate.print_seconds,
+    )
+
+
+def _spool_material(spool: Spool) -> str:
+    return f"{spool.material}-{spool.subtype}" if spool.subtype else spool.material
+
+
+async def rack_preview(
+    client: BambuddyClient,
+    request: PrintRunRequest,
+    settings: StoredSettings,
+    *,
+    printer_id: int,
+    status: PrinterStatus | None,
+    rack: RackUsage | None,
+) -> tuple[RackPickView | None, list[FilamentWarning]]:
+    """The rack side ranked as one group from the dialog's size and spools (spec §5):
+    the preview ``/check`` shows. Judged on the flow the slice will carry (Standard until
+    #484). Every chosen spool counts toward the material test, since the slice may put any
+    of them on the rack side. Advisory: a failure previews nothing."""
+    if status is None or not rack_positions(status.nozzle_rack):
+        return None, []
+    try:
+        inventory = {spool.id: spool for spool in await client.spools()}
+        chosen = [inventory.get(slot.spool_id) for slot in request.filament_plan.slots]
+        known = [spool for spool in chosen if spool is not None]
+        first = known[0].rgba if known else None
+        group = RackGroup(
+            group_id=0,
+            nozzle_diameter=request.choices.nozzles[0].size,
+            volume_type=SLICED_VOLUME_TYPE,
+            # Zero alpha (a Clear spool's 00000000) is no color, never black.
+            color=rack_color(first) if first else None,
+            materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
+            abrasive=any(
+                abrasive_type(f"{spool.material} {spool.subtype or ''}")
+                or glow(spool.material, spool.subtype)
+                for spool in known
+            ),
+            glow_unchecked=len(known) < len(chosen),
+            label="the rack side",
+        )
+        algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id)
+        usage = await _usage_or_empty(rack, status, printer_id)
+        manual = {0: request.rack_position} if request.rack_position is not None else {}
+        picks = rank_rack([group], status.nozzle_rack, algorithm, usage, manual)
+        options = candidates_for(group, status.nozzle_rack, algorithm, usage)
+        warnings = rack_warnings([group], status.nozzle_rack, algorithm, picks, manual)
+    except Exception as exc:
+        # Never str(exc): an error's text can carry a serial (§7).
+        logger.warning(
+            "the rack preview could not be built",
+            extra={"printer_id": printer_id, "error": type(exc).__name__},
+        )
+        return None, []
+    pick = picks.get(0)
+    return (
+        RackPickView(
+            position=pick.position if pick else None,
+            reason=pick.reason if pick else None,
+            unsafe_material=pick.unsafe_material if pick else False,
+            glow_unchecked=group.glow_unchecked,
+            options=[_rack_option(c) for c in sorted(options, key=lambda c: c.position)],
+        ),
+        warnings,
+    )
+
+
+def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -> None:
+    """Spec §5: a manual pick that cannot print this is a 422 before anything is sliced.
+    Judged on the flow the slice will carry, which is what Bambuddy re-checks at
+    dispatch. An unreadable rack refuses nothing: Bambuddy still re-checks it then. A
+    readable status with no rack at all is refused as that, not as one empty position."""
+    if request.rack_position is None or status is None:
+        return
+    positions = rack_positions(status.nozzle_rack)
+    if not positions:
+        raise RunRefusalError(
+            f"Rack position {request.rack_position} was chosen, but this printer reports no "
+            "nozzle rack. Choose Automatic."
+        )
+    size = request.choices.nozzles[0].size
+    held = positions.get(request.rack_position)
+    if held is not None and eligible(held, size, SLICED_VOLUME_TYPE):
+        return
+    if held is None:
+        holds = "holds no hotend"
+    else:
+        flow = "High Flow" if held.high_flow else "Standard"
+        holds = f"holds a {held.nozzle_diameter} mm {flow} nozzle"
+    raise RunRefusalError(
+        f"Rack position {request.rack_position} {holds}, and this prints with a {size} mm "
+        f"{SLICED_VOLUME_TYPE} nozzle. Choose another position, or Automatic."
+    )
 
 
 async def check_for_output(
@@ -292,18 +616,27 @@ async def check_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered."""
     return await check_print(
-        client, OutputSource(store, uploads, meta, settings), settings, request
+        client, OutputSource(store, uploads, meta, settings), settings, request, rack=rack
     )
 
 
 async def check_for_library(
-    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
+    client: BambuddyClient,
+    settings: StoredSettings,
+    file_id: int,
+    request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in Bambuddy's library."""
-    return await check_print(client, await LibrarySource.load(client, file_id), settings, request)
+    return await check_print(
+        client, await LibrarySource.load(client, file_id), settings, request, rack=rack
+    )
 
 
 @dataclass(frozen=True)
@@ -324,6 +657,9 @@ async def prepare_run(
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    rack: RackUsage | None = None,
+    refuse_manual_pick: bool = True,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -333,7 +669,9 @@ async def prepare_run(
     handles its nozzles itself. Each is a read (the source's plates, ``/printers/``, the
     preset catalogue, the printer's status), none waits on a slice, so it stays well
     inside a proxy's timeout. What needs a plate's slots is left to
-    :func:`execute_run`, because only a library file answers those.
+    :func:`execute_run`, because only a library file answers those. A manual rack
+    position that does not fit is refused too (spec 2026-10-01 §5), unless
+    ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
     plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
     if not plate_ids:
@@ -359,11 +697,15 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
+    printer_status = await _read_status(client, printer_id)
+    await record_seen(rack, printer_id, printer_status)
+    if refuse_manual_pick:
+        _check_manual_pick(request, printer_status)
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
         catalogue=catalogue,
-        printer_status=await _read_status(client, printer_id),
+        printer_status=printer_status,
     )
 
 
@@ -390,6 +732,8 @@ class PlatePlan(BaseModel):
     plate_id: int
     plan: SlicePlan
     filaments: QueueFilaments | None = None
+    #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
+    spools: dict[int, SpoolOption] = Field(default_factory=dict)
 
 
 class PlannedRun(BaseModel):
@@ -405,6 +749,73 @@ class PlannedRun(BaseModel):
     options: PrintOptions
     plates: list[PlatePlan]
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: How the rack is ranked, a hand-picked position, and whether there is a rack (#836).
+    rack_algorithm: RackAlgorithm = "least_used"
+    rack_position: int | None = None
+    has_rack: bool = False
+
+
+class QueuedPlate(BaseModel):
+    """One plate on the queue (:func:`queue_plate`): its item, and the rack positions
+    sent for it, never with a hotend's serial (spec 2026-10-01 §7), so it may cross a
+    workflow's history."""
+
+    item_id: int
+    picks: list[RackSentPick] = Field(default_factory=list)
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+
+
+async def queue_plate(
+    client: BambuddyClient,
+    *,
+    planned: PlannedRun,
+    plate: PlatePlan,
+    sliced: int,
+    rack: RackUsage | None,
+    credit: bool,
+) -> QueuedPlate:
+    """Choose the rack hotends for ``plate``'s sliced file, ``POST /queue/`` once, then
+    save the picks (``credit``: only an output's print is ever settled, so a pick row
+    for a library run would never be credited). The pick and the save never raise
+    (spec 2026-10-01 §5): only the queue call can fail."""
+    notes: list[FilamentWarning] = []
+    choice = (
+        await rack_chooser(
+            client,
+            printer_id=planned.printer_id,
+            plate_id=plate.plate_id,
+            spools=plate.spools,
+            algorithm=planned.rack_algorithm,
+            manual_position=planned.rack_position,
+            rack=rack,
+            warnings=notes,
+        )(sliced)
+        if planned.has_rack
+        else None
+    )
+    item = await enqueue_plate(
+        client,
+        sliced=sliced,
+        printer_id=planned.printer_id,
+        plate_id=plate.plate_id,
+        copies=planned.copies,
+        project_id=planned.project_id,
+        options=planned.options,
+        filaments=plate.filaments,
+        nozzle_rack_choice=choice.nozzle_rack_choice if choice is not None else None,
+    )
+    picks = list(choice.picks) if choice is not None else []
+    if credit:
+        await save_picks(rack, planned.printer_id, [item], picks)
+    return QueuedPlate(
+        item_id=item,
+        # Group ids repeat across plates, so each pick names its plate.
+        picks=[
+            RackSentPick(plate_id=plate.plate_id, group_id=pick.group_id, position=pick.position)
+            for pick in picks
+        ],
+        warnings=notes,
+    )
 
 
 async def plan_run(
@@ -539,10 +950,17 @@ async def plan_run(
                 plate_id=plate_id,
                 plan=plan,
                 filaments=queue_filaments(options, request.filament_plan),
+                spools=_spools_by_slot(options, request.filament_plan),
             )
             for plate_id, options, _, plan in planned
         ],
         warnings=warnings + hardware,
+        rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
+        rack_position=request.rack_position,
+        # A readable status with no rack (any printer but an H2C) has nothing to pick: no
+        # extra read per plate, and no rack warning on a printer without one. An
+        # unreadable status still tries, since the pick reads a fresh one (#1043).
+        has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
     )
 
 
@@ -551,8 +969,14 @@ async def finish_run(
     source: PrintSource,
     planned: PlannedRun,
     outcomes: list[QueueOutcome],
+    queued: list[QueuedPlate] | None = None,
 ) -> PrintRunResult:
-    """Remember the project's printer and nozzle, and report what was queued."""
+    """Remember the project's printer and nozzle, and report what was queued, with each
+    plate's rack picks and warnings (``queued``, one per outcome)."""
+    warnings = list(planned.warnings)
+    for plate in queued or []:
+        # A rack warning repeated on every plate is one fact, shown once (spec §6).
+        warnings += [warning for warning in plate.warnings if warning not in warnings]
     if planned.project_id is not None:
         await source.remember_project(
             planned.project_id, printer_id=planned.printer_id, nozzle_size=planned.nozzle_size
@@ -564,7 +988,8 @@ async def finish_run(
         planned.project_id,
         planned.folder_id,
         copies=planned.copies,
-        warnings=planned.warnings,
+        rack_picks=[pick for plate in queued or [] for pick in plate.picks],
+        warnings=warnings,
     )
 
 
@@ -624,6 +1049,7 @@ def _queued(
     project_id: int | None,
     folder_id: int | None,
     copies: int,
+    rack_picks: list[RackSentPick],
     warnings: list[FilamentWarning] | None = None,
 ) -> PrintRunResult:
     """Report the slice-and-queue run; each plate was recorded as it was queued.
@@ -643,6 +1069,7 @@ def _queued(
         project_id=project_id,
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
+        rack_picks=rack_picks,
     )
 
 

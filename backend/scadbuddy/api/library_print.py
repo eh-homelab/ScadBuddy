@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
@@ -105,6 +106,7 @@ async def get_library_plate_thumbnail(
 async def get_library_choices(
     file_id: FileIdPath,
     store: SettingsStoreDep,
+    rack: RackUsageDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -114,7 +116,7 @@ async def get_library_choices(
     async with client_for(settings) as client:
         source = await LibrarySource.load(client, file_id)
         return await choices_for(
-            client, source, settings, remembered=remembered, printer_id=printer_id
+            client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )
 
 
@@ -187,9 +189,9 @@ async def post_library_run(
     summary="What the run would refuse for the dialog's choices, before Print",
 )
 async def post_library_check(
-    file_id: FileIdPath, body: PrintRunRequest, store: SettingsStoreDep
+    file_id: FileIdPath, body: PrintRunRequest, store: SettingsStoreDep, rack: RackUsageDep
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760)."""
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_library(client, settings, file_id, body)
+        return await check_for_library(client, settings, file_id, body, rack=rack)
