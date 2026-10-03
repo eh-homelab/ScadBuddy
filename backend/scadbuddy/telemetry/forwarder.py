@@ -95,7 +95,14 @@ class TraceForwarder:
 
     def offer(self, batch: bytes) -> None:
         """Queue ``batch`` for the collector. When the queue is full it is dropped and
-        counted; the caller answers the browser 204 either way."""
+        counted; the caller answers the browser 204 either way. Nothing is queued when
+        tracing is off (the route answers that case itself) or once shutdown has begun,
+        which is counted ``shutdown``."""
+        if self.off:
+            return
+        if self.closing:
+            self._count("shutdown")
+            return
         if (
             len(self._pending) >= MAX_QUEUED_BATCHES
             or self._pending_bytes + len(batch) > MAX_QUEUED_BYTES
@@ -115,7 +122,7 @@ class TraceForwarder:
             return
         self.closing = False
         self._wake = asyncio.Event()
-        self._client = httpx.AsyncClient(transport=self._transport)
+        self._client = httpx.AsyncClient(transport=self._transport, timeout=self._forward_timeout)
         task = asyncio.create_task(self._forward(self._wake))
         try:
             yield

@@ -257,3 +257,81 @@ def test_the_endpoint_follows_the_backend_rule(monkeypatch: pytest.MonkeyPatch) 
     assert relay_endpoint() == ENDPOINT
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
     assert relay_endpoint() is None
+
+
+async def test_off_queues_nothing_and_counts_nothing() -> None:
+    async def collector(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector, endpoint=None)
+    forwarder.offer(BATCH)
+    assert not forwarder._pending
+    assert all(
+        outcome(metrics, name) == 0 for name in ("forwarded", "failed", "queue_full", "shutdown")
+    )
+
+
+async def test_a_batch_offered_while_closing_counts_shutdown_and_is_not_queued() -> None:
+    async def collector(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector)
+    async with forwarder.running():
+        pass
+    forwarder.offer(BATCH)
+    assert not forwarder._pending
+    assert outcome(metrics, "shutdown") == 1
+
+
+async def test_the_client_timeout_is_the_forward_timeout() -> None:
+    async def collector(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    forwarder, _ = make(collector, forward_timeout=12.0)
+    async with forwarder.running():
+        assert forwarder._client is not None
+        assert forwarder._client.timeout == httpx.Timeout(12.0)
+
+
+async def _restart_and_forward() -> tuple[list[bytes], Metrics]:
+    seen: list[bytes] = []
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        seen.append(request.content)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector)
+    async with forwarder.running():
+        pass
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await until(lambda: outcome(metrics, "forwarded") == 1)
+    return seen, metrics
+
+
+async def test_a_forwarder_restarted_on_the_same_loop_forwards() -> None:
+    seen, _ = await _restart_and_forward()
+    assert seen == [BATCH]
+
+
+def test_a_forwarder_restarted_on_a_fresh_loop_forwards() -> None:
+    forwarder_seen: list[bytes] = []
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        forwarder_seen.append(request.content)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector)
+
+    async def first() -> None:
+        async with forwarder.running():
+            pass
+
+    async def second() -> None:
+        async with forwarder.running():
+            forwarder.offer(BATCH)
+            await until(lambda: outcome(metrics, "forwarded") == 1)
+
+    asyncio.run(first())
+    asyncio.run(second())
+    assert forwarder_seen == [BATCH]
