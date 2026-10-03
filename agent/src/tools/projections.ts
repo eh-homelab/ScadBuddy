@@ -7,7 +7,7 @@ import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
-import { errorResult, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
+import { errorResult, parsedOrRaw, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -59,15 +59,6 @@ function lookupIn(tools: readonly Tool[]): (name: string) => Tool | undefined {
 function detailOf(run: ToolRun): { detail?: string } {
   if (!run.ran) return run.detail === undefined ? {} : { detail: run.detail }
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
-}
-
-/** The arguments as the handler saw them (defaults applied), or as sent when they do not parse. */
-function parsedOrRaw(tool: Tool, args: unknown): Record<string, unknown> {
-  try {
-    return tool.parse(args)
-  } catch {
-    return (args ?? {}) as Record<string, unknown>
-  }
 }
 
 function signalFrom(extra: unknown): AbortSignal {

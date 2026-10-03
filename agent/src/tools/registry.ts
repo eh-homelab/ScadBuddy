@@ -5,6 +5,7 @@ import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
+import type { TouchedSink } from '../sessions/touched.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -56,6 +57,8 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
+  /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
+  touched?: TouchedSink | undefined
 }
 
 export type ToolContext = ToolServices & {
@@ -284,12 +287,53 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     },
     executed,
   )
-  return {
+  const done: ToolRun = {
     ...run,
     ...(reported.outcome ? { outcome: reported.outcome } : {}),
     ...(reported.detail ? { detail: reported.detail } : {}),
     ...(reported.approvalId ? { approvalId: reported.approvalId } : {}),
     ...(reported.ran ? { ran: reported.ran } : {}),
+  }
+  // What the session touched (#931, sessions/touched.ts): here, not in a
+  // projection, so every path that runs a session's tool records it (the
+  // harness server today; the tool activities a durable session would run,
+  // proposed in PR #972's docs/superpowers/specs/
+  // 2026-10-01-durable-printing-agents-flows-design.md §5.3, call this too).
+  // The tool that ran, as it ran; never fails the call.
+  if (ctx.session !== undefined && (done.outcome === 'ok' || done.outcome === 'error') && ctx.touched) {
+    // A sink should never throw (TouchedSink); held to that here, so a sink
+    // that does cannot turn a call that ran into one that failed.
+    try {
+      await ctx.touched.record({
+        sessionId: ctx.session,
+        tool: ranTool(tool, done, ctx),
+        input: done.ran?.input ?? parsedOrRaw(tool, args),
+        result: done.result,
+        ok: done.outcome === 'ok',
+      })
+    } catch {
+      // Nothing to report it to: the sink's own onError is where its failures go.
+    }
+  }
+  return done
+}
+
+/**
+ * The tool a run executed: the tool called, or the one confirm_action ran.
+ * Without `lookup` the ran tool's name is still the one recorded (its tier
+ * unknown, so `outward`), never confirm_action's.
+ */
+function ranTool(tool: Tool, run: ToolRun, ctx: ToolContext): { name: string; risk: Risk } {
+  if (!run.ran) return tool
+  return ctx.lookup?.(run.ran.tool) ?? { name: run.ran.tool, risk: 'outward' }
+}
+
+/** The arguments as the handler saw them (defaults applied), or as sent when they do not parse. */
+export function parsedOrRaw(tool: Tool, args: unknown): Record<string, unknown> {
+  try {
+    return tool.parse(args)
+  } catch {
+    return (args ?? {}) as Record<string, unknown>
   }
 }
 

@@ -3,6 +3,7 @@ import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { ApprovalError } from '../approvals/service.js'
+import { QuestionError } from '../questions/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -31,6 +32,8 @@ import { ready, type RouteModule } from './module.js'
 //                            for the model only (manager.ts SendOptions)
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
+//   question.answer        → QuestionService.answer (#940): the user's answer to
+//                            the agent's AskUserQuestion
 //   approval.decision      → ApprovalService.decision (#258): the same decision
 //                            as POST /api/v1/ai/approvals/:id/approve|deny
 //   session.interrupt      → SessionManager.interrupt
@@ -120,9 +123,32 @@ export type ChatRouteDeps = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
-function errorEvent(err: unknown, sessionId: string | undefined, log: (m: string) => void): ServerEvent {
-  const where = sessionId ? { sessionId } : {}
-  if (err instanceof SessionError || err instanceof ApprovalError) {
+/**
+ * The session and question a malformed `question.answer` frame names, when it
+ * names both readably (#940): the panel re-opens that card only, and no other
+ * malformed frame touches a sent answer.
+ */
+function refusedAnswer(raw: string): { sessionId: string; questionId: string } | Record<string, never> {
+  try {
+    const frame: unknown = JSON.parse(raw)
+    if (typeof frame !== 'object' || frame === null) return {}
+    const { type, sessionId, id } = frame as Record<string, unknown>
+    const named = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100
+    return type === 'question.answer' && named(sessionId) && named(id) ? { sessionId, questionId: id } : {}
+  } catch {
+    return {}
+  }
+}
+
+function errorEvent(
+  err: unknown,
+  sessionId: string | undefined,
+  log: (m: string) => void,
+  questionId?: string,
+): ServerEvent {
+  // A failed answer names its question (#940), so the panel re-opens that card only.
+  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}) }
+  if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
   // Anything else is ours, not the user's: log it, and say only that it failed.
@@ -269,8 +295,9 @@ export class ChatConnection {
     if (!parsed.ok) {
       // Answered through the queue, so it counts against the cap like any other frame.
       const error = parsed.error
+      const where = refusedAnswer(raw)
       return this.enqueue(async () => {
-        this.emit(event({ type: 'error', code: 'invalid', message: `ignored a malformed message: ${error}` }))
+        this.emit(event({ type: 'error', ...where, code: 'invalid', message: `ignored a malformed message: ${error}` }))
       })
     }
     const message = parsed.value
@@ -349,6 +376,9 @@ export class ChatConnection {
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message)
           return
+        case 'question.answer':
+          await this.sessions.questions.answer(this.principal, message)
+          return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
           return
@@ -365,7 +395,7 @@ export class ChatConnection {
       if (sessionId && err instanceof SessionError && err.budget) {
         this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
       }
-      this.emit(errorEvent(err, sessionId, this.log))
+      this.emit(errorEvent(err, sessionId, this.log, message.type === 'question.answer' ? message.id : undefined))
     }
   }
 
