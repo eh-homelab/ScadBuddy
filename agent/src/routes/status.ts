@@ -39,8 +39,8 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
   }
   if (ai === 'unavailable (no Claude credential is usable now)') {
     return (
-      `No Claude credential is usable now: some are rate limited${recoversAt ? ` (the first is usable again at ${recoversAt})` : ''}, ` +
-      'and the rest need attention in Settings.'
+      'No Claude credential is usable now: some need attention in Settings (disabled, or sealed with another ' +
+      `key-encryption key or an older format, which need saving again)${recoversAt ? `, and the first rate-limited one is usable again at ${recoversAt}` : ''}.`
     )
   }
   if (ai === 'unavailable (every Claude credential is disabled)') {

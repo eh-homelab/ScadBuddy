@@ -3,7 +3,7 @@ import type { UpgradeWebSocket } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { AuditEntry, AuditRepo } from '../src/audit/log.js'
-import type { Credential } from '../src/credentials.js'
+import { type Credential, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { CredentialEntryView, CredentialListView, CredentialView } from '../src/routes/credentials.js'
 import type { AiStatusView } from '../src/routes/status.js'
@@ -110,6 +110,15 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect((await noKey.call('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_A })).status).toBe(503)
   })
 
+  it('refuses a credential past the most that can be stored', async () => {
+    const { call, credentials } = setup()
+    for (let i = 0; i < MAX_CREDENTIALS; i++) await credentials.create({ kind: 'anthropic_api_key', secret: `${KEY_A}${i}` }, kek)
+    const res = await call<{ detail: string }>('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_B })
+    expect(res.status).toBe(409)
+    expect(res.body.detail).toBe(TOO_MANY_MESSAGE)
+    expect((await call<CredentialListView>('GET', '/entries')).body.credentials).toHaveLength(MAX_CREDENTIALS)
+  })
+
   it('refuses a gateway host the egress rules refuse', async () => {
     const { call } = setup({ resolveHost: () => Promise.resolve(['169.254.169.254']) })
     const res = await call<{ detail: string }>('POST', '/entries', { kind: 'gateway', base_url: 'https://meta.example', secret: GW })
@@ -130,9 +139,10 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect((await call<CredentialView>('GET', '')).body).toMatchObject({ configured: true, last4: 'bbbb' })
     expect((await call('POST', '/test', undefined, UI)).status).toBe(200)
     expect(tested.at(-1)).toEqual({ kind: 'anthropic_api_key', secret: KEY_B })
-    // The single-credential DELETE removes the first; the next one moves up.
-    expect((await call<CredentialView>('DELETE', '', undefined, UI)).body.configured).toBe(false)
+    // The single-credential DELETE removes the first and answers with the one that moved up.
+    expect((await call<CredentialView>('DELETE', '', undefined, UI)).body).toMatchObject({ configured: true, last4: 'aaaa' })
     expect((await call<CredentialView>('GET', '')).body).toMatchObject({ configured: true, last4: 'aaaa' })
+    expect((await call<CredentialView>('DELETE', '', undefined, UI)).body).toMatchObject({ configured: false })
   })
 
   it('refuses an order that does not name every credential exactly once', async () => {
@@ -272,9 +282,22 @@ describe('GET /api/v1/ai/status with several credentials (#1093)', () => {
       available: false,
       state: 'unavailable',
       ai: 'unavailable (no Claude credential is usable now)',
-      reason: `No Claude credential is usable now: some are rate limited (the first is usable again at ${soon.toISOString()}), and the rest need attention in Settings.`,
+      reason:
+        'No Claude credential is usable now: some need attention in Settings (disabled, or sealed with another ' +
+        `key-encryption key or an older format, which need saving again), and the first rate-limited one is usable again at ${soon.toISOString()}.`,
       recovers_at: soon.toISOString(),
     })
+  })
+
+  it('does not call credentials disabled when one cannot be opened with the mounted key, which a reset would not fix', async () => {
+    const { app, create, credentials } = setup()
+    const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
+    await credentials.record(a.id, 0, { kind: 'disabled', reason: 'HTTP 401' })
+    await credentials.create({ kind: 'anthropic_api_key', secret: KEY_B }, kekFromBase64(randomBytes(32).toString('base64')))
+    const body = await status(app)
+    expect(body).toMatchObject({ available: false, state: 'unavailable', ai: 'unavailable (no Claude credential is usable now)' })
+    expect(body.recovers_at).toBeUndefined()
+    expect(body.reason).toMatch(/another key-encryption key/)
   })
 
   it('says a person must act when every credential is disabled', async () => {

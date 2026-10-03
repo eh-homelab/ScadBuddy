@@ -88,8 +88,10 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(error).toBeUndefined()
     expect(result).toMatchObject({ subtype: 'success', is_error: false, result: 'Box made.' })
     // Stopped at the first retry: the SDK then gives Claude Code 2 s to exit
-    // before SIGTERM, in which it may make its (bounded) retries, no more.
-    expect(callsWith(TOKEN_A).length).toBeLessThanOrEqual(1 + DEFAULT_TRANSIENT_RETRIES)
+    // before SIGTERM, in which it may make its (bounded) retries, no more;
+    // then one probe confirmed the refusal before the key was disabled.
+    expect(callsWith(TOKEN_A).length).toBeLessThanOrEqual(2 + DEFAULT_TRANSIENT_RETRIES)
+    expect(callsWith(TOKEN_A).at(-1)?.body).toMatchObject({ max_tokens: 1 })
     expect(reports.map((r) => [r.id, r.outcome.class, r.next])).toEqual([
       ['a', 'permanent', 'b'],
       ['b', 'ok', undefined],
@@ -121,7 +123,9 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const started = Date.now()
     const { result, reports } = await turn()
     expect(result).toMatchObject({ subtype: 'success', is_error: false })
-    const cooled = reports[0]?.outcome
+    // Recorded at once with the default, then replaced by the probe's answer.
+    expect(reports[0]).toMatchObject({ id: 'a', outcome: { class: 'rate_limited' }, next: 'b' })
+    const cooled = reports.find((r) => r.id === 'a' && 'replacing' in r.outcome)?.outcome
     expect(cooled).toMatchObject({ class: 'rate_limited' })
     const until = cooled && 'until' in cooled ? cooled.until.getTime() : 0
     expect(until).toBeGreaterThanOrEqual(started + 600_000)
@@ -176,7 +180,9 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     })
     expect(result).toMatchObject({ subtype: 'success', result: 'The tool said echo:hi.' })
     expect(handled).toEqual(['hi'])
-    expect(reports.map((r) => [r.id, r.outcome.class])).toEqual([
+    // A's cooldown, B's success, and A's cooldown again once the probe answered.
+    expect(reports.map((r) => [r.id, r.outcome.class]).sort()).toEqual([
+      ['a', 'rate_limited'],
       ['a', 'rate_limited'],
       ['b', 'ok'],
     ])

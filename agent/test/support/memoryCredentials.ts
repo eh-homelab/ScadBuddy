@@ -9,7 +9,9 @@ import {
   type CredentialUpdate,
   openCredential,
   planPut,
+  MAX_CREDENTIALS,
   STALE_ORDER_MESSAGE,
+  TOO_MANY_MESSAGE,
   type StoredCredential,
 } from '../../src/credentials.js'
 import { type Envelope, type Kek, SEAL_V1, sealedVersion } from '../../src/secrets.js'
@@ -83,6 +85,12 @@ export class MemoryCredentials implements CredentialRepo {
     }
   }
 
+  async revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined> {
+    const row = this.find(id)
+    if (!row) return undefined
+    return { credential: openCredential(kek, row), epoch: row.epoch }
+  }
+
   async put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential> {
     const row = this.find(id)
     if (!row) {
@@ -110,6 +118,7 @@ export class MemoryCredentials implements CredentialRepo {
 
   async create(update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential> {
     if (update.secret === undefined) throw new CredentialError('secret is required for a new credential', 400)
+    if (this.rows.length >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
     const id = randomUUID()
     const plan = planPut(update, undefined, kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
@@ -172,7 +181,12 @@ export class MemoryCredentials implements CredentialRepo {
       case 'cooling_down':
         if (row.status !== 'disabled') {
           const until = event.until.getTime()
-          row.cooldownUntil = before === 'cooling_down' ? Math.max(row.cooldownUntil ?? until, until) : until
+          row.cooldownUntil =
+            event.replacing !== undefined && row.cooldownUntil === event.replacing.getTime()
+              ? until
+              : before === 'cooling_down'
+                ? Math.max(row.cooldownUntil ?? until, until)
+                : until
           row.status = 'cooling_down'
         }
         Object.assign(row, { last_error: event.reason, last_error_at: at })

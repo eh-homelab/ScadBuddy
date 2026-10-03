@@ -5,6 +5,7 @@ import {
   CREDENTIAL_KINDS,
   CredentialError,
   type CredentialRepo,
+  MAX_CREDENTIALS,
   normaliseBaseUrl,
   opensWith,
   soonestRecovery,
@@ -107,7 +108,7 @@ const SaveBody = z.strictObject({
 
 const CreateBody = SaveBody.extend({ secret: z.string().min(1).max(4096) })
 
-const OrderBody = z.strictObject({ ids: z.array(z.string().min(1).max(64)).max(100) })
+const OrderBody = z.strictObject({ ids: z.array(z.string().min(1).max(64)).max(MAX_CREDENTIALS) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 /**
@@ -252,10 +253,11 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     })
   })
 
+  // Answers with the credential that moved up into first place, if any.
   app.delete(base, (c) =>
     withStore(c, async (repo) => {
       await repo.delete()
-      return c.json(view(undefined, kek))
+      return c.json(view(await repo.get(), kek))
     }),
   )
 

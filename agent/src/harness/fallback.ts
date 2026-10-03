@@ -15,7 +15,8 @@ import {
   type FailureClass,
   type FailureEvidence,
   type ProbeVerdict,
-  probeRateLimit,
+  cooldownUntil,
+  probeCredential,
 } from './credentialErrors.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
@@ -60,6 +61,24 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 //     credential (CLAUDE_CODE_MAX_RETRIES), as many as it likes otherwise;
 //     then the turn falls back for this call only. The credential is not
 //     marked.
+//
+// A REFUSAL IS CONFIRMED BEFORE IT DISABLES. A 401/403 can be about one
+// request rather than the key (a WAF or gateway refusing one body, a model
+// the organisation may not use); disabling on it would disable every
+// credential in one turn. So the credential is asked once more with a
+// one-token request (credentialErrors.ts `probeCredential`): refused again,
+// it is disabled and the turn falls back; answered, the refusal was the
+// request's, and the turn ends there with no fallback and nothing recorded;
+// rate limited, it cools down; no clear answer, it falls back for this call
+// without being marked.
+//
+// A RATE LIMIT DOES NOT WAIT FOR ITS PROBE. The credential is recorded as
+// cooling down for the default time at once and the next attempt starts; the
+// probe's answer then replaces that time (or disables the credential), and
+// the generator does not return before that record is written.
+//
+// No attempt starts once the turn's `maxTurns` or `maxBudgetUsd` is used up:
+// the last failure is shown as it came.
 
 /** A credential ready for a query, with the row facts its outcome is recorded against. */
 export type PooledCredential = {
@@ -74,7 +93,8 @@ export type PooledCredential = {
 export type AttemptOutcome =
   | { class: 'ok' }
   | { class: 'permanent' | 'transient'; reason: string }
-  | { class: 'rate_limited'; reason: string; until: Date }
+  /** `replacing`: the provisional time an earlier report of this rate limit recorded (fallback.ts). */
+  | { class: 'rate_limited'; reason: string; until: Date; replacing?: Date }
 
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
@@ -109,10 +129,10 @@ export type FallbackOptions = {
   /** Runs one query; runHarness by default. */
   run?: (run: HarnessRun) => AsyncIterable<SDKMessage>
   /**
-   * When a rate-limited credential is usable again, or that it is refused
-   * outright after all; asks the endpoint (credentialErrors.ts) by default.
+   * Asks the endpoint once more about a refused or rate-limited credential
+   * (credentialErrors.ts `probeCredential` by default).
    */
-  rateLimitProbe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   transientRetries?: number
   /**
    * What the session had spent before this turn, when `resume` is set: a
@@ -201,7 +221,16 @@ export async function* runWithFallback(
   options: FallbackOptions,
 ): AsyncGenerator<SDKMessage, void, undefined> {
   const runOne = options.run ?? runHarness
-  const rateLimitProbe = options.rateLimitProbe ?? ((credential, model) => probeRateLimit(credential, { model }))
+  const probe = options.probe ?? ((credential, model) => probeCredential(credential, { model }))
+  /** Rate-limit probes still running; their records are written before the generator returns. */
+  const pending: Promise<void>[] = []
+  try {
+    yield* attempts()
+  } finally {
+    await Promise.all(pending)
+  }
+
+  async function* attempts(): AsyncGenerator<SDKMessage, void, undefined> {
   const { candidates } = options
   if (candidates.length === 0) throw new NoUsableCredentialError('no Claude credential is usable', undefined)
 
@@ -228,8 +257,8 @@ export async function* runWithFallback(
       signal: controller.signal,
       ...(i > 0
         ? {
-            maxTurns: Math.max(1, (base.maxTurns ?? DEFAULT_MAX_TURNS) - spend.turns),
-            maxBudgetUsd: Math.max((base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD) - spend.usd, 0.000001),
+            maxTurns: (base.maxTurns ?? DEFAULT_MAX_TURNS) - spend.turns,
+            maxBudgetUsd: (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD) - spend.usd,
           }
         : {}),
       ...(next ? { maxRetries: options.transientRetries ?? DEFAULT_TRANSIENT_RETRIES } : {}),
@@ -336,32 +365,66 @@ export async function* runWithFallback(
       return
     }
 
-    const reason = redact(failure.message || verdict, [current.credential.secret])
-    let outcome: AttemptOutcome = { class: verdict as 'permanent' | 'transient', reason }
-    if (verdict === 'rate_limited') {
-      const probe = await rateLimitProbe(current.credential, model)
+    const secret = current.credential.secret
+    const reason = redact(failure.message || verdict, [secret])
+    let outcome: AttemptOutcome
+    if (verdict === 'permanent') {
+      // Confirmed before it disables (see the top of this file).
+      const check = await probe(current.credential, model)
+      if (check.verdict === 'answered') {
+        yield* release()
+        if (thrown !== undefined) throw thrown
+        throw new Error(`the model endpoint refused this request (${reason}); the credential itself works`)
+      }
       outcome =
-        'refused' in probe
-          ? { class: 'permanent', reason: redact(probe.refused, [current.credential.secret]) }
-          : { class: verdict, reason, until: probe.until }
+        check.verdict === 'refused'
+          ? { class: 'permanent', reason }
+          : check.verdict === 'rate_limited'
+            ? { class: 'rate_limited', reason, until: check.until }
+            : { class: 'transient', reason }
+    } else if (verdict === 'rate_limited') {
+      // Recorded now with the default; the probe's answer replaces it below.
+      outcome = { class: 'rate_limited', reason, until: cooldownUntil(undefined, Date.now()) }
+    } else {
+      outcome = { class: 'transient', reason }
     }
-    await options.report(current, outcome, next)
-    if (!next) {
+
+    const own = result ? ownCost(result, spend, resumed) : 0
+    const turns = result?.num_turns ?? 0
+    const exhausted =
+      spend.turns + turns >= (base.maxTurns ?? DEFAULT_MAX_TURNS) ||
+      spend.usd + own >= (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD)
+    const fallTo = exhausted ? undefined : next
+    await options.report(current, outcome, fallTo)
+    if (verdict === 'rate_limited' && outcome.class === 'rate_limited') {
+      const provisional = outcome.until
+      pending.push(
+        probe(current.credential, model).then((answer) =>
+          options.report(
+            current,
+            answer.verdict === 'refused'
+              ? { class: 'permanent', reason: redact(answer.reason, [secret]) }
+              : { class: 'rate_limited', reason, until: answer.until, replacing: provisional },
+            undefined,
+          ),
+        ),
+      )
+    }
+    if (!fallTo) {
       if (held.length === 0) throw new Error(`the Claude credential (${current.label}) was refused: ${reason}`)
       // With the totals as they were before this attempt: its result already counts itself.
       yield* release()
       if (thrown !== undefined) throw thrown
       return
     }
-    if (result) {
-      spend.usd += ownCost(result, spend, resumed)
-      spend.turns += result.num_turns
-    }
+    spend.usd += own
+    spend.turns += turns
     if (sessionSeen !== undefined) {
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT
       resumed = true
     }
+  }
   }
 }
 
@@ -392,14 +455,17 @@ export class CredentialPool implements CredentialSource {
     const out: PooledCredential[] = []
     for (const c of list) {
       if (c.status !== 'active' || !opensWith(c, kek)) continue
-      let credential: Credential | undefined
+      // The epoch comes with the secret, from one SELECT: a save committing
+      // after list() would otherwise run the turn on the new secret while
+      // recording its failures against the old epoch.
+      let entry: { credential: Credential; epoch: number } | undefined
       try {
-        credential = await this.repo.reveal(kek.kek, c.id)
+        entry = await this.repo.revealEntry(kek.kek, c.id)
       } catch (err) {
         if (err instanceof SealError) continue
         throw err
       }
-      if (credential) out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
+      if (entry) out.push({ id: c.id, epoch: entry.epoch, label: credentialLabel(c), credential: entry.credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))
     return out
@@ -422,7 +488,12 @@ export class CredentialPool implements CredentialSource {
         : outcome.class === 'permanent'
           ? { kind: 'disabled', reason: outcome.reason }
           : outcome.class === 'rate_limited'
-            ? { kind: 'cooling_down', until: outcome.until, reason: outcome.reason }
+            ? {
+                kind: 'cooling_down',
+                until: outcome.until,
+                reason: outcome.reason,
+                ...(outcome.replacing ? { replacing: outcome.replacing } : {}),
+              }
             : { kind: 'transient', reason: outcome.reason }
     let action: string | undefined
     let detail = ''

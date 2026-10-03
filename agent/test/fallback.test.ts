@@ -9,7 +9,7 @@ import {
   type PooledCredential,
   runWithFallback,
 } from '../src/harness/fallback.js'
-import type { ProbeVerdict } from '../src/harness/credentialErrors.js'
+import { DEFAULT_COOLDOWN_MS, type ProbeVerdict } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
@@ -81,7 +81,8 @@ function harness(script: Script) {
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
-      probeVerdict: ProbeVerdict = { until: new Date('2026-10-03T12:05:00Z') },
+      // By default the probe confirms a refusal: refused again.
+      probeVerdict: ProbeVerdict | (() => Promise<ProbeVerdict>) = { verdict: 'refused', reason: 'HTTP 401 again' },
       priorCostUsd?: number,
     ): Promise<{ messages: SDKMessage[]; error: unknown }> {
       const messages: SDKMessage[] = []
@@ -96,9 +97,9 @@ function harness(script: Script) {
               reports.push({ id: attempt.id, outcome, next: next?.id })
               return Promise.resolve()
             },
-            rateLimitProbe: (credential, model) => {
+            probe: (credential, model) => {
               probes.push({ ...credential, model })
-              return Promise.resolve(probeVerdict)
+              return typeof probeVerdict === 'function' ? probeVerdict() : Promise.resolve(probeVerdict)
             },
             ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
           },
@@ -184,13 +185,42 @@ describe('runWithFallback (#1093)', () => {
         ? { messages: [init('claude-opus-4-1'), apiError('API Error: Request rejected (429) · slow down', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429) · slow down')], throws: new Error('error result') }
         : [init(), success('ok')],
     )
-    await h.collect([A, B])
+    const until = new Date('2026-10-03T12:05:00Z')
+    await h.collect([A, B], {}, { verdict: 'rate_limited', until })
     expect(h.probes).toEqual([{ ...A.credential, model: 'claude-opus-4-1' }])
-    expect(h.reports[0]).toEqual({
+    // At once with the default cooldown and the fallback; then the probe's time replaces it.
+    const reason = 'API Error: Request rejected (429) · slow down'
+    const provisional = (h.reports[0]?.outcome as { until: Date }).until
+    expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'rate_limited', reason, until: provisional }, next: 'b' })
+    expect(h.reports.slice(1)).toHaveLength(2)
+    expect(h.reports.slice(1)).toContainEqual({ id: 'b', outcome: { class: 'ok' }, next: undefined })
+    expect(h.reports.slice(1)).toContainEqual({
       id: 'a',
-      outcome: { class: 'rate_limited', reason: 'API Error: Request rejected (429) · slow down', until: new Date('2026-10-03T12:05:00Z') },
-      next: 'b',
+      outcome: { class: 'rate_limited', reason, until, replacing: provisional },
+      next: undefined,
     })
+    expect(provisional.getTime()).toBeGreaterThan(Date.now() + DEFAULT_COOLDOWN_MS - 5000)
+  })
+
+  it('starts the next credential without waiting for a slow rate-limit probe, and writes its answer before returning', async () => {
+    let answer: (v: ProbeVerdict) => void = () => {}
+    const slow = new Promise<ProbeVerdict>((resolve) => (answer = resolve))
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), apiError('API Error: Request rejected (429)', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429)')], throws: new Error('x') }
+        : [init(), success('ok')],
+    )
+    const done = h.collect([A, B], {}, () => slow)
+    await new Promise((r) => setTimeout(r, 20))
+    // B ran while the probe was still out.
+    expect(h.runs).toHaveLength(2)
+    let finished = false
+    void done.then(() => (finished = true))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(finished).toBe(false)
+    answer({ verdict: 'answered', until: new Date('2026-10-03T12:00:01Z') })
+    await done
+    expect(h.reports.at(-1)).toMatchObject({ id: 'a', outcome: { class: 'rate_limited', until: new Date('2026-10-03T12:00:01Z') } })
   })
 
   it('stops at a 429 retry only when there is a credential to fall back to', async () => {
@@ -295,12 +325,51 @@ describe('runWithFallback (#1093)', () => {
         ? { messages: [init(), apiError('API Error: Request rejected (429)', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429)')], throws: new Error('x') }
         : [init(), success('ok')],
     )
-    await h.collect([A, B], {}, { refused: `the rate-limit probe was refused (HTTP 401): bad ${A.credential.secret}` })
-    expect(h.reports[0]).toEqual({
+    await h.collect([A, B], {}, { verdict: 'refused', reason: `the probe was refused (HTTP 401): bad ${A.credential.secret}` })
+    expect(h.reports).toContainEqual({
       id: 'a',
-      outcome: { class: 'permanent', reason: 'the rate-limit probe was refused (HTTP 401): bad [redacted]' },
-      next: 'b',
+      outcome: { class: 'permanent', reason: 'the probe was refused (HTTP 401): bad [redacted]' },
+      next: undefined,
     })
+  })
+
+  it('does not disable on a refusal the probe does not confirm: the turn ends there, with no fallback', async () => {
+    // Every credential gets the same 403 (a gateway refusing this one request); the key itself works.
+    const h = harness(() => ({
+      messages: [init(), apiError('Failed to authenticate. API Error: 403 blocked by policy', 'authentication_failed'), errorResult(403, 'Failed to authenticate. API Error: 403 blocked by policy')],
+      throws: new Error('Claude Code returned an error result'),
+    }))
+    const { messages, error } = await h.collect([A, B, C], {}, { verdict: 'answered', until: new Date() })
+    expect(h.runs).toHaveLength(1)
+    expect(h.reports).toEqual([])
+    expect(kinds(messages)).toEqual(['system/init', 'assistant', 'result/success'])
+    expect((error as Error).message).toMatch(/Claude Code returned an error result/)
+  })
+
+  it('falls back without disabling when the probe gives no clear answer', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), apiError('API Error: 403', 'authentication_failed'), errorResult(403, 'API Error: 403')], throws: new Error('x') }
+        : [init(), success('ok')],
+    )
+    await h.collect([A, B], {}, { verdict: 'unknown', until: new Date() })
+    expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'transient', reason: 'API Error: 403' }, next: 'b' })
+  })
+
+  it('starts no further attempt once the turn’s allowance is used up, showing the failure as it came', async () => {
+    const failing = (cost: number, turns: number) => ({
+      messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', cost, turns)],
+      throws: new Error('x'),
+    })
+    const byTurns = harness(() => failing(0.01, 3))
+    const r1 = await byTurns.collect([A, B], { maxTurns: 3 })
+    expect(byTurns.runs).toHaveLength(1)
+    expect(r1.messages.at(-1)).toMatchObject({ type: 'result', num_turns: 3, total_cost_usd: 0.01 })
+    expect(byTurns.reports).toEqual([{ id: 'a', outcome: { class: 'transient', reason: 'API Error: 529' }, next: undefined }])
+
+    const byBudget = harness(() => failing(0.5, 1))
+    await byBudget.collect([A, B], { maxBudgetUsd: 0.5 })
+    expect(byBudget.runs).toHaveLength(1)
   })
 
   it('does not stop a turn that has made progress at a retry: its result says what it spent', async () => {

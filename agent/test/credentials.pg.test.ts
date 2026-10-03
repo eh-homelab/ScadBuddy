@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
-import { CredentialError, CredentialStore, credentialAad } from '../src/credentials.js'
+import { CredentialError, CredentialStore, credentialAad, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { migrate, MIGRATIONS } from '../src/db/migrations.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
@@ -183,6 +183,29 @@ describe.skipIf(!TEST_DATABASE_URL)(
         )
       })
 
+      it('lets a probe’s answer replace the provisional cooldown it was recorded with, sooner or later', async () => {
+        const a = await store.create({ kind: 'anthropic_api_key', secret: KEY_A }, kek)
+        const provisional = new Date(Date.now() + 60_000)
+        await store.record(a.id, a.epoch, { kind: 'cooling_down', until: provisional, reason: 'HTTP 429' })
+        const sooner = new Date(Date.now() + 5_000)
+        await store.record(a.id, a.epoch, { kind: 'cooling_down', until: sooner, reason: 'HTTP 429', replacing: provisional })
+        expect(await store.get(a.id)).toMatchObject({ cooldown_until: sooner.toISOString() })
+        // Once another report moved it on, a replacement of the old provisional time only extends.
+        const later = new Date(Date.now() + 120_000)
+        await store.record(a.id, a.epoch, { kind: 'cooling_down', until: later, reason: 'HTTP 429' })
+        await store.record(a.id, a.epoch, { kind: 'cooling_down', until: sooner, reason: 'HTTP 429', replacing: provisional })
+        expect(await store.get(a.id)).toMatchObject({ cooldown_until: later.toISOString() })
+      })
+
+      it('refuses a credential past MAX_CREDENTIALS', async () => {
+        for (let i = 0; i < MAX_CREDENTIALS; i++) await store.create({ kind: 'anthropic_api_key', secret: `${KEY_A}${i}` }, kek)
+        await expect(store.create({ kind: 'anthropic_api_key', secret: KEY_B }, kek)).rejects.toMatchObject({
+          status: 409,
+          message: TOO_MANY_MESSAGE,
+        })
+        expect(await store.list()).toHaveLength(MAX_CREDENTIALS)
+      }, 60_000)
+
       it('races: two pods disabling and cooling one credential at once end disabled', async () => {
         const a = await store.create({ kind: 'anthropic_api_key', secret: KEY_A }, kek)
         const until = new Date(Date.now() + 60_000)
@@ -240,6 +263,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
           expect(back?.id).toBe(a.id)
           await pool.report(back!, { class: 'ok' }, undefined)
           expect(audit.at(-1)).toMatchObject({ action: 'recover', outcome: 'ok' })
+        })
+
+        it('records against the epoch of the secret the turn runs on, even when a save lands between list and reveal', async () => {
+          const a = await store.create({ kind: 'anthropic_api_key', secret: KEY_A }, kek)
+          // A save committing just after the pool listed the credentials.
+          class Racing extends CredentialStore {
+            override async list() {
+              const listed = await super.list()
+              await store.put({ kind: 'anthropic_api_key', secret: KEY_B }, kek, a.id)
+              return listed
+            }
+          }
+          const pool = new CredentialPool({ repo: new Racing(db.sql), kek: kekStatus, log: () => {} })
+          const [pooled] = await pool.candidates()
+          expect(pooled?.credential.secret).toBe(KEY_B)
+          expect(pooled?.epoch).toBe(a.epoch + 1)
+          await pool.report(pooled!, { class: 'permanent', reason: 'HTTP 401' }, undefined)
+          expect(await store.get(a.id)).toMatchObject({ status: 'disabled' })
         })
 
         it('skips a credential the mounted key cannot open', async () => {

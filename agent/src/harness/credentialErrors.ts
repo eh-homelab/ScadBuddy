@@ -18,7 +18,7 @@ import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http
 // reported as `api_retry` with `retry_delay_ms: 60000`, but one with
 // `retry-after: 120` is not retried and reports no time at all, and the
 // `anthropic-ratelimit-*-reset` headers are never passed on. So the time a
-// rate limit clears is read by asking the endpoint once more (`probeRateLimit`):
+// rate limit clears is read by asking the endpoint once more (`probeCredential`):
 // a rejected request is not billed, and one that is answered costs a single
 // output token.
 
@@ -142,27 +142,33 @@ export const PROBE_FALLBACK_MODEL = 'claude-haiku-4-5'
 const ANTHROPIC_API = 'https://api.anthropic.com'
 
 /**
- * What the probe found: the time the credential is usable again, or that it
- * is refused outright (revoked or out of credit since the 429), which the
- * caller records as permanent.
+ * What the probe found:
+ *   - refused: 401, 402, 403 or a billing 400 again; the credential itself is refused;
+ *   - answered: 2xx; the credential works now (`until` is a second away);
+ *   - rate_limited: 429; `until` is the reset its headers name, else the default;
+ *   - unknown: anything else, or no answer; `until` is the default cooldown.
  */
-export type ProbeVerdict = { until: Date } | { refused: string }
+export type ProbeVerdict =
+  | { verdict: 'refused'; reason: string }
+  | { verdict: 'answered' | 'rate_limited' | 'unknown'; until: Date }
 
 /** A probe that was answered: the limit has cleared (or hit a bucket a one-token request does not). */
 export const CLEARED_COOLDOWN_MS = 1000
 
 /**
- * Asks the endpoint once, with the credential that was rate limited, when it
- * will take requests again: a one-token Messages request. By its status:
+ * Asks the endpoint once, with a credential a query just found refused or
+ * rate limited, what it makes of that credential: a one-token Messages
+ * request (fallback.ts uses it to confirm a refusal before disabling, and to
+ * read when a rate limit clears). By its status:
  *
  *   - 429: the reset its headers name (`rateLimitResetFromHeaders`), else the default;
  *   - 2xx: answered, so usable again in a second. The `-reset` headers of a
  *     success say when a bucket is full again, not when it can be used;
- *   - 401, 402, 403: refused outright;
+ *   - 401, 402, 403, or a 400 with a billing message: refused outright;
  *   - anything else, or no answer (network, timeout, a gateway host the
- *     egress rules refuse): the default cooldown.
+ *     egress rules refuse): unknown, with the default cooldown.
  */
-export async function probeRateLimit(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
+export async function probeCredential(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
   const now = options.now ?? Date.now
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
@@ -186,15 +192,21 @@ export async function probeRateLimit(credential: Credential, options: ProbeOptio
         messages: [{ role: 'user', content: 'ok' }],
       }),
     })
-    if (res.status === 401 || res.status === 402 || res.status === 403) {
+    if (res.status === 401 || res.status === 402 || res.status === 403 || res.status === 400) {
       const body = (await res.text().catch(() => '')).slice(0, 300)
-      return { refused: `the rate-limit probe was refused (HTTP ${res.status})${body ? `: ${body}` : ''}` }
+      // A 400 refuses the key only when it says so (out of credit); otherwise it is about the probe.
+      if (res.status !== 400 || BILLING_MESSAGE.test(body)) {
+        return { verdict: 'refused', reason: `the probe was refused (HTTP ${res.status})${body ? `: ${body}` : ''}` }
+      }
+      return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
     }
     await res.body?.cancel()
-    if (res.ok) return { until: cooldownUntil(now() + CLEARED_COOLDOWN_MS, now()) }
-    if (res.status === 429) return { until: cooldownUntil(rateLimitResetFromHeaders(res.headers, now()), now()) }
-    return { until: cooldownUntil(undefined, now()) }
+    if (res.ok) return { verdict: 'answered', until: cooldownUntil(now() + CLEARED_COOLDOWN_MS, now()) }
+    if (res.status === 429) {
+      return { verdict: 'rate_limited', until: cooldownUntil(rateLimitResetFromHeaders(res.headers, now()), now()) }
+    }
+    return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
   } catch {
-    return { until: cooldownUntil(undefined, now()) }
+    return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
   }
 }

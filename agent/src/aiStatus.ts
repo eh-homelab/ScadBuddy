@@ -82,10 +82,16 @@ export async function aiStatus(
   }
   // #1093: usable now, or when the first one will be again. "Rate limited"
   // only when that is all of them; a mix (some disabled, or some the key
-  // cannot open) is "not usable now", with the time one recovers.
+  // cannot open) is "not usable now", with the time one recovers if any will.
   if (opening.some((c) => c.status === 'active')) return { ai: 'enabled', credential }
   const soonest = soonestRecovery(list, deps.kek)
-  if (!soonest) return { ai: 'unavailable (every Claude credential is disabled)', credential }
+  // "Disabled" only when a reset would fix every one: none sealed under another
+  // key or in the old format, which a reset does not open.
+  if (!soonest) {
+    return list.every((c) => c.status === 'disabled' && opensWith(c, deps.kek))
+      ? { ai: 'unavailable (every Claude credential is disabled)', credential }
+      : { ai: 'unavailable (no Claude credential is usable now)', credential }
+  }
   const recoversAt = soonest.toISOString()
   return list.every((c) => c.status === 'cooling_down' && opensWith(c, deps.kek))
     ? { ai: 'unavailable (every Claude credential is rate limited)', credential, recoversAt }

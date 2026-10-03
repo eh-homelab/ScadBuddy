@@ -77,7 +77,12 @@ export type StoredCredential = CredentialSummary & {
 export type CredentialEvent =
   | { kind: 'used' }
   | { kind: 'disabled'; reason: string }
-  | { kind: 'cooling_down'; until: Date; reason: string }
+  /**
+   * `replacing`: the provisional time an earlier report of this same rate
+   * limit recorded; if the row still holds it, `until` replaces it outright
+   * (it may be sooner), otherwise the later of the two wins as usual.
+   */
+  | { kind: 'cooling_down'; until: Date; reason: string; replacing?: Date }
   | { kind: 'transient'; reason: string }
 
 /** The status before and after a recorded event; `recovered` when an expired cooldown was cleared by a success. */
@@ -90,13 +95,15 @@ export type CredentialRepo = {
   /** One credential; the first by priority when `id` is omitted (the single-credential routes). */
   get(id?: string): Promise<StoredCredential | undefined>
   reveal(kek: Kek, id?: string): Promise<Credential | undefined>
+  /** One credential decrypted, with the epoch of the very row it was decrypted from. */
+  revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined>
   /**
    * Saves `update` over a credential (the first by priority when `id` is
    * omitted; one is created when there is none). A new secret makes it
    * `active` again. Throws CredentialError 404 for an unknown `id`.
    */
   put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential>
-  /** A new credential, last in priority. `secret` is required. */
+  /** A new credential, last in priority. `secret` is required; refused (409) past MAX_CREDENTIALS. */
   create(update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential>
   /** Deletes a credential (the first by priority when `id` is omitted); the rest close up. */
   delete(id?: string): Promise<boolean>
@@ -124,6 +131,11 @@ export class CredentialError extends Error {
     this.status = status
   }
 }
+
+/** The most credentials stored at once; the order route accepts no more ids than this. */
+export const MAX_CREDENTIALS = 100
+
+export const TOO_MANY_MESSAGE = `at most ${MAX_CREDENTIALS} Claude credentials can be stored; delete one first`
 
 /** The id the single credential had before #1093; that row keeps it. */
 export const LEGACY_ROW_ID = 'default'
@@ -381,6 +393,19 @@ export class CredentialStore implements CredentialRepo {
     })
   }
 
+  async revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined> {
+    const [row] = await this.sql<Row[]>`
+      SELECT id, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch FROM ai_credentials WHERE id = ${id}`
+    if (!row) return undefined
+    const credential = openCredential(kek, {
+      id: row.id,
+      kind: row.kind,
+      base_url: row.base_url,
+      envelope: { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
+    })
+    return { credential, epoch: row.epoch }
+  }
+
   async put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential> {
     return await this.sql.begin(async (tx) => {
       await lockForWrite(tx)
@@ -412,6 +437,9 @@ export class CredentialStore implements CredentialRepo {
   }
 
   private async insert(tx: TransactionSql, update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential> {
+    // Under the table lock (lockForWrite), so racing creates cannot pass the cap together.
+    const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_credentials`
+    if ((count?.n ?? 0) >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
     const id = randomUUID()
     const plan = planPut(update, undefined, kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
@@ -502,6 +530,8 @@ export class CredentialStore implements CredentialRepo {
           UPDATE ai_credentials c SET
             status = CASE WHEN c.status = 'disabled' THEN 'disabled' ELSE 'cooling_down' END,
             cooldown_until = CASE WHEN c.status = 'disabled' THEN NULL
+              WHEN ${event.replacing ?? null}::timestamptz IS NOT NULL AND c.cooldown_until = ${event.replacing ?? null}::timestamptz
+                THEN ${event.until}::timestamptz
               ELSE GREATEST(${event.until}::timestamptz, CASE WHEN b.status = 'cooling_down' THEN c.cooldown_until END) END,
             last_error = ${event.reason}, last_error_at = now()
           FROM b WHERE c.id = b.id

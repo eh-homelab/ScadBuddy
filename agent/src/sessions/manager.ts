@@ -317,8 +317,8 @@ export type SessionManagerDeps = {
    * throws when none is usable now.
    */
   credentials: CredentialSource
-  /** When a rate-limited credential is usable again, or that it is refused; fallback.ts asks the endpoint when omitted. */
-  rateLimitProbe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
+  /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
@@ -1128,7 +1128,7 @@ export class SessionManager {
         candidates,
         report: this.deps.credentials.reporter({ sessionId: id, turnId }),
         run: this.run,
-        ...(this.deps.rateLimitProbe ? { rateLimitProbe: this.deps.rateLimitProbe } : {}),
+        ...(this.deps.probe ? { probe: this.deps.probe } : {}),
         // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
         ...(resume ? { priorCostUsd: session.costUsd } : {}),
       })

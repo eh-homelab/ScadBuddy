@@ -255,12 +255,13 @@ is `classifyFailure()` in
 
 | Failure | Examples | What happens |
 |---|---|---|
-| Permanent | 401, 403, 402, a billing or credit message | The credential becomes `disabled`, with the reason in `last_error`. It is not tried again until someone resets it or saves a new secret for it. |
-| Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential (`probeRateLimit()`, a one-token request; a refused one is not billed) and reads `retry-after`, then the `anthropic-ratelimit-*-reset` headers, from its 429. With no time named, 60 s. A probe that is answered makes it usable again in 1 s; one refused with 401, 402 or 403 disables it instead. |
+| Permanent | 401, 403, 402, a billing or credit message | First confirmed: the agent asks the endpoint once more with that credential (`probeCredential()`, a one-token request). Refused again, the credential becomes `disabled`, with the reason in `last_error`, and is not tried again until someone resets it or saves a new secret for it. Answered, the refusal was about the request (a gateway or WAF refusing one body, say), so the turn ends there with no fallback and nothing recorded. With no clear answer it falls back for this call without being marked. |
+| Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. It is recorded at once with the default 60 s and the turn moves on; Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential in the background (`probeCredential()`, a one-token request; a refused one is not billed) and replaces that time with what its 429 names (`retry-after`, then the `anthropic-ratelimit-*-reset` headers). A probe that is answered makes it usable again in 1 s; one refused with 401, 402, 403 or a billing 400 disables it instead. |
 | Transient | 5xx, 529, network errors | Claude Code retries on the same credential, at most twice when there is another to fall back to (`CLAUDE_CODE_MAX_RETRIES`), then the turn moves on for this call only. The credential is not marked. |
 | Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. |
 
-A turn that fails mid-way (after tool calls ran) resumes the session on the next
+No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
+fails mid-way (after tool calls ran) resumes the session on the next
 credential with a short "continue" prompt, so no tool runs twice and the prompt is not
 sent twice. Each credential is tried at most once per turn. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
@@ -271,9 +272,12 @@ is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
 
 - `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
   credential is cooling down and will be usable again on its own;
-- `unavailable (no Claude credential is usable now)`, with `recovers_at`: some are
-  cooling down, and the rest are disabled or cannot be opened, which needs a person;
-- `unavailable (every Claude credential is disabled)`: nothing recovers on its own.
+- `unavailable (no Claude credential is usable now)`: some are disabled or cannot be
+  opened with the mounted key-encryption key (sealed under another one, or in the old
+  format, which a Reset does not fix: save the secret again); `recovers_at` is set when
+  any of the others is cooling down;
+- `unavailable (every Claude credential is disabled)`: every one is disabled and opens
+  with the mounted key, so a Reset of any of them makes it usable.
 
 A reset, or a new secret, clears `last_error` and `last_error_at` as well as the status.
 
@@ -299,9 +303,9 @@ credential (#1093).
 |---|---|---|
 | `GET /api/v1/ai/credentials` | No | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
 | `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
-| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential; the next one moves up. |
+| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
 | `GET /api/v1/ai/credentials/entries` | No | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
-| `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret }`; adds a credential last in priority and answers `201` with its entry. |
+| `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret }`; adds a credential last in priority and answers `201` with its entry. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
 | `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
 | `DELETE /api/v1/ai/credentials/entries/{id}` | Yes | Deletes one credential and answers with the list. |
