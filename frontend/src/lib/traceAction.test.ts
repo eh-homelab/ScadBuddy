@@ -43,6 +43,14 @@ describe('traceAction', () => {
     expect(span?.status.message ?? '').not.toContain('SECRET')
   })
 
+  it('does not mark a superseded (aborted) action as an error', async () => {
+    const aborted = new DOMException('superseded', 'AbortError')
+    await expect(traceAction('print', {}, async () => Promise.reject(aborted))).rejects.toBe(aborted)
+    const [span] = tracing.exporter.getFinishedSpans()
+    expect(span?.status.code).not.toBe(SpanStatusCode.ERROR)
+    expect(span?.attributes['scadbuddy.failure_class']).toBeUndefined()
+  })
+
   it('gives the chat turn a traceparent of a span of its own', () => {
     const traceparent = messageTraceparent()
     expect(traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
