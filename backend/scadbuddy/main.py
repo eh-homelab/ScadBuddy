@@ -21,6 +21,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.operations import bambuddy_kinds
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -600,6 +601,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     state = build_state(app_settings)
+    # The Bambuddy writes run as operations (#1053) on this process's `bambuddy` worker.
+    state.operations.kinds.update(bambuddy_kinds(state))
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)

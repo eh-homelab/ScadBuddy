@@ -16,6 +16,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
@@ -145,6 +146,21 @@ async def run_operation(
         )
     assert answer.operation is not None  # the Update answers one or the other
     return _answer(answer.operation, response, repeated=answer.repeated)
+
+
+def operation_answer[M: BaseModel](
+    result: dict[str, Any] | Operation, model: type[M]
+) -> M | JSONResponse:
+    """The route's own body, or 202 with the operation to follow."""
+    if isinstance(result, Operation):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
+    return model.model_validate(result)
+
+
+#: What a route that runs an operation documents beside its own answer.
+OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
+    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"}
+}
 
 
 @router.get("/{operation_id}", responses={404: {"description": "No such operation"}})
