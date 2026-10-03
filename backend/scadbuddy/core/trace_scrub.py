@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.trace import Status
+from opentelemetry.trace import Link, Status
 
 if TYPE_CHECKING:
     # tracing imports this module at run time; the alias is needed only by mypy.
@@ -113,15 +113,17 @@ def frames_only(stacktrace: str) -> str:
 
 
 def _scrub_event(event: Event) -> Event:
-    if event.name != "exception" or not event.attributes:
-        return event
-    attributes = {
-        key: value for key, value in event.attributes.items() if key != "exception.message"
-    }
-    stacktrace = attributes.get("exception.stacktrace")
-    if isinstance(stacktrace, str):
-        attributes["exception.stacktrace"] = frames_only(stacktrace)
+    attributes = _scrub_attributes(event.attributes)
+    if event.name == "exception":
+        attributes.pop("exception.message", None)
+        stacktrace = attributes.get("exception.stacktrace")
+        if isinstance(stacktrace, str):
+            attributes["exception.stacktrace"] = frames_only(stacktrace)
     return Event(event.name, attributes, event.timestamp)
+
+
+def _scrub_link(link: Link) -> Link:
+    return Link(link.context, _scrub_attributes(link.attributes))
 
 
 def _exception_type(events: Sequence[Event]) -> str | None:
@@ -156,7 +158,7 @@ def scrub(span: ReadableSpan) -> ReadableSpan:
         resource=span.resource,
         attributes=_scrub_attributes(span.attributes),
         events=events,
-        links=span.links,
+        links=[_scrub_link(link) for link in span.links],
         kind=span.kind,
         status=status,
         start_time=span.start_time,
