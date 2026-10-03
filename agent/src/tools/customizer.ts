@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
-import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { page, PAGED, pageInput } from './pagination.js'
@@ -222,11 +222,10 @@ export const customizerTools: Tool[] = [
       } catch (err) {
         // The render is done; only the save failed. Still the job's summary, so the
         // job can be saved again with save_output and is recorded as made (#931).
-        // Only ScadBuddy's own summary (it names the HTTP status): the backend's
-        // detail is upstream text, and this result is enveloped under
-        // render_model's source.
+        // The backend's reason is upstream text: wrapped under the error-detail
+        // source (toolErrorText), as a thrown ToolError's would be.
         if (!(err instanceof ToolError)) throw err
-        return { ...json({ ...summary, output: null, output_error: err.summary }), isError: true }
+        return { ...json({ ...summary, output: null, output_error: toolErrorText(err, 'render_model') }), isError: true }
       }
       return json({ ...summary, output })
     },

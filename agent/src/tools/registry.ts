@@ -57,7 +57,7 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
-  /** Where a session's successful calls are reported, for what it touched (sessions/touched.ts, #931). */
+  /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
 }
 

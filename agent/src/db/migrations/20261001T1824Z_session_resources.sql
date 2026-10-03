@@ -1,14 +1,19 @@
 -- #931 (agent sessions: record and show what a session touched): one row per
 -- resource a session's tool call created, changed or deleted. Written inline
--- by the harness projection from each successful call's input and result
--- (src/sessions/touched.ts); read by GET /api/v1/ai/sessions/:id/resources.
+-- by src/tools/registry.ts runToolWithOutcome from each call's input and
+-- result (src/sessions/touched.ts: successful calls, and the failed calls of
+-- the few tools whose error still names what they made); read by
+-- GET /api/v1/ai/sessions/:id/resources.
 --
 -- `resource_type` 'unclassified' is a write with no extractor: `resource_id`
 -- is NULL and `tool` names the call, so the gap stays visible. `model_slug`
 -- is the model the resource belongs to (a model's own slug for a model);
 -- `before_id`/`after_id` are what it was and became where that has an id (a
--- revision's parent and new commit). A `print` is always a Bambuddy queue item
--- id, whichever tool queued it; a `print_run` is ScadBuddy's own run id.
+-- revision's new commit, and its parent only where the call named one). A
+-- `print` is always a Bambuddy queue item id, whichever tool queued it; a
+-- `print_run` is ScadBuddy's own run id. Prints, print runs and deleted
+-- outputs carry no `model_slug` (the call does not name the model), so a
+-- lookup by model misses them.
 CREATE TABLE ai_session_resources (
   id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   session_id     uuid NOT NULL REFERENCES ai_sessions (id) ON DELETE CASCADE,

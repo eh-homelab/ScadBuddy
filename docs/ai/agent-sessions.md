@@ -191,8 +191,8 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 Every ScadBuddy tool call a session makes, once it
 succeeds, is mapped to the resources it created, changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
-extractor reads the call's parsed input and its result: models, revisions (with the
-parent and new commit), presets, assets, render jobs, outputs, print runs and prints (a `print` is always a Bambuddy queue item id, whichever tool queued it). A `write` or
+extractor reads the call's parsed input and its result: models, revisions (the new
+commit, and its parent when the call names one, as `apply_patch`'s `base` does), presets, assets, render jobs, outputs, print runs and prints (a `print` is always a Bambuddy queue item id, whichever tool queued it). A `write` or
 `outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
 gap stays visible; a `read` tool records nothing. It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a

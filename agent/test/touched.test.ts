@@ -10,7 +10,7 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { z } from 'zod'
-import { defineTool, json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
+import { defineTool, ERROR_DETAIL_SOURCE, json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // What a session touched (#931, src/sessions/touched.ts): the per-tool
@@ -56,9 +56,25 @@ describe('extractors', () => {
     ])
   })
 
-  it('takes a restored revision as the parent of the restore', () => {
+  it('never takes the restored revision as the parent of the restore', () => {
+    // `commit` is what was restored FROM; the new commit's parent is not in the call.
     expect(touches('restore_version', { slug: 'box', commit: C1 }, { slug: 'box', version: C2 })).toEqual([
-      { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 },
+      { type: 'revision', id: C2, action: 'created', model: 'box', before: null, after: C2 },
+    ])
+  })
+
+  it('leaves the parent null where the call names none', () => {
+    for (const name of ['write_source_file', 'delete_source_file', 'set_readme', 'set_model_thumbnail']) {
+      expect(touches(name, { slug: 'box' }, { slug: 'box', version: C2 })[0]).toMatchObject({ type: 'revision', before: null })
+    }
+  })
+
+  it('records a revision tool with no new commit in its answer as a model change, never its slug as a revision', () => {
+    expect(touches('update_source', { slug: 'box', base: C1 }, { slug: 'box' })).toEqual([
+      { type: 'model', id: 'box', action: 'modified', model: 'box' },
+    ])
+    expect(touchesOf({ name: 'set_readme', risk: 'write' }, { slug: 'box' }, { content: [{ type: 'text', text: 'not json' }] })).toEqual([
+      { type: 'model', id: 'box', action: 'modified', model: 'box' },
     ])
   })
 
@@ -270,8 +286,9 @@ describe('the harness projection', () => {
     expect(answer.isError).toBe(true)
     const answered = resultJson(answer as never) as { output_error: string }
     expect(answered).toMatchObject({ job_id: 'j9', output: null, output_error: expect.stringContaining('HTTP 507') })
-    // The backend's detail is upstream text: not relayed under render_model's own source.
-    expect(answered.output_error).not.toContain('disk full')
+    // The model still sees why, the backend's detail wrapped as untrusted under the error-detail source.
+    expect(answered.output_error).toContain('disk full')
+    expect(answered.output_error).toContain(ERROR_DETAIL_SOURCE)
     expect(seen).toHaveLength(1)
     expect(seen[0]!.ok).toBe(false)
     expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([
@@ -291,5 +308,28 @@ describe('the harness projection', () => {
     })
     expect(run.outcome).toBe('ok')
     expect(resultJson(run.result)).toEqual({ slug: 'box', version: C2 })
+  })
+
+  it('records nothing for a failed call outside RECORDED_WHEN_FAILED, or a render that never started', async () => {
+    backend.use(
+      http.put(`${BACKEND}/api/v1/models/box/source`, () => HttpResponse.json({ detail: 'nope' }, { status: 422 })),
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json({ groups: [], parameters: [] })),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ detail: 'queue full' }, { status: 503 })),
+    )
+    const rows: unknown[] = []
+    const ctx = {
+      ...services({
+        // As SessionResources does: what touchesOf yields is what is stored.
+        touched: { record: async (c: TouchedCall) => void rows.push(...touchesOf(c.tool, c.input, c.result, c.ok ?? true)) },
+      }),
+      principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+      progress: async () => {},
+      signal: new AbortController().signal,
+      session: 'sess-6',
+    }
+    const find = (name: string) => ALL_TOOLS.find((t) => t.name === name)!
+    expect((await runToolWithOutcome(find('update_source'), { slug: 'box', source: '' }, ctx)).outcome).toBe('error')
+    expect((await runToolWithOutcome(find('render_model'), { slug: 'box' }, ctx)).outcome).toBe('error')
+    expect(rows).toEqual([])
   })
 })

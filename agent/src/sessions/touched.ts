@@ -63,12 +63,19 @@ function field(value: unknown, key: string): unknown {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
 }
 
-/** A call that made a revision of `slug`: the ModelRecord it answers names the new commit. */
+/**
+ * A call that made a revision of `slug`: the ModelRecord it answers names the
+ * new commit. `before` is the parent only where the call names it (`base`,
+ * which apply_patch requires and update_source takes); the other revision
+ * tools leave it null. With no new commit in the answer the model is recorded
+ * as changed, never its slug as a revision id.
+ */
 function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   const slug = str(field(result, 'slug')) ?? str(input.slug)
   const after = str(field(result, 'version'))
   if (!slug) return []
-  return [{ type: 'revision', id: after ?? slug, action: 'created', model: slug, before: str(input.base), after }]
+  if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
+  return [{ type: 'revision', id: after, action: 'created', model: slug, before: str(input.base), after }]
 }
 
 /** A model the call made: the ModelRecord's slug and version. */
@@ -104,8 +111,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   apply_patch: revision,
   write_source_file: revision,
   delete_source_file: revision,
-  restore_version: (input, result) =>
-    revision(input, result).map((t) => ({ ...t, before: t.before ?? str(input.commit) })),
+  // `commit` is the revision restored FROM, not the new commit's parent, so it is not `before`.
+  restore_version: revision,
   // A merge is a revision (its answer wraps the ModelRecord); dismiss and detach change the model.
   update_from_upstream: (input, result) => {
     if (input.action === 'merge') return revision(input, field(result, 'model'))
@@ -218,7 +225,11 @@ export type TouchedCall = {
   ok?: boolean
 }
 
-/** Where the harness projection reports a session's successful calls (ToolServices.touched). Never throws. */
+/**
+ * Where runToolWithOutcome reports a session's calls that ran (ToolServices.touched): the
+ * successful ones, and the failed ones with `ok` false, which record nothing unless
+ * their tool is in RECORDED_WHEN_FAILED. Never throws.
+ */
 export interface TouchedSink {
   record(call: TouchedCall): Promise<void>
 }
