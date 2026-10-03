@@ -56,6 +56,7 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
         operations=SimpleNamespace(store=None, kinds={}),
         print_progress=None,
         print_watcher=None,
+        components=SimpleNamespace(get=lambda key: None),
     )
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
