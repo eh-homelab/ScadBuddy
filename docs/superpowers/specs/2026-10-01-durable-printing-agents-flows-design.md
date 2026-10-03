@@ -689,10 +689,13 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   `createHarnessServer` sets it for a classic session (`agent/src/tools/harness.ts`).
   Revision commits take their session trailer from it (#252), and the record of what a
   session touched (#931) is written from it, so an activity without it attributes nothing.
-- **A build step** exports `ALL_TOOLS` as `[{name, description, input_schema, tier}]`
-  JSON, generated like `gen:api`. The Python worker declares each one as
+- **A build step** exports `ALL_TOOLS` as `[{name, description, input_schema, tier,
+  hitl}]` JSON, generated like `gen:api`. `hitl` is the tool's HITL kind (§6.6):
+  `approval` for every outward tool, `answer` for `ask_user` and `wait_for_user`, and
+  absent otherwise. The Python worker declares each one as
   `activity_as_tool(activity.defn(name=<name>)(_remote), description=…, input_schema=…,
-  needs_approval=(tier == "outward"), task_queue="agent-tools")`. `_remote` is never run:
+  needs_approval=(hitl is not None), task_queue="agent-tools")`, so an `answer` tool
+  parks at the gate like an outward one. `_remote` is never run:
   the plugin needs an `@activity.defn` callable to name the activity (§3.2), and the
   TypeScript worker serves that name.
 - **`browser_*` tools** need a paired tab. With none, they fail at once with that
@@ -948,7 +951,7 @@ happens, and there is no separate request system.
       periodic sweep, the one that runs `expireDue()` (`approvals/service.ts:100`),
       also looks at `ai_pending_input` rows more than 10 minutes past `expires_at`.
       For each one it first asks Temporal (`DescribeWorkflowExecution` on the row's
-      run id). Only a run that is closed or not found is an orphan. A row whose run is
+      `workflow_id` and `workflow_run_id` columns). Only a run that is closed or not found is an orphan. A row whose run is
       still open is left alone, because it is a live entry whose `resolve_input` is
       still retrying (the worker or Postgres is down).
     - Both writers remove the row through one guarded `DELETE … WHERE request_id = $1
@@ -957,8 +960,10 @@ happens, and there is no separate request system.
     - A Reset starts a new run. The pre-Reset run's open entry is an orphan for the
       sweep, and the replayed park opens a new entry under the new run id. `open_input`
       is still an upsert on `request_id`, so a retried activity adds no second row.
-  - `ai_pending_input(request_id primary key, session_id, kind, tool, summary,
-    input_hash, prompt, requested_by, responders, created_at, expires_at)` and
+  - `ai_pending_input(request_id primary key, session_id, workflow_id, workflow_run_id,
+    kind, tool, summary, input_hash, prompt, requested_by, responders, created_at,
+    expires_at)`, where the workflow pair is what `workflow_runs` records too, and the
+    sweep reads it; nothing parses `request_id`, and
     `ai_input_responses(request_id primary key, session_id, kind, outcome, response
     jsonb, responder, created_at)` are one new agent migration in phase 5. The `agent-durable`
     role writes both (§6.3a).
@@ -1096,25 +1101,32 @@ happens, and there is no separate request system.
   - then OS notifications and webhooks as #815 adds them.
 - The trigger in a durable session is `open_input`'s `input.requested` event, not the
   plugin's `approval_needed` stream event, so a notification and the projection come
-  from one write. The subscriber (§6.2) **drops** `approval_needed`, so that its
-  translation into `approval.required` comes only from `input.requested`. One parked
-  call gives exactly one card; §8 asserts it. In a classic one it is the gate's insert. Both modes emit one
+  from one write. In a classic one it is the gate's insert. Both modes emit one
   `input.requested` and one `input.resolved` event to the bus, with the entry.
 - The panel's cards keep their events. `approval.required` (`approvals/service.ts:120`)
   and PR #998's `question.asked` / `question.resolved` are still emitted, beside
   `input.requested` / `input.resolved`, as the approval routes stay beside `respond`.
-  A durable session emits them too: its subscriber (§6.2) maps `input.requested` for an
-  `approval` to `approval.required`, and for a question to `question.asked`. Moving
-  the cards onto the `input.*` events is a later cleanup, not phase 5's. The panel's existing cards (`approval.required`; `question.asked` in
-  PR #998) are what renders them.
+  - In a durable session, **`open_input` and `resolve_input` write them**, in the same
+    transaction as `input.*`: `approval.required` for an `approval`, `question.asked` for
+    a question, and the matching resolution on the way out. The `follow_agent`
+    subscriber (§6.2) reads only the plugin's stream, never `ai_session_events`, so it
+    cannot be the one to translate `input.*`.
+  - The subscriber **drops** the plugin's `approval_needed`. So one parked call gives
+    exactly one card; §8 asserts it.
+  - Moving the cards onto the `input.*` events is a later cleanup, not phase 5's.
 - #815's throttling (one open request per session per reason, a per-user rate limit)
   applies to attention requests, which an agent creates at will. Approvals and questions
   are already bounded by the one call parked at a time.
 - `tab_disconnected` (#815 §2): the failing `browser_*` call returns its error
   (`bridge/hub.ts:69`) as today. The agent then calls `wait_for_user(reason:
   "tab_disconnected")`, which is the entry. Re-pairing the tab resolves it as
-  `reconnected`. In a durable session `browser_*` tools fail at once without a tab
-  (§6.3), so the same path applies.
+  `reconnected`, a classic-only resolution: the bridge's pairing path resolves the
+  `ai_*` row as the system. A durable session has no pairing hook into its workflow:
+  `browser_*` tools fail at once without a tab (§6.3), and nothing but `respond` and the
+  timer resolves its entry. So there, `tab_disconnected` is answered by the person
+  (`respond`, "I'm back") or times out by #815's rule. Adding a re-pair resolution is a
+  later change, through the `respond` route with a `system:repair` responder that the
+  attention policy allows.
 
 #### Classic sessions
 
