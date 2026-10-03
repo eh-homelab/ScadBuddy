@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import suppress
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -64,6 +66,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
+    COMMAND_ANSWER_DEADLINE,
+    CONNECT_MARGIN_SECONDS,
+    DESCRIBE_SECONDS,
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
     CommandStillAcceptingError,
@@ -250,6 +255,12 @@ async def post_run(
 
 #: How long a request waits for an execution past its repeat window to close.
 CLOSING_WAIT = 5.0
+#: All of one accept: a start's deadline, its connect margin and the describe that
+#: tells a late Update from an unreachable Temporal. Under Envoy's 15 s, so a repeat
+#: that must start again never holds the request past it (review #1061).
+ACCEPT_BUDGET = COMMAND_ANSWER_DEADLINE.total_seconds() + CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
+#: The least deadline a second start is given; below it the request is still accepting.
+MIN_RESTART_DEADLINE = 1.0
 
 
 async def accept_run(
@@ -288,7 +299,9 @@ async def accept_run(
     )
     workflow_id = f"print-{key}"
 
-    async def start() -> AcceptAnswer:
+    began = time.monotonic()
+
+    async def start(deadline: timedelta = COMMAND_ANSWER_DEADLINE) -> AcceptAnswer:
         return await start_command(
             runs.client,
             PRINT_RUN_WORKFLOW,
@@ -302,6 +315,7 @@ async def accept_run(
                 if has_request_id
                 else WorkflowIDReusePolicy.ALLOW_DUPLICATE
             ),
+            deadline=deadline,
         )
 
     try:
@@ -316,11 +330,18 @@ async def accept_run(
         if ended:
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
+            margin = CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
+            left = ACCEPT_BUDGET - (time.monotonic() - began) - margin
             with suppress(Exception):
                 await asyncio.wait_for(
-                    runs.client.get_workflow_handle(workflow_id).result(), CLOSING_WAIT
+                    runs.client.get_workflow_handle(workflow_id).result(),
+                    max(0.0, min(CLOSING_WAIT, left - MIN_RESTART_DEADLINE)),
                 )
-            answer = await start()
+            left = ACCEPT_BUDGET - (time.monotonic() - began) - margin
+            if left < MIN_RESTART_DEADLINE:
+                # The client sends it again, and that request starts the new run.
+                raise CommandStillAcceptingError(workflow_id)
+            answer = await start(timedelta(seconds=left))
     except AlreadyClosedError:
         # The press's execution closed after recording its run (§4.2): that run.
         closed = await runs.store.find(key, has_request_id=True)

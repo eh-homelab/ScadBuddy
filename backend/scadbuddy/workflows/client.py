@@ -9,11 +9,13 @@ from temporalio.api.workflowservice.v1 import (
     DescribeWorkerDeploymentRequest,
     SetWorkerDeploymentCurrentVersionRequest,
 )
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import VersioningBehavior
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.workflows.activities import RenderActivities
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
@@ -145,3 +147,30 @@ __all__ = [
     "pydantic_data_converter",
     "render_worker",
 ]
+
+
+#: A run younger than this is left alone: its execution may not have been described yet.
+LOST_RUN_GRACE = timedelta(minutes=1)
+
+
+async def reconcile_lost_runs(
+    client: Client, store: PrintRunStore, *, older_than: timedelta = LOST_RUN_GRACE
+) -> int:
+    """End each ``running`` print run whose execution has closed or is gone (review
+    #1061): terminated or reset in the Temporal UI, it never runs ``print_fail``. One
+    still running is left to end its row itself. Returns how many it ended."""
+    ended = 0
+    for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
+        try:
+            described = await client.get_workflow_handle(
+                workflow_id, run_id=workflow_run_id
+            ).describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+        else:
+            if described.status == WorkflowExecutionStatus.RUNNING:
+                continue
+        if (await store.fail_lost(run_id)).status == "failed":
+            ended += 1
+    return ended
