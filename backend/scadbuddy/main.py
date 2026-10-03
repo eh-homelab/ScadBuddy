@@ -8,9 +8,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime
 from functools import partial
-from typing import Any
+from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 
 import scadbuddy.api
@@ -28,6 +29,7 @@ from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
@@ -45,6 +47,9 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import connect
 
 API_PREFIX = "/api/v1"
+
+#: Never traced (spec §6): set in code so no deployment can drop it.
+EXCLUDED_URLS: Final = "/healthz,/metrics,/telemetry/v1/traces"
 
 logger = logging.getLogger(__name__)
 
@@ -525,6 +530,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings_override: Settings | None = None) -> FastAPI:
     app_settings = settings_override or Settings()
     configure_logging(app_settings.log_level)
+    configure_tracing(
+        "scadbuddy-api",
+        version=app_settings.version,
+        revision=app_settings.revision,
+        inprocess_worker=app_settings.temporal_worker_inprocess,
+    )
 
     app = FastAPI(
         title="ScadBuddy",
@@ -578,4 +589,6 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         app.mount("/", SPAStaticFiles(frontend), name="frontend")
     else:
         logger.info("no frontend bundle found; serving the API only")
+    # Outermost, so the server span covers every middleware, the body gate included.
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_URLS)
     return app

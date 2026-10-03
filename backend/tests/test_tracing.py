@@ -127,7 +127,6 @@ def test_failure_class_names_the_problem_or_the_class() -> None:
     assert tracing.failure_class(ValueError("x")) == "ValueError"
 
 
-@pytest.mark.skip(reason="needs Task 3's spans fixture")
 def test_span_records_the_failure_class_and_reraises(spans: InMemorySpanExporter) -> None:
     # `spans` is the tests' global provider (tests/conftest.py, Task 3), which
     # `tracing.span` uses.
