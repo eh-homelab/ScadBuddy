@@ -6,9 +6,10 @@ import {
   type ReadableSpan,
 } from '@opentelemetry/sdk-trace-web'
 import { HttpResponse, delay, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { MAX_REQUEST_BYTES, RELAY_PATH, RelayExporter } from './relayExporter'
+import { MAX_REQUEST_BYTES, MAX_REQUEST_SPANS, RELAY_PATH, REQUEST_TIMEOUT_MS, RelayExporter } from './relayExporter'
 
 /** `count` finished spans, each carrying `padding` characters in one attribute. */
 function spans(count: number, padding = 0): ReadableSpan[] {
@@ -61,6 +62,51 @@ function acceptingRelay(wait = 0): Seen {
 }
 
 describe('RelayExporter', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('times out a request the relay never answers, and still sends the next batch', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    server.use(
+      http.post(RELAY_PATH, async () => {
+        calls += 1
+        if (calls === 1) await new Promise(() => {})
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const exporter = new RelayExporter()
+    const first = exportOnce(exporter, spans(2))
+    const second = exportOnce(exporter, spans(2))
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1)
+    expect((await first).code).toBe(ExportResultCode.FAILED)
+    await vi.advanceTimersByTimeAsync(1)
+    expect((await second).code).toBe(ExportResultCode.SUCCESS)
+    expect(calls).toBe(2)
+  })
+
+  it('reports a serializer that throws as failed, and sends the next batch', async () => {
+    const seen = acceptingRelay()
+    vi.spyOn(JsonTraceSerializer, 'serializeRequest').mockImplementationOnce(() => {
+      throw new Error('boom')
+    })
+    const exporter = new RelayExporter()
+    expect((await exportOnce(exporter, spans(2))).code).toBe(ExportResultCode.FAILED)
+    expect((await exportOnce(exporter, spans(2))).code).toBe(ExportResultCode.SUCCESS)
+    expect(seen.bodies).toHaveLength(1)
+  })
+
+  it('splits a batch over 512 spans so no request carries more', async () => {
+    const seen = acceptingRelay()
+    const batch = spans(MAX_REQUEST_SPANS + 8)
+    expect((await exportOnce(new RelayExporter(), batch)).code).toBe(ExportResultCode.SUCCESS)
+    expect(seen.bodies.length).toBeGreaterThan(1)
+    for (const body of seen.bodies) expect(body.spanNames.length).toBeLessThanOrEqual(MAX_REQUEST_SPANS)
+    expect(seen.bodies.flatMap((b) => b.spanNames)).toEqual(batch.map((s) => s.name))
+  })
+
   it('posts a batch as OTLP/JSON with keepalive, and reports success on 204', async () => {
     const seen = acceptingRelay()
     const result = await exportOnce(new RelayExporter(), spans(3))
