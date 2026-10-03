@@ -34,7 +34,7 @@ let stop: (() => Promise<void>) | null = null
  * `ScrubbingSpanExporter` → `RelayExporter`; W3C trace context only, no baggage (§4);
  * fetch instrumentation that injects `traceparent` only into same-origin requests
  * (never Bambuddy or Google Fonts), and document-load instrumentation. Calling it
- * again does nothing. Returns the function that undoes it, for tests.
+ * again does nothing. Spans are flushed when the page is hidden. Returns the function that undoes it, for tests.
  */
 export function startTracing(): () => Promise<void> {
   if (stop) return stop
@@ -66,7 +66,16 @@ export function startTracing(): () => Promise<void> {
       new DocumentLoadInstrumentation(),
     ],
   })
+  // The SDK installs no listeners of its own; `keepalive` lets this flush outlive the page.
+  const flush = () => void provider.forceFlush().catch(() => undefined)
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') flush()
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('pagehide', flush)
   const undo = async () => {
+    document.removeEventListener('visibilitychange', onVisibility)
+    window.removeEventListener('pagehide', flush)
     unload()
     await provider.shutdown()
     trace.disable()
