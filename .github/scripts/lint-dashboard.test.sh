@@ -120,6 +120,24 @@ check 'a series the backend does not declare fails' \
   "$(run)"
 
 good
+edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "max(scadbuddy_render_queue_depth_total)"'
+check 'a _total suffix on a gauge fails' \
+  "1:$f: scadbuddy_render_queue_depth_total is not a metric backend/scadbuddy/core/metrics.py declares" \
+  "$(run)"
+
+good
+edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum(rate(scadbuddy_render_jobs_finished_bucket[5m]))"'
+check 'a _bucket suffix on a counter fails' \
+  "1:$f: scadbuddy_render_jobs_finished_bucket is not a metric backend/scadbuddy/core/metrics.py declares" \
+  "$(run)"
+
+good
+edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum(rate(scadbuddy_render_jobs_finished[5m]))"'
+check 'a counter read without _total fails' \
+  "1:$f: scadbuddy_render_jobs_finished is not a metric backend/scadbuddy/core/metrics.py declares" \
+  "$(run)"
+
+good
 p=$(tempo_panel 'render.render')
 edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=\\\"render.openscad\\\"}\""
 check 'a span name the backend never emits fails' \
@@ -147,6 +165,20 @@ check 'a span-name regex fails' \
   "1:$f: panel $p target A: match span names exactly (name=\"…\"), so this lint can check them" \
   "$(run)"
 
+good
+p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name!=\\\"render.renderr\\\"}\""
+check 'a span-name != fails' \
+  "1:$f: panel $p target A: match span names exactly (name=\"…\"), so this lint can check them" \
+  "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-api\\\" && name=\\\"render.render\\\"} >> {resource.service.name=\\\"scadbuddy-agent\\\" && name=\\\"agent.turn\\\"}\""
+check 'a TraceQL query naming two services fails' \
+  "1:$f: panel $p target A: a TraceQL query must name one resource.service.name, not scadbuddy-agent scadbuddy-api" \
+  "$(run)"
+
 # The agent's span names are checked once its tracing module exists (row 3).
 good
 mkdir -p "$r/agent/src"
@@ -160,8 +192,26 @@ check 'agent span names absent from agent/src fail once it traces' \
 good
 mkdir -p "$r/agent/src"
 : > "$r/agent/src/telemetry.ts"
-printf 'export const TURN = "agent.turn";\nexport const APPROVAL = "agent.approval";\n' > "$r/agent/src/spans.ts"
-check 'agent span names present in agent/src pass' '0:' "$(run)"
+printf 'const t = tracer()\nt.startSpan("agent.turn")\nwithSpan("agent.approval", {}, run)\n' > "$r/agent/src/spans.ts"
+check 'agent span names passed to a tracer call pass' '0:' "$(run)"
+
+good
+mkdir -p "$r/agent/src"
+: > "$r/agent/src/telemetry.ts"
+printf 'export const TURN_SPAN = "agent.turn"\nexport const APPROVAL_SPAN = "agent.approval"\n' > "$r/agent/src/spans.ts"
+check 'agent span-name constants pass' '0:' "$(run)"
+
+# A name that is only quoted somewhere else is not a span the agent emits.
+good
+mkdir -p "$r/agent/src/mocks" "$r/agent/test"
+: > "$r/agent/src/telemetry.ts"
+printf 'const x = ["agent.turn", "agent.approval"]\nlog("agent.turn")\n' > "$r/agent/src/log.ts"
+printf 'startSpan("agent.turn")\n' > "$r/agent/src/spans.test.ts"
+printf 'startSpan("agent.turn")\n' > "$r/agent/src/mocks/m.ts"
+printf 'startSpan("agent.approval")\n' > "$r/agent/test/t.ts"
+check 'agent span names only in tests, mocks or non-tracer literals fail' \
+  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
+  "$(run)"
 
 good
 out="$("$script" "$r" 2>&1)" || true

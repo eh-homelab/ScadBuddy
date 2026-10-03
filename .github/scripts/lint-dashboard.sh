@@ -15,17 +15,26 @@
 #     by one of those variables, never by a hard-coded uid; a TraceQL target
 #     uses ${DS_TEMPO}, and a PromQL target or a query variable
 #     ${DS_PROMETHEUS}, so a missing Tempo empties the trace panels only
-#   - every `scadbuddy_*` series a query reads is declared in
-#     backend/scadbuddy/core/metrics.py (a histogram's `_bucket`/`_sum`/`_count`
-#     and a counter's `_total` are prometheus_client's exposition suffixes)
-#   - every TraceQL query filters on a ScadBuddy `resource.service.name`
-#     (spec §3), and every span `name="…"` in it is one that service emits:
-#     for scadbuddy-api and scadbuddy-worker, `render.<RenderStage>` or a
-#     literal passed to `span(`/`detached_span(` in backend/scadbuddy; for
-#     scadbuddy-agent and scadbuddy-web, a quoted literal in agent/src or
-#     frontend/src, checked once that service's tracing module
-#     (agent/src/telemetry.ts, frontend/src/lib/tracing.ts) exists and noted
-#     as unchecked until then
+#   - every `scadbuddy_*` series a query reads is one backend/scadbuddy/core/
+#     metrics.py exposes, by its constructor: a Gauge as its name, a Counter as
+#     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
+#     `<name>_info` (prometheus_client's exposition names), so a `_total` on a
+#     gauge or a bare counter is an error, not an empty panel
+#   - every TraceQL query names exactly one ScadBuddy `resource.service.name`
+#     (spec §3; a query spanning services is rejected, so each span name is
+#     checked against the service that says it), and every span `name="…"` in
+#     it is one that service emits; `name=~`, `name!~` and `name!=` are
+#     rejected, since this lint cannot check them. Emitted means, for
+#     scadbuddy-api and scadbuddy-worker, `render.<RenderStage>` or a literal
+#     passed to `span(`/`detached_span(` in backend/scadbuddy; for
+#     scadbuddy-agent and scadbuddy-web, a literal passed to a tracer call
+#     (`startSpan(`, `startActiveSpan(`, `withSpan(`, `traceAction(`) or
+#     assigned to a `*SPAN*` constant (the agent's `TURN_SPAN = 'agent.turn'`)
+#     in a non-test source file under agent/src or frontend/src: files named
+#     `*.test.*` and the `test`, `mocks` and `e2e` directories are excluded,
+#     so a name that only a fixture or log line quotes does not count. That
+#     search runs once the service's tracing module (agent/src/telemetry.ts,
+#     frontend/src/lib/tracing.ts) exists, and is noted as unchecked until then
 #   - `kustomize build deploy/grafana` succeeds and yields exactly one
 #     ConfigMap, `scadbuddy-dashboard` in `cattle-dashboards`, labelled
 #     `grafana_dashboard: "1"`, whose `scadbuddy.json` is the file above
@@ -112,15 +121,27 @@ done < <(jq -r "$panels"'
     (.templating.list[]? | select(.type == "query") | ["variable \(.name)", "DS_PROMETHEUS", (.datasource.uid // "")]) ]
   | .[] | @tsv' "$dash")
 
-# Prometheus series against the registry in core/metrics.py.
-declared() { grep -qF "\"$1\"" "$metrics_py"; }
+# Prometheus series against the registry in core/metrics.py: the names each
+# declaration exposes, by its constructor.
+exposed=$(
+  tr '\n' ' ' < "$metrics_py" \
+    | grep -oE '(Counter|Gauge|Histogram|Summary|Info)\(\s*"scadbuddy_[a-z0-9_]+"' \
+    | sed -E 's/\(\s*/ /' \
+    | while read -r kind name; do
+      name=${name//\"/}
+      case "$kind" in
+        Gauge) echo "$name" ;;
+        Counter) echo "${name%_total}_total" ;;
+        Histogram) printf '%s\n' "${name}_bucket" "${name}_sum" "${name}_count" ;;
+        Summary) printf '%s\n' "${name}_sum" "${name}_count" ;;
+        Info) echo "${name%_info}_info" ;;
+      esac
+    done
+)
 while read -r series; do
   [ -n "$series" ] || continue
-  ok=false
-  for name in "$series" "${series%_bucket}" "${series%_sum}" "${series%_count}" "${series%_total}"; do
-    if declared "$name"; then ok=true; break; fi
-  done
-  $ok || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares"
+  grep -qxF "$series" <<< "$exposed" \
+    || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares"
 done < <(jq -r "$panels"' [panels | .targets[]? | .expr // empty] + [.templating.list[]? | .query | objects | .query // empty] | .[]' "$dash" \
   | grep -oE 'scadbuddy_[a-z0-9_]+' | sort -u)
 
@@ -133,6 +154,15 @@ backend_names=$(
       | grep -oE '(^|[^A-Za-z_])(detached_)?span\(\s*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"'
   } | sort -u
 )
+# The names a TS tree passes to a tracer, outside its tests and fixtures (the
+# header says which calls and files count).
+ts_names() { # source dir
+  find "$1" \( -name test -o -name mocks -o -name e2e \) -prune -o \
+    -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.*' -print0 \
+    | xargs -0 cat | tr '\n' ' ' \
+    | grep -oE "((startSpan|startActiveSpan|withSpan|traceAction)\(\s*|[A-Z_]*SPAN[A-Z_]*\s*(:\s*[A-Za-z]+\s*)?=\s*)['\"\`][^'\"\`]+['\"\`]" \
+    | grep -oE "['\"\`][^'\"\`]+['\"\`]\$" | tr -d "'\"\`" | sort -u
+}
 unchecked=""
 emitted() { # service name -> 0 when that service emits a span of that name
   local service=$1 name=$2 src probe
@@ -145,13 +175,17 @@ emitted() { # service name -> 0 when that service emits a span of that name
     [[ " $unchecked " == *" $service "* ]] || unchecked+=" $service"
     return 0
   fi
-  grep -rqF -e "\"$name\"" -e "'$name'" -e "\`$name\`" "$src"
+  grep -qxF "$name" <<< "$(ts_names "$src")"
 }
 
 while IFS=$'\t' read -r where query; do
-  mapfile -t services < <(grep -oE 'resource\.service\.name\s*=\s*"[^"]*"' <<< "$query" | sed -E 's/.*"(.*)"/\1/')
+  mapfile -t services < <(grep -oE 'resource\.service\.name\s*=\s*"[^"]*"' <<< "$query" | sed -E 's/.*"(.*)"/\1/' | sort -u)
   if [ "${#services[@]}" -eq 0 ]; then
     problem "$rel" "$where: a TraceQL query must filter on resource.service.name"
+    continue
+  fi
+  if [ "${#services[@]}" -gt 1 ]; then
+    problem "$rel" "$where: a TraceQL query must name one resource.service.name, not ${services[*]}"
     continue
   fi
   bad=false
@@ -162,7 +196,7 @@ while IFS=$'\t' read -r where query; do
     esac
   done
   $bad && continue
-  if grep -qE '(^|[^.A-Za-z_])name\s*(=~|!~)' <<< "$query"; then
+  if grep -qE '(^|[^.A-Za-z_])name\s*(=~|!~|!=)' <<< "$query"; then
     problem "$rel" "$where: match span names exactly (name=\"…\"), so this lint can check them"
   fi
   while read -r name; do
