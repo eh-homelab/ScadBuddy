@@ -49,7 +49,7 @@ backend this dashboard queries.
 
 ## Review Focus
 
-1. **No Tempo datasource yet** (clusters#1596 Phase 4 not done): the dashboard loads, every Prometheus panel and the `namespace` variable work, and only the trace tables are empty. Pinned by the lint rule "a PromQL target or query variable uses `${DS_PROMETHEUS}`, a TraceQL target `${DS_TEMPO}`" and its two cases in Task 1.
+1. **No Tempo datasource yet** (clusters#1596 Phase 4 not done): the dashboard loads, the `namespace` variable and the Prometheus panels that read API or queue series work, and the trace tables are empty. Prometheus panels that read worker series (stage time, outcomes, submit to settled) stay empty until clusters#1596 Phase 5 widens the worker ServiceMonitor's keep list. Pinned by the lint rule "a PromQL target or query variable uses `${DS_PROMETHEUS}`, a TraceQL target `${DS_TEMPO}`" and its two cases in Task 1.
 2. **Clusters adds the dashboard line after the last deploy** (with a placeholder SHA), then the same digest deploys again: the deploy PR moves only the ref, instead of answering "nothing to deploy". Test case 11 in Task 3.
 3. **The line is commented out** in clusters (someone disabling the dashboard by hand): the deploy stops with an error naming the line, not a silent skip that leaves the old build's dashboard. Test case "commented out" in Task 3.
 4. **The overlay file is gone or moved** in clusters: the deploy fails saying so, rather than reading a missing file as "not configured". Test case 19 in Task 3.

@@ -95,24 +95,12 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Wait for a worker",
-      "description": "Submit until a worker took the job: p50 and p95, and the oldest job still waiting.",
+      "title": "Oldest waiting job",
+      "description": "Age of the oldest job still waiting for a worker, read from the queue on every scrape (the max across pods).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(scadbuddy_render_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(scadbuddy_render_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -125,7 +113,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Submit to settled (p95) against the SLO",
-      "description": "What the user waits for, by outcome, against SCADBUDDY_RENDER_LATENCY_SLO.",
+      "description": "What the user waits for, by outcome, against SCADBUDDY_RENDER_LATENCY_SLO. Needs the worker's render metrics scraped (clusters#1596 Phase 5).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
@@ -148,7 +136,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Outcomes",
-      "description": "Render jobs leaving the queue, by outcome, and submits refused because the queue was full.",
+      "description": "Render jobs leaving the queue, by outcome, and submits refused because the queue was full. Needs the worker's render metrics scraped (clusters#1596 Phase 5).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 0, "y": 9, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
@@ -171,7 +159,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Stage time (p95)",
-      "description": "Time in each render stage; render.<stage> spans in the traces below carry the same names.",
+      "description": "Time in each render stage; render.<stage> spans in the traces below carry the same names. Needs the worker's render metrics scraped (clusters#1596 Phase 5).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 8, "y": 9, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
@@ -188,7 +176,7 @@
       "id": 7,
       "type": "table",
       "title": "Slowest renders",
-      "description": "render.render spans on the worker, slowest first. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "The 20 most recent render.render spans on the worker, sorted by duration (Tempo search returns recent traces, not the slowest). Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 16, "y": 9, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
@@ -208,7 +196,7 @@
       "id": 8,
       "type": "table",
       "title": "Failed renders",
-      "description": "render.render spans that ended in ERROR (the job settled failed); scadbuddy.failure_class names the cause. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "Worker spans, any render stage, that ended in ERROR (the job settled failed), with scadbuddy.failure_class naming the cause. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
       "targets": [
@@ -216,7 +204,7 @@
           "refId": "A",
           "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
           "queryType": "traceql",
-          "query": "{resource.service.name=\"scadbuddy-worker\" && name=\"render.render\" && status=error} | select(span.scadbuddy.failure_class)",
+          "query": "{resource.service.name=\"scadbuddy-worker\" && status=error} | select(span.scadbuddy.failure_class)",
           "limit": 20,
           "spss": 3,
           "tableType": "traces"
@@ -267,7 +255,7 @@
       "id": 12,
       "type": "table",
       "title": "Slowest API traces",
-      "description": "Server spans on the API, slowest first. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "The 20 most recent server spans on the API, sorted by duration (Tempo search returns recent traces, not the slowest). Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 16, "y": 26, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
@@ -295,7 +283,7 @@
       "id": 14,
       "type": "table",
       "title": "Turns and their tool calls",
-      "description": "Recent agent.turn spans; expand a row for its tool calls (the turn's child spans) and their count. A parked turn ends with scadbuddy.outcome=parked. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "Recent agent.turn spans; listed through their tool-call children, so a turn with no tool call does not appear; expand a row for its tool calls and their count. A parked turn ends with scadbuddy.outcome=parked. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 35, "w": 8, "h": 8 },
       "targets": [

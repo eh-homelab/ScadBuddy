@@ -794,7 +794,8 @@ The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
 directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
 in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
 rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
-overlay lists it as a remote resource pinned to a full commit SHA, and the deploy
+overlay will list it as a remote resource pinned to a full commit SHA, once
+clusters#1596 Phase 5 adds the line, and the deploy
 moves that pin with the image (above), so the dashboard shown is the one written
 for the build that is serving. The overlay must namespace its own resources with
 an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
