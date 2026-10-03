@@ -10,7 +10,7 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 // own. So the rule is enforced here, once, in front of the exporter, not at
 // each call site:
 //   - `exception.message` is dropped from every exception event;
-//   - `exception.stacktrace` keeps only its `at …` frame lines, after the
+//   - `exception.stacktrace` keeps only its V8 frame lines, after the
 //     message is cut out of the stack's head (a message can imitate a frame);
 //   - a non-empty status description becomes the exception's type, or `error`;
 //   - `url.query` and user agents are dropped; URLs lose their query.
@@ -25,6 +25,13 @@ const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url', 'http.target'
 
 const FRAME_NEXT = /^\n\s+at \S/
 
+// A V8 frame's location: `file:line:col` (an eval's nests another), `native`,
+// `<anonymous>`, or `index N` (`at async Promise.all (index 0)`).
+const LOCATION = String.raw`(?:.+:\d+:\d+|native|<anonymous>|index \d+)`
+// The whole line must be a frame, `at <fn> (<location>)` or `at <location>`, not
+// merely start with `at `: a message line such as `at least 3 items` is dropped.
+const FRAME = new RegExp(String.raw`^at (?:.+ \(${LOCATION}\)|[^()]+:\d+:\d+|native|<anonymous>)$`)
+
 /** `stacktrace` with `message` cut out of its head only: V8 writes `<name>: <message>` (or the bare message) before the first frame, and a global cut would mangle frames when the message is short. */
 function withoutHeadMessage(stacktrace: string, message: string): string {
   for (let i = stacktrace.indexOf(message); i !== -1; i = stacktrace.indexOf(message, i + 1)) {
@@ -35,13 +42,13 @@ function withoutHeadMessage(stacktrace: string, message: string): string {
   return stacktrace
 }
 
-/** The `at …` lines of a Node stack, with the head's `message` cut out first; nothing else. */
+/** The V8 frame lines of a Node stack, with the head's `message` cut out first; nothing else. */
 export function framesOnly(stacktrace: string, message?: string): string {
   const text = message ? withoutHeadMessage(stacktrace, message) : stacktrace
   return text
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => /^at \S/.test(line))
+    .filter((line) => FRAME.test(line))
     .join('\n')
 }
 
