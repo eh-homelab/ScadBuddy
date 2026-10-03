@@ -74,7 +74,7 @@ def _frame(path: str, line: str, name: str) -> str | None:
     if not os.path.isfile(path) or not linecache.getline(path, int(line)):
         return None
     if name in _ANONYMOUS or (
-        _NAME.match(name) and name.rsplit(".", 1)[-1] in _defined_names(path)
+        _NAME.match(name) and _defined_names(path).issuperset(name.split("."))
     ):
         return f'File "{path}", line {line}, in {name}'
     return None
@@ -104,7 +104,7 @@ def frames_only(stacktrace: str) -> str:
     block's exception line, and only when it names a file that exists. A message can
     also hold a traceback header of its own, so the frame's text is checked too: its
     function name must be ``<module>``, a lambda or comprehension, or a name the file
-    itself defines with ``def``/``class`` (a dotted name by its last segment). So
+    itself defines with ``def``/``class`` (a dotted name, every segment). So
     every exported frame is a real path, one of its line numbers, and an identifier
     taken from that file's own source, never message text. A pseudo-file
     (``<frozen …>`` naming a standard-library module, ``<string>``, ``<stdin>``) has no

@@ -204,16 +204,18 @@ def test_a_pseudo_file_frame_keeps_only_its_path_and_line() -> None:
     assert frames_only(text) == 'File "<frozen importlib._bootstrap>", line 7'
 
 
-def test_a_dotted_name_is_checked_by_its_last_segment() -> None:
+def test_a_dotted_name_is_checked_segment_by_segment() -> None:
     text = (
         "Traceback (most recent call last):\n"
-        f'  File "{__file__}", line 1, in Thing._exported\n'
+        f'  File "{__file__}", line 1, in _exported\n'
         f'  File "{__file__}", line 1, in _exported.{SENTINEL}\n'
+        f'  File "{__file__}", line 1, in LEAKEDTOKEN._exported\n'
         "ValueError: boom"
     )
     kept = frames_only(text)
     assert SENTINEL not in kept
-    assert kept == f'File "{__file__}", line 1, in Thing._exported'
+    assert "LEAKEDTOKEN" not in kept
+    assert kept == f'File "{__file__}", line 1, in _exported'
 
 
 def test_a_frozen_module_must_be_one() -> None:
