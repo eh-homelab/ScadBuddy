@@ -13,6 +13,10 @@ export const TRACING_HEADER = 'X-ScadBuddy-Tracing'
  * under it with room to spare.
  */
 export const MAX_REQUEST_BYTES = 48 * 1024
+/** The relay refuses a request of more spans than this with a 413 (`telemetry.payload.MAX_SPANS`). */
+export const MAX_REQUEST_SPANS = 512
+/** A request still unanswered after this is abandoned, so a hung relay cannot pin the queue. */
+export const REQUEST_TIMEOUT_MS = 10_000
 
 const SUCCESS: ExportResult = { code: ExportResultCode.SUCCESS }
 const decoder = new TextDecoder()
@@ -27,10 +31,11 @@ function failed(error: unknown): ExportResult {
  * relay's off signal is one.
  *
  * - A batch whose JSON is over `MAX_REQUEST_BYTES` is split in halves until each part
- *   fits; a single span still over it is dropped and counted in `droppedSpans`.
+ *   fits (and holds at most `MAX_REQUEST_SPANS` spans); a single span still over it is dropped and counted in `droppedSpans`.
  * - Requests go one at a time, across `export` calls too, so in-flight `keepalive`
  *   bytes stay under the browser's cap. `keepalive` lets a batch flushed as the page
- *   hides still go.
+ *   hides still go; a request queued behind one in flight may start after `pagehide`.
+ *   A request unanswered after `REQUEST_TIMEOUT_MS` is aborted and the batch failed.
  * - `X-ScadBuddy-Tracing: off` switches the exporter off for the rest of the page's
  *   life: every later batch is reported a success and never sent.
  * - Anything else that is not a 2xx (413, 429, 403, 503), or a `fetch` that rejects,
@@ -50,7 +55,7 @@ export class RelayExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    const sent = this.#tail.then(() => this.#send(spans))
+    const sent = this.#tail.then(() => this.#send(spans)).catch(failed)
     this.#tail = sent
     void sent.then(resultCallback)
   }
@@ -66,8 +71,16 @@ export class RelayExporter implements SpanExporter {
 
   async #send(spans: ReadableSpan[]): Promise<ExportResult> {
     if (this.#off) return SUCCESS
-    for (const body of this.#bodies(spans)) {
+    let bodies: string[]
+    try {
+      bodies = this.#bodies(spans)
+    } catch (error) {
+      return failed(error)
+    }
+    for (const body of bodies) {
       let response: Response
+      const abort = new AbortController()
+      const timer = setTimeout(() => abort.abort(new Error('the trace relay timed out')), REQUEST_TIMEOUT_MS)
       try {
         // Untraced: the relay's own request must not become a span to export.
         response = await context.with(suppressTracing(context.active()), () =>
@@ -76,10 +89,13 @@ export class RelayExporter implements SpanExporter {
             headers: { 'Content-Type': 'application/json' },
             body,
             keepalive: true,
+            signal: abort.signal,
           }),
         )
       } catch (error) {
         return failed(error)
+      } finally {
+        clearTimeout(timer)
       }
       if (response.headers.get(TRACING_HEADER) === 'off') {
         this.#off = true
@@ -96,7 +112,7 @@ export class RelayExporter implements SpanExporter {
     const visit = (part: ReadableSpan[]) => {
       if (part.length === 0) return
       const bytes = JsonTraceSerializer.serializeRequest(part)
-      if (bytes && bytes.byteLength <= MAX_REQUEST_BYTES) {
+      if (part.length <= MAX_REQUEST_SPANS && bytes && bytes.byteLength <= MAX_REQUEST_BYTES) {
         bodies.push(decoder.decode(bytes))
         return
       }
