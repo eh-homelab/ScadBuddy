@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
-import { ASK_USER_QUESTION, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -173,12 +173,12 @@ export class QuestionService {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
     }
     const answered = await this.atomically(sessionId, async (tx) => {
-      const [row] = await tx<{ turn_id: string; tool_use_id: string; created_at: Date }[]>`
+      const [row] = await tx<{ turn_id: string; tool: string; tool_use_id: string; created_at: Date }[]>`
         UPDATE ai_questions
         SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
             answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
         WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
-        RETURNING turn_id, tool_use_id, created_at`
+        RETURNING turn_id, tool, tool_use_id, created_at`
       return row
         ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
         : { value: undefined, events: [] }
@@ -195,9 +195,9 @@ export class QuestionService {
       turnId: answered.turn_id,
       toolUseId: answered.tool_use_id,
       tier: 'read',
-      inputHash: this.deps.audit.hash(ASK_USER_QUESTION, { answers }),
+      inputHash: this.deps.audit.hash(answered.tool, { answers }),
       outcome: 'ok',
-      detail: `question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+      detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
       startedAt: answered.created_at,
       finishedAt: new Date(),
     })
@@ -293,8 +293,8 @@ export class QuestionService {
         if (owner?.owner_kind !== 'browser') return { value: false, events: [] }
         const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
         await tx`
-          INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
-          VALUES (${id}, ${sessionId}, ${turnId}, ${request.toolUseId}, ${tx.json(questions)})`
+          INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
+          VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)})`
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
         // shown; each refreshStatus hands back to whichever is still pending).

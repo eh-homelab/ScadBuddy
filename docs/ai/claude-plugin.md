@@ -94,7 +94,10 @@ A subagent's calls go through the same permission checks as the session's own. O
 to run in the background runs inside the turn instead (#946).
 Claude Code refuses `AskUserQuestion` inside a subagent, so in a session the user is in
 the harness also serves `mcp__scadbuddy_questions__ask_user`, which asks the user through
-the same panel card (#940). The subagents' `tools` field lists that server too.
+the same panel card (#940). The subagents' `tools` field lists that server too. The entry
+is harness-only: an external install has no such server, and Claude Code ignores a listed
+server that is absent, as the harness does `mcp__plugin_scadbuddy_scadbuddy`
+(`claude plugin validate plugins/scadbuddy` passes on 2.1.283).
 [`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) runs all three
 against the bundled Claude Code.
 

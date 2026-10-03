@@ -81,6 +81,8 @@ const InputSchema = z.object({ questions: QuestionsSchema })
 
 /** One AskUserQuestion call waiting for the user. */
 export type QuestionRequest = {
+  /** The tool that asked: ASK_USER_QUESTION, or ASK_USER_TOOL from a subagent. */
+  tool: string
   questions: UserQuestion[]
   /** The tool_use block's id: the panel's `tool.call` id. */
   toolUseId: string
@@ -106,6 +108,7 @@ export function parseQuestions(input: unknown): { ok: true; questions: UserQuest
 /** Asks through the gate; anything but an answer is the message the model reads as the tool's error. */
 async function ask(
   gate: QuestionGate,
+  tool: string,
   input: unknown,
   toolUseId: string,
   signal: AbortSignal,
@@ -113,7 +116,7 @@ async function ask(
   const parsed = parseQuestions(input)
   if (!parsed.ok) return { answered: false, message: `The question was not asked: ${parsed.error}` }
   try {
-    const verdict = await gate({ questions: parsed.questions, toolUseId, signal })
+    const verdict = await gate({ tool, questions: parsed.questions, toolUseId, signal })
     return verdict.answered ? { ...verdict, questions: parsed.questions } : verdict
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
@@ -128,28 +131,59 @@ export async function askThroughGate(
   toolUseId: string,
   signal: AbortSignal,
 ): Promise<PermissionResult> {
-  const result = await ask(gate, input, toolUseId, signal)
+  const result = await ask(gate, ASK_USER_QUESTION, input, toolUseId, signal)
   if (!result.answered) return { behavior: 'deny', message: result.message }
   return { behavior: 'allow', updatedInput: { questions: result.questions, answers: result.answers } }
 }
 
 /**
- * The tool result Claude Code gives AskUserQuestion's answers (measured on
- * 2.1.283), so the model reads ask_user's the same way.
+ * ask_user's result: Claude Code's wording for AskUserQuestion's (measured on
+ * 2.1.283), with each question and answer JSON-quoted, so an answer the user
+ * typed with a quote in it cannot read as a second answer.
  */
 export function answersText(answers: Record<string, string>): string {
-  const pairs = Object.entries(answers).map(([q, a]) => `"${q}"="${a}"`)
+  const pairs = Object.entries(answers).map(([q, a]) => `${JSON.stringify(q)}=${JSON.stringify(a)}`)
   return `User has answered your questions: ${pairs.join(', ')}. You can now continue with the user's answers in mind.`
 }
 
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
+/**
+ * ask_user's call timeout. An MCP call is cut off at the server's `timeout`,
+ * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283;
+ * the cut-off aborts the call, and the gate withdraws its card). The idle
+ * timeout does not apply to `sdk` servers, and MCP auto-backgrounding is off
+ * in a non-interactive session. A question waits until it is answered or its
+ * turn ends, so the clamp: the turn's end is the only bound.
+ * Measured: 70 s and 130 s waits are answered, and a 2 s MCP_TOOL_TIMEOUT
+ * or a 2 s `timeout` on this server cuts the call off (so both are honoured
+ * for an `sdk` server).
+ */
+export const ASK_USER_TIMEOUT_MS = 2_147_483_647
+
 /** The parts of the MCP SDK's RequestHandlerExtra the handler reads. */
 const ExtraSchema = z.object({
   signal: z.instanceof(AbortSignal),
-  _meta: z.object({ [TOOL_USE_ID_META]: z.string().min(1) }).optional(),
+  _meta: z.object({ [TOOL_USE_ID_META]: z.string().min(1).optional() }).loose().optional(),
 })
+
+type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
+
+const failed = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true })
+
+/** ask_user's handler (exported for tests). */
+export async function askUserHandler(gate: QuestionGate, args: unknown, extra: unknown): Promise<ToolResult> {
+  const parsed = ExtraSchema.safeParse(extra)
+  if (!parsed.success) {
+    // A measured fact about Claude Code no longer holds: say which.
+    return failed(`The question was not asked: the call's context is not as expected (${z.prettifyError(parsed.error)}).`)
+  }
+  const toolUseId = parsed.data._meta?.[TOOL_USE_ID_META]
+  if (toolUseId === undefined) return failed('The question was not asked: the call has no tool_use id.')
+  const result = await ask(gate, ASK_USER_TOOL, args, toolUseId, parsed.data.signal)
+  return result.answered ? { content: [{ type: 'text', text: answersText(result.answers) }] } : failed(result.message)
+}
 
 /** ASK_USER_TOOL, on the run's question gate. */
 export function questionServer(gate: QuestionGate): McpSdkServerConfigWithInstance {
@@ -157,19 +191,9 @@ export function questionServer(gate: QuestionGate): McpSdkServerConfigWithInstan
     'ask_user',
     'Ask the user in the ScadBuddy panel one to four multiple-choice questions, and wait for the answers. ' +
       'Use it from a subagent, where AskUserQuestion is not available; it takes the same input. The user may ' +
-      'always type an answer of their own. For a draft to approve, give it as an option\'s Markdown `preview`.',
+      "always type an answer of their own. For a draft to approve, give it as an option's Markdown `preview`.",
     { questions: QuestionsSchema },
-    async (args, extra) => {
-      const parsed = ExtraSchema.safeParse(extra)
-      const toolUseId = parsed.success ? parsed.data._meta?.[TOOL_USE_ID_META] : undefined
-      if (!parsed.success || toolUseId === undefined) {
-        return { content: [{ type: 'text' as const, text: 'The question was not asked: the call has no tool_use id.' }], isError: true }
-      }
-      const result = await ask(gate, args, toolUseId, parsed.data.signal)
-      return result.answered
-        ? { content: [{ type: 'text' as const, text: answersText(result.answers) }] }
-        : { content: [{ type: 'text' as const, text: result.message }], isError: true }
-    },
+    (args, extra) => askUserHandler(gate, args, extra),
   )
-  return createSdkMcpServer({ name: QUESTION_SERVER, tools: [askUser] })
+  return { ...createSdkMcpServer({ name: QUESTION_SERVER, tools: [askUser] }), timeout: ASK_USER_TIMEOUT_MS }
 }

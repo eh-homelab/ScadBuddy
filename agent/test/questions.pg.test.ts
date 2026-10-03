@@ -2,7 +2,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
-import type { QuestionVerdict, UserQuestion } from '../src/harness/questions.js'
+import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { QuestionError, QuestionService } from '../src/questions/service.js'
 import { ChatConnection } from '../src/routes/chat.js'
@@ -57,17 +57,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await drop()
   })
 
-  /** A turn that asks QUESTIONS through its gate (when it has one), then ends. */
-  const asking = (run: HarnessRun): AsyncIterable<SDKMessage> => {
+  /** A turn that asks QUESTIONS through its gate (when it has one) with `tool`, then ends. */
+  const askingWith = (tool: string) => (run: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(run)
     return (async function* () {
       await Promise.resolve()
       if (run.questionGate) {
-        verdicts.push(await run.questionGate({ questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate({ tool, questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal }))
       }
       yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
     })()
   }
+  const asking = askingWith(ASK_USER_QUESTION)
 
   async function events(m: SessionManager, sessionId: string): Promise<ServerEvent[]> {
     return (await m.events.read(sessionId)).map((e) => e.event)
@@ -121,9 +122,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
 
   // #1075: the answer is in the AI audit log, tied to the tool call, as a
   // hash: an answer can be free text the user typed.
-  it("records the answer in the audit log: who answered, which call, and a hash, never the answer's text", async () => {
+  // Which tool asked tells the session's agent from a subagent.
+  it.each([ASK_USER_QUESTION, ASK_USER_TOOL])("records the answer to %s in the audit log: who answered, which call and tool, a hash, never the text", async (tool) => {
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingWith(tool), approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
     await m.questions.answer(browser, answer(session.id, id, ['Make it teal, like my car', 'Approve']))
@@ -143,13 +145,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
         turn_id: expect.any(String),
         tool_use_id: 'toolu_q1',
         tier: 'read',
-        input_hash: audit.hash('AskUserQuestion', { answers: ['Make it teal, like my car', 'Approve'] }),
+        input_hash: audit.hash(tool, { answers: ['Make it teal, like my car', 'Approve'] }),
         input_summary: null,
         outcome: 'ok',
-        detail: `question ${id}: 2 answers`,
+        detail: `${tool} question ${id}: 2 answers`,
       },
     ])
-    const [q] = await db.sql<{ turn_id: string }[]>`SELECT turn_id FROM ai_questions WHERE id = ${id}`
+    const [q] = await db.sql<{ turn_id: string; tool: string }[]>`SELECT turn_id, tool FROM ai_questions WHERE id = ${id}`
+    expect(q?.tool).toBe(tool)
     expect(rows[0]?.turn_id).toBe(q?.turn_id)
     expect(JSON.stringify(rows)).not.toContain('teal')
   })
@@ -201,7 +204,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        const asked = run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal })
+        const asked = run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
         await run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         verdicts.push(await asked)
@@ -234,7 +237,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        const asked = run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal })
+        const asked = run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
         const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         verdicts.push(await asked)
@@ -267,7 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
         const signal = new AbortController().signal
         const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal }))
         await approved
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -290,7 +293,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const parked = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal: new AbortController().signal }))
         yield* []
         throw new Error('Claude Code process aborted by user')
       })()
@@ -341,8 +344,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q1', signal }))
-        second = await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q2', signal })
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q1', signal }))
+        second = await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q2', signal })
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
@@ -370,7 +373,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const dropped = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: withdraw.signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal: withdraw.signal }))
         await goOn
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -424,7 +427,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const askingColliding = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: colliding, toolUseId: 'toolu_c', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: colliding, toolUseId: 'toolu_c', signal: new AbortController().signal }))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingColliding, approvalPollMs: 20 })
