@@ -1272,6 +1272,31 @@ describe('Bambuddy writes as operations (#1053)', () => {
   })
 })
 
+describe('library pins as operations (#1054)', () => {
+  const op = { id: 'op-7', kind: 'library_pin', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+
+  it.each([
+    ['pin_library', { slug: 'w', name: 'BOSL2' }, 'put', '/api/v1/models/w/libraries/BOSL2'],
+    ['pin_library_from_url', { slug: 'w', name: 'X', url: 'https://g.example/x.git', ref: 'v1' }, 'put', '/api/v1/models/w/libraries/X'],
+    ['repin_library_from_pinned_url', { slug: 'w', name: 'X' }, 'patch', '/api/v1/models/w/libraries/X'],
+    ['unpin_library', { slug: 'w', name: 'BOSL2' }, 'delete', '/api/v1/models/w/libraries/BOSL2'],
+    ['remove_library_checkout', { name: 'BOSL2' }, 'delete', '/api/v1/libraries/BOSL2'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)
