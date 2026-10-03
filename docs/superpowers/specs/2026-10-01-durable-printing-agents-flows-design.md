@@ -877,9 +877,13 @@ happens, and there is no separate request system.
   - `id` is the `request_id` that `respond` takes. It is opaque to clients: the row id
     for a classic entry (an `ai_approvals` or `ai_questions` row, whose `tool_use_id`
     is not unique, since cancelled, expired and re-asked rows are kept), and
-    `durable:<session id>:<tool_use_id>` for a durable session's, where the plugin runs
-    each `tool_use_id` once (§3.2), and `flow:<run id>:<call id>` for a flow run's, where
-    `<call id>` is the harness's id for the host call;
+    `durable:<session id>:<workflow run id>:<tool_use_id>` for a durable session's,
+    where the plugin runs each `tool_use_id` once per run (§3.2). The run id makes a
+    Reset's replayed park a new entry, never a collision with the pre-Reset outcome. A
+    parked call never spans a continue-as-new, which happens only between tool calls
+    (§3.2). The activity on `agent-tools` derives the same id from its activity info
+    (`tool-<tool_use_id>`, and the run id). A flow run's is
+    `flow:<run id>:<call id>`, where `<call id>` is the harness's id for the host call;
   - `kind` and `responders` come from the tool's HITL policy;
   - for an `approval`, the entry carries the scrubbed `summary` and the `input_hash`
     and **never the call's raw input**, as the approval reads already do
@@ -892,6 +896,11 @@ happens, and there is no separate request system.
   (§3.2), so a durable session has at most one entry. A flow run can hold several: its
   host calls may run in parallel (`asyncio.gather`, §3.2), and each parked one is an
   entry.
+- **Who answers a flow's entries.** A flow run has no session and no owner. Its
+  `wait_for_human` is answered by the browser user only, as every `answer` kind is. Its
+  outward `tool(...)` approvals follow the `approval` rule: the browser user, or a grant
+  holder that did not start the run (`workflow_runs` records the starting principal).
+  The shared vectors include both.
 - **Flow entries stay out of the assistant's reads.** They are listed and answered on
   the Workflows page only (§7.2, §7.3), through `ProjectWorkflow`'s own `pending_input`
   and `respond`. They get no `ai_pending_input` row, so `GET /api/v1/ai/pending-input`
@@ -905,13 +914,22 @@ happens, and there is no separate request system.
     `input.requested` to `ai_session_events` in one transaction, and starts the entry's
     timer.
   - `resolve_input`: every resolution, by `respond` or by the timer and of either kind,
-    runs it *before* `agent.decide`. In one transaction it writes the outcome to
+    runs it *before* `agent.decide`. In one transaction it takes the row with the
+    guarded `DELETE … RETURNING` described below (and, finding it gone, does nothing
+    but tell the plugin), and it writes the outcome to
     `ai_input_responses` (every kind: `approved`, `denied`, `expired`, `answered`,
     `cancelled`, `timed_out`), deletes the `ai_pending_input` row, appends
     `input.resolved`, and, for an `approval`, writes the `ai_audit` row that
     `approvals/service.ts` writes for a classic decision or expiry (`audit/log.ts:276`).
     So no resolution reaches the plugin without the projection, the event and the audit
     recording it, and a durable expiry is recorded as `expired` there.
+  - **The approved call's own audit row.** Today `ai_audit`'s `tool_call` row names its
+    approver by sub-selecting `ai_approvals` with the approval id, and only when that id
+    is a UUID (`audit/log.ts:270-289`). A durable approval has no `ai_approvals` row and
+    a non-UUID id, so that lookup finds nobody. For a durable call, the `agent-tools`
+    activity passes its `request_id`, and the audit insert copies `approved_by_*` from
+    `ai_input_responses` (`outcome = 'approved'`, its `responder`). §8 asserts that the
+    `tool_call` row of an approved durable call names its approver.
   - **Ending without a decision**, as classic `cancelPending` does
     (`approvals/service.ts:87-95`). An interrupt, a handoff and a new turn that
     supersedes the call each first send `DurableSession` a `cancel_input(reason)`
@@ -928,12 +946,17 @@ happens, and there is no separate request system.
       rows with its other rows (§6.5 step 3);
     - every entry has an `expires_at` of at most 86 400 s, so the agent service's
       periodic sweep, the one that runs `expireDue()` (`approvals/service.ts:100`),
-      also deletes `ai_pending_input` rows more than 10 minutes past `expires_at`,
-      writing `input.resolved` with outcome `cancelled` and reason `workflow gone`. A
-      live workflow resolves its own entry at `expires_at`, so the sweep only meets
-      orphans.
-    A Reset replays to before or after `open_input`. `open_input` is an upsert on
-    `request_id`, so a replayed park reuses the row rather than adding one.
+      also looks at `ai_pending_input` rows more than 10 minutes past `expires_at`.
+      For each one it first asks Temporal (`DescribeWorkflowExecution` on the row's
+      run id). Only a run that is closed or not found is an orphan. A row whose run is
+      still open is left alone, because it is a live entry whose `resolve_input` is
+      still retrying (the worker or Postgres is down).
+    - Both writers remove the row through one guarded `DELETE … WHERE request_id = $1
+      RETURNING`. Whoever deletes it writes the outcome, the event and the audit, and
+      the loser writes nothing. So a request never gets two `input.resolved` events.
+    - A Reset starts a new run. The pre-Reset run's open entry is an orphan for the
+      sweep, and the replayed park opens a new entry under the new run id. `open_input`
+      is still an upsert on `request_id`, so a retried activity adds no second row.
   - `ai_pending_input(request_id primary key, session_id, kind, tool, summary,
     input_hash, prompt, requested_by, responders, created_at, expires_at)` and
     `ai_input_responses(request_id primary key, session_id, kind, outcome, response
@@ -996,9 +1019,10 @@ happens, and there is no separate request system.
   plugin accepts any approver name (`_workflow.py:360`), so the guard is structural:
   `DurableSession` registers **no decision Signal**, and the only handlers that reach
   `agent.decide` are `respond`, `cancel_input` (which can only cancel) and the entry's
-  timer. A test in §8 asserts the workflow's complete handler set, read from the
-  running workflow rather than from our source, so a handler the plugin or harness
-  registers by default is caught too. Phase 5 checks whether the plugin registers any.
+  timer. A test in §8 reads the running workflow's handlers rather than our source. It
+  allows the plugin's own, such as the Workflow Streams poll Update that
+  `live_output=True` registers, by name, and fails on any other, so a handler the
+  plugin or harness adds later is caught too. Phase 5 checks whether the plugin registers any.
 - **Why an Update, not the cookbook's Signal.** A Signal cannot refuse. The plugin's
   `decide` logs an invalid decision and drops it, so the person who clicked would see
   nothing happen. An Update's validator rejects synchronously: the panel gets the reason
@@ -1072,7 +1096,9 @@ happens, and there is no separate request system.
   - then OS notifications and webhooks as #815 adds them.
 - The trigger in a durable session is `open_input`'s `input.requested` event, not the
   plugin's `approval_needed` stream event, so a notification and the projection come
-  from one write. In a classic one it is the gate's insert. Both modes emit one
+  from one write. The subscriber (§6.2) **drops** `approval_needed`, so that its
+  translation into `approval.required` comes only from `input.requested`. One parked
+  call gives exactly one card; §8 asserts it. In a classic one it is the gate's insert. Both modes emit one
   `input.requested` and one `input.resolved` event to the bus, with the entry.
 - The panel's cards keep their events. `approval.required` (`approvals/service.ts:120`)
   and PR #998's `question.asked` / `question.resolved` are still emitted, beside
@@ -1193,7 +1219,7 @@ happens, and there is no separate request system.
   - `workflow_definitions(id, name, version, script, created_by, created_at)`; versions
     are immutable.
   - `workflow_runs(id, definition_id, version, status, waiting_on jsonb, steps jsonb,
-    workflow_id, workflow_run_id, created_at, updated_at)`, written by the workflow's
+    workflow_id, workflow_run_id, started_by, created_at, updated_at)`, written by the workflow's
     activities.
 
   Creates follow §5.1: `POST /runs` is update-with-start, and the first activity
@@ -1288,13 +1314,21 @@ happens, and there is no separate request system.
     and an `approval` entry never carries the call's raw input;
   - an `answer` whose write activity fails returns to pending, can be answered again,
     and still times out;
-  - a running `DurableSession`'s registered Signal and Update handlers are exactly
-    `send_message`, `respond` and `cancel_input`, with no Signal, read from the
-    workflow, not from our source;
+  - from the running workflow's registered handlers (not our source): no handler other
+    than `respond`, `cancel_input` and the entry's timer reaches `agent.decide`. The
+    expected set is ours (`send_message`, `respond`, `cancel_input`) plus what the
+    plugin registers by default, such as the Workflow Streams poll Update that
+    `live_output=True` adds (§3.2, §6.2), each listed by name with why it cannot decide.
+    A new, unlisted handler fails the test;
   - interrupt, handoff and a superseding send each cancel a parked durable entry
     through `cancel_input`: the row is gone, `input.resolved` and the audit say
     `cancelled`, and an approval asked before a handoff cannot be approved after it;
-  - the sweep removes an `ai_pending_input` row whose workflow was terminated;
+  - the sweep removes an `ai_pending_input` row whose workflow was terminated, and
+    leaves one whose worker was down past `expires_at` + 10 minutes. When the worker
+    returns, that entry gets exactly one `input.resolved`;
+  - a Reset to before a resolution parks again under a new `request_id` and resolves
+    without a key collision;
+  - one durable approval yields exactly one `approval.required`;
   - `forgetSubject` removes the subject's `ai_pending_input` and `ai_input_responses`
     rows;
   - the aggregate read includes a session-less MCP approval, and a durable entry
@@ -1343,7 +1377,7 @@ None. The ones considered, and how each was resolved:
 | Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§7.2). |
 | Vendoring the unmerged `temporalio-claude-agent-sdk` | Not vendored, by the user's decision. The residual risk (an unreachable commit) is monitored by a scheduled `uv lock --check` (§6.2). This is not a deviation from Temporal. |
 | Encrypting session and flow payloads | Temporal's documented Payload Codec with serialization context (§6.5). Not a deviation. |
-| A durable approval's expiry reaches the model as the plugin's rejection text | Not a deviation: the plugin's `decide` takes no message. It fails closed, and the panel and audit record `expired` (§6.6). Phase 5 asks upstream for a reason on `decide`, and adopts it once released. |
+| A durable approval that expires, or is cancelled by an interrupt, handoff or superseding send, reaches the model as the plugin's rejection text ("A human reviewer rejected this action. Do not retry it.") | Not a deviation: the plugin's `decide` takes no message. It fails closed, and the panel and audit record `expired` or `cancelled` (§6.6). The cost is the model's reading: after a handoff, "do not retry" steers the new owner's turn away from a legitimate call. Phase 5 asks upstream for a reason on `decide` covering both, and adopts it once released. Until then, an interrupt or handoff that ends the turn anyway (cancelling `agent.run`, as `stop` does) is preferred over `decide(False)` once phase 5 verifies that path. |
 | Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
