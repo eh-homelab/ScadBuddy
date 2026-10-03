@@ -1,5 +1,6 @@
 import path from 'node:path'
 import {
+  type CanUseTool,
   type HookCallbackMatcher,
   type HookEvent,
   type McpHttpServerConfig,
@@ -33,6 +34,7 @@ import {
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
+import { ASK_USER_QUESTION, askThroughGate, type QuestionGate } from './questions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -69,6 +71,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     were refused that way, read tools included (measured on Claude Code
 //     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
 //     through the permission seam below, and an outward one parks at the gate.
+//   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
+//     Claude Code's retries on one credential when there is another to fall
+//     back to (#1093);
 //   - limits: `maxTurns`, `maxBudgetUsd` ("The query will stop if this budget is
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
@@ -92,6 +97,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     they sit beside the permission seam's `PreToolUse` hook;  
 //     a human's approval of an off-origin navigation also approves
 //     that origin for the session (browserOrigins.ts).
+//   - the AskUserQuestion built-in (#940, questions.ts) when the run has a
+//     question gate: the call is answered in `canUseTool`, where it parks
+//     until the user answers in the panel;
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -107,6 +115,12 @@ export type HarnessRun = {
   model?: string
   maxTurns?: number
   maxBudgetUsd?: number
+  /**
+   * How many times Claude Code retries a failed model request on this
+   * credential (CLAUDE_CODE_MAX_RETRIES); its own default when omitted. Set
+   * when there is another credential to fall back to (fallback.ts, #1093).
+   */
+  maxRetries?: number
   /** Aborting stops the query and its Claude Code process. */
   signal?: AbortSignal
   /**
@@ -150,6 +164,11 @@ export type HarnessRun = {
    * one, outward calls are denied as needing approval.
    */
   approvalGate?: ApprovalGate
+  /**
+   * Parks AskUserQuestion calls until the user answers (#940, questions.ts).
+   * Only with one is the run given the tool.
+   */
+  questionGate?: QuestionGate
   /** Appended to the SDK's default system prompt: route, model, diagnostics (#256). */
   systemPromptAppend?: string
   /** Session id to resume (#300). */
@@ -277,6 +296,35 @@ function linkedController(signal: AbortSignal | undefined): AbortController {
   return controller
 }
 
+/** canUseTool with AskUserQuestion answered through the question gate (#940). */
+function answeringQuestions(questions: QuestionGate, inner: CanUseTool): CanUseTool {
+  return (toolName, input, options) =>
+    toolName === ASK_USER_QUESTION ? askThroughGate(questions, input, options.toolUseID, options.signal) : inner(toolName, input, options)
+}
+
+/**
+ * Forces the permission prompt for AskUserQuestion, so the call always
+ * reaches canUseTool (where it is answered) and no allow rule can skip it.
+ */
+const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
+  // Anchored: the SDK tests the matcher as a regex (memory/hindsight.ts).
+  matcher: `^${ASK_USER_QUESTION}$`,
+  hooks: [
+    (input) =>
+      Promise.resolve(
+        input.hook_event_name === 'PreToolUse' && input.tool_name === ASK_USER_QUESTION
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse' as const,
+                permissionDecision: 'ask' as const,
+                permissionDecisionReason: 'A question for the user, answered in the ScadBuddy panel.',
+              },
+            }
+          : {},
+      ),
+  ],
+}
+
 /** The full SDK options for one run. Pure apart from the AbortController; tests read it. */
 export function buildHarnessOptions(run: HarnessRun): Options {
   return buildHarness(run).options
@@ -284,7 +332,12 @@ export function buildHarnessOptions(run: HarnessRun): Options {
 
 function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
   const base = buildQueryOptions(run.paths)
-  const ownTiers = harnessTierOf(run)
+  const harnessTiers = harnessTierOf(run)
+  const questions = run.questionGate
+  // AskUserQuestion only asks the user; it is answered in canUseTool below.
+  const ownTiers: TierResolver = questions
+    ? (name, input) => (name === ASK_USER_QUESTION ? 'read' : harnessTiers(name, input))
+    : harnessTiers
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
@@ -348,6 +401,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       }
     }
   }
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
   const options: Options = {
     ...base,
     env: {
@@ -355,14 +409,20 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
     },
     mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, gate, guard),
+    canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
-      { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, gate, guard)] },
+      {
+        PreToolUse: [
+          makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+          ...(questions ? [QUESTION_PROMPT_HOOK] : []),
+        ],
+      },
       run.memoryHooks,
     ),
     permissionMode: 'default',
@@ -389,7 +449,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     assertPluginAllowed(p)
     return { type: 'local' as const, path: path.resolve(p) }
   })
-  if (run.ownPlugin !== undefined) options.tools = [...OWN_PLUGIN_TOOLS]
+  const builtins = [...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []), ...(questions ? [ASK_USER_QUESTION] : [])]
+  if (builtins.length) options.tools = builtins
   // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
   // assertPluginAllowed refuses, but one this module wrote and starts under `env -i`.
   if (browserPlugin !== undefined) plugins.push({ type: 'local', path: browserPlugin })

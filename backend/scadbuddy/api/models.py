@@ -1402,7 +1402,7 @@ async def get_schema(
 THUMBNAIL_CACHE_CONTROL = "no-cache"
 
 
-def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+def etag_matches(if_none_match: str | None, etag: str) -> bool:
     """RFC 9110 §13.1.2: `*`, or any listed tag, compared weakly."""
     if if_none_match is None:
         return False
@@ -1444,7 +1444,7 @@ def get_thumbnail(
     # whichever source -- a set, a removal, or the fallback moving to another output.
     etag = f'"{hashlib.sha256(image).hexdigest()}"'
     headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
-    if _etag_matches(if_none_match, etag):
+    if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(image, media_type=content_type, headers=headers)
 

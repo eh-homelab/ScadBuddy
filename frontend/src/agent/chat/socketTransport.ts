@@ -15,7 +15,7 @@ import type { ChatTransport, SendResult, TransportHandlers } from './transport'
  * before anything queued goes out (a queued message sent first would start a follow
  * that the attach's replay then repeats). Messages sent while disconnected wait for
  * the next connection, up to `MAX_QUEUED` each for control frames (approval
- * decisions, interrupts), which go ahead of the rest, and for everything else.
+ * decisions, answers to the agent's questions, interrupts), which go ahead of the rest, and for everything else.
  *
  * A handshake the agent refuses (its origin and HTTPS gate, answered 403) reaches the
  * browser only as close code 1006, the same as an agent that is down or restarting
@@ -40,7 +40,7 @@ export const REFUSED_MESSAGE =
   'HTTPS address (not a LAN IP or plain http); open it there, or see Settings → Assistant. Retrying…'
 
 /** Frames that decide or stop something: queued apart from, and sent before, the rest. */
-const CONTROL: ReadonlySet<ClientMessage['type']> = new Set(['approval.decision', 'session.interrupt'])
+const CONTROL: ReadonlySet<ClientMessage['type']> = new Set(['approval.decision', 'question.answer', 'session.interrupt'])
 
 export interface SocketTransportOptions {
   url?: string

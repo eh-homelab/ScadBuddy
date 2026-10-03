@@ -8,6 +8,7 @@ import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
+import { CredentialPool } from './harness/fallback.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -36,6 +37,7 @@ import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
+import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
@@ -173,6 +175,12 @@ const toolServices: ToolServices = {
 // one through `ai_browser_pairings` (spec §8.5).
 const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined })
 toolServices.browser = tabs
+// What each session touched (#931, sessions/touched.ts), from its tool calls.
+if (database) {
+  toolServices.touched = new SessionResources(database.sql, (err) =>
+    console.error('session resources: could not record a call:', (err as Error).message),
+  )
+}
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -256,12 +264,9 @@ const sessions =
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
-        credential: async () => {
-          if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
-          const credential = await credentials.reveal(kek.kek)
-          if (!credential) throw new Error('no Claude credential is configured')
-          return credential
-        },
+        // Every usable credential in priority order, with fallback; disables,
+        // cooldowns, recoveries and fallbacks are audited (#1093).
+        credentials: new CredentialPool({ repo: credentials, kek, audit }),
       })
     : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,

@@ -10,6 +10,8 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { ProbeVerdict } from '../harness/credentialErrors.js'
+import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import {
@@ -51,6 +53,8 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
+import { QuestionService } from '../questions/service.js'
+import { ASK_USER_QUESTION } from '../harness/questions.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -69,6 +73,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
+import { SessionResources, type TouchedRecord } from './touched.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -306,8 +311,14 @@ export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
 export type SessionManagerDeps = {
   sql: Sql
   paths: HarnessPaths
-  /** The Claude credential for a query; throws when there is none. */
-  credential: () => Promise<Credential>
+  /**
+   * The Claude credentials a turn may use, in priority order, and where what
+   * each attempt learned goes (harness/fallback.ts, #1093). `candidates`
+   * throws when none is usable now.
+   */
+  credentials: CredentialSource
+  /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
@@ -384,7 +395,10 @@ export type SessionManagerDeps = {
    * (audit/turn.ts), and every approval decision.
    */
   audit?: AuditLog
-  /** How often a parked turn polls its approval for a decision made on another replica. */
+  /**
+   * How often a parked turn polls its approval, or its question (#940), for a
+   * decision or answer given on another replica: one interval for both.
+   */
   approvalPollMs?: number
   /** How long a handoff offer lasts (HANDOFF_OFFER_TTL_MS by default). */
   handoffOfferTtlMs?: number
@@ -537,6 +551,8 @@ export class SessionManager {
   readonly events: EventLog
   /** Approvals of outward calls (#258); `approvals.decide` is the decision API. */
   readonly approvals: ApprovalService
+  /** Questions the agent asks the user (#940); `questions.answer` is the panel's answer. */
+  readonly questions: QuestionService
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -545,10 +561,13 @@ export class SessionManager {
   private readonly active = new Map<string, LocalTurn>()
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
   private draining = false
+  /** What sessions touched (#931), read by `resources`. */
+  private readonly touched: SessionResources
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
+    this.touched = new SessionResources(deps.sql)
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -562,6 +581,11 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
+    })
+    this.questions = new QuestionService({
+      sql: deps.sql,
+      events: this.events,
+      ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -583,6 +607,12 @@ export class SessionManager {
     const session = await this.row(id)
     if (!session || !canSee(principal, session)) throw new SessionError('not_found', `no session ${id}`)
     return session
+  }
+
+  /** What the session's tool calls touched, oldest first (#931, touched.ts); a session the principal may not see is not found. */
+  async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
+    await this.get(id, principal)
+    return this.touched.list(id)
   }
 
   /** Newest first. */
@@ -882,7 +912,11 @@ export class SessionManager {
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
     let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
-    const mapper = new SdkEventMapper(id, (name, input) => eventTierOf(name, input))
+    // AskUserQuestion (#940) only asks the user: shown and audited as `read`, as the harness tiers it.
+    const asksUser = session.owner.kind === 'browser'
+    const shownTierOf: TierResolver = (name, input) =>
+      asksUser && name === ASK_USER_QUESTION ? 'read' : eventTierOf(name, input)
+    const mapper = new SdkEventMapper(id, shownTierOf)
     let lost = false
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
@@ -892,7 +926,7 @@ export class SessionManager {
           sessionId: id,
           turnId,
           actor: session.owner,
-          tierOf: (name, input) => eventTierOf(name, input),
+          tierOf: shownTierOf,
           secrets: () => secrets,
         })
       : undefined
@@ -925,10 +959,11 @@ export class SessionManager {
     /** Whether this turn wrote headless-browser folders, removed when it ends. */
     let browserDirs = false
     try {
-      // The credential first, and into `secrets` at once: whatever fails
-      // after this point is redacted before it reaches the event log.
-      const credential = await this.deps.credential()
-      secrets = [credential.secret]
+      // The credentials first, and into `secrets` at once: whatever fails
+      // after this point is redacted before it reaches the event log. Every
+      // candidate's, since the turn may fall back to any of them.
+      const candidates = await this.deps.credentials.candidates()
+      secrets = candidates.map((c) => c.credential.secret)
       forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
       const remotePlugins = forwarded?.plugins ?? []
       // Plugin header values (and their bare tokens) are redacted from the
@@ -1038,9 +1073,8 @@ export class SessionManager {
             }
           : undefined
       browserDirs = browser !== undefined
-      const run: HarnessRun = {
+      const run: Omit<HarnessRun, 'credential'> = {
         paths: this.deps.paths,
-        credential,
         prompt,
         cwd,
         sessionStore: this.store,
@@ -1050,6 +1084,12 @@ export class SessionManager {
         signal: controller.signal,
         tierOf,
         approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+        // AskUserQuestion (#940): only the user in the panel answers, so only
+        // a session the browser user owns is given the tool. Any other
+        // owner's turn would wait on someone who is not asked.
+        ...(asksUser
+          ? { questionGate: this.questions.gate({ sessionId: id, turnId, secrets: () => secrets, signal: controller.signal }) }
+          : {}),
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
         // user's messages are instructions; tool results are data. Then which
         // browser each browser_* tool drives.
@@ -1084,7 +1124,15 @@ export class SessionManager {
         ...(memory ? { memoryHooks: memory.hooks } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
-      for await (const message of this.run(run)) {
+      const turn = runWithFallback(run, {
+        candidates,
+        report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+        run: this.run,
+        ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+        // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
+        ...(resume ? { priorCostUsd: session.costUsd } : {}),
+      })
+      for await (const message of turn) {
         if (message.type === 'result') {
           result = message
           local.settling = true
@@ -1244,6 +1292,9 @@ export class SessionManager {
     // so either outcome below can follow. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
+    // A question never outlives its turn (questions/service.ts), shutdown or not.
+    // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
+    await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
@@ -1328,7 +1379,7 @@ export class SessionManager {
       // Accurate, not optimistic: a turn whose result is already in is
       // finishing by itself, so this interrupt stops nothing.
       if (local.settling) return false
-      // Its pending approvals are cancelled as it finishes (finish()).
+      // Its pending approvals and questions are cancelled as it finishes (finish()).
       local.controller.abort(new Error(`interrupted by ${publicLabel(principal)}`))
       return true
     }
@@ -1465,6 +1516,7 @@ export class SessionManager {
     }
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
+    await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     return this.get(id, to)
   }
 
@@ -1663,7 +1715,12 @@ export class SessionManager {
    * are revoked, as finish() does on a shutdown. Returns the sessions reaped.
    */
   async reapExpired(): Promise<string[]> {
-    const rows = await this.deps.sql<{ id: string; status: SessionStatus }[]>`
+    const rows = await this.deps.sql<{ id: string; status: SessionStatus; dead_turn: string }[]>`
+      WITH dead AS (
+        SELECT id, turn_id FROM ai_sessions
+        WHERE turn_id IS NOT NULL AND lease_until <= now()
+        FOR UPDATE SKIP LOCKED
+      )
       UPDATE ai_sessions s
       SET status = CASE
             WHEN s.status = 'done' THEN 'done'
@@ -1672,10 +1729,13 @@ export class SessionManager {
             ELSE 'idle'
           END,
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
-      WHERE s.turn_id IS NOT NULL AND s.lease_until <= now()
-      RETURNING s.id, s.status`
-    for (const { id, status } of rows) {
+      FROM dead
+      WHERE s.id = dead.id
+      RETURNING s.id, s.status, dead.turn_id AS dead_turn`
+    for (const { id, status, dead_turn } of rows) {
       await this.approvals.revokeUnused(id, 'the turn ended')
+      // The dead turn's questions only (questions/service.ts).
+      await this.questions.cancelPending(id, 'the turn ended', { refresh: false, turnId: dead_turn })
       await this.events.append(id, [
         event({
           type: 'error',

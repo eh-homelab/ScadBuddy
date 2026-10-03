@@ -79,8 +79,15 @@ export interface AppDeps {
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
 function credentialVerb(method: string, path: string): string | undefined {
-  if (path !== '/api/v1/ai/credentials') return undefined
-  return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+  const base = '/api/v1/ai/credentials'
+  if (path === base) return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+  if (path === `${base}/entries`) return method === 'POST' ? 'create' : undefined
+  if (path === `${base}/order`) return method === 'PUT' ? 'reorder' : undefined
+  if (/^\/api\/v1\/ai\/credentials\/entries\/[^/]+\/reset$/.test(path)) return method === 'POST' ? 'reset' : undefined
+  if (/^\/api\/v1\/ai\/credentials\/entries\/[^/]+$/.test(path)) {
+    return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+  }
+  return undefined
 }
 
 /** MCP token mint and revoke (routes/mcpTokens.ts). */
@@ -164,7 +171,8 @@ export function createApp(deps: AppDeps): AgentApp {
     // action rather than written one row per request (audit/writes.ts).
     const refusals = new RefusalCoalescer(audit)
     const writes = { audit, remoteAddress: deps.remoteAddress, refusals }
-    app.use('/api/v1/ai/credentials', auditWrites({ ...writes, kind: 'credential', verb: credentialVerb }))
+    // `/*` matches the bare path too (Hono), so this covers both sets of routes.
+    app.use('/api/v1/ai/credentials/*', auditWrites({ ...writes, kind: 'credential', verb: credentialVerb }))
     // Refused or failed token writes; successful ones are recorded by the
     // token store itself (audit/writes.ts auditedTokenStore), with the token's id.
     app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
