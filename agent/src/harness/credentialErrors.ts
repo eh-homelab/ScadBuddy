@@ -192,6 +192,10 @@ export const CLEARED_COOLDOWN_MS = 1000
  */
 export async function probeCredential(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
   const now = options.now ?? Date.now
+  // How Claude Code presents an OAuth token to the Messages API is not measured, and
+  // in x-api-key Anthropic answers one with a 401 that would read as its own refusal:
+  // unknown, so a rate limit or refusal cools it down and never disables it.
+  if (credential.kind === 'claude_oauth_token') return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 10_000)
