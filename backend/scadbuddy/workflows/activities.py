@@ -22,7 +22,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
-from scadbuddy.render.job_models import Job, JobNotFoundError, now
+from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, now
 from scadbuddy.render.jobs import (
     Prepared,
     finish_piece_stage,
@@ -41,6 +41,10 @@ from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
+    ACCEPT_ACTIVITY,
+    CLAIMS_ACTIVITY,
+    QUEUE_FULL,
+    AcceptRender,
     Failure,
     PieceRequest,
     PieceResult,
@@ -245,6 +249,8 @@ class RenderActivities:
             self.finish_piece,
             self.project,
             self.render_preview_png,
+            self.render_accept,
+            self.render_claims,
         ]
 
     def _config(self, prepared: PrepareResult) -> Config:
@@ -466,6 +472,38 @@ class RenderActivities:
             raise ApplicationError(
                 str(error), Failure(error=str(error)), type="PreviewFailedError", non_retryable=True
             ) from None
+
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        """`TemplatePipeline`'s first step (#1053): the execution's row, or the full
+        queue's refusal with nothing written."""
+        start = accept.start
+        job = Job(
+            id=uuid.uuid4().hex,
+            slug=start.slug,
+            params=dict(start.params),
+            inputs=dict(start.inputs),
+            model_version=start.model_version,
+            kind=start.kind,
+            created_at=now(),
+        )
+        try:
+            return await asyncio.to_thread(
+                self.deps.projection.accept,
+                job,
+                start.render_key,
+                workflow_id=accept.workflow_id,
+                run_id=accept.run_id,
+                max_pending=start.max_pending,
+            )
+        except QueueFullError as error:
+            raise ApplicationError(
+                str(error), error.depth, type=QUEUE_FULL, non_retryable=True
+            ) from None
+
+    @activity.defn(name=CLAIMS_ACTIVITY)
+    async def render_claims(self, job_id: str, claims: int) -> None:
+        await asyncio.to_thread(self.deps.projection.set_claims, job_id, claims)
 
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:

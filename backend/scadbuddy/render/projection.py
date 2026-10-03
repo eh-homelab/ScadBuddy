@@ -23,6 +23,7 @@ from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
@@ -36,7 +37,6 @@ from scadbuddy.render.pg_store import TransactionalEvents, migrate
 
 logger = logging.getLogger(__name__)
 
-CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
 LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
 

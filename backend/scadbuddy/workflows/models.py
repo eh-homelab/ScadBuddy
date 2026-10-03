@@ -6,15 +6,15 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.job_models import Job, JobResult, JobTableKind, StepInfo
 from scadbuddy.render.schema import ParamValue
 
 
@@ -119,3 +119,52 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+
+
+#: `TemplatePipeline`'s first step and its claim count (#1053): local activities, so
+#: they never wait behind openscad runs for the worker's activity slots.
+ACCEPT_ACTIVITY = "render_accept"
+CLAIMS_ACTIVITY = "render_claims"
+#: The Update a supersede or a withdrawal sends the job's execution.
+RELEASE_UPDATE = "release"
+#: `render_accept`'s refusal: `render_queue_max` jobs already wait.
+QUEUE_FULL = "QueueFull"
+
+
+class RenderStart(BaseModel):
+    """`render-<render_key>`'s input (spec 2026-10-01 §4.5): what the route resolved."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    slug: str
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    model_version: str | None = None
+    render_key: str
+    kind: JobTableKind = "render"
+    #: `render_queue_max` when the request was made; 0 is no limit.
+    max_pending: int = 0
+    search_attributes: bool = False
+
+
+class AcceptRender(BaseModel):
+    start: RenderStart
+    workflow_id: str
+    run_id: str
+
+
+class RenderAnswer(BaseModel):
+    """The `accepted` Update's answer: the job, or why there is none."""
+
+    job: Job | None = None
+    #: A later request that joined the open execution, with one more claim.
+    coalesced: bool = False
+    #: How many jobs wait, when the queue was full and nothing was started.
+    queue_full: int | None = None
+    #: The execution's last claim was released: it is closing, and starts again.
+    closing: bool = False
+
+
+class ReleaseAnswer(BaseModel):
+    #: The job, cancelled by this release; None while other claims remain.
+    cancelled: Job | None = None

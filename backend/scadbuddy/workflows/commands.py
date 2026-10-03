@@ -14,7 +14,9 @@ that holds itself open for a window (a print without a ``request_id``, §5.2).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import timedelta
+from typing import Any
 
 from temporalio.client import (
     Client,
@@ -81,6 +83,7 @@ async def start_command[T](
     result_type: type[T],
     reuse: WorkflowIDReusePolicy,
     search_attributes: TypedSearchAttributes | None = None,
+    memo: Mapping[str, Any] | None = None,
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
@@ -93,6 +96,7 @@ async def start_command[T](
         id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
         id_reuse_policy=reuse,
         search_attributes=search_attributes,
+        memo=memo,
     )
     # `rpc_timeout` bounds the Update; the outer bound is for the connect a lazy
     # client makes on its first call, which retries for minutes on its own.

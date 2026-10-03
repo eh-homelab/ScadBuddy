@@ -13,6 +13,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobResult,
@@ -22,7 +23,6 @@ from scadbuddy.render.job_models import (
     render_key,
 )
 from scadbuddy.render.projection import (
-    CANCELLED_ERROR,
     LEGACY_RUNNING_ERROR,
     LEGACY_UNSTARTED_ERROR,
     JobProjection,

@@ -140,6 +140,7 @@ def now() -> datetime:
 
 
 SUPERSEDED_ERROR = "superseded by a newer render before it started"
+CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 
 
 class QueueFullError(Exception):
