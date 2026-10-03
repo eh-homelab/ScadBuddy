@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { SessionResource } from '../../api/types'
@@ -26,7 +26,7 @@ const ACTION_LABEL: Record<SessionResource['action'], string> = {
   deleted: 'deleted',
 }
 
-/** One resource, however many calls touched it: every way it was touched, in order. */
+/** One resource, however many calls touched it: how it was touched, in order, repeats folded. */
 interface Entry {
   type: Kind
   id: string | null
@@ -43,7 +43,7 @@ function entries(rows: readonly SessionResource[]): Entry[] {
     const key = r.id === null ? null : `${r.type}\u0000${r.id}`
     const seen = key === null ? undefined : byKey.get(key)
     if (seen) {
-      if (!seen.actions.includes(r.action)) seen.actions.push(r.action)
+      if (seen.actions.at(-1) !== r.action) seen.actions.push(r.action)
       if (!seen.tools.includes(r.tool)) seen.tools.push(r.tool)
       seen.model ??= r.model
       continue
@@ -95,7 +95,14 @@ interface Props {
 /** #931 — the session view's "Touched" panel: what this session's tool calls changed. */
 export function SessionTouched({ sessionId, refreshKey }: Props) {
   const idBase = useId()
-  const { data, error } = useAsync(() => api.listAiSessionResources(sessionId), [sessionId, refreshKey])
+  const { data, error, refresh } = useAsync(() => api.listAiSessionResources(sessionId), [sessionId])
+  // A background re-read: the list stays on screen, and a failed read keeps it.
+  const readAt = useRef(refreshKey)
+  useEffect(() => {
+    if (Object.is(readAt.current, refreshKey)) return
+    readAt.current = refreshKey
+    refresh()
+  }, [refreshKey, refresh])
 
   if (error) {
     return (

@@ -88,17 +88,67 @@ describe('SessionTouched', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('session not found')
   })
 
-  it('reads again when the session moves on', async () => {
-    setSessionResources('sess-1', [])
-    const view = renderPage(<SessionTouched sessionId="sess-1" refreshKey={0} />)
-    await screen.findByText('Nothing changed by this session yet.')
+  it('reads again when the session moves on, keeping the list on screen meanwhile', async () => {
+    setSessionResources('sess-1', [row({ type: 'model', id: 'first', model: 'first' })])
+    const view = renderPage(<SessionTouched sessionId="sess-1" refreshKey="running" />)
+    await screen.findByRole('link', { name: /first/ })
 
-    setSessionResources('sess-1', [row({ type: 'model', id: 'later', model: 'later' })])
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('/api/v1/ai/sessions/:id/resources', async () => {
+        await answered
+        return HttpResponse.json({ resources: [row({ type: 'model', id: 'later', model: 'later' })] })
+      }),
+    )
     view.rerender(
       <MemoryRouter>
-        <SessionTouched sessionId="sess-1" refreshKey={1} />
+        <SessionTouched sessionId="sess-1" refreshKey="idle" />
       </MemoryRouter>,
     )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.getByRole('link', { name: /first/ })).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).toBeNull()
+
+    answer()
     expect(await screen.findByRole('link', { name: /later/ })).toBeInTheDocument()
+  })
+
+  it('keeps the list when a re-read fails', async () => {
+    setSessionResources('sess-1', [row({ type: 'model', id: 'first', model: 'first' })])
+    const view = renderPage(<SessionTouched sessionId="sess-1" refreshKey="running" />)
+    await screen.findByRole('link', { name: /first/ })
+
+    server.use(http.get('/api/v1/ai/sessions/:id/resources', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    view.rerender(
+      <MemoryRouter>
+        <SessionTouched sessionId="sess-1" refreshKey="idle" />
+      </MemoryRouter>,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.getByRole('link', { name: /first/ })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows every action in the order it happened, and links a resource made again after a delete', async () => {
+    setSessionResources('sess-1', [
+      row({ type: 'model', id: 'bin', model: 'bin', tool: 'create_model' }),
+      row({ type: 'model', id: 'bin', model: 'bin', action: 'deleted', tool: 'delete_model' }),
+      row({ type: 'model', id: 'bin', model: 'bin', tool: 'create_from_template' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-1" />)
+
+    const item = within(await screen.findByRole('group', { name: 'Models' })).getByRole('listitem')
+    expect(item).toHaveTextContent('created, deleted, created')
+    expect(within(item).getByRole('link', { name: /bin/ })).toHaveAttribute('href', '/m/bin')
+  })
+
+  it('does not link a revision whose model is unknown', async () => {
+    setSessionResources('sess-1', [row({ type: 'revision', id: 'abcdef0123456', model: null })])
+    renderPage(<SessionTouched sessionId="sess-1" />)
+
+    const revisions = await screen.findByRole('group', { name: 'Revisions' })
+    expect(revisions).toHaveTextContent('abcdef0')
+    expect(within(revisions).queryByRole('link')).toBeNull()
   })
 })
