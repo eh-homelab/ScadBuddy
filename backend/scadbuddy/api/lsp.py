@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -9,21 +10,47 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Response, WebSocket, status
+from fastapi import APIRouter, Header, Query, Response, WebSocket, status
 from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import STATE_ATTR, AppState, CatalogueDep, PathsDep, SlugPath, StateDep
+from scadbuddy.api.assets import INERT_IMAGE_HEADERS
+from scadbuddy.api.deps import (
+    STATE_ATTR,
+    AppState,
+    CatalogueDep,
+    HistoryDep,
+    PathsDep,
+    SlugPath,
+    StateDep,
+)
 from scadbuddy.api.libraries import LibraryName
-from scadbuddy.api.models import MAX_SOURCE_CHARS, require_model_exists
+from scadbuddy.api.models import (
+    MAX_SOURCE_CHARS,
+    MAX_THUMBNAIL_BYTES,
+    THUMBNAIL_CACHE_CONTROL,
+    etag_matches,
+    require_model_exists,
+)
+from scadbuddy.api.versions import require_history
 from scadbuddy.core.fontconfig import env_for
+from scadbuddy.core.paths import model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.editor_files import (
     MAX_PATH_LENGTH,
     FilePathError,
     FileTooLargeError,
     NotTextError,
+    plain_segments,
+    read_file,
     read_text_file,
+)
+from scadbuddy.library.history import (
+    COMMIT_ID_PATTERN,
+    BlobTooLargeError,
+    GitError,
+    ModelHistory,
+    RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import (
     COMMIT_PATTERN,
@@ -172,6 +199,116 @@ def get_model_file(
 ) -> Response:
     require_model_exists(catalogue, slug)
     return _text_file(paths.model_dir(slug), path)
+
+
+#: An image a model's README shows beside it (#951), by extension, as served.
+IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+}
+
+#: The largest image served from a model's directory: the cap a model's own
+#: thumbnail takes, which is already far above any image a README shows.
+MAX_MODEL_IMAGE_BYTES = MAX_THUMBNAIL_BYTES
+
+#: A revision's bytes never change under its id.
+REVISION_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+def _image_type(path: str) -> str:
+    media_type = IMAGE_MEDIA_TYPES.get(Path(path).suffix.lower())
+    if media_type is None:
+        raise ApiError(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"{path!r} is not an image ({', '.join(IMAGE_MEDIA_TYPES)})",
+        )
+    return media_type
+
+
+def _too_large(path: str) -> ApiError:
+    return ApiError(
+        status.HTTP_413_CONTENT_TOO_LARGE,
+        f"{path!r} is larger than the {MAX_MODEL_IMAGE_BYTES:,} bytes an image here may be",
+    )
+
+
+def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) -> bytes:
+    require_history(history)
+    try:
+        # Sized from the tree before it is read, as the working tree's file is stat'ed.
+        folder = model_path(slug)
+        return history.read_blob(
+            commit, f"{folder}/{path}", limit=MAX_MODEL_IMAGE_BYTES, root=folder
+        )
+    except RevisionNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
+    except BlobTooLargeError:
+        raise _too_large(path) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+
+
+@router.get(
+    "/models/{slug}/images/{path:path}",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {media_type: {} for media_type in sorted(set(IMAGE_MEDIA_TYPES.values()))}
+        },
+        304: {"description": "The copy named by `If-None-Match` is still current"},
+        503: {"description": "`commit` was given but model history is unavailable"},
+    },
+    summary="An image file in a model's directory",
+    description=(
+        "Read-only, for a model README's relative image (`![](thumbnail.png)`, #951). "
+        "The same path rules as `GET /models/{slug}/files/{path}`: an absolute path or "
+        "one with a `.`, `..` or dot-file segment is a 422, a file that is missing or "
+        "resolves outside the directory a 404. Only "
+        f"{', '.join(IMAGE_MEDIA_TYPES)} are served, each with its image type (else a "
+        f"415), and none over {MAX_MODEL_IMAGE_BYTES:,} bytes (a 413). With `commit`, "
+        "the file as it was at that revision (404 when it did not exist then, 503 when "
+        "there is no model history), cached as immutable; without, the working tree's, "
+        "with a strong `ETag` and `Cache-Control: no-cache`."
+    ),
+)
+def get_model_image(
+    slug: SlugPath,
+    path: FilePath,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    commit: Annotated[
+        str | None,
+        Query(pattern=COMMIT_ID_PATTERN, description="The revision to read the image at"),
+    ] = None,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
+    require_model_exists(catalogue, slug)
+    try:
+        plain = "/".join(plain_segments(path))
+    except FilePathError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    media_type = _image_type(plain)
+    if commit is not None:
+        data = _revision_image(history, slug, plain, commit)
+        cache_control = REVISION_CACHE_CONTROL
+    else:
+        try:
+            data = read_file(paths.model_dir(slug), plain, limit=MAX_MODEL_IMAGE_BYTES)
+        except FileNotFoundError:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no file {path!r}") from None
+        except FileTooLargeError:
+            raise _too_large(path) from None
+        cache_control = THUMBNAIL_CACHE_CONTROL
+    etag = f'"{hashlib.sha256(data).hexdigest()}"'
+    headers = {**INERT_IMAGE_HEADERS, "ETag": etag, "Cache-Control": cache_control}
+    if etag_matches(if_none_match, etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(data, media_type=media_type, headers=headers)
 
 
 @router.get(

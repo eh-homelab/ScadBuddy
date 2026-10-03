@@ -15,7 +15,9 @@
 - Printer model string is `H2C`; Bambu printer preset names are `Bambu Lab H2C <size> nozzle`.
 - Nozzle sizes offered: `0.2`, `0.4`, `0.6`, `0.8` (strings, as Bambuddy spells them).
 - Tier table is §4.2 verbatim, keyed by **process name** (not id), so it resolves in the cloud tier (ids `GPxxx`) and the standard tier (id == name) alike.
-- ScadBuddy sends **no `ams_mapping`** and **no `nozzle_rack_choice`** (§6).
+- ScadBuddy sends **no `ams_mapping`** (§6). It sent no `nozzle_rack_choice` either
+  until #836 (`2026-10-01-rack-nozzle-selection-design.md`), which supersedes that
+  decision.
 - Default plate `Textured PEI Plate`; plate strings are `BED_TYPES` in `pipelines.py`.
 - US spelling in new UI text and docs ("color"); existing identifiers such as `filament_colours` / `colour` keep their names.
 - Every backend change passes `uv run --frozen ruff check . && uv run --frozen ruff format --check . && uv run --frozen mypy && uv run --frozen pytest` in `backend/`.
@@ -1266,6 +1268,7 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     sent = json.loads(queued.calls.last.request.content)
     assert sent["printer_id"] == 1
     assert sent.get("ams_mapping") is None
+    # Superseded by #836: true only when no group prints from the rack.
     assert sent.get("nozzle_rack_choice") is None
     assert not respx.calls.call_count or all(
         "/slicer-pipelines" not in str(call.request.url) for call in respx.calls
