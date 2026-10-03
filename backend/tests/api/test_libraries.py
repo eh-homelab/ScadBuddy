@@ -1788,3 +1788,16 @@ def test_a_pin_may_run_longer_than_its_clone() -> None:
     for name in ("library_pin", "library_repin"):
         timeout = kinds[name].run_timeout
         assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT
+
+
+def test_a_pin_on_a_model_with_a_thumbnail_answers_its_record(lib_client: TestClient) -> None:
+    """The run's record is read back as the route's answer: a model with media must
+    survive that (its items are views, not model.json entries)."""
+    create_model(lib_client)
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    put = lib_client.put(
+        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", png, "image/png")}
+    )
+    assert put.status_code == 200, put.text
+    pinned = pin(lib_client, "BOSL2")
+    assert [item["id"] for item in pinned["media"]] == ["thumbnail"]
