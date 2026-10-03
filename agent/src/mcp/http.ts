@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
+import { context, propagation, ROOT_CONTEXT, trace } from '@opentelemetry/api'
 import type { Context, Hono } from 'hono'
 import type { AuditLog } from '../audit/log.js'
 import {
@@ -21,6 +22,7 @@ import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
 import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
+import { withSpan } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
@@ -133,6 +135,41 @@ function jsonRpcError(status: number, code: number, message: string): Response {
   return Response.json({ jsonrpc: '2.0', error: { code, message }, id: null }, { status })
 }
 
+/** The JSON-RPC method of a POST, for its span name; `unknown` for anything else. Reads a clone. */
+export async function mcpMethodOf(request: Request): Promise<string> {
+  try {
+    const body: unknown = await request.clone().json()
+    const first: unknown = Array.isArray(body) ? body[0] : body
+    const method = (first as { method?: unknown } | undefined)?.method
+    return typeof method === 'string' && /^[A-Za-z0-9_./-]{1,64}$/.test(method) ? method : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * `agent.mcp/<method>` around one POST (spec 2026-10-01 §5.4). Under the HTTP
+ * instrumentation's server span in production; where there is none (tests, or
+ * an untraced listener), the caller's `traceparent` is continued here. GET is
+ * the SSE stream (left untraced, telemetry/setup.ts) and DELETE has no method.
+ */
+async function traced(request: Request, handle: () => Promise<Response>): Promise<Response> {
+  if (request.method !== 'POST') return handle()
+  const method = await mcpMethodOf(request)
+  const active = context.active()
+  const parent = trace.getSpan(active)
+    ? active
+    : propagation.extract(ROOT_CONTEXT, request.headers, {
+        keys: (headers) => [...headers.keys()],
+        get: (headers, key) => headers.get(key) ?? undefined,
+      })
+  return withSpan(`agent.mcp/${method}`, { parent, attributes: { 'rpc.method': method } }, async (span) => {
+    const response = await handle()
+    span.setAttribute('http.response.status_code', response.status)
+    return response
+  })
+}
+
 /** What /mcp shares with the rest of the app: the origin allowlist and how to read the peer. */
 export type McpHttpContext = { origins: OriginPolicy; remoteAddress: RemoteAddress }
 
@@ -221,7 +258,7 @@ export function mountMcp(
       // principal, even a valid one, may not ride on it.
       if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
       session.lastSeen = Date.now()
-      return session.transport.handleRequest(request, { authInfo: authInfoFor(principal) })
+      return traced(request, () => session.transport.handleRequest(request, { authInfo: authInfoFor(principal) }))
     }
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
@@ -256,7 +293,7 @@ export function mountMcp(
       },
     })
     await server.connect(transport)
-    const response = await transport.handleRequest(request, { authInfo: authInfoFor(principal) })
+    const response = await traced(request, () => transport.handleRequest(request, { authInfo: authInfoFor(principal) }))
     // Not an initialize request: the transport answered 400 and no session exists.
     if (transport.sessionId === undefined) {
       detach()

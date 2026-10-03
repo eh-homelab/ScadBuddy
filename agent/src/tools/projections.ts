@@ -1,9 +1,11 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import { z } from 'zod'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
+import { toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import { errorResult, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
@@ -110,17 +112,22 @@ export function createHarnessServer(
         // there until someone re-checks this (and drops it if fixed).
         z.object(t.shape) as unknown as typeof t.shape,
         (args, extra) =>
-          // `gate: 'harness'`: the query's permission seam has already parked
-          // an outward call for approval (registry.ts ToolContext.gate).
-          runTool(t, args, {
-            ...services,
-            principal,
-            session,
-            progress: progressFrom(extra),
-            signal: signalFrom(extra),
-            lookup,
-            gate: 'harness',
-          }),
+          // In the call's own span (telemetry/turn.ts TurnTrace), found by the
+          // tool_use id Claude Code sends in `_meta`: the SDK runs this handler
+          // in the query's context, not the tool's (telemetry/trace.ts).
+          otelContext.with(toolContextFor(extra), () =>
+            // `gate: 'harness'`: the query's permission seam has already parked
+            // an outward call for approval (registry.ts ToolContext.gate).
+            runTool(t, args, {
+              ...services,
+              principal,
+              session,
+              progress: progressFrom(extra),
+              signal: signalFrom(extra),
+              lookup,
+              gate: 'harness',
+            }),
+          ),
         { annotations: t.annotations },
       ),
     ),
@@ -159,13 +166,24 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
         const principal = principalFrom(extra)
         if (!principal) return errorResult('unauthenticated')
         const startedAt = new Date()
-        const run = await runToolWithOutcome(t, args, {
-          ...services,
-          principal,
-          progress: progressFrom(extra),
-          signal: extra.signal,
-          lookup,
-        })
+        // `agent.tool/<name>` under the request's `agent.mcp/tools/call` (spec
+        // 2026-10-01 §5.4); never its input or result (§6).
+        const run = await withSpan(
+          `agent.tool/${t.name}`,
+          { attributes: { 'scadbuddy.tool': t.name, 'scadbuddy.tier': t.risk } },
+          async (span) => {
+            const done = await runToolWithOutcome(t, args, {
+              ...services,
+              principal,
+              progress: progressFrom(extra),
+              signal: extra.signal,
+              lookup,
+            })
+            span.setAttribute('scadbuddy.outcome', done.outcome)
+            if (done.outcome === 'error') span.setStatus({ code: SpanStatusCode.ERROR })
+            return done
+          },
+        )
         // Every /mcp call, whatever became of it (#258, audit/log.ts). The row
         // names the tool that ran: a confirm_action that executed its approved
         // call is recorded as that call, with the approval it ran on, and its
