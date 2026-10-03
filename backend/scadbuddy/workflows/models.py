@@ -56,6 +56,8 @@ class PieceRequest(BaseModel):
             raise ValueError(problem)
         if self.revision is not None and self.scope is not None:
             raise ValueError("a piece at a revision is shared, so it takes no scope")
+        if self.revision is None and self.scope is None:
+            raise ValueError("a piece with no revision needs a scope, or jobs would share it")
         version = self.revision if self.revision is not None else self.scope
         expected = piece_key(self.slug, version, self.file, self.params)
         if self.piece_key != expected:

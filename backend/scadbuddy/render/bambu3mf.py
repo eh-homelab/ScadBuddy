@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import re
 import uuid
 import zipfile
@@ -454,6 +455,9 @@ class PlateEntry:
 
     index: int
     thumbnail: str | None
+    #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
+    #: the objects on it joined with " + ", else ``None``.
+    name: str | None = None
 
 
 def _metadata(node: ET.Element) -> dict[str, str]:
@@ -471,6 +475,8 @@ class PlateSettings:
     index: int
     metadata: dict[str, str]
     object_id: str | None
+    #: Every ``model_instance``'s object id, in file order (#929).
+    object_ids: tuple[str, ...] = ()
 
 
 def plate_settings(config: ET.Element) -> list[PlateSettings]:
@@ -485,7 +491,12 @@ def plate_settings(config: ET.Element) -> list[PlateSettings]:
             raise ValueError("a <plate> in the 3MF's model settings has no plater_id")
         instance = plate.find("model_instance")
         object_id = _metadata(instance).get("object_id") if instance is not None else None
-        plates.append(PlateSettings(int(metadata["plater_id"] or 0), metadata, object_id))
+        object_ids = tuple(
+            _metadata(instance).get("object_id", "") for instance in plate.findall("model_instance")
+        )
+        plates.append(
+            PlateSettings(int(metadata["plater_id"] or 0), metadata, object_id, object_ids)
+        )
     return plates
 
 
@@ -498,10 +509,19 @@ def plates_of(path: Path) -> list[PlateEntry]:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    # An <object> without an id is named by nothing, so a missing object_id ("") on a
+    # plate's instance can never meet one.
+    object_names = {
+        object_id: _metadata(obj).get("name", "")
+        for obj in config.iter("object")
+        if (object_id := obj.get("id"))
+    }
     plates: list[PlateEntry] = []
     for plate in plate_settings(config):
         cover = plate.metadata.get("thumbnail_file")
-        plates.append(PlateEntry(plate.index, cover if cover in names else None))
+        on_plate = (object_names.get(object_id, "") for object_id in plate.object_ids)
+        name = plate.metadata.get("plater_name") or " + ".join(n for n in on_plate if n) or None
+        plates.append(PlateEntry(plate.index, cover if cover in names else None, name))
     return sorted(plates, key=lambda plate: plate.index)
 
 
@@ -592,15 +612,24 @@ def write_plates_3mf(
                 zip(names, (images.plate, images.plate_small, images.top, images.pick), strict=True)
             )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in entries:
-            info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-            # PNG is already a deflate stream; re-deflating it is pure CPU for
-            # nothing, and Studio stores its own thumbnails uncompressed too.
-            info.compress_type = (
-                zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
-            )
-            archive.writestr(info, payload)
+    # Written aside and swapped in whole (#867): a timed-out attempt's thread that is
+    # still writing can never leave a half-written archive at `out_path`. A hard kill
+    # before the replace leaves the dot-named staging file: `pack_dir` never publishes
+    # dot files, and it goes when the piece's directory is evicted or swept.
+    staging = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}")
+    try:
+        with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in entries:
+                info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
+                # PNG is already a deflate stream; re-deflating it is pure CPU for
+                # nothing, and Studio stores its own thumbnails uncompressed too.
+                info.compress_type = (
+                    zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
+                )
+                archive.writestr(info, payload)
+        os.replace(staging, out_path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def _plate_offset(

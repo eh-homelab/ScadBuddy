@@ -386,12 +386,16 @@ interface Host {
   inputs: { get(): Json; set(patch: Json): void; subscribe(fn: (i: Json) => void): () => void }
   schema(file?: string): Promise<CustomizerSchema>     // default model.scad
   files: { url(path: string): string }                  // template assets
-  generate(): Promise<{ jobId: string }>
+  generate(): Promise<{ jobId: string; outputId: string }>
   openPrint(outputId: string): void
   presets: { list(); save(name); load(id) }             // over inputs
   describe?: (fn: () => string) => void                 // agent-facing summary (optional)
 }
 ```
+
+`generate()` waits for the render of the current inputs and keeps it as an output,
+resolving with both ids: a template's own Generate then has an output to hand to
+`openPrint`, with no polling of its own (phase 4's pipeline outputs build on this shape).
 
 `inputs` is the one piece of state. It is JSON the template owns. For a template
 with no custom UI, inputs are exactly the parameter values, so today's

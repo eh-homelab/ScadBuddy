@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import psycopg
 from pydantic import (
@@ -68,7 +68,12 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
-from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import (
+    PresetStore,
+    TemplatePreset,
+    TemplatePresets,
+    for_model_json,
+)
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -240,10 +245,15 @@ class UiDeclaration(BaseModel):
 
 _BOOLEAN = ("0", "1")
 
+#: Bambu's ``print_sequence`` (#907): the one list a template's ``print_settings`` and a
+#: print's own override both take.
+PrintSequence = Literal["by layer", "by object"]
+
 #: The process settings a template may declare in ``print_settings`` (#770), in the
 #: order a download lists them as edits, each with the values it takes. Each is a
 #: Bambu Studio process key, and its value the string a Bambu config stores; the
-#: enums are ``s_keys_map_SupportType`` and ``s_keys_map_BrimType`` in Bambu Studio's
+#: enums are ``s_keys_map_SupportType``, ``s_keys_map_BrimType`` and
+#: ``s_keys_map_PrintSequence`` (#907) in Bambu Studio's
 #: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
 #: number of millimetres. Only these: a template states how it prints best, not a
 #: whole profile.
@@ -261,6 +271,7 @@ PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
         "outer_and_inner",
         "no_brim",
     ),
+    "print_sequence": get_args(PrintSequence),
 }
 PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
 
@@ -310,6 +321,9 @@ class ModelMeta(BaseModel):
     #: Why a ``ui`` on disk could not be read. The template still lists and
     #: customizes with the generated form (§4.2); never written back to model.json.
     ui_error: str | None = Field(default=None, exclude=True)
+    #: The ``ui`` as written when it could not be read, so a create writes the
+    #: author's declaration back as it came rather than dropping it.
+    unread_ui: Any = Field(default=None, exclude=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -323,7 +337,12 @@ class ModelMeta(BaseModel):
                 f"ui.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
                 for detail in error.errors()
             )
-            return {**data, "ui": None, "ui_error": f"model.json's ui is not valid: {problems}"}
+            return {
+                **data,
+                "ui": None,
+                "ui_error": f"model.json's ui is not valid: {problems}",
+                "unread_ui": data["ui"],
+            }
         return data
 
     #: The template's default slicer settings (#770): process overrides on the print
@@ -706,11 +725,19 @@ class Catalogue:
         except RecursionError:
             raise InvalidModelMetaError(slug, "nested too deeply") from None
 
-    def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
+    def write_raw_meta(self, slug: str, meta: dict[str, Any], *, presets: bool = False) -> None:
+        """Write ``model.json``. With ``presets`` (the write sets them), the presets are
+        written as :func:`for_model_json` keeps them; otherwise they are left exactly as
+        the file had them, so an unrelated edit never rewrites a hand-edited list."""
         # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
         # Dropping it here retires the key from volumes written before that was
         # true, rather than leaving a cache blob in the versioned tree forever.
         meta.pop("schema", None)
+        written = meta.get("presets")
+        if presets and isinstance(written, list):
+            meta["presets"] = [
+                for_model_json(preset) if isinstance(preset, dict) else preset for preset in written
+            ]
         # No `mkdir`: the model directory must already exist (`create` makes it).
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
@@ -920,7 +947,10 @@ class Catalogue:
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
-            self.write_raw_meta(slug, meta.model_dump(exclude=excluded))
+            raw = meta.model_dump(exclude=excluded)
+            if meta.unread_ui is not None:
+                raw["ui"] = meta.unread_ui
+            self.write_raw_meta(slug, raw, presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
@@ -1094,7 +1124,7 @@ class Catalogue:
         def change() -> None:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
-            self.write_raw_meta(slug, raw)
+            self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
                 # The list written is the template's presets whole: a legacy file left
                 # beside it would add its entries back (they are read below model.json),

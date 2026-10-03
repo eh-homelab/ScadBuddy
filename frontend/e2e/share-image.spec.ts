@@ -108,7 +108,7 @@ test.describe('rendered image in the media', () => {
       (request) =>
         request.method() === 'POST' &&
         request.url().endsWith('/render') &&
-        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.params?.label_art ?? '')),
+        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.inputs?.params?.label_art ?? '')),
     )
     await page.getByRole('button', { name: 'Choose…' }).click()
     const picker = page.getByRole('dialog', { name: 'Choose Label artwork' })

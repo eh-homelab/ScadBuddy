@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
@@ -22,7 +23,8 @@ import { page, PAGED, pageInput } from './pagination.js'
 //   (#312).
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
-//   per-slot remaining grams (get_print_filaments), and print progress. The
+//   per-slot remaining grams (get_print_filaments), print progress, and a
+//   printer's current camera frame (get_printer_camera, #796). The
 //   queue, the print archive and aggregate stats have no backend route yet, so
 //   they have no tool yet.
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
@@ -277,6 +279,29 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_printer_camera',
+    description:
+      "A printer's current camera frame as a JPEG: what is on the bed now, including prints ScadBuddy did " +
+      'not start. printer_id is a Bambuddy printer id, as get_print_targets lists them.',
+    input: z.object({ printer_id: z.number().int().nonnegative() }),
+    risk: 'read',
+    source: "a printer's camera: whatever is in view, including anything written on it",
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/print/printers/{printer_id}/camera'],
+    handler: async ({ printer_id }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/print/printers/{printer_id}/camera', {
+          params: { path: { printer_id } },
+          parseAs: 'stream',
+        }),
+        `capture the camera of printer ${printer_id}`,
+        ctx,
+        { path: `/api/v1/print/printers/${printer_id}/camera`, name: `printer-${printer_id}-camera.jpg`, fallbackType: 'image/jpeg' },
+        image,
+      ),
+  }),
+
+  defineTool({
     name: 'get_print_run',
     description:
       'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
@@ -426,6 +451,10 @@ export const printTools: Tool[] = [
         .describe('A filament preset per slot id, in place of the spool\'s own'),
       project_id: nullable(z.number().int()).describe('Omit for the remembered project; null for "No project"'),
       options: printOptions,
+      print_sequence: z
+        .enum(['by layer', 'by object'])
+        .optional()
+        .describe("'by object' finishes each object before the next starts; omit for the template's own"),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -525,6 +554,7 @@ export const printTools: Tool[] = [
               // Omitted stays omitted (the remembered project); null is "No project" (#317).
               ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
+              ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
               request_id: requestId,
             },
           }),
@@ -537,7 +567,10 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'create_print_project',
-    description: 'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`.',
+    description:
+      'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`. ' +
+      '`parent_id` nests a new project under an existing one, and its folder under the parent\'s folder; ' +
+      'it applies only to a new project, and sent with `project_id` or `folder_id` it is refused (400), never ignored.',
     input: z.object({
       name: z.string().optional(),
       description: z.string().optional(),
@@ -546,6 +579,7 @@ export const printTools: Tool[] = [
       url: z.string().optional(),
       folder_id: z.number().int().optional(),
       project_id: z.number().int().optional(),
+      parent_id: z.number().int().optional(),
     }),
     risk: 'outward',
     bambuddyScope: ['Manage Projects', 'Manage Library'],
@@ -564,6 +598,7 @@ export const printTools: Tool[] = [
               url: args.url ?? null,
               folder_id: args.folder_id ?? null,
               project_id: args.project_id ?? null,
+              parent_id: args.parent_id ?? null,
             },
           }),
           'create project',

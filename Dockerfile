@@ -540,10 +540,14 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
 # is the API's 8080). Phase 1 runs one replica, sharing /data with the API.
 # SIGTERM starts its drain (tini forwards it; no preStop needed): it polls until no
-# workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
+# workflow pinned to its build is running (or, after 30 s, until it sees its build is
+# still current: a restart of the same build), for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
 # + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
 # terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
 # plus a little slack for teardown (e.g. 30 s): 690 s at the default.
+# A new build must become current before the old pod drains, so roll it out with
+# RollingUpdate and maxSurge >= 1: under Recreate the old build stays current while it
+# drains, and runs submitted then are pinned to a build no pod serves afterwards.
 CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short

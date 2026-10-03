@@ -53,6 +53,7 @@ describe('buildHarnessOptions', () => {
     expect(Object.keys(options.env ?? {}).sort()).toEqual(
       [
         'ANTHROPIC_API_KEY',
+        'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
         'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
         'CLAUDE_CONFIG_DIR',
         'HOME',

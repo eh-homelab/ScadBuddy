@@ -124,9 +124,10 @@ def test_a_scadbuddy_output_is_one_plate(client: TestClient, model: str) -> None
     configure(client)
     output_id = _output_without_cover(client, model)
 
-    assert client.get(f"/api/v1/outputs/{output_id}/plates").json() == [
-        {"index": 1, "has_thumbnail": False}
-    ]
+    [plate] = client.get(f"/api/v1/outputs/{output_id}/plates").json()
+    assert plate == {"index": 1, "has_thumbnail": False, "name": plate["name"]}
+    # #929: the plate is named by what is on it, so the dialog can say what prints.
+    assert plate["name"]
 
 
 @respx.mock
@@ -137,10 +138,13 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
     output_id = _output_without_cover(client, model)
     add_plate(_output_3mf(paths, output_id), 2, thumbnail=b"\x89PNG plate two")
 
-    assert client.get(f"/api/v1/outputs/{output_id}/plates").json() == [
-        {"index": 1, "has_thumbnail": False},
-        {"index": 2, "has_thumbnail": True},
+    plates = client.get(f"/api/v1/outputs/{output_id}/plates").json()
+    assert [(plate["index"], plate["has_thumbnail"]) for plate in plates] == [
+        (1, False),
+        (2, True),
     ]
+    # #929: plate 2 as `add_plate` writes it holds nothing and is unnamed.
+    assert plates[1]["name"] is None
     cover = client.get(f"/api/v1/outputs/{output_id}/plates/2/thumbnail")
     assert cover.headers["content-type"] == "image/png"
     assert cover.content == b"\x89PNG plate two"

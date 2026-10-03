@@ -8,10 +8,10 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.exceptions import ApplicationError, CancelledError
-from temporalio.worker import Worker
+from temporalio.exceptions import ApplicationError, CancelledError, FailureError
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo
@@ -24,7 +24,7 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
-from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
+from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline, _target_gone
 from tests.support.temporal import temporal_client
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.asyncio]
@@ -399,3 +399,40 @@ async def test_a_job_with_a_slug_the_api_would_refuse_projects_failed_unrendered
         last = acts.projections[-1]
         assert last.state == "failed" and last.failure is not None
         assert "../../etc" in last.failure.error
+
+
+@workflow.defn(name="ReturnsAtOnce")
+class _ReturnsAtOnce:
+    @workflow.run
+    async def run(self) -> None:
+        return None
+
+
+@workflow.defn(name="SignalsAnother")
+class _SignalsAnother:
+    @workflow.run
+    async def run(self, target: str) -> bool:
+        try:
+            await workflow.get_external_workflow_handle(target).signal("anything")
+        except FailureError as error:
+            return _target_gone(error)
+        return False
+
+
+async def test_signalling_a_closed_or_unknown_workflow_is_recognised_as_gone() -> None:
+    """#857: `_target_gone` names an SDK error type; a Temporal bump that renames it
+    would turn a waiter's retry on a closed piece into a failed job."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[_ReturnsAtOnce, _SignalsAnother],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            closed = f"closed-{uuid.uuid4().hex}"
+            await client.execute_workflow(_ReturnsAtOnce.run, id=closed, task_queue=queue)
+            for target in (closed, f"never-{uuid.uuid4().hex}"):
+                assert await client.execute_workflow(
+                    _SignalsAnother.run, target, id=f"signals-{uuid.uuid4().hex}", task_queue=queue
+                )

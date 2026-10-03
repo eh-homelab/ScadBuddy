@@ -41,8 +41,9 @@ def recorded_schema(name: str) -> dict[str, Any]:
 
 def shaped(schema: str, **values: Any) -> dict[str, Any]:
     """A response body built inline for a call the live instance was never asked to make
-    (a POST; see recordings/README.md), checked field by field against Bambuddy's
-    recorded schema so a misspelt field fails here rather than in production."""
+    (a POST; see recordings/README.md). Only the field names are checked against
+    Bambuddy's recorded schema, so a misspelt field fails here rather than in
+    production; required fields and JSON types are not checked."""
     unknown = set(values) - set(recorded_schema(schema)["properties"])
     assert not unknown, f"{schema} has no field {sorted(unknown)}"
     return values

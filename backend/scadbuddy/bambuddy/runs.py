@@ -167,11 +167,11 @@ class RunLostError(RuntimeError):
 def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The output plus the request as parsed, so key order and spacing do not matter.
 
-    ``request_id`` is part of it when sent; without one the key is what it was before
-    the field existed.
+    ``request_id`` and ``print_sequence`` are part of it when sent; without them the key
+    is what it was before the fields existed.
     """
-    exclude = {"request_id"} if request.request_id is None else None
-    body = request.model_dump(mode="json", exclude=exclude)
+    exclude = {name for name in ("request_id", "print_sequence") if getattr(request, name) is None}
+    body = request.model_dump(mode="json", exclude=exclude or None)
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 

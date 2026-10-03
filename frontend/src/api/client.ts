@@ -11,6 +11,7 @@ import type {
   ChoicesView,
   ConnectionTest,
   CustomizerSchema,
+  RevisionSchema,
   DuplicateRequest,
   EditTarget,
   FilamentOptions,
@@ -43,7 +44,6 @@ import type {
   ParamPresetDuplicate,
   ParamPresetUpdate,
   PastedSource,
-  ParamValue,
   Plate,
   PlateCatalogue,
   PlateFit,
@@ -73,6 +73,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -87,6 +88,7 @@ import type {
 } from './mcpTokens'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
+import type { JsonObject } from '../lib/inputs'
 
 export const API_BASE = '/api/v1'
 
@@ -349,6 +351,47 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
       await wait(printRunPoll.intervalMs, signal)
     }
   }
+}
+
+/**
+ * A print run to its end (#470, #742): POST `path` (an output's or a library file's
+ * `/run`), then follow `GET /print/runs/{id}`. The server answers 202 with a run and
+ * slices and queues in the background, since that takes longer than the proxies in
+ * front wait. A repeat of the same request (the same `request_id`) is the same run, so
+ * re-sending it after an answer that never arrived re-attaches to that run and never
+ * queues a second print. `signal` stops following; the run itself goes on.
+ */
+async function followPrintRun(
+  path: string,
+  body: PrintRunRequest,
+  signal?: AbortSignal,
+): Promise<PrintRunResult> {
+  let run = await reattach(
+    () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
+    signal,
+  )
+  while (run.status === 'running') {
+    await wait(printRunPoll.intervalMs, signal)
+    const id = run.id
+    run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
+  }
+  if (run.status === 'failed' || !run.result) {
+    const error = run.error
+    const detail = error?.detail ?? 'The print run ended without a result.'
+    throw new ApiError({
+      ...error?.extensions,
+      // The problem's type, so the failure reads as a synchronous answer would have.
+      type: error?.type,
+      title: error?.title ?? 'Print failed',
+      status: error?.status ?? 500,
+      detail,
+      // Whether the run had already tried to queue (a queue call that timed out, a
+      // later plate failing after an earlier one was queued, or a run lost while
+      // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
+      may_have_queued: run.may_have_queued,
+    })
+  }
+  return run.result
 }
 
 export const api = {
@@ -620,6 +663,7 @@ export const api = {
 
   /** #296 — the upload store's size against its caps, for Settings. */
   getAssetUsage: () => request<AssetUsage>('/assets/usage'),
+  getStoreUsage: () => request<StoreUsage>('/store/usage'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
@@ -647,13 +691,11 @@ export const api = {
     return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
   },
 
-  /** A `version` reads that revision's schema instead of the model's current one. */
-  getSchema: (slug: string, version?: string) =>
-    request<CustomizerSchema>(
-      version
-        ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
-        : `/models/${seg(slug)}/schema`,
-    ),
+  /** A `version` reads that revision's schema, and its `ui`, instead of the model's current one. */
+  getSchema: (slug: string, version?: string): Promise<CustomizerSchema | RevisionSchema> =>
+    version
+      ? request<RevisionSchema>(`/models/${seg(slug)}/versions/${seg(version)}/schema`)
+      : request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
 
   listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 
@@ -674,16 +716,11 @@ export const api = {
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
    * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
    */
-  render: (
-    slug: string,
-    params: Record<string, ParamValue>,
-    version?: string,
-    supersedes?: string,
-  ) =>
+  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
       body: JSON.stringify({
-        params,
+        inputs,
         version: version ?? null,
         ...(supersedes ? { supersedes } : {}),
       }),
@@ -693,10 +730,17 @@ export const api = {
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
-  createOutput: (slug: string, jobId: string, name?: string) =>
+  /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
+  uiFileUrl: (slug: string, version: string | undefined, path: string) =>
+    `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ''}/ui/${path
+      .split('/')
+      .map(seg)
+      .join('/')}`,
+
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
     request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null }),
+      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
     }),
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
@@ -809,47 +853,8 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: async (
-    outputId: string,
-    body: PrintRunRequest,
-    signal?: AbortSignal,
-  ): Promise<PrintRunResult> => {
-    // #470: the server answers 202 with a run and slices and queues in the background,
-    // since that takes longer than the proxies in front wait. A repeat of the same
-    // request (the same `request_id`) is the same run, so re-sending it after an
-    // answer that never arrived re-attaches to that run and never queues a second print.
-    let run = await reattach(
-      () =>
-        request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
-          method: 'POST',
-          body: JSON.stringify(body),
-          signal,
-        }),
-      signal,
-    )
-    while (run.status === 'running') {
-      await wait(printRunPoll.intervalMs, signal)
-      const id = run.id
-      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
-    }
-    if (run.status === 'failed' || !run.result) {
-      const error = run.error
-      const detail = error?.detail ?? 'The print run ended without a result.'
-      throw new ApiError({
-        ...error?.extensions,
-        // The problem's type, so the failure reads as a synchronous answer would have.
-        type: error?.type,
-        title: error?.title ?? 'Print failed',
-        status: error?.status ?? 500,
-        detail,
-        // Whether the run had already tried to queue (a queue call that timed out, a
-        // later plate failing after an earlier one was queued, or a run lost while
-        // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
-        may_have_queued: run.may_have_queued,
-      })
-    }
-    return run.result
-  },
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -983,13 +988,9 @@ export const api = {
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },
 
-  /** Still answered in one request (#470 moved only an output's run to a 202). */
+  /** #742 — followed to its end like an output's run (`runPrint`). */
   runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    request<PrintRunResult>(`/print/library/${fileId}/run`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      signal,
-    }),
+    followPrintRun(`/print/library/${fileId}/run`, body, signal),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {

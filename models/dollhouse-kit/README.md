@@ -13,6 +13,15 @@ piece made with the same **Grid** settings joins every other piece.
 The second picture is the hidden `preview = "room"` mode: one back corner of a
 2 x 2 module room, assembled. It is for this page only, not a print plate.
 
+**House designer.** ScadBuddy opens this template in its own designer (`ui/`).
+You enter a box house: modules wide and deep (at the Grid panel's module size), storeys, and windows
+per storey. It lists every piece that house needs, with counts. **Show** puts
+one piece in the preview on the one-module grid, and Generate keeps the piece
+shown, so a house is generated one piece at a time. The Grid sizes (module,
+course height, wall and floor thickness) and the style parameters (exterior,
+wallpaper, colours) stay editable and apply to every piece. Generating the whole house
+in one go is still to come (it needs template pipelines).
+
 **Safety:** the keys, pegs and hinge pins are small parts and a choking hazard
 for children under 3. Supervise play, and keep the connector bag away from
 small children.

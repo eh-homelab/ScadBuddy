@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.render.jobs import export_revision
+from scadbuddy.render.jobs import (
+    SnapshotUnavailableError as SnapshotUnavailableError,  # defined beside resolve_source
+)
+from scadbuddy.render.jobs import export_revision, touch_export
 from scadbuddy.store.archive import pack_dir, unpack_dir
 from scadbuddy.store.content import (
     BlobCorruptError,
@@ -31,10 +35,6 @@ from scadbuddy.store.locks import KeyLocks
 
 def snapshot_key(slug: str, revision: str) -> str:
     return f"src-{re.sub(r'[^A-Za-z0-9._-]', '_', slug)}-{revision}"
-
-
-class SnapshotUnavailableError(RuntimeError):
-    """No snapshot is stored and this process has no git history to make one."""
 
 
 class SnapshotStore:
@@ -66,33 +66,49 @@ class SnapshotStore:
 
     async def ensure(self, slug: str, revision: str) -> str:
         key = snapshot_key(slug, revision)
-        if await asyncio.to_thread(self.content.index.get, key) is not None:
-            await self.content.touch(key)
+        if await self._stored(key):
             return key
-        directory = self.paths.model_revision_dir(slug, revision)
-        if not directory.is_dir():
-            if self.history is None:
-                raise SnapshotUnavailableError(f"no snapshot of {slug}@{revision} and no history")
-            await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
-        data = await asyncio.to_thread(pack_dir, directory)
-        await self.content.put(
-            "snapshot",
-            data,
-            name=f"src-{revision[:12]}.zip",
-            scope=BlobScope(slug=slug, title=template_title(directory, slug)),
-            key=key,
-        )
+        # One export and upload per key in this process: a revision's first submits
+        # (debounced, at once) wait for the first rather than each storing it (#686).
+        async with self.locks.hold(key):
+            if await self._stored(key):
+                return key
+            directory = self.paths.model_revision_dir(slug, revision)
+            # Marked used before it is packed, so the prune (whose TTL an old revision's
+            # export is past) does not take it mid-pack; one it already took is exported
+            # again.
+            if not (directory.is_dir() and await _used(directory)):
+                if self.history is None:
+                    raise SnapshotUnavailableError(
+                        f"no snapshot of {slug}@{revision} and no history"
+                    )
+                await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
+            data = await asyncio.to_thread(pack_dir, directory)
+            await self.content.put(
+                "snapshot",
+                data,
+                name=f"src-{revision[:12]}.zip",
+                scope=BlobScope(slug=slug, title=template_title(directory, slug)),
+                key=key,
+            )
         return key
+
+    async def _stored(self, key: str) -> bool:
+        """Whether the index holds ``key``; a hit is touched, as a use."""
+        if await asyncio.to_thread(self.content.index.get, key) is None:
+            return False
+        await self.content.touch(key)
+        return True
 
     async def materialize(self, slug: str, revision: str) -> bool:
         directory = self.paths.model_revision_dir(slug, revision)
-        if directory.is_dir():
+        if directory.is_dir() and await _used(directory):
             return True
         key = snapshot_key(slug, revision)
         # One unpack per key in this process: a second one, arriving after the first
         # finished, would swap the export out from under a render reading it.
         async with self.locks.hold(key):
-            if directory.is_dir():
+            if directory.is_dir() and await _used(directory):
                 return True
             stat = await asyncio.to_thread(self.content.index.get, key)
             # This backend's row only: `read` downloads from this backend.
@@ -108,3 +124,11 @@ class SnapshotStore:
             await asyncio.to_thread(unpack_dir, data, directory)
         await self.content.touch(key)
         return True
+
+
+async def _used(directory: Path) -> bool:
+    """Mark an export used, so the prune's TTL runs from the last render that read it.
+    False when the prune took it first: the caller brings it in again, or says it
+    cannot, rather than handing on a directory that is gone."""
+    await asyncio.to_thread(touch_export, directory)
+    return directory.is_dir()
