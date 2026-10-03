@@ -6,7 +6,7 @@ through by default. The resource is rebuilt with ``service.name`` forced to
 list and string is capped at the limits the browser SDK's provider is configured with
 (the frontend ``RelayExporter``'s ``spanLimits``), so a well-behaved page never meets
 them; and the backend's own scrub (`core/trace_scrub.py`) is applied: no exception
-message, no query string, no user agent on a span.
+message, no query string, no user agent, no captured header on a span.
 
 What is dropped for a cap is counted in OTLP's own field for its kind, as the SDK's
 limits count it: ``droppedAttributesCount`` on the span, an event or a link,
@@ -21,7 +21,7 @@ import math
 import re
 from typing import Any, Final
 
-from scadbuddy.core.trace_scrub import CUT_AT_QUERY, DROPPED_ATTRIBUTES
+from scadbuddy.core.trace_scrub import CUT_AT_QUERY, DROPPED_ATTRIBUTES, HEADER_PREFIXES
 
 MAX_SPANS: Final = 512
 #: Bound what an empty ``{}`` entry can be rewritten into: each resource and scope is
@@ -209,7 +209,7 @@ def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
         if not isinstance(key, str):
             dropped += 1
             continue
-        if key in DROPPED_ATTRIBUTES:
+        if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue
         value = _value(item.get("value"))
         if value is None or len(kept) >= limit:

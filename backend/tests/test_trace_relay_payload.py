@@ -481,3 +481,19 @@ def test_a_stack_without_a_message_header_keeps_every_frame() -> None:
     }
     (scrubbed,) = only_span(export(span(events=[event])))["events"]
     assert scrubbed["attributes"] == [string("exception.stacktrace", stack)]
+
+
+def test_header_attributes_are_removed_from_a_span_an_event_and_a_link() -> None:
+    headers = [
+        string("http.request.header.cookie", SENTINEL),
+        string("http.response.header.set_cookie", SENTINEL),
+        string("http.method", "GET"),
+    ]
+    event = {"name": "fetch", "attributes": headers}
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": headers}
+    body = export(span(attributes=headers, events=[event], links=[link]))
+    assert SENTINEL not in _prepared(body).decode()
+    result = only_span(body)
+    for scrubbed in (result, result["events"][0], result["links"][0]):
+        assert scrubbed["attributes"] == [string("http.method", "GET")]
+        assert scrubbed["droppedAttributesCount"] == 0

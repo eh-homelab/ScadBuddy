@@ -42,8 +42,9 @@ _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 DROPPED_ATTRIBUTES: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
 CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
 #: Headers the instrumentation captures when a deployment sets
-#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything.
-_HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
+#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything. The
+#: relay drops them from the page's spans too.
+HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
 
 
 @lru_cache(maxsize=256)
@@ -137,7 +138,7 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
     kept: dict[str, AttributeValue] = {}
     for key, value in (attributes or {}).items():
-        if key in DROPPED_ATTRIBUTES or key.startswith(_HEADER_PREFIXES):
+        if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue
         if key in CUT_AT_QUERY and isinstance(value, str):
             value = value.split("?", 1)[0]
@@ -183,6 +184,7 @@ class ScrubbingSpanExporter(SpanExporter):
 __all__ = [
     "CUT_AT_QUERY",
     "DROPPED_ATTRIBUTES",
+    "HEADER_PREFIXES",
     "ScrubbingSpanExporter",
     "frames_only",
     "scrub",
