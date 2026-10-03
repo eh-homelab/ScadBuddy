@@ -477,9 +477,11 @@ not copied from that module, which has no such list:
 
 **Not traced:**
 - `/healthz`, `/metrics` and `/telemetry/v1/traces`, through
-  `FastAPIInstrumentor.instrument_app(app,
-  excluded_urls="/healthz,/metrics,/telemetry/v1/traces")`. This is set in
-  code, not by `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`, so a deployment cannot
+  `FastAPIInstrumentor.instrument_app(app, excluded_urls=…)` with each path
+  anchored (`^[a-z]+://[^/]+/healthz$` and so on: the instrumentation searches the
+  URL, so an unanchored `/metrics` would also exclude `/api/v1/models/metrics-box`),
+  and `exclude_spans=["receive", "send"]` (no span per body chunk or WebSocket
+  message). This is set in code, not by `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`, so a deployment cannot
   lose it. The worker's own `/healthz` and `/metrics` on 9090 are served by
   its health server, which is never instrumented.
 - The relay's httpx forwarder, whose client is never passed to

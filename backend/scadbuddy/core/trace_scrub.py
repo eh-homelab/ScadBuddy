@@ -8,27 +8,54 @@ rule is enforced here, once, rather than at each call site."""
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from collections.abc import Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status
 
-_FRAME: Final = re.compile(r'^ {2}(?:\| +)*(File "[^"\n]*", line \d+, in [\w.<>]+)$')
+if TYPE_CHECKING:
+    # tracing imports this module at run time; the alias is needed only by mypy.
+    from scadbuddy.core.tracing import AttributeValue
+
+#: An exception group's margin (``  | ``, ``  + ``) in front of each of its lines.
+_MARGIN: Final = re.compile(r"^ *[|+] ?")
+_TRACEBACK: Final = re.compile(r"^(?:Exception Group )?Traceback \(most recent call last\):$")
+_FRAME: Final = re.compile(r'^ {2}File "(?P<path>[^"\n]*)", line \d+, in [\w.<>]+$')
+_PSEUDO_FILE: Final = re.compile(r"^<(?:frozen [\w.]+|string|stdin)>$")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
 #: string can carry anything a user typed, a user agent is a header value.
 _DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
 _CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
 
 
+def _frames(stacktrace: str) -> Iterator[str]:
+    in_traceback = False
+    for line in stacktrace.splitlines():
+        inner = _MARGIN.sub("", line, count=1)
+        if _TRACEBACK.match(inner):
+            in_traceback = True
+        elif not inner.startswith(" "):
+            # The exception line, and every line of its message after it, until the
+            # next traceback header: message text, whatever it looks like.
+            in_traceback = False
+        elif in_traceback and (frame := _FRAME.match(inner)):
+            path = frame.group("path")
+            if _PSEUDO_FILE.match(path) or os.path.isfile(path):
+                yield inner.strip()
+
+
 def frames_only(stacktrace: str) -> str:
     """The ``File "…", line N, in f`` lines of a formatted traceback, and nothing else:
     a traceback ends with, and for a chained exception repeats, the messages, and its
-    code lines are source text."""
-    kept = (match.group(1) for line in stacktrace.splitlines() if (match := _FRAME.match(line)))
-    return "\n".join(kept)
+    code lines are source text. A message can hold newlines (Bambuddy's ``detail``
+    does), so a line counts as a frame only inside a traceback block, before that
+    block's exception line, and only when it names a file that exists: text shaped
+    like a frame inside a message is dropped with the message."""
+    return "\n".join(_frames(stacktrace))
 
 
 def _scrub_event(event: Event) -> Event:
@@ -52,8 +79,8 @@ def _exception_type(events: Sequence[Event]) -> str | None:
     return None
 
 
-def _scrub_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
-    kept: dict[str, Any] = {}
+def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
+    kept: dict[str, AttributeValue] = {}
     for key, value in (attributes or {}).items():
         if key in _DROPPED:
             continue

@@ -128,10 +128,44 @@ def test_no_query_string_or_user_agent_survives() -> None:
 def test_a_frame_line_with_anything_but_a_function_name_does_not_survive() -> None:
     text = (
         "Traceback (most recent call last):\n"
-        '  File "/ok.py", line 3, in fine_name\n'
-        f'  File "/x", line 1, in {SENTINEL}-detail with spaces\n'
+        f'  File "{__file__}", line 3, in fine_name\n'
+        f'  File "{__file__}", line 1, in {SENTINEL}-detail with spaces\n'
         "ValueError: boom"
     )
     kept = frames_only(text)
     assert SENTINEL not in kept
-    assert 'File "/ok.py", line 3, in fine_name' in kept
+    assert f'File "{__file__}", line 3, in fine_name' in kept
+
+
+def test_a_message_shaped_like_frames_does_not_survive() -> None:
+    # A Bambuddy detail keeps its newlines: whatever follows the exception line is
+    # message text, however much it looks like a traceback.
+    detail = (
+        f'\n  File "/tok {SENTINEL} here", line 1, in g'
+        f'\n  File "{__file__}", line 1, in {SENTINEL}_abc'
+        "\nTraceback (most recent call last):"
+        f'\n  File "/{SENTINEL}", line 1, in g'
+    )
+    try:
+        raise RuntimeError(detail)
+    except RuntimeError as error:
+        formatted = "".join(traceback.format_exception(error))
+    kept = frames_only(formatted)
+    assert SENTINEL not in kept
+    assert f'File "{__file__}"' in kept
+
+
+def test_frames_inside_nested_exception_groups_are_kept() -> None:
+    def inner() -> None:
+        raise ValueError(SENTINEL)
+
+    try:
+        try:
+            inner()
+        except ValueError as cause:
+            raise ExceptionGroup("outer", [ExceptionGroup("inner", [cause])]) from None
+    except ExceptionGroup as group:
+        formatted = "".join(traceback.format_exception(group))
+    kept = frames_only(formatted)
+    assert SENTINEL not in kept
+    assert "in inner" in kept
