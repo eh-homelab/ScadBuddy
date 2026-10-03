@@ -474,6 +474,11 @@ not copied from that module, which has no such list:
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
   is configured; URLs are recorded without the query);
+- the request path: a segment is data (a file path a user chose, a photo
+  filename Bambuddy returned, whatever the SPA fallback was asked for), so the
+  route's template stands in for it (`http.target`, `url.path`, and after the
+  `scheme://host` of `http.url`, `url.full`), and a request with no route
+  records no path at all;
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
