@@ -246,12 +246,15 @@ export type GateContext = {
  * end and link"). `traceparent` is the parked tool span's, stored on the row;
  * `parked` ends that span and the open turn segment once the row exists;
  * `decided` hands over the decision (its `decisionTraceparent` is the parent
- * of what the turn does next), and whether the call now runs.
+ * of what the turn does next), and whether the call now runs; `abandoned` says
+ * the row was never written (the gate's throw becomes a deny), so the call no
+ * longer waits on a decision.
  */
 export type ParkTrace = {
   traceparent: string | undefined
   parked(approvalId: string): void
   decided(approval: Pick<ApprovalRecord, 'id' | 'decision' | 'decisionTraceparent'>, runs: boolean): void
+  abandoned(): void
 }
 
 export type GateTrace = { park(toolUseId: string, toolName: string): ParkTrace }
@@ -1126,18 +1129,24 @@ export class ApprovalService {
       // The turn's trace (#988): the call's span context goes on the row, and
       // the span and the turn's open segment end as soon as the row exists.
       const park = context.trace?.park(request.toolUseId, request.toolName)
-      const approval = await this.create({
-        sessionId: context.sessionId,
-        turnId: context.turnId,
-        toolUseId: request.toolUseId,
-        tool: request.toolName,
-        input,
-        tier: request.tier,
-        requestedBy: context.requestedBy,
-        ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
-        secrets: context.secrets(),
-        ...(park?.traceparent ? { traceparent: park.traceparent } : {}),
-      })
+      let approval: ApprovalRecord
+      try {
+        approval = await this.create({
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          toolUseId: request.toolUseId,
+          tool: request.toolName,
+          input,
+          tier: request.tier,
+          requestedBy: context.requestedBy,
+          ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
+          secrets: context.secrets(),
+          ...(park?.traceparent ? { traceparent: park.traceparent } : {}),
+        })
+      } catch (err) {
+        park?.abandoned()
+        throw err
+      }
       park?.parked(approval.id)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it or, on shutdown, keeps it

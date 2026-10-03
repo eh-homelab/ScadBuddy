@@ -27,6 +27,9 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 //     undecided there from park() on, before its row exists: a sibling decided
 //     while this call's row is still being written does not open the resume
 //     early, and this call's parked() ends its own segment, not the resume.
+//     A call that parks only after its segment's parks were all decided (Claude
+//     Code runs outward calls one at a time, so a message's second call parks
+//     after the first ran) parks in the segment then open, and ends it.
 //   - An approved call's execution is a new `agent.tool/<name>` span: under
 //     the new segment when its decision opened one, else under its own
 //     decision (a root linked to its parked span when the decision has no
@@ -203,11 +206,14 @@ export class TurnTrace implements GateTrace {
   }
 
   park(toolUseId: string, toolName: string): ParkTrace {
-    if (this.#finished) return { traceparent: undefined, parked: () => {}, decided: () => {} }
+    if (this.#finished) return { traceparent: undefined, parked: () => {}, decided: () => {}, abandoned: () => {} }
     const call = this.#call(toolUseId, toolName)
-    // Undecided from now on, in the segment the call started in (see the header).
-    const segment = call.segment
+    // Undecided from now on, in the segment the call started in (see the header),
+    // unless every park there was decided and a later segment opened: then the
+    // call parks in the open segment, and its parked() ends that one.
+    let segment = call.parkedIn ?? call.segment
     if (!call.parkedIn) {
+      if (segment !== this.#segment && segment.undecided === 0) segment = this.#segment
       segment.undecided += 1
       call.parkedIn = segment
     }
@@ -222,7 +228,29 @@ export class TurnTrace implements GateTrace {
         this.#endSegment(segment, { 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
       },
       decided: (approval, runs) => this.#decided(toolUseId, call, parkedSpan, approval, runs),
+      abandoned: () => this.#abandoned(call),
     }
+  }
+
+  /**
+   * The call's row was never written, so no decision will come for it. Its
+   * count is undone; if its siblings were all decided meanwhile, the resume
+   * they were waiting on opens now, under the last of their decisions.
+   */
+  #abandoned(call: Call): void {
+    const segment = call.parkedIn
+    if (!segment || this.#finished) return
+    call.parkedIn = undefined
+    segment.undecided -= 1
+    if (segment.undecided > 0 || segment !== this.#segment || !segment.ended) return
+    const last = segment.decisions.at(-1)
+    this.#resume(segment, last, last ? trace.setSpanContext(ROOT_CONTEXT, last) : ROOT_CONTEXT)
+  }
+
+  /** Opens the segment after `segment`: a child of `decision`, linked to the segment's other decisions. */
+  #resume(segment: Segment, decision: SpanContext | undefined, decisionContext: Context): void {
+    const others = segment.decisions.filter((d) => d !== decision).map((context) => ({ context }))
+    this.#segment = this.#open(RESUME_SPAN, segment.index + 1, decisionContext, others)
   }
 
   #decided(
@@ -242,8 +270,7 @@ export class TurnTrace implements GateTrace {
     let parent = decisionContext
     let links: Link[] = []
     if (segment.undecided === 0 && segment === this.#segment) {
-      const links = segment.decisions.filter((d) => d !== decision).map((context) => ({ context }))
-      this.#segment = this.#open(RESUME_SPAN, segment.index + 1, decisionContext, links)
+      this.#resume(segment, decision, decisionContext)
       parent = this.context()
     }
     if (!runs) return

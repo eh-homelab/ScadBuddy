@@ -112,6 +112,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
             calls.push(`decided ${approval.decision} ${runs}`)
             decidedWith = approval.decisionTraceparent
           },
+          abandoned: () => calls.push('abandoned'),
         }
       },
     }
@@ -126,5 +127,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     expect(calls).toEqual([`park toolu_g mcp__stub__print`, `parked ${pending!.id}`, 'decided approved true'])
     const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
     expect(decidedWith).toBe(`00-${decision.spanContext().traceId}-${decision.spanContext().spanId}-01`)
+  })
+
+  it('a row that cannot be written abandons the park, so the turn’s count is undone', async () => {
+    const calls: string[] = []
+    const trace: GateTrace = {
+      park: (toolUseId) => {
+        calls.push(`park ${toolUseId}`)
+        return {
+          traceparent: TRACEPARENT,
+          parked: () => calls.push('parked'),
+          decided: () => calls.push('decided'),
+          abandoned: () => calls.push('abandoned'),
+        }
+      },
+    }
+    const stop = new AbortController()
+    // No such session: the insert breaks its foreign key.
+    const gate = m.approvals.gate({ sessionId: randomUUID(), turnId: randomUUID(), requestedBy: agentA, secrets: () => [], signal: stop.signal, trace })
+    await expect(gate({ toolName: 'mcp__stub__print', input: {}, toolUseId: 'toolu_g', tier: 'outward', signal: stop.signal })).rejects.toThrow()
+    expect(calls).toEqual(['park toolu_g', 'abandoned'])
   })
 })
