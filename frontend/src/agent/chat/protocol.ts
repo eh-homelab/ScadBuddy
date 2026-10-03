@@ -25,6 +25,7 @@
  * | complete `assistant` message with a `tool_use` block         | `tool.call`            |
  * | `user` message with the matching `tool_result` block         | `tool.result`          |
  * | `canUseTool` / `PreToolUse` for an `outward` tool (§8.2)      | `approval.required`    |
+ * | `canUseTool` for AskUserQuestion (#940)                       | `question.asked`       |
  * | `result` (total cost, number of turns)                       | `session.result`       |
  *
  * The exact SDK field names (for example the result message's cost and turn fields)
@@ -87,6 +88,46 @@ export const VersionLinkSchema = z.object({
   revision: z.string().min(1),
 })
 export type VersionLink = z.infer<typeof VersionLinkSchema>
+
+/**
+ * The longest answer the agent takes (agent `src/harness/questions.ts` `ANSWER_MAX`). A
+ * longer one is refused as a malformed frame and never reaches the question, so the
+ * panel never sends one: the card treats a longer answer (typed words plus any picked
+ * labels) as unfinished.
+ */
+export const ANSWER_MAX = 20_000
+/** The agent's other bounds on a question (`src/harness/questions.ts`); its tests pin them to these. */
+export const QUESTIONS_MAX = 4
+export const OPTIONS_MIN = 2
+export const OPTIONS_MAX = 4
+export const QUESTION_TEXT_MAX = 2_000
+export const PREVIEW_MAX = 20_000
+
+/**
+ * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
+ * picks an option (several when `multiSelect`) or types their own answer. An option's
+ * `preview` is Markdown it shows, e.g. a draft to approve.
+ */
+export const QuestionSchema = z.object({
+  question: z.string().min(1).max(QUESTION_TEXT_MAX),
+  header: z.string().max(200),
+  multiSelect: z.boolean(),
+  options: z
+    .array(
+      z.object({
+        label: z.string().min(1).max(200),
+        description: z.string().max(QUESTION_TEXT_MAX),
+        preview: z.string().max(PREVIEW_MAX).optional(),
+      }),
+    )
+    .min(OPTIONS_MIN)
+    .max(OPTIONS_MAX)
+    // The card tells options apart by label.
+    .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
+})
+  // A multi-select answer joins labels with ", " (agent questions.ts): no comma in one.
+  .refine((q) => !q.multiSelect || q.options.every((o) => !o.label.includes(',')), 'no comma in a multi-select label')
+export type Question = z.infer<typeof QuestionSchema>
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
@@ -197,6 +238,32 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     approved: z.boolean(),
     by: OwnerSchema.optional(),
   }),
+  /**
+   * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.
+   * `tool` is the AskUserQuestion `tool.call` id.
+   */
+  z.object({
+    v,
+    type: z.literal('question.asked'),
+    sessionId,
+    id: z.string().min(1),
+    tool: z.string().min(1),
+    questions: z.array(QuestionSchema).min(1).max(QUESTIONS_MAX),
+  }),
+  /**
+   * Answered (`answers`, one per question in order, and `by`), or cancelled with its
+   * turn (`reason`). A question never answers itself.
+   */
+  z.object({
+    v,
+    type: z.literal('question.resolved'),
+    sessionId,
+    id: z.string().min(1),
+    answered: z.boolean(),
+    answers: z.array(z.string()).optional(),
+    by: OwnerSchema.optional(),
+    reason: z.string().optional(),
+  }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
   z.object({
     v,
@@ -223,6 +290,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     code: z.string().optional(),
     message: z.string().min(1),
+    /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
+    questionId: z.string().min(1).optional(),
   }),
   /**
    * An automatic Hindsight recall or retain (#818): memory the agent read or wrote
@@ -267,6 +336,14 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId,
     id: z.string().min(1),
     approve: z.boolean(),
+  }),
+  /** #940 — the user's answer to a `question.asked`: one per question, in order. */
+  z.object({
+    v,
+    type: z.literal('question.answer'),
+    sessionId,
+    id: z.string().min(1),
+    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
