@@ -231,12 +231,30 @@ def _string_attribute(attributes: list[Any], name: str) -> str | None:
     return None
 
 
+def _without_message(stack: str, error_type: str | None, message: str | None) -> str:
+    """The stack without the message at its head, where V8 writes ``<type>: <message>``
+    (which can span lines). Firefox and Safari write no head, so nothing is removed; nor
+    is the message anywhere else, where it can be text inside a frame."""
+    if not message:
+        return stack
+    heads = [f"{error_type}: {message}"] if error_type else []
+    colon = stack.find(": ")
+    if colon != -1 and "\n" not in stack[:colon]:
+        heads.append(stack[: colon + 2] + message)
+    heads.append(message)
+    for head in heads:
+        if stack.startswith(head):
+            return stack[len(head) :]
+    return stack
+
+
 def _scrub_exception(raw: object) -> list[Any]:
     """An ``exception`` event's attributes without the message, and with only the frame
     lines of the stack (spec §6)."""
     scrubbed: list[Any] = []
     attributes = raw if isinstance(raw, list) else []
     message = _string_attribute(attributes, "exception.message")
+    error_type = _string_attribute(attributes, "exception.type")
     for item in attributes:
         key = item.get("key") if isinstance(item, dict) else None
         if key == "exception.message":
@@ -245,9 +263,8 @@ def _scrub_exception(raw: object) -> list[Any]:
             stack = _string_attribute([item], key)
             if stack is None:
                 continue
-            if message:
-                # A multi-line message can carry a line that looks like a frame.
-                stack = stack.replace(message, "")
+            # A multi-line message can carry a line that looks like a frame.
+            stack = _without_message(stack, error_type, message)
             item = {"key": key, "value": {"stringValue": browser_frames_only(stack)}}
         scrubbed.append(item)
     return scrubbed

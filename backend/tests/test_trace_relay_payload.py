@@ -443,3 +443,41 @@ def test_a_message_smuggled_into_the_stack_is_removed_before_frames_are_kept() -
     }
     (scrubbed,) = only_span(export(span(events=[event])))["events"]
     assert scrubbed["attributes"] == [string("exception.stacktrace", "at real (http://h/a.js:1:2)")]
+
+
+_FRAMES = (
+    "    at f (https://host/assets/index-a1b2.js:112:15)\n"
+    "    at https://host/assets/index-a1b2.js:20:7\n"
+    "g@https://host/assets/index-a1b2.js:30:9"
+)
+
+
+@pytest.mark.parametrize("message", ["1", "at", "assets", "host"])
+def test_a_message_found_inside_a_frame_leaves_the_frames_byte_identical(message: str) -> None:
+    event = {
+        "name": "exception",
+        "attributes": [
+            string("exception.type", "Error"),
+            string("exception.message", message),
+            string("exception.stacktrace", f"Error: {message}\n{_FRAMES}"),
+        ],
+    }
+    (scrubbed,) = only_span(export(span(events=[event])))["events"]
+    assert scrubbed["attributes"] == [
+        string("exception.type", "Error"),
+        string("exception.stacktrace", "\n".join(line.strip() for line in _FRAMES.splitlines())),
+    ]
+
+
+def test_a_stack_without_a_message_header_keeps_every_frame() -> None:
+    """Firefox and Safari write no ``<type>: <message>`` line: nothing is removed."""
+    stack = "f@https://host/assets/index-a1b2.js:1:2\ng@https://host/assets/index-a1b2.js:3:4"
+    event = {
+        "name": "exception",
+        "attributes": [
+            string("exception.message", "1"),
+            string("exception.stacktrace", stack),
+        ],
+    }
+    (scrubbed,) = only_span(export(span(events=[event])))["events"]
+    assert scrubbed["attributes"] == [string("exception.stacktrace", stack)]
