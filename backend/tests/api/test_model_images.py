@@ -290,3 +290,24 @@ def test_a_symlinked_directory_inside_the_folder_is_followed_live_and_at_a_revis
     assert live.content == PNG
     assert pinned.status_code == 200, pinned.text
     assert pinned.content == PNG
+
+
+@pytest.mark.requires_git
+def test_a_symlink_onto_a_hidden_path_is_a_404_live_and_at_a_revision(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _upload(client)
+    folder = paths.model_dir(SLUG)
+    (folder / ".hidden").mkdir()
+    (folder / ".hidden" / "x.png").write_bytes(b"HIDDEN")
+    (folder / "peek.png").symlink_to(".hidden/x.png")
+    (folder / "door").symlink_to(".hidden")
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    commit = state.history.commit("Add hidden links", model_path(SLUG))
+    assert commit is not None
+
+    for path in ("peek.png", "door/x.png"):
+        for params in ({}, {"commit": commit}):
+            response = client.get(f"/api/v1/models/{SLUG}/images/{path}", params=params)
+            assert response.status_code == 404, (path, params, response.text)
+            assert b"HIDDEN" not in response.content

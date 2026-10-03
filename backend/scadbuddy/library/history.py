@@ -690,60 +690,53 @@ class ModelHistory:
         cannot read the tree.
         """
         resolved = self.resolve(commit)
-        # The usual case, a plain file at a plain path, in one tree read.
-        entry = self._tree_entry(resolved, path)
-        if entry is not None and entry[0] in FILE_MODES:
-            return self._sized_blob(entry, limit, path, commit)
-        if root is None:
-            raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-        return self._walk(resolved, path, root, limit, commit)
-
-    def _walk(self, resolved: str, path: str, root: str, limit: int, commit: str) -> bytes:
-        """:meth:`read_blob` one segment at a time, following each symlink met."""
         missing = RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-        done: list[str] = []
-        pending = path.split("/")
-        hops = 0
-        while pending:
-            segment = pending.pop(0)
-            entry = self._tree_entry(resolved, "/".join([*done, segment]))
-            if entry is None:
-                raise missing
-            mode, oid, size = entry
-            if mode == SYMLINK_MODE:
-                hops += 1
-                if hops > MAX_SYMLINK_HOPS or size > MAX_PATH_BYTES:
+        current = path
+        for _ in range(MAX_SYMLINK_HOPS + 1):
+            segments = current.split("/")
+            prefixes = ["/".join(segments[: i + 1]) for i in range(len(segments))]
+            # Every prefix in one tree read: a plain file costs one, a missing one too.
+            entries = self._tree_entries(resolved, prefixes)
+            for index, prefix in enumerate(prefixes):
+                entry = entries.get(prefix)
+                if entry is None:
                     raise missing
-                target = self._blob(oid).decode("utf-8", "replace")
-                followed = posixpath.normpath(posixpath.join("/".join(done), target))
-                if target.startswith("/") or not followed.startswith(f"{root}/"):
+                mode, oid, size = entry
+                if mode == SYMLINK_MODE:
+                    if root is None or size > MAX_PATH_BYTES:
+                        raise missing
+                    target = self._blob(oid).decode("utf-8", "replace")
+                    followed = _follow(prefix, target, segments[index + 1 :], root)
+                    if followed is None:
+                        raise missing
+                    current = followed
+                    break
+                if index < len(prefixes) - 1:
+                    if mode != TREE_MODE:
+                        raise missing
+                elif mode in FILE_MODES:
+                    if size > limit:
+                        raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+                    return self._blob(oid)
+                else:
                     raise missing
-                done, pending = [], [*followed.split("/"), *pending]
-            elif pending:
-                if mode != TREE_MODE:
-                    raise missing
-                done.append(segment)
-            elif mode in FILE_MODES:
-                return self._sized_blob(entry, limit, path, commit)
-            else:
-                raise missing
         raise missing
 
-    def _sized_blob(self, entry: tuple[str, str, int], limit: int, path: str, commit: str) -> bytes:
-        if entry[2] > limit:
-            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-        return self._blob(entry[1])
-
-    def _tree_entry(self, resolved: str, path: str) -> tuple[str, str, int] | None:
-        """``path``'s mode, object id and size (0 for a directory) at ``resolved``, or
-        None when nothing is there. :class:`GitError` when git cannot read the tree."""
-        listing = self._out("ls-tree", "-l", resolved, "--", path)
-        # `<mode> <type> <object> <size>\t<path>`, size `-` for a tree; a directory
-        # named without a trailing slash lists as itself, not its contents.
-        fields = listing.partition("\t")[0].split()
-        if len(fields) != 4 or fields[0] not in (*FILE_MODES, SYMLINK_MODE, TREE_MODE):
-            return None
-        return fields[0], fields[2], int(fields[3]) if fields[3].isdigit() else 0
+    def _tree_entries(self, resolved: str, paths: list[str]) -> dict[str, tuple[str, str, int]]:
+        """Each of ``paths`` that exists at ``resolved``, as its mode, object id and size
+        (0 for a directory), from one ``ls-tree``. :class:`GitError` when git cannot read
+        the tree."""
+        listing = self._out("ls-tree", "-z", "-l", "-t", resolved, "--", *paths)
+        entries: dict[str, tuple[str, str, int]] = {}
+        # `<mode> <type> <object> <size>\t<path>\0`, size `-` for a tree; `-t` lists a
+        # directory itself as well as what is under it on the way to a deeper path.
+        for record in listing.split("\0"):
+            meta, _, name = record.partition("\t")
+            fields = meta.split()
+            if len(fields) == 4 and fields[0] in (*FILE_MODES, SYMLINK_MODE, TREE_MODE):
+                size = int(fields[3]) if fields[3].isdigit() else 0
+                entries[name] = (fields[0], fields[2], size)
+        return entries
 
     def _blob(self, oid: str) -> bytes:
         completed = self._run("cat-file", "blob", oid, text=False)
@@ -887,6 +880,20 @@ class ModelHistory:
 
     def _tracked(self, slug: str) -> list[str]:
         return [line for line in self._out("ls-files", "--", slug).splitlines() if line]
+
+
+def _follow(link: str, target: str, rest: list[str], root: str) -> str | None:
+    """The path a symlink at ``link`` leads to, with ``rest`` after it, or None when
+    its target is absolute, leaves ``root`` or names a hidden segment under it (a
+    dot-file or dot-directory, as no plain path may)."""
+    if target.startswith("/"):
+        return None
+    followed = posixpath.normpath(posixpath.join(posixpath.dirname(link), target))
+    if not followed.startswith(f"{root}/"):
+        return None
+    if any(part.startswith(".") for part in followed[len(root) + 1 :].split("/")):
+        return None
+    return "/".join([followed, *rest])
 
 
 def _model_id(path: str) -> str | None:

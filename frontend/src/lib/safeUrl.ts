@@ -73,9 +73,11 @@ const ORIGIN = 'http://scadbuddy.invalid'
  *   Without a base (agent chat) such a path, like a filesystem path, is never fetched.
  */
 export function safeImageSrc(value: string | null | undefined, base?: ImageBase): string | null {
-  if (!value || value.includes('\\')) return null
-  if (value.startsWith('/api/v1/')) return apiPath(value)
+  if (!value) return null
+  // In a data: image a backslash is only text; in a path the URL parser reads it as `/`.
   if (DATA_IMAGE.test(value)) return value.length <= MAX_DATA_IMAGE_CHARS ? value : null
+  if (value.includes('\\')) return null
+  if (value.startsWith('/api/v1/')) return apiPath(value)
   return base ? modelImage(value, base) : null
 }
 
@@ -100,9 +102,12 @@ function modelImage(value: string, base: ImageBase): string | null {
   // No scheme (which covers `C:/`), no absolute or protocol-relative path, and no
   // query or fragment: the route takes a plain file path and nothing else.
   if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/') || /[?#]/.test(value)) return null
+  // A `%` that starts no escape is a literal one in the file's name, sent as `%25`
+  // since the server decodes the path once.
+  const escaped = value.replace(/%(?![0-9A-Fa-f]{2})/g, '%25')
   let parsed: URL
   try {
-    parsed = new URL(value, `${ORIGIN}/m/`)
+    parsed = new URL(escaped, `${ORIGIN}/m/`)
   } catch {
     return null
   }

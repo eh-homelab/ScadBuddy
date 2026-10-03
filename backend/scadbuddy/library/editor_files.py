@@ -10,9 +10,9 @@ the same way (#951): :func:`read_file` returns the bytes, and
 A path is relative, ``/``-separated and plain: no empty, ``.`` or ``..`` segment and
 no dot-file anywhere along it (``.git``, a model's ``.renders``), so nothing outside
 the files a model ships is reachable. The file it names must resolve, symlinks
-followed, to a regular file still under the root, no larger than the caller's limit
-(for text, the API's ``MAX_SOURCE_CHARS``, the cap on a model's own source; for an
-image, ``MAX_MODEL_IMAGE_BYTES``).
+followed, to a regular file still under the root and on no hidden path, no larger
+than the caller's limit (for text, the API's ``MAX_SOURCE_CHARS``, the cap on a
+model's own source; for an image, ``MAX_MODEL_IMAGE_BYTES``).
 
 The check and the read are one file: the resolved path is opened without following a
 symlink at its end (``O_NOFOLLOW``) and without blocking on a FIFO (``O_NONBLOCK``),
@@ -83,6 +83,9 @@ def read_file(root: Path, relative: str, *, limit: int) -> bytes:
     base = root.resolve(strict=True)
     target = base.joinpath(*segments).resolve()
     if not target.is_relative_to(base) or not target.is_file():
+        raise FileNotFoundError(relative)
+    # A symlink inside the root may still lead to a hidden path no plain one may name.
+    if any(part.startswith(".") for part in target.relative_to(base).parts):
         raise FileNotFoundError(relative)
     try:
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)

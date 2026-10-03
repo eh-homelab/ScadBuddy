@@ -72,6 +72,10 @@ describe('safeImageSrc (#820)', () => {
       expect(safeImageSrc(src), src).toBeNull()
     }
     expect(safeImageSrc('/api/v1/models/m/images/my%20pic.png')).toBe('/api/v1/models/m/images/my%20pic.png')
+    // A literal % in a file name is sent as %25, as the server decodes the path.
+    expect(safeImageSrc('100%.png', { slug: 'm' })).toBe('/api/v1/models/m/images/100%25.png')
+    expect(safeImageSrc('/api/v1/models/m/images/100%25.png')).toBe('/api/v1/models/m/images/100%25.png')
+    expect(safeImageSrc('a%2e%2e.png', { slug: 'm' })).toBe('/api/v1/models/m/images/a%2e%2e.png')
     // Whatever a relative path resolves to, the same URL written out is allowed too.
     const resolved = safeImageSrc('a+b (1).png', { slug: 'm' })
     expect(resolved).toBe('/api/v1/models/m/images/a+b%20(1).png')
@@ -105,6 +109,11 @@ describe('safeImageSrc', () => {
     expect(safeImageSrc('data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E')).toBe(
       'data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E',
     )
+  })
+
+  it('allows a backslash inside an SVG data: image, where it is only text', () => {
+    const src = "data:image/svg+xml;utf8,<svg><text>a\\b</text></svg>"
+    expect(safeImageSrc(src)).toBe(src)
   })
 
   it('refuses every other data: type', () => {

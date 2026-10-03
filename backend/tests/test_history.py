@@ -412,6 +412,50 @@ def test_read_blob_follows_a_symlinked_directory_under_its_root(
         history.read_blob(commit, "keychain/images/deep/real.png", limit=100)
 
 
+def test_read_blob_never_follows_a_symlink_onto_a_hidden_path(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / ".hidden").mkdir()
+    (folder / ".hidden" / "x.png").write_bytes(b"HIDDEN")
+    (folder / "peek.png").symlink_to(".hidden/x.png")
+    (folder / "door").symlink_to(".hidden")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for path in ("peek.png", "door/x.png"):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, f"keychain/{path}", limit=100, root="keychain")
+
+
+def test_read_blob_reads_the_tree_once_per_symlink_hop_not_per_segment(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / "a" / "b").mkdir(parents=True)
+    (folder / "a" / "b" / "real.png").write_bytes(b"REAL")
+    (folder / "link").symlink_to("a/b")
+    commit = history.ensure_repo()
+    assert commit is not None
+    calls: list[str] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, "keychain/x/y/z/missing.png", limit=100, root="keychain")
+        assert calls.count("ls-tree") == 1
+        calls.clear()
+        assert history.read_blob(commit, "keychain/link/real.png", limit=100, root="keychain")
+        # One read of the tree, one of the link's target, one more of the tree.
+        assert calls.count("ls-tree") == 2
+
+
 def test_read_blob_reports_a_failed_tree_read_as_a_git_error(
     models: Path, history: ModelHistory
 ) -> None:
