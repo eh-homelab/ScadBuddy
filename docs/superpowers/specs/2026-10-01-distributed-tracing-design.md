@@ -589,7 +589,8 @@ has to handle:
 - **Not configured:** the anchored pattern matches 0 lines and the file
   does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
   unanchored, fixed-string, case-insensitive `grep -iF`, so a near-miss in
-  casing still counts as a mention). Post a `::notice::` that clusters has
+  casing still counts as a mention, and so does the `.git` form of the URL,
+  `eh-homelab/ScadBuddy.git//deploy/grafana`, or extra slashes). Post a `::notice::` that clusters has
   no dashboard pin yet, and pin the images only. This keeps deploys working
   until clusters#1596 Phase 5 adds the line.
 - **Malformed:** the anchored pattern matches 0 lines but the path does

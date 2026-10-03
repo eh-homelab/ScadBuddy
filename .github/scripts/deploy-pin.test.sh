@@ -242,6 +242,7 @@ dashboard_fails "trailing comment" "$near_miss" "${dashboard_line}${old_ref} # d
 dashboard_fails "lower case" "$near_miss" "  - https://github.com/eh-homelab/scadbuddy//deploy/grafana?ref=${old_ref}"
 dashboard_fails "commented out" "$near_miss" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
 dashboard_fails "extra space" "$near_miss" "  -  $DASHBOARD_RESOURCE?ref=${old_ref}"
+dashboard_fails ".git form" "$near_miss" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=${old_ref}"
 
 # 18. Two exact lines: an error, as for any other pinned line.
 dashboard_fails "two dashboard lines" "expected at most one dashboard line, found 2" \

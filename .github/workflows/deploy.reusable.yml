@@ -295,7 +295,7 @@ jobs:
             [ -f "$target" ] || { echo "::error::${target} is not in clusters; cannot tell whether it pins the dashboard"; exit 1; }
             n=$(grep -cE "$line" "$target" || true)
             if [ "$n" -eq 0 ]; then
-              if grep -qiF 'eh-homelab/ScadBuddy//deploy/grafana' "$target"; then
+              if grep -qiE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' "$target"; then
                 echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>'"; exit 1
               fi
               echo "::notice::${target} has no dashboard pin yet (clusters#1596 Phase 5); pinning the images only"
