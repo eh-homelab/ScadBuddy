@@ -283,6 +283,7 @@ class SettingsPatch(BaseModel):
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
+    template_activity_max_timeout: float | None = None
     render_concurrency: int | None = None
     solid_concurrency: int | None = None
     render_queue_max: int | None = None

@@ -884,6 +884,11 @@ jobs:
           echo "Selected ${count} template(s):"
           cat "$list"
           echo "count=${count}" >>"$GITHUB_OUTPUT"
+          # Of those, the ones whose verify.sh runs their pipeline: only they need
+          # the `test` image, so only they pay for building it.
+          pipelines="$(.github/scripts/select-models.sh pipelines <"$list" | grep -c . || true)"
+          echo "${pipelines} of them run a pipeline check."
+          echo "pipelines=${pipelines}" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
         if: ${{ steps.select.outputs.count != '0' }}
@@ -910,6 +915,22 @@ jobs:
           target: base
           load: true
           tags: scadbuddy-verify:ci
+          cache-from: type=gha
+
+      # The backend and its pinned `temporal` CLI, for a template's pipeline check
+      # (`SCADBUDDY_PIPELINE_IMAGE`; spec 2026-09-27 §5.5): `base` has no Python.
+      # Read-only from the same cache, which an earlier run's `image` job wrote
+      # (its test-image build, mode=max), as for `base` above. Built only when a
+      # selected template has a pipeline: the stage copies models/, so a template
+      # PR misses the cache from there on, and only those templates use it.
+      - name: Build the pipeline image (Dockerfile `test` stage)
+        if: ${{ steps.select.outputs.pipelines != '0' && steps.select.outputs.count != '0' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:test
           cache-from: type=gha
 
       # `base` sits BELOW the Dockerfile's OPENSCAD_VERSION assertion (that is
@@ -940,6 +961,8 @@ jobs:
         env:
           SCADBUDDY_OPENSCAD_IMAGE: scadbuddy-verify:ci
           SCADBUDDY_FONTS_IMAGE: scadbuddy-verify:ci
+          # Unset (empty) without a pipeline template: verify.sh then skips the check.
+          SCADBUDDY_PIPELINE_IMAGE: ${{ steps.select.outputs.pipelines != '0' && 'scadbuddy:test' || '' }}
         run: .github/scripts/verify-models.sh <"$RUNNER_TEMP/models.txt"
 
       - name: Nothing to verify

@@ -382,6 +382,81 @@ async def test_the_in_process_worker_stops_without_draining(
 
 
 @pytest.mark.requires_temporal
+async def test_the_worker_names_its_image_and_openscad_for_every_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What `OutputRecord.image_revision` / `openscad_version` read (§8.4)."""
+
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    openscad = tmp_path / "openscad"
+    openscad.write_text("#!/bin/sh\necho 'OpenSCAD version 2026.09.28' >&2\n")
+    openscad.chmod(0o755)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad=str(openscad), data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+    assert deps.revision == settings.revision
+    assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+
+
+@pytest.mark.requires_temporal
+async def test_a_worker_given_the_apis_openscad_version_does_not_run_openscad_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process worker takes the API's probe (`worker_deps_from_state`): a second
+    `openscad --version`, in a task beside the API's first requests, would race them."""
+
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    ran = tmp_path / "ran"
+    openscad = tmp_path / "openscad"
+    openscad.write_text(f"#!/bin/sh\ntouch {ran}\necho 'OpenSCAD version 2099.01.01' >&2\n")
+    openscad.chmod(0o755)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad=str(openscad), data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+        openscad_version="OpenSCAD version 2026.09.28",
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+    assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+    assert not ran.exists()
+
+
+@pytest.mark.requires_temporal
 async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -18,7 +18,7 @@ import { fitLabel, fitMessages } from '../lib/plate'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import type { InputsExtra } from '../lib/inputs'
-import { saveOutput } from '../lib/saveOutput'
+import { ExtraOutputsError, saveOutput, saveRemaining } from '../lib/saveOutput'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { ImageDialog } from './ImageDialog'
@@ -104,6 +104,11 @@ export function ActionBar({
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** A job whose first output was saved but not the rest: Generate saves only those. */
+  const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
+  /** Stops a render Generate is waiting for when the page leaves this model. */
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => generation.current?.abort(), [slug])
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
    * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
@@ -164,18 +169,37 @@ export function ActionBar({
 
   async function generate(): Promise<Output | null> {
     if (!job) return null
+    const controller = new AbortController()
+    generation.current?.abort()
+    generation.current = controller
     setGenerating(true)
     setError(null)
+    // Matched on the job Generate was asked to save, not a re-render it made for it.
+    const resume = unfinished?.requested.id === job.id ? unfinished : null
+    setUnfinished(null)
     setFiled(null)
     setFileError(null)
     try {
-      const created = await saveOutput({ slug, job, extra, capture })
-      onGenerated(created)
+      let created: Output
+      if (resume) {
+        await saveRemaining(resume)
+        created = resume.saved
+      } else {
+        // The first output shows as soon as it is saved, before a pipeline job's others.
+        created = await saveOutput({ slug, job, extra, capture, onSaved: onGenerated, signal: controller.signal })
+      }
       // After the thumbnail, so the file Bambuddy lists carries the plate image.
       await fileIntoProject(created)
       return created
     } catch (cause) {
-      const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
+      if (controller.signal.aborted) return null // the page has moved on
+      if (cause instanceof ExtraOutputsError) setUnfinished(cause)
+      const message =
+        cause instanceof ExtraOutputsError
+          ? cause.message
+          : cause instanceof ApiError
+            ? cause.detail
+            : 'Could not save this output.'
       setError(message)
       throw new AgentToolError('failed', message)
     } finally {

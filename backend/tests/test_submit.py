@@ -15,11 +15,13 @@ from typing import Any
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+from temporalio.exceptions import TimeoutType
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
-from scadbuddy.core.config import load_config
+from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -30,13 +32,20 @@ from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
 from scadbuddy.render.jobs import SnapshotUnavailableError
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
+from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RPC_TIMEOUT, RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.models import Projection
-from scadbuddy.workflows.pipelines import RenderPreview
+from scadbuddy.workflows.models import MigrateRequest, MigrateResult, Projection
+from scadbuddy.workflows.pipelines import (
+    MIGRATE_EXECUTION_TIMEOUT,
+    RenderPiece,
+    RenderPreview,
+    TemplatePipeline,
+)
+from tests.support.pipelines import FakeWorld
 from tests.support.temporal import temporal_client
+from tests.test_template_pipeline import NEVER_YIELDS
 from tests.test_workflows import FakeActivities, _worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -57,8 +66,12 @@ class ProjectingActivities(FakeActivities):
         await self._real.project(projection)
 
 
-def _sample(metrics: Metrics, name: str) -> float:
-    return metrics.registry.get_sample_value(name) or 0.0
+#: The render series of a counter labelled by job kind.
+RENDER = {"kind": "render"}
+
+
+def _sample(metrics: Metrics, name: str, labels: dict[str, str] | None = None) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
 
 
 async def _settled(projection: JobProjection, job_id: str, timeout: float = 30) -> Job:
@@ -99,12 +112,14 @@ ServiceFactory = Callable[..., RenderService]
 
 @pytest.fixture
 def make_service(projection: JobProjection, deps: WorkerDeps) -> ServiceFactory:
-    def make(client: Client, task_queue: str, **kwargs: Any) -> RenderService:
+    def make(
+        client: Client, task_queue: str, *, config: Config | None = None, **kwargs: Any
+    ) -> RenderService:
         return RenderService(
             projection=projection,
             client=client,
             task_queue=task_queue,
-            config=deps.config,
+            config=config or deps.config,
             paths=deps.paths,
             metrics=Metrics(),
             **kwargs,
@@ -131,7 +146,7 @@ async def test_a_submit_starts_the_workflow_its_row_names(
 
     assert done.state == "done", done.error
     assert done.result is not None
-    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
 
 
 async def test_a_submit_whose_start_failed_is_started_by_the_reconciler(
@@ -223,7 +238,7 @@ async def test_an_identical_submit_coalesces_and_starts_nothing_new(
     assert second.id == first.id
     assert submitted == [workflow_id_for(first.id)]
     assert reconciled == 0
-    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total", RENDER) == 1
     assert (await asyncio.to_thread(projection.read, first.id)).claims == 2
 
 
@@ -847,3 +862,189 @@ async def test_with_a_snapshot_store_a_submit_names_the_pinned_revision(
     assert pinned.asked == [(SLUG, None)]
     assert job.model_version == "f" * 40
     assert (await asyncio.to_thread(projection.read, job.id)).model_version == "f" * 40
+
+
+class _ProjectingWorld(FakeWorld):
+    """FakeWorld, but `project` writes the row, as `ProjectingActivities` does: without
+    it the row never leaves `pending` and `stale_running` never sees it."""
+
+    def __init__(self, source: str, deps: WorkerDeps) -> None:
+        super().__init__(source)
+        self._real = RenderActivities(deps)
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> None:
+        await super().project(projection)
+        await self._real.project(projection)
+
+
+async def test_a_timed_out_pipeline_is_failed_by_the_reconciler(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    world = _ProjectingWorld(NEVER_YIELDS, deps)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(
+            client, queue, config=replace(deps.config, template_activity_max_timeout=2.0)
+        )
+        assert service.config.pipeline_timeout == 8.0
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            job = await service.submit(
+                "demo", {}, model_version=None, supersedes=None, inputs={"params": {}, "v": 0}
+            )
+            async with asyncio.timeout(60):
+                while (await asyncio.to_thread(projection.read, job.id)).state not in (
+                    "done",
+                    "failed",
+                ):
+                    await service.settle_timed_out()
+                    await asyncio.sleep(1)
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == "failed"
+    # The reconciler's message; the only other way to fail is the pipeline's own
+    # raise, should a machine ever finish the loop inside 8 s (N3).
+    assert stored.error == "the pipeline did not finish within 8s" or (
+        stored.error or ""
+    ).startswith("pipeline/pipeline.py:")
+
+
+class _DescribeFails:
+    """A client whose `describe` answers every workflow with one RPC error."""
+
+    def __init__(self, status: RPCStatusCode) -> None:
+        self.status = status
+
+    def get_workflow_handle(self, workflow_id: str) -> _DescribeFails:
+        return self
+
+    async def describe(self, **_: object) -> None:
+        raise RPCError("describe failed", self.status, b"")
+
+
+@pytest.mark.parametrize(
+    ("status", "settled"), [(RPCStatusCode.NOT_FOUND, 1), (RPCStatusCode.UNAVAILABLE, 0)]
+)
+async def test_only_a_workflow_temporal_no_longer_has_is_settled_as_gone(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    status: RPCStatusCode,
+    settled: int,
+) -> None:
+    """NOT_FOUND is the workflow gone from retention; any other error (the frontend
+    briefly down) says nothing about the job, which stays running until next pass."""
+    job = Job(id=uuid.uuid4().hex, slug=SLUG, params={}, created_at=now(), state="running")
+    finished: list[Job] = []
+
+    def finish(j: Job) -> bool:
+        finished.append(j)
+        return True
+
+    monkeypatch.setattr(projection, "stale_running", lambda older_than: [job])
+    monkeypatch.setattr(projection, "finish", finish)
+    service = make_service(_DescribeFails(status), "unused")
+    try:
+        assert await service.settle_timed_out() == settled
+    finally:
+        await service.aclose()
+    assert [j.error for j in finished] == (
+        ["the job's workflow ended without settling it"] if settled else []
+    )
+
+
+class _MigrationClient:
+    """A client whose `execute_workflow` records its calls and answers or raises."""
+
+    def __init__(self, outcome: BaseException | None = None) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute_workflow(self, _run: object, req: MigrateRequest, **kwargs: Any) -> Any:
+        self.calls.append({"req": req, **kwargs})
+        if self.outcome is not None:
+            raise self.outcome
+        return MigrateResult(inputs=req.inputs, from_version=0, to_version=0)
+
+
+class _RecordingSnapshots:
+    def __init__(self) -> None:
+        self.pinned: list[tuple[str, str | None]] = []
+
+    async def pin(self, slug: str, revision: str | None) -> str:
+        self.pinned.append((slug, revision))
+        return revision or "f" * 40
+
+
+@pytest.mark.parametrize("version", ["a" * 40, None])
+async def test_a_migration_on_the_bambuddy_store_pins_its_revision(
+    make_service: ServiceFactory, version: str | None
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
+    try:
+        await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=version)
+    finally:
+        await service.aclose()
+    assert snapshots.pinned == [(SLUG, version)]
+    assert client.calls[0]["req"].revision == (version or "f" * 40)
+    assert client.calls[0]["rpc_timeout"] == RPC_TIMEOUT
+    assert client.calls[0]["execution_timeout"] == MIGRATE_EXECUTION_TIMEOUT
+
+
+async def test_inputs_too_large_to_migrate_are_refused_before_any_workflow(
+    make_service: ServiceFactory,
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    # On the bambuddy store: refused before a snapshot is uploaded for it.
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(
+                SLUG, {"blob": "x" * (MAX_WORKFLOW_INPUT_BYTES + 1)}, version=None
+            )
+    finally:
+        await service.aclose()
+    assert raised.value.status == 413
+    assert client.calls == []
+    assert snapshots.pinned == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "message"),
+    [
+        (
+            RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b""),
+            503,
+            "the render service is unavailable",
+        ),
+        (
+            WorkflowFailureError(
+                cause=TemporalTimeoutError(
+                    "timed out", type=TimeoutType.START_TO_CLOSE, last_heartbeat_details=[]
+                )
+            ),
+            504,
+            "migrating the inputs timed out",
+        ),
+    ],
+)
+async def test_a_migration_the_service_cannot_finish_is_a_server_error(
+    make_service: ServiceFactory, outcome: BaseException, status: int, message: str
+) -> None:
+    service = make_service(_MigrationClient(outcome), "q")
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=None)
+    finally:
+        await service.aclose()
+    assert raised.value.status == status
+    assert message in str(raised.value.detail)

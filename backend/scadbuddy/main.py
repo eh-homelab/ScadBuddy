@@ -15,9 +15,9 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models
+from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
-from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
@@ -29,11 +29,13 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.backfill import attach_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -264,6 +266,19 @@ async def _asset_sweeper(state: AppState) -> None:
         await _sweep_duplicate_staging_logged(state)
 
 
+async def _attach_backfills_forever(state: AppState) -> None:
+    """#902: every reconcile interval, attach each finished re-render to the output it
+    was queued for. A pass that fails leaves the markers for the next."""
+    while True:
+        try:
+            await asyncio.to_thread(
+                attach_backfills, state.outputs, state.refs, state.render.store.read
+            )
+        except Exception:
+            logger.exception("could not attach the finished output re-renders")
+        await asyncio.sleep(state.render.reconcile_interval)
+
+
 async def _prepare_catalogue(state: AppState) -> None:
     """The boot's passes over the catalogue, run before the render queue starts."""
     seed_dir = state.settings.resolve_seed_models_dir()
@@ -442,6 +457,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
     backfill: asyncio.Task[None] | None = None
+    attacher: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
     components = AsyncExitStack()
@@ -459,6 +475,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
+        attacher = asyncio.create_task(_attach_backfills_forever(state))
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
         # After the projection has opened: the jobs in it are references too.
@@ -498,7 +515,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
-        for background in (sweeper, backfill):
+        for background in (sweeper, backfill, attacher):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
@@ -570,7 +587,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

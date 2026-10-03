@@ -3,6 +3,7 @@ import { ApiError } from '../api/client'
 import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
 import { DEFAULT_NOZZLES, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
+import type { CarryBox } from './useFilamentPlan'
 import { useLatest } from './useLatest'
 
 export type Tier = NonNullable<PrintChoices['tier']>
@@ -30,7 +31,12 @@ export interface PrintSelection {
  * `sourceKey` identifies what is being printed; what belongs to one source is reset when
  * it changes, here and by the caller's own effect keyed on it.
  */
-export function usePrintChoices(open: boolean, source: PrintSource | undefined) {
+export function usePrintChoices(
+  open: boolean,
+  source: PrintSource | undefined,
+  /** §7 — set while a re-arrange carries the dialog's choices onto its new output. */
+  carry?: CarryBox,
+) {
   const key = sourceKey(source)
   const latest = useLatest(source)
   const [choices, setChoices] = useState<ChoicesView | null>(null)
@@ -85,20 +91,25 @@ export function usePrintChoices(open: boolean, source: PrintSource | undefined) 
         setChoices(next)
         // The server already applied last archive → remembered → default.
         setBedType(next.bed_type)
-        if (!seeded.current) {
+        if (carry?.get()) {
+          // A re-arrange keeps the dialog's nozzles, tier, process and Advanced.
+          carry.markReady()
+        } else if (!seeded.current) {
           seeded.current = true
           seedDialog(next.model_choices)
         }
       })
       .catch((cause: unknown) => {
         if (token !== attempt.current) return
+        // A carry survives a failed read: a Retry of the same output still applies it.
+        // A different output clears it (PrintPicker), and a stale read never lands here.
         setChoices(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
       })
       .finally(() => {
         if (token === attempt.current) setLoading(false)
       })
-  }, [open, key, askedPrinter, latest])
+  }, [open, key, askedPrinter, latest, carry])
   useEffect(() => {
     reload()
   }, [reload])
@@ -109,9 +120,11 @@ export function usePrintChoices(open: boolean, source: PrintSource | undefined) 
   useEffect(() => {
     setPlate(1)
     setPlates([])
+    // Except onto the output a re-arrange made, which keeps the dialog's choices.
+    if (carry?.get()) return
     setOverrides({})
     seeded.current = false
-  }, [resetKey])
+  }, [resetKey, carry])
 
   useEffect(() => {
     if (!open || !latest.current) return

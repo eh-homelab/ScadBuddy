@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -14,8 +14,17 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.job_models import (
+    BomEntry,
+    JobResult,
+    ManifestObject,
+    OutputRecord,
+    PipelineOutput,
+    StepInfo,
+)
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.template import Blob as Blob
+from scadbuddy.template import Part as Part
 
 
 def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, ParamValue]) -> str:
@@ -104,6 +113,8 @@ class PieceOutcome(BaseModel):
 
     result: PieceResult | None = None
     failure: Failure | None = None
+    #: Which piece: one job waits on many (§3.4).
+    piece_key: str = ""
 
 
 class Projection(BaseModel):
@@ -119,3 +130,170 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+    #: Every `ctx.output`, in order (§5.2); ``result`` is the first one's.
+    outputs: list[PipelineOutput] = Field(default_factory=list)
+    #: Every blob the job reads (pieces and outputs); `project` refs each on done.
+    blob_keys: list[str] = Field(default_factory=list)
+
+
+class PlateSize(BaseModel):
+    """The plate a pipeline packs onto (spec §5.2). Task 2's `load_pipeline` reads it
+    from the template; the fields are the plan's."""
+
+    key: str
+    width: float
+    depth: float
+
+
+class LoadRequest(BaseModel):
+    slug: str
+    revision: str | None
+
+
+class LoadedPipeline(BaseModel):
+    """What `load_pipeline` returns: recorded in the history, so a replay runs this
+    source whatever the template holds by then (§3.4, §8.3)."""
+
+    source: str
+    file: str
+    api: int
+    #: sha256 of ``source``, or "default" (§3.2).
+    version: str
+    inputs_version: int
+    ui_api: int | None = None
+    plate: PlateSize
+
+
+class SlotPlan(BaseModel):
+    """The print-flow spec's `FilamentPlan` as a workflow payload: one spool per 1-based
+    filament slot. `bambuddy.filaments` imports the client, which must not enter the
+    workflow sandbox; `of` is the bridge."""
+
+    slots: dict[int, int] = Field(default_factory=dict)
+
+    @classmethod
+    def of(cls, plan: object) -> SlotPlan | None:
+        if plan is None or isinstance(plan, SlotPlan):
+            return plan
+        data = plan.model_dump() if isinstance(plan, BaseModel) else plan
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                "filament_plan must be a FilamentPlan or {slots: [{slot_id, spool_id}]}"
+            )
+        slots = data.get("slots", [])
+        if isinstance(slots, Mapping):
+            return cls(slots={int(k): int(v) for k, v in slots.items()})
+        return cls(slots={int(s["slot_id"]): int(s["spool_id"]) for s in slots})
+
+
+class PackItem(BaseModel):
+    part: Part
+    count: int = Field(default=1, ge=1)
+    #: `keep_together` keeps every copy with the same group on one plate.
+    group: str | None = None
+
+
+class Placed(BaseModel):
+    """Where one copy of a piece goes: its box's min corner, relative to the plate's
+    content (the writer then centres the plate as it does today)."""
+
+    piece_key: str
+    x: float
+    y: float
+    #: A quarter turn about Z, in degrees (0, 90, 180 or 270); x and y place the
+    #: turned box's min corner.
+    rot: float = 0.0
+
+
+class LayoutPlate(BaseModel):
+    items: list[Placed]
+
+
+class Layout(BaseModel):
+    """What `pack`/`plate_of` yield (§5.2). ``own``: one part alone, on the plates it
+    laid out itself, written exactly as it rendered (§5.3)."""
+
+    plates: list[LayoutPlate] = Field(default_factory=list)
+    own: str | None = None
+
+
+class PackRequest(BaseModel):
+    items: list[PackItem]
+    plate: PlateSize
+    goal: str = "fewest_plates"
+    filament_plan: SlotPlan | None = None
+    #: The filament order slot numbers refer to (`#RRGGBB`); the writer keeps it.
+    colours: list[str] = Field(default_factory=list)
+    #: False (Arrange): always pack onto plates, even one object with one copy, so the
+    #: writer applies `colours`. True keeps phase 4's shortcut for a pipeline's lone part.
+    allow_own: bool = True
+
+
+class OutputRequest(BaseModel):
+    job_id: str
+    index: int
+    slug: str
+    layout: Layout
+    parts: list[Part]
+    name: str | None
+    bom: list[BomEntry]
+    files: dict[str, str | Blob]
+    plate_model: str | None = None
+    record: OutputRecord
+    #: Arrange's objects keep where they came from; keyed by part.
+    provenance: dict[str, ManifestObject] = Field(default_factory=dict)
+    #: The filament order to keep (slot N = colours[N-1]); Arrange passes the order the
+    #: plan was chosen against. Empty: first appearance, as phase 4 wrote it.
+    colours: list[str] = Field(default_factory=list)
+
+
+#: `pipeline_version` of an arranged output's record: no template code ran.
+ARRANGE_VERSION = "arrange"
+
+
+class ArrangeInputs(BaseModel):
+    """An arrange job's `render_jobs.inputs` (spec §7): objects, goal, plate and plan."""
+
+    items: list[PackItem]
+    goal: str = "fewest_plates"
+    plate: PlateSize
+    #: The printer model the 3MF is laid out for (`plate_for`); None is the default plate.
+    plate_model: str | None = None
+    filament_plan: SlotPlan | None = None
+    colours: list[str] = Field(default_factory=list)
+    name: str | None = None
+    provenance: dict[str, ManifestObject] = Field(default_factory=dict)
+    #: The outputs the objects came from.
+    sources: list[str] = Field(default_factory=list)
+
+
+class OutputRef(BaseModel):
+    index: int
+    name: str | None
+
+
+class TemplateCall(BaseModel):
+    """`ctx.activity(name, …)` (§5.2): JSON arguments, `Blob`/`Part` as their dicts."""
+
+    slug: str
+    revision: str | None
+    name: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: float
+    #: The job that holds (refs) the blob the call emits.
+    job_id: str = ""
+
+
+class MigrateRequest(BaseModel):
+    """`migrate(inputs, from_version)` (§8.2) of ``slug`` at ``revision``."""
+
+    slug: str
+    revision: str | None
+    inputs: dict[str, Any]
+
+
+class MigrateResult(BaseModel):
+    inputs: dict[str, Any]
+    from_version: int
+    to_version: int

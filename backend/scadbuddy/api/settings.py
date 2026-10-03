@@ -86,6 +86,7 @@ class SettingsView(BaseModel):
     media_upload_max_bytes: int
 
     render_timeout: float
+    template_activity_max_timeout: float
     render_concurrency: int
     solid_concurrency: int
     render_queue_max: int

@@ -2,6 +2,7 @@ import type {
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
+  ArrangeRequest,
   DecisionCreate,
   Asset,
   AssetUsage,
@@ -32,6 +33,7 @@ import type {
   LibraryRepinRequest,
   LibraryUser,
   MediaView,
+  MigrateResult,
   ModelPatch,
   LastProject,
   ModelPrintChoices,
@@ -80,6 +82,7 @@ import type {
   UpstreamStatus,
   UrlImport,
   VersionDiff,
+  NeedsBackfillProblem,
 } from './types'
 import type {
   McpAuthSetting,
@@ -182,6 +185,11 @@ export const OFFLINE = 'urn:scadbuddy:offline'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
+ * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
+ */
+export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['code']
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -752,11 +760,36 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
+  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
+  arrangeOutputs: (body: ArrangeRequest) =>
+    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
+  backfillOutput: (outputId: string) =>
+    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+
+  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
     request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
+      body: JSON.stringify({
+        job_id: jobId,
+        name: name ?? null,
+        ...(inputs ? { inputs } : {}),
+        ...(index !== undefined ? { index } : {}),
+      }),
     }),
+
+  /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
+  migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
+    request<MigrateResult>(`/models/${seg(slug)}/inputs/migrate`, {
+      method: 'POST',
+      body: JSON.stringify({ inputs, version: version ?? null }),
+    }),
+
+  /** An extra file a pipeline wrote beside an output (spec 2026-09-27 §5.2). */
+  outputFileUrl: (outputId: string, name: string) =>
+    `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 

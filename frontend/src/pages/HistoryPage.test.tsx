@@ -37,6 +37,49 @@ async function row(name: string): Promise<HTMLElement> {
 }
 
 describe('HistoryPage', () => {
+  it('shows a pipeline output\'s bill of materials and links its files', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...first,
+            bom: [{ piece: 'wall', label: 'Wall', count: 8, plates: [1, 2], part: 'k1' }],
+            files: ['guide.svg'],
+          },
+        ]),
+      ),
+    )
+    render()
+    const item = await row('Reagan')
+    const table = within(item).getByRole('table')
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Wall81, 2')
+    const link = within(item).getByRole('link', { name: 'guide.svg' })
+    expect(link).toHaveAttribute('href', `/api/v1/outputs/${first.id}/files/guide.svg`)
+    expect(link).toHaveAttribute('download')
+    expect(link).not.toHaveAttribute('target')
+  })
+
+  it('opens a pipeline output\'s file in a new tab when embedded, out of the sandbox', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, bom: [], files: ['guide.svg'] }]),
+      ),
+    )
+    const top = window.top
+    // Inside Bambuddy's iframe: its sandbox has no allow-downloads (CLAUDE.md).
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    try {
+      render()
+      const link = within(await row('Reagan')).getByRole('link', { name: 'guide.svg' })
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener')
+    } finally {
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
   it('lists every output newest first', async () => {
     render()
     const list = await screen.findByTestId('outputs')
@@ -245,6 +288,75 @@ describe('HistoryPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Send' })).toBeInTheDocument()
+  })
+
+  it('arranges the outputs ticked on the page', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(within(reagan).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Copies of wall — Reagan')).not.toBeInTheDocument(),
+    )
+    // The list reloads with the arranged output, and the selection is cleared.
+    expect(await screen.findByText('Arranged from 1 output')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
+  it('says which outputs could not be re-rendered after the dialog closes (#902)', async () => {
+    const workshop = outputs[2]!
+    server.use(
+      http.post(`/api/v1/outputs/${workshop.id}/backfill`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'revision abc is gone' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(within(await row('Workshop')).getByRole('checkbox', { name: 'Select Workshop' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (2)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    await user.click(screen.getByRole('button', { name: 'Re-render' }))
+    // Reagan still arranges; the dialog closes, and History says Workshop was skipped.
+    expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Workshop could not be re-rendered: revision abc is gone.')
+  })
+
+  it('drops a deleted output from the selection', async () => {
+    const { user } = render()
+    const workshop = await row('Workshop')
+    await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    await user.click(within(workshop).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
+  it('offers no Edit on an arranged output', async () => {
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...outputs[0],
+            id: 'f'.repeat(32),
+            name: 'Batch',
+            params: {},
+            arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+          },
+        ]),
+      ),
+    )
+    render()
+    const batch = await row('Batch')
+    expect(within(batch).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Send again' })).toBeInTheDocument()
   })
 })
 

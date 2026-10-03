@@ -80,6 +80,83 @@ class JobResult(BaseModel):
     libraries: list[ModelLibrary] = Field(default_factory=list)
 
 
+class BomEntry(BaseModel):
+    """One line of an output's bill of materials (spec §5.2): structured, shown as a table."""
+
+    piece: str
+    label: str
+    count: int = Field(ge=1)
+    #: 1-based plates the piece is on, when the pipeline says.
+    plates: list[int] = Field(default_factory=list)
+    #: The piece's `piece_key` (a PartRef).
+    part: str | None = None
+
+
+class OutputRecord(BaseModel):
+    """What reproduces an output (§8.4)."""
+
+    revision: str | None
+    ui_api: int | None
+    pipeline_api: int
+    pipeline_version: str
+    inputs_v: int
+    #: `SCADBUDDY_REVISION` of the worker image that wrote it.
+    image_revision: str = ""
+    openscad_version: str = ""
+    plate_key: str
+    #: The store refs (piece keys) of every Part it was built from.
+    parts: list[str]
+
+
+#: An extra output file's name: plain, no path, no leading dot.
+FILE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+
+
+class ManifestObject(BaseModel):
+    """One object of an output (spec 2026-09-27 §7): what Arrange lays out again.
+
+    ``part`` is the Part's store key (its `piece_key`), held by the output's
+    `blob_refs` so it outlives the job that rendered it.
+    """
+
+    part: str
+    file: str
+    slug: str
+    revision: str | None
+    bbox: BoundingBox
+    #: Width and depth on the plate, mm: the rectangle the packer places.
+    footprint: tuple[float, float]
+    #: The part's colours, `#RRGGBB`, in its own slot order.
+    colours: list[str]
+    #: Copies of this object in this output's layout.
+    count: int = Field(ge=1)
+    #: More than one: the part lays out its own plates (base spec §6.4) and is only
+    #: ever written alone.
+    plates: int = 1
+    #: The BOM entry naming this Part, when the pipeline wrote one.
+    bom_piece: str | None = None
+    #: The output an arranged object came from.
+    source_output: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class PipelineOutput(BaseModel):
+    """One `ctx.output` (§5.2): Generate saves each as an output."""
+
+    name: str | None
+    result: JobResult
+    bom: list[BomEntry] = Field(default_factory=list)
+    #: Extra files, by name, under ``files/`` in the blob ``files_key``.
+    files: list[str] = Field(default_factory=list)
+    #: The blob holding ``files/`` (always `output_key(job_id, index)`); None without files.
+    files_key: str | None = None
+    #: The blobs this output reads; the job holds a ref on each.
+    blob_keys: list[str]
+    record: OutputRecord
+    #: The output's objects, each once with its count (§7): what Arrange reads.
+    manifest: list[ManifestObject] = Field(default_factory=list)
+
+
 class Job(BaseModel):
     # `model_version` is the name #90 asks for on the wire; without this pydantic
     # warns that it collides with its own `model_` namespace.
@@ -115,6 +192,7 @@ class Job(BaseModel):
     #: sha256 of the pipeline source `load_pipeline` recorded, or "default" (§3.2).
     pipeline_version: str = "default"
     steps: list[StepInfo] = Field(default_factory=list)
+    outputs: list[PipelineOutput] = Field(default_factory=list)
     workflow_id: str | None = None
     #: Submitters still waiting on this job (coalesced identical requests).
     claims: int = 1

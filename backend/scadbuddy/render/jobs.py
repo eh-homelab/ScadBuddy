@@ -361,7 +361,8 @@ async def plate_layout(
 
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
     """One entry per extruder: the name the first plate to use it gives it, and whether
-    every plate's part of that colour is a closed solid."""
+    every plate's part of that colour is a closed solid. A slot no plate uses (a planned
+    filament order keeps its place, §7) has no part to name and is left out."""
     infos: list[PartInfo] = []
     for extruder, colour in enumerate(layout.colours, start=1):
         parts = [
@@ -370,6 +371,8 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
             for part, number in zip(plate.parts, plate.extruders, strict=True)
             if number == extruder
         ]
+        if not parts:
+            continue
         infos.append(
             PartInfo(
                 name=parts[0].name,

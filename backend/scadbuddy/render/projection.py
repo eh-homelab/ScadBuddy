@@ -60,6 +60,7 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "outputs",
 )
 
 
@@ -179,6 +180,15 @@ class JobProjection:
             ).fetchone()
             assert row is not None
             if row["inserted"]:
+                if job.kind == "arrange":
+                    # Held from the insert, in its transaction: a source output deleted
+                    # while this waits must not let a sweep take the Parts it places.
+                    # `prune`/`delete` release them with the row.
+                    conn.cursor().executemany(
+                        "INSERT INTO blob_refs (key, holder_kind, holder_id)"
+                        " VALUES (%s, 'job', %s) ON CONFLICT DO NOTHING",
+                        [(key, row["id"]) for key in _piece_keys(job.inputs)],
+                    )
                 self._announce(conn, row["id"], row["slug"], "job.pending")
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
 
@@ -274,7 +284,7 @@ class JobProjection:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"
-                " warnings = %s, steps = %s, pipeline_version = %s"
+                " warnings = %s, steps = %s, pipeline_version = %s, outputs = %s"
                 " WHERE id = %s AND state IN ('pending', 'running')",
                 (
                     job.state,
@@ -287,6 +297,7 @@ class JobProjection:
                     Jsonb(job.warnings),
                     Jsonb([s.model_dump(mode="json") for s in job.steps]),
                     job.pipeline_version,
+                    Jsonb([o.model_dump(mode="json") for o in job.outputs]),
                     job.id,
                 ),
             )
@@ -323,6 +334,17 @@ class JobProjection:
             ).fetchall()
         return [_job(row) for row in rows]
 
+    def stale_running(self, older_than: float) -> list[Job]:
+        """Workflow-owned rows still `running` ``older_than`` seconds after they started:
+        what `RenderService.settle_timed_out` checks against Temporal."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state = 'running' AND workflow_id IS NOT NULL"
+                " AND started_at < now() - make_interval(secs => %s) ORDER BY started_at",
+                (older_than,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
     def read(self, job_id: str) -> Job:
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
@@ -347,7 +369,9 @@ class JobProjection:
     def latest_finished(self, slug: str) -> Job | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                # An arrange row carries a source output's slug but is no render of it.
+                "SELECT * FROM render_jobs WHERE slug = %s AND kind = 'render'"
+                " AND state IN ('done', 'failed')"
                 " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
                 (slug,),
             ).fetchone()
@@ -388,3 +412,9 @@ class JobProjection:
             conn.execute(
                 "DELETE FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s", (job_id,)
             )
+
+
+def _piece_keys(inputs: dict[str, Any] | None) -> list[str]:
+    """The Parts an arrange's `ArrangeInputs` places, once each."""
+    items = (inputs or {}).get("items", [])
+    return list(dict.fromkeys(item["part"]["piece_key"] for item in items))

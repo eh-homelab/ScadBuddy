@@ -44,7 +44,8 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     the first store error) after a start would never page. They must be exported
     at 0 before anything happens."""
     text = client.get("/metrics").text
-    assert "scadbuddy_render_jobs_rejected_total 0.0" in text
+    assert 'scadbuddy_render_jobs_rejected_total{kind="render"} 0.0' in text
+    assert 'scadbuddy_render_jobs_rejected_total{kind="arrange"} 0.0' in text
     assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
     assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
 
@@ -70,7 +71,7 @@ def test_metrics_count_renders(client: TestClient, model: str) -> None:
 
     done = 'scadbuddy_render_jobs_finished_total{outcome="done"} 1.0'
     text = _metrics_once(client, done)
-    assert "scadbuddy_render_jobs_submitted_total 1.0" in text
+    assert 'scadbuddy_render_jobs_submitted_total{kind="render"} 1.0' in text
     assert done in text
 
 

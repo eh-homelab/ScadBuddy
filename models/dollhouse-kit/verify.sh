@@ -495,3 +495,13 @@ if failures:
     sys.exit(1)
 print("\nOK")
 PY
+
+# The whole-house pipeline (spec 2026-09-27 §5.5), in the image that has the backend:
+# the OpenSCAD image has no Python. CI sets SCADBUDDY_PIPELINE_IMAGE to the test image.
+PIPELINE_IMAGE="${SCADBUDDY_PIPELINE_IMAGE:-}"
+if [ -n "$PIPELINE_IMAGE" ]; then
+    echo "==> pipeline: the house cases in pipeline/verify-inputs.json, in $PIPELINE_IMAGE"
+    docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD:/template/dollhouse-kit:ro" -w /app/backend "$PIPELINE_IMAGE" uv run --frozen --no-sync python -m scadbuddy.workflows.verify_pipeline /template/dollhouse-kit --inputs /template/dollhouse-kit/pipeline/verify-inputs.json
+else
+    echo "==> SCADBUDDY_PIPELINE_IMAGE unset: pipeline check skipped (docker build --target test -t scadbuddy:test . and set it to run)"
+fi

@@ -197,6 +197,11 @@ on shutdown.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
     (`render_jobs`), so accepted renders survive a restart; a pending row whose
     workflow never started is started by the API's reconciler.
+    The same holds for a pending row whose workflow timed out before any worker
+    took it (the pipeline bound, 4 × `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`): the
+    reconciler starts a new one, so the row stays `pending` and is restarted once
+    per bound until a worker runs it. Only a `running` row whose workflow ended
+    without settling it is failed.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
