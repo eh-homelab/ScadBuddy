@@ -30,11 +30,13 @@ interface StepProps {
   algorithm: RackAlgorithm
   position: number | null
   onAlgorithm: (next: RackAlgorithm) => void
+  /** The algorithm's save for this printer failed; this print still uses it. */
+  algorithmUnsaved?: boolean
   onPosition: (next: number | null) => void
 }
 
 /** #836 — Advanced mode: the algorithm (remembered per printer) and a hand-picked position. */
-export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosition }: StepProps) {
+export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosition, algorithmUnsaved }: StepProps) {
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
       <legend className="px-1 text-[13px] text-ink">Rack nozzle</legend>
@@ -55,6 +57,11 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
             </option>
           ))}
         </select>
+        {algorithmUnsaved && (
+          <p role="alert" data-testid="rack-algorithm-unsaved" className="text-[12px] text-warn">
+            Not remembered for this printer; this print still uses it.
+          </p>
+        )}
       </div>
       <div className="mt-1.5 flex flex-col gap-1">
         <label htmlFor="rack-position" className="text-[12px] text-muted">

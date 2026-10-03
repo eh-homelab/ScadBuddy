@@ -132,11 +132,18 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    */
   const [rackAlgorithm, setRackAlgorithm] = useState<RackAlgorithm>('least_used')
   const [rackPosition, setRackPosition] = useState<number | null>(null)
+  /** A failed save of the algorithm: this print still uses it, the next one may not. */
+  const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
   const openedAlgorithm = choices?.rack_algorithm
   useEffect(() => {
     setRackAlgorithm(openedAlgorithm ?? 'least_used')
-    setRackPosition(null)
   }, [openedAlgorithm, printerId])
+  // Only a change of printer drops the hand pick: a choices read that catches up with an
+  // algorithm the user just saved must not (claude-review on #1043, finding 4).
+  useEffect(() => {
+    setRackPosition(null)
+    setAlgorithmUnsaved(false)
+  }, [printerId])
   // Simple mode shows no rack step, so a hand pick would be sent unseen (as
   // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
   const { advanced } = picker
@@ -148,7 +155,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   }, [size])
   function changeRackAlgorithm(next: RackAlgorithm) {
     setRackAlgorithm(next)
-    if (printerId !== null) void api.putPrinterRackAlgorithm(printerId, next).catch(() => undefined)
+    setAlgorithmUnsaved(false)
+    if (printerId !== null)
+      void api.putPrinterRackAlgorithm(printerId, next).catch(() => setAlgorithmUnsaved(true))
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
@@ -514,6 +523,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                       rack={check.verdict.rack}
                       algorithm={rackAlgorithm}
                       position={rackPosition}
+                      algorithmUnsaved={algorithmUnsaved}
                       onAlgorithm={changeRackAlgorithm}
                       onPosition={setRackPosition}
                     />

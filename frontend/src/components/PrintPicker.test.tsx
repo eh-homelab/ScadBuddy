@@ -1948,6 +1948,28 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('')
   })
 
+  it('says when the algorithm could not be remembered, and still prints with it', async () => {
+    // claude-review on #1043, finding 3: a failed PUT was swallowed.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', () =>
+        HttpResponse.json({ title: 'Service Unavailable', status: 503 }, { status: 503 }),
+      ),
+    )
+    const runs = watch('POST', '/run')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    expect(await screen.findByTestId('rack-algorithm-unsaved')).toHaveTextContent(
+      'Not remembered for this printer',
+    )
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_algorithm: 'oldest_first' })
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')
