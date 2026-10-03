@@ -293,6 +293,12 @@ keeps its `first_seen_at` and its print history, and the write updates
   this, because the rack may have changed again by then; the hotend actually
   mounted during the print is not something §2 has measured. Accepted here;
   tracking the hotend actually mounted belongs to the telemetry work in #912.
+- Known limit: only an output's print is credited. A Bambuddy library-file run
+  ranks and sends picks, and its hotends are recorded as seen, but the watcher
+  settles by output id and a library print is linked nowhere, so no pick row is
+  saved for it and its use is never counted. An owner who prints mostly from
+  the library sees "least used" fall through to color and lowest position.
+  Tracked in #1073.
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.
