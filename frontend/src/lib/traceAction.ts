@@ -50,7 +50,7 @@ export function traceparentOf(span: Span): string | undefined {
  * The browser has no async context (a `StackContextManager` cannot follow an
  * `await`), so a request issued after an `await` joins the trace only when its call
  * is wrapped in `within`. `span` is for attributes learnt on the way (an output's id).
- * A failure sets `ERROR` and `scadbuddy.failure_class`, and is rethrown unchanged.
+ * An abort (a superseded action) records nothing. A failure sets `ERROR` and `scadbuddy.failure_class`, and is rethrown unchanged.
  */
 export async function traceAction<T>(
   name: string,
@@ -63,6 +63,8 @@ export async function traceAction<T>(
   try {
     return await within(() => run(within, span))
   } catch (error) {
+    // A superseded action (an aborted print) is not a failure.
+    if (failureClass(error) === 'AbortError') throw error
     span.setStatus({ code: SpanStatusCode.ERROR })
     span.setAttribute('scadbuddy.failure_class', failureClass(error))
     throw error
