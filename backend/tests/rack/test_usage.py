@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
@@ -146,10 +147,29 @@ async def test_an_item_with_no_picks_records_no_print(store: RackUsageStore) -> 
 async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> None:
     """#1086 review: a stuck read must release its thread even after the watcher's
     timeout has stopped waiting on it."""
-    await store.seen(1, [A])  # opens the pool
-    with store._ready().connection() as conn:
-        row = conn.execute("SHOW statement_timeout").fetchone()
-    assert row is not None and row["statement_timeout"] == f"{STATEMENT_TIMEOUT_MS // 1000}s"
+    await store.seen(1, [A])  # opens the pool, and migrates on one connection
+    pool = store._ready()
+    # Both of the pool's connections: the second never ran migrate().
+    with pool.connection() as first, pool.connection() as second:
+        rows = [conn.execute("SHOW statement_timeout").fetchone() for conn in (first, second)]
+    assert [row and row["statement_timeout"] for row in rows] == [
+        f"{STATEMENT_TIMEOUT_MS // 1000}s"
+    ] * 2
+
+
+async def test_a_lower_statement_timeout_in_the_conninfo_is_kept(pg_conninfo: str) -> None:
+    """#1086 review: the store lowers an operator's timeout, never raises it."""
+    parts = conninfo_to_dict(pg_conninfo)
+    parts["options"] = f"{parts.get('options') or ''} -c statement_timeout=5s".strip()
+    lower = RackUsageStore(make_conninfo(**parts))
+    try:
+        await lower.seen(1, [A])
+        pool = lower._ready()
+        with pool.connection() as first, pool.connection() as second:
+            rows = [conn.execute("SHOW statement_timeout").fetchone() for conn in (first, second)]
+    finally:
+        lower.close()
+    assert [row and row["statement_timeout"] for row in rows] == ["5s", "5s"]
 
 
 async def test_migrating_waits_out_another_process_holding_the_lock(

@@ -12,7 +12,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from psycopg import Connection
@@ -36,6 +36,10 @@ CONNECT_TIMEOUT = 5.0
 #: Bounds every query on this store's connections, so a stuck read releases its thread
 #: and connection even after an awaiting caller has stopped waiting (#1086 review).
 STATEMENT_TIMEOUT_MS = 15_000
+#: How long one archive's read and record may take in a settle (#1086 review): a stall
+#: costs that archive alone, not the ones after it, which the watcher's whole-hook
+#: timeout (``SETTLE_TIMEOUT``) would otherwise cut off with it.
+ARCHIVE_TIMEOUT = 15.0
 
 
 class PickedHotend(BaseModel):
@@ -71,7 +75,14 @@ class RackUsage(Protocol):
 
 
 def _bound_statements(conn: Connection[DictRow]) -> None:
-    conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+    """Lower the connection's statement timeout to ``STATEMENT_TIMEOUT_MS``; one the
+    conninfo already sets lower is kept (#1086 review)."""
+    row = conn.execute(
+        "SELECT current_setting('statement_timeout')::interval AS current"
+    ).fetchone()
+    current = row["current"] if row is not None else timedelta(0)
+    if not current or current > timedelta(milliseconds=STATEMENT_TIMEOUT_MS):
+        conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
 
 
 class RackUsageStore:
@@ -91,7 +102,7 @@ class RackUsageStore:
                 "connect_timeout": max(1, int(connect_timeout)),
             },
             # Set per connection rather than as ``options``, which would replace any the
-            # conninfo already carries (a search_path, say).
+            # conninfo already carries (a search_path, say). It only ever lowers one.
             configure=_bound_statements,
             name="scadbuddy-rack-usage",
         )
@@ -108,11 +119,13 @@ class RackUsageStore:
             with self._pool.connection() as conn:
                 # Unbounded while migrating (#1086 review): the wait for another
                 # process's migration lock, and a slow migration, count toward it.
+                row = conn.execute("SHOW statement_timeout").fetchone()
+                bound = row["statement_timeout"] if row is not None else "0"
                 conn.execute("SET statement_timeout = 0")
                 try:
                     migrate(conn)
                 finally:
-                    _bound_statements(conn)
+                    conn.execute("SELECT set_config('statement_timeout', %s, false)", (bound,))
             self._migrated = True
         return self._pool
 
@@ -329,13 +342,14 @@ async def record_settled(
     links: LinkReader,
     store: RackUsage,
     now: Callable[[], datetime] = _now,
+    archive_timeout: float = ARCHIVE_TIMEOUT,
 ) -> int:
     """One ``rack_nozzle_prints`` row per linked archive and picked group (spec §4); the
     rows written. Every ended archive counts, whatever the print's outcome: the hotend
     wore either way (spec §10). One still running is left for its own settle. An
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
-    and ids and skipped; nothing is retried."""
+    and ids and skipped, a stall past ``archive_timeout`` too; nothing is retried."""
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -350,27 +364,33 @@ async def record_settled(
             extra={"output_id": output_id, "error": type(exc).__name__},
         )
         return 0
+
+    async def record_one(archive_id: int, queue_item_id: int) -> int:
+        archive = await client.archive(archive_id)
+        if archive.status not in SETTLED_STATUSES:
+            # Another print of this output, still running: its own settle counts it,
+            # with its real time, which DO NOTHING would never let in after this.
+            return 0
+        seconds = (
+            archive.actual_time_seconds
+            if archive.actual_time_seconds is not None
+            else archive.print_time_seconds
+        )
+        return await store.record_prints(
+            archive_id=archive_id,
+            queue_item_id=queue_item_id,
+            settled_at=now(),
+            print_seconds=seconds,
+            grams=archive.filament_used_grams,
+        )
+
     written = 0
     for archive_id, queue_item_id in linked:
         if queue_item_id not in picked or archive_id in recorded:
             continue
         try:
-            archive = await client.archive(archive_id)
-            if archive.status not in SETTLED_STATUSES:
-                # Another print of this output, still running: its own settle counts it,
-                # with its real time, which DO NOTHING would never let in after this.
-                continue
-            seconds = (
-                archive.actual_time_seconds
-                if archive.actual_time_seconds is not None
-                else archive.print_time_seconds
-            )
-            written += await store.record_prints(
-                archive_id=archive_id,
-                queue_item_id=queue_item_id,
-                settled_at=now(),
-                print_seconds=seconds,
-                grams=archive.filament_used_grams,
+            written += await asyncio.wait_for(
+                record_one(archive_id, queue_item_id), timeout=archive_timeout
             )
         except Exception as exc:
             logger.warning(

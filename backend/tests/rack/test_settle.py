@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -43,13 +44,21 @@ class Links:
 
 
 class Archives:
-    def __init__(self, *archives: ArchiveDetail, failing: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        *archives: ArchiveDetail,
+        failing: set[int] | None = None,
+        hanging: set[int] | None = None,
+    ) -> None:
         self.by_id = {archive.id: archive for archive in archives}
         self.failing = failing or set()
+        self.hanging = hanging or set()
         self.reads: list[int] = []
 
     async def archive(self, archive_id: int) -> ArchiveDetail:
         self.reads.append(archive_id)
+        if archive_id in self.hanging:
+            await asyncio.Event().wait()
         if archive_id in self.failing:
             raise ApiError(503, f"archive {archive_id} unreadable near {A}")
         return self.by_id[archive_id]
@@ -186,6 +195,32 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
         getattr(record, "error", None),
     ) == (OUTPUT, 101, "ApiError")
     assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+async def test_an_archive_that_stalls_costs_only_itself(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1086 review: a stall on one archive must not use up the watcher's whole-hook
+    timeout and lose the archives after it."""
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
+    )
+    with caplog.at_level(logging.DEBUG):
+        written = await record_settled(
+            OUTPUT,
+            client=archives,
+            links=Links(link(101, 51), link(102, 51)),
+            store=store,
+            now=lambda: AT,
+            archive_timeout=0.1,
+        )
+    assert written == 1
+    assert archives.reads == [101, 102]
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
+    assert (getattr(record, "archive_id", None), getattr(record, "error", None)) == (
+        101,
+        "TimeoutError",
+    )
 
 
 class FailingLinks:

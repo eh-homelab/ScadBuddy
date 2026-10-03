@@ -2048,7 +2048,9 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await loaded()
-    if (!screen.queryByLabelText('Rack algorithm')) await showAdvanced()
+    // close() puts the dialog back in Simple mode, which has no rack step.
+    expect(screen.queryByLabelText('Rack algorithm')).toBeNull()
+    await showAdvanced()
     await screen.findByLabelText('Rack algorithm')
     release()
     // The picker's own .catch was chained first, so it has run once this settles.
