@@ -81,7 +81,7 @@ describe('/mcp spans', () => {
     try {
       await client.callTool({ name: 'list_models', arguments: {} })
       // msw clones the backend request; no /mcp request is cloned.
-      expect(clone.mock.contexts.map((r) => new URL(r.url).pathname).filter((p) => p.startsWith('/mcp'))).toEqual([])
+      expect(clone.mock.contexts.map((r) => new URL((r as Request).url).pathname).filter((p) => p.startsWith('/mcp'))).toEqual([])
     } finally {
       clone.mockRestore()
     }
