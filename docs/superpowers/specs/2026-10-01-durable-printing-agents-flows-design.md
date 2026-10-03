@@ -914,9 +914,10 @@ happens, and there is no separate request system.
   entry.
 - **Who answers a flow's entries.** A flow run has no session and no owner. Its
   `wait_for_human` is answered by the browser user only, as every `answer` kind is. Its
-  outward `tool(...)` approvals follow the `approval` rule: the browser user, or a grant
-  holder that did not start the run (`workflow_runs` records the starting principal).
-  The shared vectors include both.
+  outward `tool(...)` approvals are decided by the browser user only, on the Workflows
+  page: flow entries have no route or tool a grant holder could reach them through
+  (`sessions_approve` / `sessions_deny` take session ids). The shared vectors include
+  both.
 - **Flow entries stay out of the assistant's reads.** They are listed and answered on
   the Workflows page only (§7.2, §7.3), through `ProjectWorkflow`'s own `pending_input`
   and `respond`. They get no `ai_pending_input` row, so `GET /api/v1/ai/pending-input`
@@ -981,8 +982,11 @@ happens, and there is no separate request system.
     `forgetSubject`), nothing in it runs. Two things clean up:
     - `forgetSubject` deletes the subject's `ai_pending_input` and `ai_input_responses`
       rows with its other rows (§6.5 step 3);
-    - every entry has an `expires_at` of at most 86 400 s, which bounds how long any
-      entry can live. Separately, the agent service's sweep that runs `expireDue()`
+    - every entry has an `expires_at` of at most 86 400 s, which bounds how long it
+      waits while its worker runs. While the `agent-durable` worker is down, an entry
+      can outlive `expires_at` until the worker returns and resolves it. The aggregate
+      read marks such rows `expiring` rather than pending, and the badge does not count
+      them. Separately, the agent service's sweep that runs `expireDue()`
       every 30 s (`APPROVAL_SWEEP_MS`, `main.ts:49`) checks `ai_pending_input` rows
       older than 10 minutes against Temporal, so that a closed run's entry is removed
       promptly rather than at its expiry. It calls `DescribeWorkflowExecution` on the
@@ -1296,9 +1300,11 @@ happens, and there is no separate request system.
 - The host functions are harness tools (`@agent.activity_tool_defn`, or workflow
   functions for the child workflows). Approvals use the harness's `ToolApprovalPolicy`:
   an outward `tool(...)` goes to a human through the Workflows page (§7.3), whose
-  Approve/Deny is §6.6's `respond`, sending the harness's Update. Phase 6 checks how
-  the harness's approval Update carries a `wait_for_human` answer; anything that would
-  mean departing from it goes to the user (§9). A flow has no chat session, so its approvals
+  Approve/Deny is §6.6's `respond`, `ProjectWorkflow`'s own Update, which runs
+  `resolve_input` and then makes the harness's decision call inside the workflow. No
+  harness or plugin decision Update is exposed to clients. Phase 6 checks how the
+  harness's approval API carries a `wait_for_human` answer; anything that would mean
+  departing from it goes to the user (§9). A flow has no chat session, so its approvals
   do not appear in the assistant's panel. An `agent(...)` step is a durable session of
   its own, and that session's approvals appear in the assistant's panel (§6.4, §6.6), with
   the Workflows page linking to it. Event
@@ -1412,7 +1418,10 @@ happens, and there is no separate request system.
   - an `answer` whose write activity fails returns to pending, can be answered again,
     and still times out;
   - from the running workflow's registered handlers (not our source): no handler other
-    than `respond`, `cancel_input` and the entry's timer reaches `agent.decide`. The
+    than `respond`, `cancel_input`, the `interrupt` Signal (cancel-only,
+    `decide(False, "system:cancel")`) and the entry's timer reaches `agent.decide`. The
+    same test runs against `ProjectWorkflow`, where a plugin- or harness-registered
+    decision Update fails it. The
     expected set is every handler `DurableSession` registers, Queries included:
     the Updates `send_message`, `respond` and `cancel_input`, the Signal `interrupt`,
     and the Query `pending_input`, plus what the plugin registers by default, such as the Workflow Streams poll Update that
@@ -1533,8 +1542,9 @@ Each phase is its own implementation plan and ships alone.
      interrupt, handoff and send paths, the timers, `open_input` / `resolve_input`, the
      orphan sweep,
      the `ai_pending_input` and `ai_input_responses` migration, `ask_user` /
-     `wait_for_user` as tools, and the subscriber's `approval.required` /
-     `question.asked` mapping;
+     `wait_for_user` as tools, `open_input` / `resolve_input` emitting
+     `approval.required` / `question.asked`, and the subscriber dropping
+     `approval_needed`;
    - clusters: the Temporal frontend's ingress `CiliumNetworkPolicy`;
    - classic: the `pending-input` and `respond` routes over `ai_approvals` and
      `ai_questions`, the approval routes and `sessions_approve` / `sessions_deny` as
