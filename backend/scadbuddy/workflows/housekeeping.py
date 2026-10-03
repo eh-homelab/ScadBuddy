@@ -1,8 +1,10 @@
 """Housekeeping on a Temporal Schedule (#1054, spec 2026-10-01 §4.4).
 
-The API process's periodic loops (the asset sweeper and the render prune) are one
-Schedule, ``scadbuddy-housekeeping-<queue>``, that starts ``Housekeeping`` on the ``library``
-queue every ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds. The queue is served in the API
+The API process's periodic loops are two Schedules that start ``Housekeeping`` on the
+``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
+``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
+``scadbuddy-prune-<queue>`` prunes settled render jobs every `PRUNE_INTERVAL`, as the
+render service's loop did, whatever that interval. The queue is served in the API
 process, which holds the data volume the sweeps read. Each sweep is best effort, as the
 loop's were: one that fails is logged and the rest still run, and the next tick tries
 again.
@@ -34,11 +36,18 @@ logger = logging.getLogger(__name__)
 
 HOUSEKEEPING_WORKFLOW = "Housekeeping"
 HOUSEKEEPING_SCHEDULE = "scadbuddy-housekeeping"
+PRUNE_SCHEDULE = "scadbuddy-prune"
+#: The render service's prune loop's interval: a settled job outlives `job_ttl` by this.
+PRUNE_INTERVAL = 300.0
 
 
 def schedule_id_for(task_queue: str) -> str:
     """One Schedule per queue: a test's app (a queue of its own) never moves another's."""
     return f"{HOUSEKEEPING_SCHEDULE}-{task_queue}"
+
+
+def prune_schedule_id_for(task_queue: str) -> str:
+    return f"{PRUNE_SCHEDULE}-{task_queue}"
 
 
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
@@ -48,6 +57,7 @@ SWEEPS = (
     "housekeeping_sweep_blobs",
     "housekeeping_sweep_staging",
 )
+PRUNE_SWEEPS = SWEEPS[:1]
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 
@@ -55,9 +65,9 @@ SWEEP_TIMEOUT = timedelta(minutes=30)
 @workflow.defn(name=HOUSEKEEPING_WORKFLOW)
 class Housekeeping:
     @workflow.run
-    async def run(self) -> list[str]:
+    async def run(self, sweeps: list[str] | None = None) -> list[str]:
         failed: list[str] = []
-        for sweep in SWEEPS:
+        for sweep in SWEEPS if sweeps is None else sweeps:
             try:
                 await workflow.execute_activity(
                     sweep,
@@ -71,10 +81,12 @@ class Housekeeping:
         return failed
 
 
-def _schedule(task_queue: str, interval: float) -> Schedule:
+def _schedule(
+    schedule_id: str, task_queue: str, interval: float, sweeps: tuple[str, ...]
+) -> Schedule:
     return Schedule(
         action=ScheduleActionStartWorkflow(
-            HOUSEKEEPING_WORKFLOW, id=f"housekeeping-{task_queue}", task_queue=task_queue
+            HOUSEKEEPING_WORKFLOW, list(sweeps), id=schedule_id, task_queue=task_queue
         ),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=interval))]),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
@@ -87,6 +99,7 @@ async def ensure_schedule(
     interval: float,
     *,
     schedule_id: str | None = None,
+    sweeps: tuple[str, ...] = SWEEPS,
 ) -> None:
     """The Schedule at ``interval`` seconds (0: none), then one run now: the boot's
     converging sweep."""
@@ -99,7 +112,7 @@ async def ensure_schedule(
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
         return
-    schedule = _schedule(task_queue, interval)
+    schedule = _schedule(schedule_id, task_queue, interval, sweeps)
     try:
         await client.create_schedule(schedule_id, schedule)
     except ScheduleAlreadyRunningError:
@@ -109,3 +122,15 @@ async def ensure_schedule(
 
         await handle.update(replace)
     await handle.trigger()
+
+
+async def ensure_schedules(client: Client, task_queue: str, interval: float) -> None:
+    """Both Schedules: the prune's fixed one, and every sweep at ``interval``."""
+    await ensure_schedule(
+        client,
+        task_queue,
+        PRUNE_INTERVAL,
+        schedule_id=prune_schedule_id_for(task_queue),
+        sweeps=PRUNE_SWEEPS,
+    )
+    await ensure_schedule(client, task_queue, interval)

@@ -170,9 +170,10 @@ on shutdown.
     blob store's pieces and snapshots (see "Blob store and render workers").
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
     after the one at startup; 0 turns it off. It is the interval of the Temporal
-    Schedule `scadbuddy-housekeeping-library`, which also prunes settled render jobs and
-    runs on the API's own `library` queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0
-    deletes the Schedule. The same interval drives the blob
+    Schedule `scadbuddy-housekeeping-library`, on the API's own `library` queue
+    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Settled render
+    jobs are pruned every 300 s by a second Schedule, `scadbuddy-prune-library`, which
+    0 leaves alone. The same interval drives the blob
     store's sweep, which 0 also turns off, and a render worker's piece-cache
     eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging

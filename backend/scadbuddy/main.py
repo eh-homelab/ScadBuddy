@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 from temporalio import activity
+from temporalio.client import Client
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -48,7 +49,7 @@ from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import bambuddy_worker, connect
 from scadbuddy.workflows.follow import resume_followed
-from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping, ensure_schedule
+from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping, ensure_schedules
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -469,19 +470,36 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             if stop.is_set():
                 return
     queue = settings.temporal_task_queue_library
-    try:
-        await ensure_schedule(client, queue, state.config.asset_sweep_interval)
-    except Exception:
-        logger.exception("could not set up the housekeeping Schedule; the next start retries")
+    schedules = asyncio.create_task(
+        _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
+    )
     activities = _housekeeping_activities(state)
+    try:
+        while not stop.is_set():
+            try:
+                async with Worker(
+                    client, task_queue=queue, workflows=[Housekeeping], activities=activities
+                ):
+                    await stop.wait()
+            except Exception:
+                logger.exception("the library worker failed; starting it again")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        schedules.cancel()
+
+
+async def _set_up_housekeeping(
+    client: Client, queue: str, interval: float, stop: asyncio.Event
+) -> None:
+    """The housekeeping Schedules, retried until Temporal takes them: a frontend can
+    answer the connect before it can create one."""
     while not stop.is_set():
         try:
-            async with Worker(
-                client, task_queue=queue, workflows=[Housekeeping], activities=activities
-            ):
-                await stop.wait()
+            await ensure_schedules(client, queue, interval)
+            return
         except Exception:
-            logger.exception("the library worker failed; starting it again")
+            logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 

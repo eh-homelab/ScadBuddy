@@ -156,7 +156,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
   Housekeeping (#1054): `housekeeping.py` (`Housekeeping`, `ensure_schedule`), the
-  periodic sweeps as one Temporal Schedule on the `library` queue
+  periodic sweeps as Temporal Schedules (every sweep, and the render prune on its own
+  300 s one) on the `library` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
   process (it holds the data volume). A new periodic pass is an activity in its
   `SWEEPS`, never a loop in the API.

@@ -1043,7 +1043,9 @@ Each phase is its own implementation plan and ships alone.
      `asset_sweep_interval`; `0` deletes it) starts `Housekeeping` on the `library` queue.
      It runs four activities in order, each tried once and best effort: prune settled
      render jobs, sweep unused uploads, sweep unreferenced blobs, sweep old duplicate
-     staging. Its worker runs in the API process, which holds the data volume, until the
+     staging. A second Schedule, `scadbuddy-prune-<queue>`, runs only the prune every
+     300 s (the old loop's cadence) and stays when the interval is `0`. Setup is retried
+     until Temporal takes it. Its worker runs in the API process, which holds the data volume, until the
      `scadbuddy-library` container. The API's sweep loop and `RenderService`'s prune
      loop are gone. The boot passes stay in the boot, since they must finish before the
      first request; the boot then triggers the Schedule once.
