@@ -195,7 +195,34 @@ describe('/api/v1/ai/credentials', () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
     const res = await app.request('/api/v1/ai/credentials')
     expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect(await res.json()).toEqual({
+      detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
+      code: 'no_database',
+    })
+  })
+
+  const credential = { kind: 'anthropic_api_key', secret: SECRET }
+  it.each([
+    ['PUT', '/api/v1/ai/credentials', credential],
+    ['DELETE', '/api/v1/ai/credentials', undefined],
+    ['POST', '/api/v1/ai/credentials/test', undefined],
+    // The routes for several credentials (#1093).
+    ['GET', '/api/v1/ai/credentials/entries', undefined],
+    ['POST', '/api/v1/ai/credentials/entries', credential],
+    ['PUT', '/api/v1/ai/credentials/order', { ids: ['a'] }],
+    ['PUT', '/api/v1/ai/credentials/entries/a', credential],
+    ['DELETE', '/api/v1/ai/credentials/entries/a', undefined],
+    ['POST', '/api/v1/ai/credentials/entries/a/reset', undefined],
+    ['POST', '/api/v1/ai/credentials/entries/a/test', undefined],
+  ] as const)('answers %s %s with code no_database too', async (method, path, body) => {
+    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const res = await app.request(path, {
+      method,
+      headers: { ...UI, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ code: 'no_database' })
   })
 
   describe('writes only through the UI ingress path (interim, until #258)', () => {

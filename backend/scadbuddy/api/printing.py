@@ -31,6 +31,7 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
+from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -55,6 +56,8 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.runs import BeforeEnqueue, PrintRun, PrintRuns, run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.rack.usage import RackUsage
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -70,6 +73,19 @@ class PrinterBedType(BaseModel):
 
     printer_id: int
     bed_type: str | None = None
+
+
+class PrinterRackAlgorithmPut(BaseModel):
+    """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
+
+    algorithm: RackAlgorithm | None = None
+
+
+class PrinterRackAlgorithm(BaseModel):
+    """The rack algorithm in force on one printer (#836)."""
+
+    printer_id: int
+    algorithm: RackAlgorithm
 
 
 class ProjectAttach(BaseModel):
@@ -121,6 +137,22 @@ def put_printer_bed_type(
     )
 
 
+@router.put(
+    "/printers/{printer_id}/rack-algorithm",
+    response_model=PrinterRackAlgorithm,
+    summary="Remember how this printer's rack nozzle is picked",
+)
+def put_printer_rack_algorithm(
+    printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
+) -> PrinterRackAlgorithm:
+    """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
+    Bambuddy, like the printer's remembered plate."""
+    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    return PrinterRackAlgorithm(
+        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
+    )
+
+
 @router.get(
     "/printers/{printer_id}/camera",
     response_class=Response,
@@ -163,6 +195,7 @@ async def post_run(
     watcher: PrintWatcherDep,
     runs: PrintRunsDep,
     catalogue: CatalogueDep,
+    rack: RackUsageDep,
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -222,6 +255,7 @@ async def post_run(
         request=body,
         source_for=source_for,
         started=started,
+        rack=rack,
     )
 
 
@@ -235,6 +269,7 @@ async def accept_run(
     request: PrintRunRequest,
     source_for: Callable[[BambuddyClient], Awaitable[PrintSource]],
     started: Callable[[], Awaitable[None]] | None = None,
+    rack: RackUsage | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742).
 
@@ -252,7 +287,7 @@ async def accept_run(
     try:
         async with client_for(settings) as client:
             source = await source_for(client)
-            prepared = await prepare_run(client, source, settings, request)
+            prepared = await prepare_run(client, source, settings, request, rack=rack)
     except ApiError:
         # A racer with the same key may have claimed its run while this one was
         # checking; its caller gets that run, not a refusal from a separate read.
@@ -269,7 +304,9 @@ async def accept_run(
 
     async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:
-            result = await execute_run(client, source, settings, request, prepared, before_enqueue)
+            result = await execute_run(
+                client, source, settings, request, prepared, before_enqueue, rack=rack
+            )
         if started is not None:
             await started()
         return result
@@ -312,6 +349,7 @@ async def post_check(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
+    rack: RackUsageDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -323,7 +361,7 @@ async def post_check(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_output(client, outputs, uploads, meta, settings, body)
+        return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
 
 
 @router.get(
@@ -380,6 +418,7 @@ async def get_choices(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
+    rack: RackUsageDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
@@ -388,7 +427,7 @@ async def get_choices(
     settings = store.load()
     async with client_for(settings) as client:
         return await choices_for_output(
-            client, outputs, uploads, meta, settings, printer_id=printer_id
+            client, outputs, uploads, meta, settings, printer_id=printer_id, rack=rack
         )
 
 

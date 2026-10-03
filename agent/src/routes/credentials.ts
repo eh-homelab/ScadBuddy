@@ -110,6 +110,11 @@ const CreateBody = SaveBody.extend({ secret: z.string().min(1).max(4096) })
 const OrderBody = z.strictObject({ ids: z.array(z.string().min(1).max(64)).max(100) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
+/**
+ * Says "no AI database here" to a machine: the Settings section hides on it
+ * (frontend `AiCredentialSection` `notDeployed`) instead of matching the text above.
+ */
+export const NO_DATABASE_CODE = 'no_database'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 /** The largest credential body read: a secret and a base URL, with room to spare. */
@@ -194,10 +199,15 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     return (await deps.ready()) ? deps.credentials : NOT_READY
   }
 
+  /** The 503 for `store()`'s refusal, with `code` when there is no database at all. */
+  function unavailable(detail: string) {
+    return { detail, ...(detail === NO_DATABASE ? { code: NO_DATABASE_CODE } : {}) }
+  }
+
   /** Runs `fn` with the store, mapping the store's refusals to their statuses. */
   async function withStore(c: Context, fn: (repo: CredentialRepo) => Promise<Response>): Promise<Response> {
     const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    if (typeof repo === 'string') return c.json(unavailable(repo), 503)
     try {
       return await fn(repo)
     } catch (err) {
@@ -315,7 +325,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     testing = true
     try {
       const repo = await store()
-      if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+      if (typeof repo === 'string') return c.json(unavailable(repo), 503)
       if (!kek.ok) return c.json({ detail: `no key-encryption key: ${kek.reason}` }, 503)
       let credential: Credential | undefined
       try {

@@ -284,9 +284,16 @@ the query read, so a query that started with an old secret cannot disable a new 
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`. The routes without `/entries` are the
-single-credential routes Settings used first: they act on the first credential by
-priority.
+bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way to use them is Settings → Assistant →
+**Claude credential** (`AiCredentialSection`,
+[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx), #1000),
+which shows the stored kind, base URL and last four, replaces the credential, runs the
+test (showing `Retry-After` on a `429`) and deletes it after a confirmation. The
+`curl` below is the fallback when there is no UI.
+
+The routes without `/entries` are the single-credential routes that section uses: they
+act on the first credential by priority. The `/entries` and `/order` routes manage every
+credential (#1093).
 
 | Route | Guarded | What it does |
 |---|---|---|
@@ -304,8 +311,11 @@ priority.
 
 "Guarded" means the request must pass `uiRequestProblem()` in
 [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts) or it gets `403` (§6).
-Every route answers `503` while there is no database, or while migrations have not
-applied (`store()` in `routes/credentials.ts`).
+Every route, the `/entries` and `/order` ones included, answers `503` while there is no
+database, or while migrations have not applied (`store()` in `routes/credentials.ts`).
+The no-database `503` also carries
+`"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
+the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
 Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
 
