@@ -84,6 +84,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending') ?? false
   const itemCount = active?.items.length ?? 0
+  const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 
   // Voice (#257): dictation fills the draft for the user to review; replies can be read aloud.
   // Kept in step with every write, so dictation reconciles against typing that hasn't
@@ -275,8 +276,13 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           aria-label="What this session touched"
           className="shrink-0 border-b border-line bg-surface-2"
         >
-          {/* Read again whenever the session's status moves, so a finished turn's changes show. */}
-          <SessionTouched sessionId={active.id} refreshKey={active.status} />
+          {/* Read again when the status moves or a tool call finishes, so a running turn's
+              changes show as they land. Keyed per session, so a switch reads once. */}
+          <SessionTouched
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}`}
+          />
         </section>
       )}
 

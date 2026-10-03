@@ -1,6 +1,7 @@
-import { screen, within } from '@testing-library/react'
+import { act, screen, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter } from 'react-router'
+import { api } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
@@ -122,24 +123,23 @@ describe('SessionTouched', () => {
     const view = renderPage(<SessionTouched sessionId="sess-1" refreshKey="running" />)
     await screen.findByRole('link', { name: /first/ })
 
-    let failed: () => void = () => {}
-    const refused = new Promise<void>((resolve) => (failed = resolve))
     server.use(
-      http.get('/api/v1/ai/sessions/:id/resources', () => {
-        // Settles after the response is handed back, so the client has seen the 503.
-        setTimeout(failed, 0)
-        return HttpResponse.json({ detail: 'down' }, { status: 503 })
-      }),
+      http.get('/api/v1/ai/sessions/:id/resources', () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
     )
+    const reads = vi.spyOn(api, 'listAiSessionResources')
     view.rerender(
       <MemoryRouter>
         <SessionTouched sessionId="sess-1" refreshKey="idle" />
       </MemoryRouter>,
     )
-    await refused
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1))
+    // useAsync's handlers were attached when it called; once this settles, theirs has run.
+    await act(async () => {
+      await reads.mock.results[0]!.value.catch(() => {})
+    })
     expect(screen.getByRole('link', { name: /first/ })).toBeInTheDocument()
     expect(screen.queryByRole('alert')).toBeNull()
+    reads.mockRestore()
   })
 
   it('shows every action in the order it happened, and links a resource made again after a delete', async () => {
@@ -165,6 +165,21 @@ describe('SessionTouched', () => {
 
     await screen.findByRole('group', { name: 'Revisions' })
     expect(screen.queryAllByRole('link')).toHaveLength(0)
+  })
+
+  it('does not link what belonged to a model the session deleted and made again', async () => {
+    setSessionResources('sess-1', [
+      row({ type: 'revision', id: 'abcdef0123456', model: 'bin', tool: 'update_source' }),
+      row({ type: 'model', id: 'bin', model: 'bin', action: 'deleted', tool: 'delete_model' }),
+      row({ type: 'model', id: 'bin', model: 'bin', tool: 'create_model' }),
+      row({ type: 'preset', id: 'p-new', model: 'bin', tool: 'save_preset' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-1" />)
+
+    const revisions = await screen.findByRole('group', { name: 'Revisions' })
+    expect(within(revisions).queryByRole('link')).toBeNull()
+    expect(within(group('Models')).getByRole('link', { name: /bin/ })).toHaveAttribute('href', '/m/bin')
+    expect(within(group('Presets')).getByRole('link', { name: /p-new/ })).toHaveAttribute('href', '/m/bin')
   })
 
   it('does not link a revision whose model is unknown', async () => {

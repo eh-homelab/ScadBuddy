@@ -33,35 +33,51 @@ interface Entry {
   model: string | null
   actions: SessionResource['action'][]
   tools: string[]
+  /** Where its last row sits in the session's rows, to order it against a model's delete. */
+  last: number
 }
 
 /** Folds the session's rows into one entry per resource; each `unclassified` row stays its own. */
 function entries(rows: readonly SessionResource[]): Entry[] {
   const out: Entry[] = []
   const byKey = new Map<string, Entry>()
-  for (const r of rows) {
+  rows.forEach((r, index) => {
     const key = r.id === null ? null : `${r.type}\u0000${r.id}`
     const seen = key === null ? undefined : byKey.get(key)
     if (seen) {
       if (seen.actions.at(-1) !== r.action) seen.actions.push(r.action)
       if (!seen.tools.includes(r.tool)) seen.tools.push(r.tool)
       seen.model ??= r.model
-      continue
+      seen.last = index
+      return
     }
-    const entry: Entry = { type: r.type, id: r.id, model: r.model, actions: [r.action], tools: [r.tool] }
+    const entry: Entry = { type: r.type, id: r.id, model: r.model, actions: [r.action], tools: [r.tool], last: index }
     out.push(entry)
     if (key !== null) byKey.set(key, entry)
-  }
+  })
   return out
 }
 
 const short = (id: string) => (/^[0-9a-f]{12,}$/.test(id) ? id.slice(0, 7) : id)
 
+/**
+ * Where each model's last `deleted` row sits. Anything of that model last touched
+ * before it belonged to the deleted model, even if one of that slug was made again.
+ */
+function modelDeletes(rows: readonly SessionResource[]): Map<string, number> {
+  const at = new Map<string, number>()
+  rows.forEach((r, index) => {
+    if (r.type === 'model' && r.action === 'deleted' && r.id !== null) at.set(r.id, index)
+  })
+  return at
+}
+
 /** What the entry is called, and its page in the app; no page once it, or its model, is gone. */
-function describe(e: Entry, deletedModels: ReadonlySet<string>): { name: string; to: string | null } {
+function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: string; to: string | null } {
   const id = e.id ?? ''
   const on = e.model ? ` · ${e.model}` : ''
-  const gone = e.actions.at(-1) === 'deleted' || (e.model !== null && deletedModels.has(e.model))
+  const modelGone = e.type !== 'model' && e.model !== null && (deletes.get(e.model) ?? -1) > e.last
+  const gone = e.actions.at(-1) === 'deleted' || modelGone
   const page = (to: string | null) => (gone ? null : to)
   switch (e.type) {
     case 'model':
@@ -114,9 +130,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
   if (!data) return <p className="px-3 py-2 text-[12px] text-faint">Loading…</p>
 
   const all = entries(data.resources)
-  const deletedModels = new Set(
-    all.filter((e) => e.type === 'model' && e.id !== null && e.actions.at(-1) === 'deleted').map((e) => e.id as string),
-  )
+  const deletes = modelDeletes(data.resources)
   if (all.length === 0) {
     return <p className="px-3 py-2 text-[12px] text-muted">Nothing changed by this session yet.</p>
   }
@@ -134,7 +148,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
             </h3>
             <ul className="mt-0.5 space-y-0.5">
               {items.map((e, i) => {
-                const { name, to } = describe(e, deletedModels)
+                const { name, to } = describe(e, deletes)
                 return (
                   <li key={e.id ?? `${e.tools.join()}-${i}`} className="flex items-baseline gap-1.5" title={e.tools.join(', ')}>
                     {to ? (
