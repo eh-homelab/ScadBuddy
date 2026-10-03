@@ -80,6 +80,8 @@ class SettingsView(BaseModel):
     display_unit: DisplayUnit = "mm"
     #: How long a finished print run is kept, in seconds; ``None`` keeps every one.
     print_run_retention_seconds: float | None = None
+    #: How long a finished operation is kept, in seconds; ``None`` keeps every one.
+    operation_retention_seconds: float | None = None
     last_project_id: int | None = None
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
@@ -279,6 +281,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         default_plate=stored.default_plate,
         display_unit=stored.display_unit,
         print_run_retention_seconds=stored.print_run_retention_seconds,
+        operation_retention_seconds=stored.operation_retention_seconds,
         last_project_id=stored.last_project_id,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),

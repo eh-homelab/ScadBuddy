@@ -25,6 +25,7 @@ DEFAULTS: dict[str, object] = {
     "default_plate": None,
     "display_unit": "mm",
     "print_run_retention_seconds": None,
+    "operation_retention_seconds": None,
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
     "temporal_ui_url": None,
@@ -155,20 +156,23 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
     )
 
 
-def test_print_run_retention_is_stored_and_a_clear_keeps_every_run(
-    client: TestClient, settings: Settings
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
+def test_a_retention_is_stored_and_a_clear_keeps_every_row(
+    client: TestClient, settings: Settings, field: str
 ) -> None:
-    """#1052, spec 2026-10-01 §5.4: empty keeps every run; a number prunes older ones."""
-    saved = client.put("/api/v1/settings", json={"print_run_retention_seconds": 604800})
-    assert saved.json()["print_run_retention_seconds"] == 604800
-    assert read_stored(settings.database_url)["print_run_retention_seconds"] == 604800
-    cleared = client.put("/api/v1/settings", json={"print_run_retention_seconds": None})
-    assert cleared.json()["print_run_retention_seconds"] is None
+    """#1052/#1053, spec 2026-10-01 §4.2, §5.4: empty keeps every row; a number prunes
+    older ones."""
+    saved = client.put("/api/v1/settings", json={field: 604800})
+    assert saved.json()[field] == 604800
+    assert read_stored(settings.database_url)[field] == 604800
+    cleared = client.put("/api/v1/settings", json={field: None})
+    assert cleared.json()[field] is None
 
 
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
 @pytest.mark.parametrize("value", [0, -1])
-def test_a_print_run_retention_of_zero_or_less_is_refused(client: TestClient, value: int) -> None:
-    response = client.put("/api/v1/settings", json={"print_run_retention_seconds": value})
+def test_a_retention_of_zero_or_less_is_refused(client: TestClient, field: str, value: int) -> None:
+    response = client.put("/api/v1/settings", json={field: value})
     assert response.status_code == 422
 
 
