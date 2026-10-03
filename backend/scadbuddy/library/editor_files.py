@@ -1,15 +1,18 @@
-"""Files the source editor opens read-only beside the model (#185).
+"""Files read read-only from beside a model or from a pinned library, under one root.
 
 Go-to-definition can land in a model's sibling file (an ``include``/``use`` target)
-or in a library on its ``OPENSCADPATH``. The editor has no copy of either, so it
+or in a library on its ``OPENSCADPATH`` (#185). The editor has no copy of either, so it
 reads the one file it jumps into through here, confined to one root: the model's
-directory, or one pinned library checkout.
+directory, or one pinned library checkout. A model README's relative images are read
+the same way (#951): :func:`read_file` returns the bytes, and
+:func:`read_text_file` adds the check that they are UTF-8 text.
 
 A path is relative, ``/``-separated and plain: no empty, ``.`` or ``..`` segment and
 no dot-file anywhere along it (``.git``, a model's ``.renders``), so nothing outside
 the files a model ships is reachable. The file it names must resolve, symlinks
-followed, to a regular file still under the root, and be UTF-8 text no larger than
-the caller's limit (the API's ``MAX_SOURCE_CHARS``, the cap on a model's own source).
+followed, to a regular file still under the root and on no hidden path, no larger
+than the caller's limit (for text, the API's ``MAX_SOURCE_CHARS``, the cap on a
+model's own source; for an image, ``MAX_MODEL_IMAGE_BYTES``).
 
 The check and the read are one file: the resolved path is opened without following a
 symlink at its end (``O_NOFOLLOW``) and without blocking on a FIFO (``O_NONBLOCK``),
@@ -40,7 +43,8 @@ class NotTextError(ValueError):
     """Not UTF-8 text: a binary file."""
 
 
-def _segments(relative: str) -> list[str]:
+def plain_segments(relative: str) -> list[str]:
+    """``relative``'s segments, or :class:`FilePathError` when it is not plain."""
     if not relative or len(relative) > MAX_PATH_LENGTH:
         raise FilePathError("the path is empty or too long")
     if "\\" in relative or "\0" in relative:
@@ -56,15 +60,32 @@ def _segments(relative: str) -> list[str]:
 def read_text_file(root: Path, relative: str, *, limit: int) -> str:
     """The text of ``relative`` under ``root``, at most ``limit`` bytes.
 
+    Raises what :func:`read_file` does, and :class:`NotTextError`.
+    """
+    data = read_file(root, relative, limit=limit)
+    if b"\0" in data:
+        raise NotTextError(relative)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise NotTextError(relative) from None
+
+
+def read_file(root: Path, relative: str, *, limit: int) -> bytes:
+    """The bytes of ``relative`` under ``root``, at most ``limit`` of them.
+
     Raises :class:`FilePathError` for a path that is not plain, ``FileNotFoundError``
     for one that is missing, not a regular file, or resolves outside ``root`` (a
     symlink out of it reads as missing, so it says nothing about what is outside),
-    :class:`FileTooLargeError` and :class:`NotTextError`.
+    and :class:`FileTooLargeError`.
     """
-    segments = _segments(relative)
+    segments = plain_segments(relative)
     base = root.resolve(strict=True)
     target = base.joinpath(*segments).resolve()
     if not target.is_relative_to(base) or not target.is_file():
+        raise FileNotFoundError(relative)
+    # A symlink inside the root may still lead to a hidden path no plain one may name.
+    if any(part.startswith(".") for part in target.relative_to(base).parts):
         raise FileNotFoundError(relative)
     try:
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -84,12 +105,7 @@ def read_text_file(root: Path, relative: str, *, limit: int) -> str:
         data = file.read(limit + 1)
     if len(data) > limit:
         raise FileTooLargeError(relative)
-    if b"\0" in data:
-        raise NotTextError(relative)
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise NotTextError(relative) from None
+    return data
 
 
 def opened_path(fd: int) -> Path | None:

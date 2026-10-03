@@ -317,6 +317,9 @@ def _build_core(settings: Settings) -> AppState:
                 client,
                 meta,
                 uploads=uploads if pool is not None else None,
+                # Load-bearing for the rack settle hook (#836): without ``links=`` a fast
+                # print's archive is never linked, so its rack use goes uncounted, and
+                # no test catches it (the P3 settle test builds its own reader).
                 links=print_links if print_links.available else None,
             )
 

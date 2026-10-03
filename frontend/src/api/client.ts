@@ -50,6 +50,8 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrinterRackAlgorithm,
+  RackAlgorithm,
   PrintAgain,
   PrintDetail,
   PrintPage,
@@ -89,6 +91,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -172,6 +175,8 @@ async function requestText(path: string): Promise<string> {
  * Cloudflare's 524 at ~100 s), or no answer at all (#470).
  */
 export const UNANSWERED = 'urn:scadbuddy:unanswered'
+/** The `type` of the problem for an `/api/v1/ai` read the backend's SPA fallback answered. */
+export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
 /**
@@ -222,14 +227,24 @@ function parsedProblem(body: unknown, status: number, statusText: string): Probl
   }
 }
 
+/**
+ * A 429's or 503's `Retry-After`, in seconds, as `problem.retry_after` (the agent's
+ * connection test, #1000). Only the delay form; an HTTP date is left out.
+ */
+function withRetryAfter(problem: Problem, header: string | null): Problem {
+  if (problem.status !== 429 && problem.status !== 503) return problem
+  const seconds = Number(header)
+  return header && seconds > 0 ? { ...problem, retry_after: seconds } : problem
+}
+
 async function readProblem(response: Response): Promise<Problem> {
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    return unansweredProblem(response.status, response.statusText)
+    return withRetryAfter(unansweredProblem(response.status, response.statusText), response.headers.get('Retry-After'))
   }
-  return parsedProblem(body, response.status, response.statusText)
+  return withRetryAfter(parsedProblem(body, response.status, response.statusText), response.headers.get('Retry-After'))
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
@@ -238,9 +253,9 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
   try {
     body = JSON.parse(xhr.responseText)
   } catch {
-    return unansweredProblem(xhr.status, xhr.statusText)
+    return withRetryAfter(unansweredProblem(xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
   }
-  return parsedProblem(body, xhr.status, xhr.statusText)
+  return withRetryAfter(parsedProblem(body, xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
 }
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
@@ -840,6 +855,13 @@ export const api = {
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
+  /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
+  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null) =>
+    request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
+      method: 'PUT',
+      body: JSON.stringify({ algorithm }),
+    }),
+
   /**
    * #87 — one read per output, because the join is the server's job. The spool
    * inventory, where each spool is assigned, the printer's live AMS state and the
@@ -1217,4 +1239,32 @@ export const api = {
 
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
+
+  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
+  /**
+   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
+   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
+   * parse is a real failure and rejects as it would anywhere.
+   */
+  getAiCredential: async (): Promise<AiCredentialView> => {
+    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
+      throw new ApiError({
+        type: AI_NOT_ROUTED,
+        title: 'Not routed',
+        status: response.status,
+        detail: 'The agent service did not answer at /api/v1/ai.',
+      })
+    }
+    return (await response.json()) as AiCredentialView
+  },
+
+  putAiCredential: (body: AiCredentialUpdate) =>
+    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+
+  /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
+  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
 }

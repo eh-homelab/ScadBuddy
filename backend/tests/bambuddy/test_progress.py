@@ -626,3 +626,14 @@ def test_scans_older_than_the_interval_are_forgotten() -> None:
     assert not progress_module._claim_hash_scan("a", interval / 2)
     assert progress_module._claim_hash_scan("b", interval + 1)
     assert set(progress_module._last_hash_scan) == {"b"}
+
+
+def test_a_stale_rack_pick_shows_bambuddys_own_words() -> None:
+    """Spec §5, §10: a pick that no longer fits fails the item at dispatch; the print's
+    progress shows Bambuddy's message (the run result was fixed at queue time)."""
+    item = QueueItem(
+        id=51, status="failed", error_message="Nozzle rack pick no longer fits the printer"
+    )
+    shown = from_queue(item, bambuddy_url="http://bambuddy.test/queue")
+    assert (shown.stage, shown.settled) == ("failed", True)
+    assert shown.error_message == "Nozzle rack pick no longer fits the printer"

@@ -649,9 +649,14 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   (`/srv/agent`), as the store keys sessions by it.
 - **The credential** is read from `ai_credentials` and decrypted in Python with a port of
   `openSecret` (`agent/src/secrets.ts:187`):
+  - There may be several rows (#1093). A query takes them in the pool's fallback order
+    (`CredentialPool`, `agent/src/harness/fallback.ts`): by `priority`, skipping any
+    that are cooling down, disabled, or not openable with the mounted key.
   - AES-256-GCM, sealed format `version | IV(12) | tag(16) | ciphertext`;
-  - AAD `v2|ai_credentials:default:{"kind":…,"base_url":…}` for the secret, and
-    `dek:` + that for the data key;
+  - AAD `v2|ai_credentials:<row id>:{"kind":…,"base_url":…}` for the secret, as
+    `credentialAad` (`agent/src/credentials.ts`) builds it. The row id is `default`
+    for the row migrated from the single-credential table. The data key's AAD is
+    `dek:` + that;
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
   **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`
@@ -685,7 +690,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   activity per tool, registered under the tool's name. Each runs
   `runToolWithOutcome(tool, args, ctx)` (`agent/src/tools/registry.ts:267`), the entry
   point `/mcp` uses, so parsing, tiers, scope and audit are unchanged. The `ctx`
-  principal is the session's owner.
+  principal is the session's owner, and `ctx.session` is the session's id, exactly as
+  `createHarnessServer` sets it for a classic session (`agent/src/tools/harness.ts`).
+  Revision commits take their session trailer from it (#252), and the record of what a
+  session touched (#931) is written from it, so an activity without it attributes nothing.
 - **A build step** exports `ALL_TOOLS` as `[{name, description, input_schema, tier}]`
   JSON, generated like `gen:api`. The Python worker declares each one as
   `activity_as_tool(activity.defn(name=<name>)(_remote), description=…, input_schema=…,

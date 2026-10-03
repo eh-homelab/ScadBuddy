@@ -195,6 +195,7 @@ SettingsSection = Literal[
     "print_options",
     "model_choices",
     "printer_bed_type",
+    "printer_rack_algorithm",
     "last_project",
     "remembered",
 ]

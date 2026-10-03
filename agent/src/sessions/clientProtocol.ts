@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import { PROTOCOL_VERSION } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
@@ -35,6 +36,14 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
+  // #940: the user's answer to an AskUserQuestion (questions/service.ts).
+  z.object({
+    v,
+    type: z.literal('question.answer'),
+    sessionId,
+    id: z.string().min(1).max(200),
+    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
+  }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   z.object({ v, type: z.literal('session.attach'), sessionId }),

@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { FeedItem } from '../../agent/chat/state'
 import { FeedItemView } from './FeedItemView'
@@ -7,7 +8,7 @@ const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
   const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you }
-  return render(<FeedItemView item={item} onDecide={vi.fn()} />)
+  return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
 describe('the approval card', () => {
@@ -39,6 +40,7 @@ describe('the memory line', () => {
       <FeedItemView
         item={{ kind: 'memory', id: 'memory-0', action: 'recall', bank: 'scadbuddy', outcome: 'ok', ...item }}
         onDecide={vi.fn()}
+        onAnswer={vi.fn()}
         advanced={advanced}
       />,
     )
@@ -116,6 +118,7 @@ describe('the tool card', () => {
           result: { ok: true, summary: 'Set 1 parameter', sources: [{ title: 'Customizer docs', url: 'https://example.com/c' }] },
         } as Extract<FeedItem, { kind: 'tool' }>}
         onDecide={vi.fn()}
+        onAnswer={vi.fn()}
         advanced={advanced}
       />,
     )
@@ -134,5 +137,145 @@ describe('the tool card', () => {
     expect(args).toHaveAttribute('open')
     expect(args).toHaveTextContent('"width": 40')
     expect(screen.getByRole('link', { name: 'Customizer docs' })).toBeVisible()
+  })
+})
+
+describe('the question card (#940)', () => {
+  type Question = Extract<FeedItem, { kind: 'question' }>
+  const colour = {
+    question: 'Which colour should the base be?',
+    header: 'Colour',
+    multiSelect: false,
+    options: [
+      { label: 'Red', description: 'PLA red' },
+      { label: 'Blue', description: 'PLA blue' },
+    ],
+  }
+  const draft = {
+    question: 'Approve this issue draft?',
+    header: 'Draft',
+    multiSelect: false,
+    options: [
+      { label: 'Approve', description: 'File it as written', preview: '## Bed level\n\nThe **first** layer lifts.' },
+      { label: 'Cancel', description: 'Do not file it' },
+    ],
+  }
+  const extras = {
+    question: 'Which extras?',
+    header: 'Extras',
+    multiSelect: true,
+    options: [
+      { label: 'Magnets', description: 'Two 6 mm magnets' },
+      { label: 'Hook', description: 'A wall hook' },
+    ],
+  }
+
+  function ask(questions: Question['questions'], extra: Partial<Question> = {}) {
+    const onAnswer = vi.fn()
+    const item: Question = { kind: 'question', id: 'q1', tool: 't1', questions, state: 'pending', ...extra }
+    const view = render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={onAnswer} />)
+    return { onAnswer, ...view }
+  }
+
+  it('sends the chosen option, and only once every question has an answer', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([colour, extras])
+    const send = screen.getByRole('button', { name: 'Send answer' })
+    expect(send).toBeDisabled()
+    await user.click(screen.getByRole('radio', { name: /Blue/ }))
+    expect(send).toBeDisabled()
+    await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
+    await user.click(screen.getByRole('checkbox', { name: /Hook/ }))
+    await user.click(send)
+    expect(onAnswer).toHaveBeenCalledWith('q1', ['Blue', 'Magnets, Hook'])
+  })
+
+  it('marks the user’s own words in a multi-select answer, after the picked labels', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([extras])
+    await user.click(screen.getByRole('checkbox', { name: /Hook/ }))
+    await user.click(screen.getByRole('checkbox', { name: 'Other…' }))
+    await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'a lanyard, too')
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenCalledWith('q1', ['Hook, Other: a lanyard, too'])
+  })
+
+  it('takes the user’s own words instead of an option', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([colour])
+    await user.click(screen.getByRole('radio', { name: 'Other…' }))
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled()
+    // No longer than the agent takes: a longer answer would be refused before reaching the question.
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveAttribute('maxlength', '20000')
+    await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'Green, please')
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenCalledWith('q1', ['Green, please'])
+  })
+
+  it('shows a draft as Markdown, approves it, or returns the user’s edit of it', async () => {
+    const user = userEvent.setup()
+    const { onAnswer, unmount } = ask([draft])
+    const preview = screen.getByTestId('agent-question-preview')
+    expect(screen.getByRole('heading', { name: 'Bed level' })).toBeVisible()
+    expect(preview.querySelector('strong')).toHaveTextContent('first')
+    // Cancel declines the draft, so it is not shown under Cancel.
+    await user.click(screen.getByRole('radio', { name: /Cancel/ }))
+    expect(screen.queryByTestId('agent-question-preview')).toBeNull()
+    expect(screen.getByRole('radio', { name: 'Edit…' })).toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: /Approve/ }))
+    expect(screen.getByRole('heading', { name: 'Bed level' })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenLastCalledWith('q1', ['Approve'])
+    unmount()
+
+    const edit = ask([draft])
+    await user.click(screen.getByRole('radio', { name: 'Edit…' }))
+    // The draft to edit, as the agent wrote it.
+    const box = screen.getByRole('textbox', { name: 'Your answer' })
+    expect(box).toHaveValue('## Bed level\n\nThe **first** layer lifts.')
+    await user.clear(box)
+    await user.type(box, '## Bed adhesion')
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(edit.onAnswer).toHaveBeenCalledWith('q1', ['## Bed adhesion'])
+  })
+
+  it('will not send a multi-select answer longer than the agent takes, picked labels included', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([extras])
+    await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
+    await user.click(screen.getByRole('checkbox', { name: 'Other…' }))
+    const box = screen.getByRole('textbox', { name: 'Your answer' })
+    // "Other: " plus this is exactly the cap; with "Magnets, " in front it goes over.
+    await user.click(box)
+    await user.paste('x'.repeat(20_000 - 'Other: '.length))
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/longer than the assistant takes/)
+    await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenCalledWith('q1', [`Other: ${'x'.repeat(20_000 - 'Other: '.length)}`])
+  })
+
+  it('offers its controls only to the user, never to the browser bridge', () => {
+    ask([colour])
+    for (const control of [...screen.getAllByRole('radio'), screen.getByRole('button', { name: 'Send answer' })]) {
+      expect(control.closest('[data-agent-user-only]')).not.toBeNull()
+    }
+  })
+
+  it('says where the answer is once it is not pending', () => {
+    const cases: [Partial<Question>, string][] = [
+      [{ state: 'sent' }, 'Sending your answer…'],
+      [{ state: 'queued' }, 'Not connected: your answer goes first when the assistant reconnects.'],
+      [{ state: 'answered', answers: ['Blue'], by: you }, 'Answered by You: Blue'],
+      [{ state: 'cancelled', reason: 'interrupted by You' }, 'Not answered: interrupted by You.'],
+    ]
+    for (const [extra, text] of cases) {
+      const { unmount } = ask([colour], extra)
+      expect(screen.queryByRole('button', { name: 'Send answer' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+      expect(screen.getByRole('status')).toHaveTextContent(text)
+      unmount()
+    }
   })
 })

@@ -8,7 +8,9 @@
  * It plays one realistic session: streamed text, a `write` tool call whose result
  * cites its sources and links the version it made, then an `outward` send that pauses
  * on `approval.required` and goes nowhere until the panel sends `approval.decision`
- * (spec §8.2). It also lists a session an external MCP agent owns, so the picker's
+ * (spec §8.2). A first message that mentions a draft gets a question instead (#940):
+ * a draft to approve, which waits on `question.asked` until the panel sends
+ * `question.answer`. It also lists a session an external MCP agent owns, so the picker's
  * "controlled by …" badge and Take over have something to act on.
  *
  * Each chat has a budget (#790, `budgetUsd`, $1.00 by default) that every turn spends
@@ -69,6 +71,8 @@ interface MockSession extends SessionSummary {
   timers: ReturnType<typeof setTimeout>[]
   /** The approval the script is parked on, with what to run on each answer. */
   pending?: { id: string; toolCallId: string }
+  /** The question the script is parked on (#940). */
+  asking?: { id: string; toolCallId: string }
   streaming?: string
   turns: number
   costUsd: number
@@ -204,6 +208,59 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     ]
   }
 
+  /** #940: a draft to approve, parked on `question.asked`. */
+  const questionTurn = (s: MockSession): Array<() => void> => {
+    const askId = nextId('tool')
+    const questionId = nextId('question')
+    const questions = [
+      {
+        question: 'File this issue on the keychain template?',
+        header: 'Draft',
+        multiSelect: false,
+        options: [
+          {
+            label: 'Approve',
+            description: 'File it as written',
+            preview: '## Name text too thin\n\nAt **10 mm** the letters break off the plate.',
+          },
+          { label: 'Cancel', description: 'Do not file it' },
+        ],
+      },
+    ]
+    return [
+      ...say(s, "Here's a draft. I'll file it once you approve."),
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: askId,
+          name: 'AskUserQuestion',
+          input: { questions },
+          risk: 'read',
+        }),
+      () => {
+        s.asking = { id: questionId, toolCallId: askId }
+        emit({ type: 'question.asked', sessionId: s.sessionId, id: questionId, tool: askId, questions })
+        setStatus(s, 'waiting_input')
+      },
+      // Parked. Only `question.answer` moves the script on.
+    ]
+  }
+
+  const resolveQuestion = (s: MockSession, answers: string[]) => {
+    const asking = s.asking
+    if (!asking) return
+    s.asking = undefined
+    emit({ type: 'question.resolved', sessionId: s.sessionId, id: asking.id, answered: true, answers, by: BROWSER_USER })
+    setStatus(s, 'running')
+    const answer = answers[0] ?? ''
+    play(s, [
+      () => emit({ type: 'tool.result', sessionId: s.sessionId, id: asking.toolCallId, ok: true, summary: `Answered: ${answer}` }),
+      ...say(s, answer === 'Approve' ? 'Filed.' : answer === 'Cancel' ? "OK, I won't file it." : `Updated the draft: "${answer}".`),
+      () => finish(s),
+    ])
+  }
+
   const followUp = (s: MockSession, text: string): Array<() => void> => [
     ...say(s, `Noted: "${text}". Anything else on this model?`),
     () => finish(s),
@@ -263,7 +320,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           emit({ type: 'error', code: 'not_found', message: 'That session no longer exists.' })
           return
         }
-        if (s && (s.status === 'running' || s.status === 'waiting_approval')) {
+        if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
           emit({ type: 'error', sessionId: s.sessionId, code: 'busy', message: 'A turn is already running in this session.' })
           return
         }
@@ -304,7 +361,12 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         }
         emit({ type: 'user.turn', sessionId: s.sessionId, turnId: nextId('turn'), text: msg.text, author: BROWSER_USER })
         setStatus(s, 'running')
-        play(s, isNew ? firstTurn(s) : followUp(s, msg.text))
+        play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
+        return
+      }
+      case 'question.answer': {
+        const s = sessions.get(msg.sessionId)
+        if (s?.asking?.id === msg.id) resolveQuestion(s, msg.answers)
         return
       }
       case 'approval.decision': {
@@ -324,6 +386,10 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         if (s.pending) {
           emit({ type: 'approval.resolved', sessionId: s.sessionId, id: s.pending.id, approved: false })
           s.pending = undefined
+        }
+        if (s.asking) {
+          emit({ type: 'question.resolved', sessionId: s.sessionId, id: s.asking.id, answered: false, reason: 'interrupted by You' })
+          s.asking = undefined
         }
         setStatus(s, 'idle')
         return
