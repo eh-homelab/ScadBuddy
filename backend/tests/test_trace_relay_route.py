@@ -254,10 +254,16 @@ def test_a_body_that_is_not_an_export_is_400(client: TestClient) -> None:
     assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
 
 
-def test_empty_resource_spans_are_400(client: TestClient) -> None:
+def test_more_than_16_resource_spans_is_413(client: TestClient) -> None:
     body = json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode()
     response = client.post(PATH, content=body, headers=UI)
-    assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
+    assert_problem(response, 413, "a trace batch holds at most 16 resourceSpans")
+
+
+def test_more_than_64_scope_spans_is_413(client: TestClient) -> None:
+    body = json.dumps({"resourceSpans": [{"scopeSpans": [{} for _ in range(65)]}]}).encode()
+    response = client.post(PATH, content=body, headers=UI)
+    assert_problem(response, 413, "a trace batch holds at most 64 scopeSpans")
 
 
 def test_a_batch_with_no_valid_span_is_204_and_queues_nothing(

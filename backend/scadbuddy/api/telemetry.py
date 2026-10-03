@@ -25,7 +25,7 @@ from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.telemetry.admission import check_content_type, check_origin, relay_client
 from scadbuddy.telemetry.component import TraceRelayDep
-from scadbuddy.telemetry.payload import MAX_SPANS, PayloadError, TooManySpansError, prepare
+from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, prepare
 
 RELAY_PATH: Final = "/telemetry/v1/traces"
 #: On the 204 when tracing is off (no endpoint, or ``OTEL_SDK_DISABLED``): the page's
@@ -64,8 +64,8 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
     relay.limits.take(relay_client(request.headers, peer, settings))
     try:
         batch = await asyncio.to_thread(prepare, await request.body())
-    except TooManySpansError as error:
-        raise ApiError(413, f"a trace batch holds at most {MAX_SPANS} spans") from error
+    except BatchTooLargeError as error:
+        raise ApiError(413, str(error)) from error
     except PayloadError as error:
         raise ApiError(400, "the body is not an OTLP/JSON trace export") from error
     if batch is not None:

@@ -7,7 +7,7 @@ import json
 import pytest
 
 from scadbuddy.telemetry import payload
-from scadbuddy.telemetry.payload import PayloadError, TooManySpansError, prepare
+from scadbuddy.telemetry.payload import PayloadError, BatchTooLargeError, prepare
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
 
 
@@ -194,7 +194,7 @@ def test_a_status_description_without_an_exception_reads_error() -> None:
 def test_512_spans_pass_and_513_do_not() -> None:
     body = export(*[span() for _ in range(payload.MAX_SPANS)])
     assert len(forwarded(body)["resourceSpans"][0]["scopeSpans"][0]["spans"]) == 512
-    with pytest.raises(TooManySpansError):
+    with pytest.raises(BatchTooLargeError):
         prepare(export(*[span() for _ in range(payload.MAX_SPANS + 1)]))
 
 
@@ -379,22 +379,23 @@ HOSTILE = [
 def test_prepare_raises_only_its_own_errors(body: bytes) -> None:
     try:
         out = prepare(body)
-    except (PayloadError, TooManySpansError):
+    except (PayloadError, BatchTooLargeError):
         return
     if out is not None:
         json.loads(out)
 
 
-def test_more_than_16_resource_spans_are_refused() -> None:
+def test_more_than_16_resource_spans_are_too_large() -> None:
     body = json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode()
-    with pytest.raises(PayloadError):
+    with pytest.raises(BatchTooLargeError, match="at most 16 resourceSpans"):
         prepare(body)
+    assert prepare(json.dumps({"resourceSpans": [{} for _ in range(16)]}).encode()) is None
 
 
-def test_more_than_64_scope_spans_in_total_are_refused() -> None:
+def test_more_than_64_scope_spans_in_total_are_too_large() -> None:
     scopes: list[Json] = [{} for _ in range(33)]
     body = json.dumps({"resourceSpans": [{"scopeSpans": scopes}, {"scopeSpans": scopes}]}).encode()
-    with pytest.raises(PayloadError):
+    with pytest.raises(BatchTooLargeError, match="at most 64 scopeSpans"):
         prepare(body)
 
 

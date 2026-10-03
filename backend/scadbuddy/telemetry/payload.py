@@ -104,8 +104,9 @@ class PayloadError(ValueError):
     """The body is not an OTLP/JSON trace export."""
 
 
-class TooManySpansError(ValueError):
-    """The batch holds more than :data:`MAX_SPANS` spans."""
+class BatchTooLargeError(ValueError):
+    """The batch holds more spans, scopes or resources than the relay takes. Its message
+    names the cap, as the route's 413 does."""
 
 
 def _list(value: object) -> list[Any]:
@@ -128,14 +129,14 @@ def parse(body: bytes) -> Json:
     scopes = 0
     resources = _list(payload.get("resourceSpans"))
     if len(resources) > MAX_RESOURCES:
-        raise PayloadError
+        raise BatchTooLargeError(f"a trace batch holds at most {MAX_RESOURCES} resourceSpans")
     for resource_spans in resources:
         if not isinstance(resource_spans, dict):
             raise PayloadError
         scope_list = _list(resource_spans.get("scopeSpans", []))
         scopes += len(scope_list)
         if scopes > MAX_SCOPES:
-            raise PayloadError
+            raise BatchTooLargeError(f"a trace batch holds at most {MAX_SCOPES} scopeSpans")
         for scope_spans in scope_list:
             if not isinstance(scope_spans, dict):
                 raise PayloadError
@@ -144,7 +145,7 @@ def parse(body: bytes) -> Json:
                 raise PayloadError
             count += len(spans)
     if count > MAX_SPANS:
-        raise TooManySpansError
+        raise BatchTooLargeError(f"a trace batch holds at most {MAX_SPANS} spans")
     return payload
 
 
@@ -440,8 +441,8 @@ __all__ = [
     "MAX_SPANS",
     "MAX_STRING_CHARS",
     "WEB_SERVICE_NAME",
+    "BatchTooLargeError",
     "PayloadError",
-    "TooManySpansError",
     "browser_frames_only",
     "parse",
     "prepare",
