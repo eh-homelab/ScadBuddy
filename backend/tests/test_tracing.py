@@ -16,12 +16,31 @@ from opentelemetry.trace import Span, SpanKind
 from scadbuddy.core import tracing
 from scadbuddy.core.problems import ApiError
 
+_OTEL_VARS = (
+    "OTEL_TRACES_SAMPLER",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_SDK_DISABLED",
+    "OTEL_RESOURCE_ATTRIBUTES",
+)
+
+
+def _clear_otel(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _OTEL_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _processors(provider: TracerProvider) -> int:
+    return len(provider._active_span_processor._span_processors)
+
 
 def _provider(
     monkeypatch: pytest.MonkeyPatch, **env: str
 ) -> tuple[TracerProvider, InMemorySpanExporter]:
-    for name in ("OTEL_TRACES_SAMPLER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"):
-        monkeypatch.delenv(name, raising=False)
+    _clear_otel(monkeypatch)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     exported = InMemorySpanExporter()
@@ -184,3 +203,65 @@ def test_is_gone_by_the_next_test(spans: InMemorySpanExporter) -> None:
     # Review of #1064: the session exporter is cleared after every test, not only
     # after tests that ask for `spans`, so it never grows across the session.
     assert [s.name for s in spans.get_finished_spans()] == []
+
+
+def test_a_traces_only_endpoint_turns_export_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, _ = _provider(
+        monkeypatch, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://collector:4318/v1/traces"
+    )
+    assert _processors(provider) == 2
+
+
+def test_otel_traces_exporter_none_exports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    for value in ("none", "NONE"):
+        provider, _ = _provider(
+            monkeypatch,
+            OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318",
+            OTEL_TRACES_EXPORTER=value,
+        )
+        assert _processors(provider) == 1
+        assert tracing.otlp_traces_target() is None
+
+
+def test_target_is_none_without_an_endpoint_or_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_otel(monkeypatch)
+    assert tracing.otlp_traces_target() is None
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    assert tracing.otlp_traces_target() is None
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    assert tracing.otlp_traces_target() is None
+
+
+def test_target_appends_v1_traces_with_one_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
+    assert tracing.otlp_traces_target() == ("http://c:4318/v1/traces", {})
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318/")
+    assert tracing.otlp_traces_target() == ("http://c:4318/v1/traces", {})
+
+
+def test_the_traces_endpoint_wins_and_is_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://general:4318")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://t:4318/custom/")
+    assert tracing.otlp_traces_target() == ("http://t:4318/custom/", {})
+
+
+def test_target_headers_prefer_the_traces_variable_and_are_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "general=1")
+    target = tracing.otlp_traces_target()
+    assert target is not None and target[1] == {"general": "1"}
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        " Authorization = Basic%20abc%3D%3D , bad, =nokey, x-k=a=b,%6Bey=v%2Cw",
+    )
+    target = tracing.otlp_traces_target()
+    assert target is not None
+    assert target[1] == {"Authorization": "Basic abc==", "x-k": "a=b", "key": "v,w"}
