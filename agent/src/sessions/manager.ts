@@ -895,258 +895,263 @@ export class SessionManager {
       // Each tool's tier for its span (TierResolver takes an optional input).
       tierOf: (name) => eventTierOf(name) ?? 'outward',
     })
-    let lost = false
-    /** Redacted from everything this turn writes to the durable event log. */
-    let secrets: string[] = []
-    // One audit row per tool call of this turn (#258, audit/turn.ts).
-    const auditor = this.deps.audit
-      ? new TurnAuditor(this.deps.audit, {
-          sessionId: id,
-          turnId,
-          actor: session.owner,
-          tierOf: (name, input) => eventTierOf(name, input),
-          secrets: () => secrets,
-        })
-      : undefined
-
-    // Lease renewal, and the interrupt flag from other replicas.
-    let renewing: Promise<unknown> = Promise.resolve()
-    const renew = setInterval(() => {
-      renewing = sql<{ interrupt_requested: boolean }[]>`
-        UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
-        WHERE id = ${id} AND turn_id = ${turnId}
-        RETURNING interrupt_requested`
-        .then((rows) => {
-          if (rows.length === 0) {
-            lost = true
-            controller.abort(new Error('lost the turn claim'))
-          } else if (rows[0]?.interrupt_requested) {
-            controller.abort(new Error('the turn was interrupted'))
-          }
-        })
-        .catch(() => {
-          // A database blip: keep running; the lease covers several misses.
-        })
-    }, this.renewMs)
-
+    // The turn's span ends whatever happens below, even if a cleanup step or
+    // finish() throws: segment 0 and its tool bindings never outlive the turn.
     let result: SDKResultMessage | undefined
-    let failure: string | undefined
-    let forwarded: PluginsForRun | undefined
-    let packages: PackagesForRun | undefined
-    let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
-    /** Whether this turn wrote headless-browser folders, removed when it ends. */
-    let browserDirs = false
-    try {
-      // The credential first, and into `secrets` at once: whatever fails
-      // after this point is redacted before it reaches the event log.
-      const credential = await this.deps.credential()
-      secrets = [credential.secret]
-      forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-      const remotePlugins = forwarded?.plugins ?? []
-      // Plugin header values (and their bare tokens) are redacted from the
-      // event log like the credential. Claude Code never holds them (the
-      // forwarder adds them), but a plugin could echo one in a tool result.
-      secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-      const ownPlugin = this.deps.ownPlugin
-      const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
-      eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
-      // A plugin left out of this turn is said so in the session, not only in the log.
-      const unavailable = (message: string) =>
-        this.events.append(id, [
-          scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
-        ])
-      for (const problem of forwarded?.problems ?? []) {
-        this.deps.stderr?.(`${problem}\n`)
-        await unavailable(problem)
-      }
-      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-      for (const problem of packages?.problems ?? []) {
-        this.deps.stderr?.(`${problem}\n`)
-        await unavailable(problem)
-      }
-      const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
-      pluginCheck = async (message: SDKMessage) => {
-        if (message.type !== 'system' || message.subtype !== 'init') return
-        // The SDK skips a plugin it cannot load; the init message lists what it did load
-        // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
-        const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
-        const loaded = new Set(listed.map((p) => path.resolve(p.path)))
-        if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
-          await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
-        }
-        for (const dir of packages?.paths ?? []) {
-          if (!loaded.has(path.resolve(dir))) {
-            await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
-          }
-        }
-        for (const plugin of remotePlugins) {
-          const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
-          if (status !== 'connected') {
-            await unavailable(
-              `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
-            )
-          }
-        }
-      }
-      const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
-        ensureSessionDir(this.deps.paths, id),
-        this.store.exists(id),
-        this.deps.settings?.get<string>(SETTING_MODEL),
-        this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
-        this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-      ])
-      // The http_request tool (#827): on unless the setting is `false`. Its
-      // saved bodies live in the session's own directory, and it never sees
-      // the turn's secrets except to refuse a request that carries one.
-      const http =
-        this.deps.httpRequest && httpRequestEnabled(httpSetting)
-          ? httpRequestServer({
-              saveDir: path.join(cwd, 'http'),
-              secrets: () => secrets,
-              audit: this.deps.audit,
-              actor: session.owner,
-              sessionId: id,
-              turnId,
-              signal: controller.signal,
-              ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-              ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
-            })
-          : undefined
-      const hb = this.deps.headlessBrowser
-      const gate = this.approvals.gate({
-        sessionId: id,
-        turnId,
-        requestedBy: session.owner,
-        ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
-        secrets: () => secrets,
-        signal: controller.signal,
-        trace: traced,
-      })
-      const sandbox =
-        this.deps.headlessBrowser?.sandbox && browserSetting === true
-          ? await this.deps.headlessBrowser.sandbox()
-          : false
-      const browser =
-        hb && browserSetting === true
-          ? {
-              ...(sandbox ? { sandbox: true } : {}),
-              sessionId: id,
-              backendUrl: hb.backendUrl,
-              ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
-              ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
-              ...(hb.browserAllowedOrigins
-                ? {
-                    browserAllowedOrigins: hb.browserAllowedOrigins,
-                    // Approved once per origin per session, in Postgres, so a
-                    // later turn (on any replica) does not ask again.
-                    approvedOrigins: await loadApprovedOrigins(sql, id),
-                    rememberOrigin: (origin: string, approvalId: string | undefined) =>
-                      rememberApprovedOrigin(sql, id, origin, approvalId),
-                  }
-                : {}),
-              dir: sessionBrowserDir(this.deps.paths, id),
-              tmpDir: sessionBrowserTmpDir(id),
-              ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
-            }
-          : undefined
-      browserDirs = browser !== undefined
-      const run: HarnessRun = {
-        paths: this.deps.paths,
-        credential,
-        prompt,
-        cwd,
-        sessionStore: this.store,
-        includePartialMessages: true,
-        maxTurns: session.maxTurns,
-        maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-        signal: controller.signal,
-        tierOf,
-        approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-        // The data/instruction boundary (#258, safety/untrusted.ts): only the
-        // user's messages are instructions; tool results are data. Then which
-        // browser each browser_* tool drives.
-        systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
-        ...(browser ? { headlessBrowser: browser } : {}),
-        // First turn: the SDK session gets OUR id; later turns resume it.
-        ...(resume ? { resume: id } : { sessionId: id }),
-        ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers || browser || http
-          ? {
-              mcpServers: {
-                ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
-                ...(http ? { [HTTP_SERVER]: http } : {}),
-                // The one way past the backend's agent-actor gate: a human
-                // approves one exact outward request (harness/headlessGrants.ts).
-                ...(browser
-                  ? {
-                      [GRANT_SERVER]: headlessGrantServer({
-                        sql,
-                        sessionId: id,
-                        turnId,
-                        hash: (tool, input) => this.approvals.hash(tool, input),
-                      }),
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-        ...(pluginPaths.length ? { pluginPaths } : {}),
-        ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-        ...(remotePlugins.length ? { remotePlugins } : {}),
-        ...(memory ? { memoryHooks: memory.hooks } : {}),
-        traceHooks: traced.hooks(),
-        ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
-      }
-      for await (const message of otelContext.with(traced.context(), () => this.run(run))) {
-        if (message.type === 'result') {
-          result = message
-          local.settling = true
-        }
-        await pluginCheck?.(message)
-        const events = mapper.map(message)
-        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
-        for (const e of events) traced.observe(e)
-        if (auditor) for (const e of events) await auditor.observe(e)
-      }
-    } catch (err) {
-      // For an error result the SDK yields the result and then throws
-      // ("Claude Code returned an error result", test/run.test.ts); the
-      // result is what counts then.
-      if (!result && !controller.signal.aborted) {
-        failure = redact(describe(err), secrets)
-        traced.fail(err)
-      }
-    } finally {
-      forwarded?.release()
-      packages?.release()
-      local.settling = true
-      clearInterval(renew)
-      await renewing
-      await auditor?.finish(
-        controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
-      )
-      // The query has ended, and with it the playwright server and Chromium:
-      // its screenshots and profile go now, not when the volume fills.
-      if (browserDirs) {
-        await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
-          this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
-        )
-      }
-    }
-    // The loop has ended only after the SDK's last transcript append (measured:
-    // `last-prompt` and `cost-state` entries arrive after the `result`
-    // message), so releasing the claim here means the next turn, on any
-    // replica, resumes from a complete transcript.
-    if (lost) {
-      traced.finish({ kind: 'lost_claim' }, result)
-      return { kind: 'lost_claim' }
-    }
-    const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
     try {
+      let lost = false
+      /** Redacted from everything this turn writes to the durable event log. */
+      let secrets: string[] = []
+      // One audit row per tool call of this turn (#258, audit/turn.ts).
+      const auditor = this.deps.audit
+        ? new TurnAuditor(this.deps.audit, {
+            sessionId: id,
+            turnId,
+            actor: session.owner,
+            tierOf: (name, input) => eventTierOf(name, input),
+            secrets: () => secrets,
+          })
+        : undefined
+
+      // Lease renewal, and the interrupt flag from other replicas.
+      let renewing: Promise<unknown> = Promise.resolve()
+      const renew = setInterval(() => {
+        renewing = sql<{ interrupt_requested: boolean }[]>`
+          UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
+          WHERE id = ${id} AND turn_id = ${turnId}
+          RETURNING interrupt_requested`
+          .then((rows) => {
+            if (rows.length === 0) {
+              lost = true
+              controller.abort(new Error('lost the turn claim'))
+            } else if (rows[0]?.interrupt_requested) {
+              controller.abort(new Error('the turn was interrupted'))
+            }
+          })
+          .catch(() => {
+            // A database blip: keep running; the lease covers several misses.
+          })
+      }, this.renewMs)
+
+      let failure: string | undefined
+      let forwarded: PluginsForRun | undefined
+      let packages: PackagesForRun | undefined
+      let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
+      /** Whether this turn wrote headless-browser folders, removed when it ends. */
+      let browserDirs = false
+      try {
+        // The credential first, and into `secrets` at once: whatever fails
+        // after this point is redacted before it reaches the event log.
+        const credential = await this.deps.credential()
+        secrets = [credential.secret]
+        forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+        const remotePlugins = forwarded?.plugins ?? []
+        // Plugin header values (and their bare tokens) are redacted from the
+        // event log like the credential. Claude Code never holds them (the
+        // forwarder adds them), but a plugin could echo one in a tool result.
+        secrets.push(...(forwarded?.secrets ?? []))
+        const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
+        const ownPlugin = this.deps.ownPlugin
+        const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
+        eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
+        // A plugin left out of this turn is said so in the session, not only in the log.
+        const unavailable = (message: string) =>
+          this.events.append(id, [
+            scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
+          ])
+        for (const problem of forwarded?.problems ?? []) {
+          this.deps.stderr?.(`${problem}\n`)
+          await unavailable(problem)
+        }
+        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        for (const problem of packages?.problems ?? []) {
+          this.deps.stderr?.(`${problem}\n`)
+          await unavailable(problem)
+        }
+        const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
+        pluginCheck = async (message: SDKMessage) => {
+          if (message.type !== 'system' || message.subtype !== 'init') return
+          // The SDK skips a plugin it cannot load; the init message lists what it did load
+          // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
+          const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
+          const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+          if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
+            await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
+          }
+          for (const dir of packages?.paths ?? []) {
+            if (!loaded.has(path.resolve(dir))) {
+              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+            }
+          }
+          for (const plugin of remotePlugins) {
+            const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
+            if (status !== 'connected') {
+              await unavailable(
+                `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
+              )
+            }
+          }
+        }
+        const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
+          ensureSessionDir(this.deps.paths, id),
+          this.store.exists(id),
+          this.deps.settings?.get<string>(SETTING_MODEL),
+          this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
+          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+        ])
+        // The http_request tool (#827): on unless the setting is `false`. Its
+        // saved bodies live in the session's own directory, and it never sees
+        // the turn's secrets except to refuse a request that carries one.
+        const http =
+          this.deps.httpRequest && httpRequestEnabled(httpSetting)
+            ? httpRequestServer({
+                saveDir: path.join(cwd, 'http'),
+                secrets: () => secrets,
+                audit: this.deps.audit,
+                actor: session.owner,
+                sessionId: id,
+                turnId,
+                signal: controller.signal,
+                ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
+              })
+            : undefined
+        const hb = this.deps.headlessBrowser
+        const gate = this.approvals.gate({
+          sessionId: id,
+          turnId,
+          requestedBy: session.owner,
+          ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
+          secrets: () => secrets,
+          signal: controller.signal,
+          trace: traced,
+        })
+        const sandbox =
+          this.deps.headlessBrowser?.sandbox && browserSetting === true
+            ? await this.deps.headlessBrowser.sandbox()
+            : false
+        const browser =
+          hb && browserSetting === true
+            ? {
+                ...(sandbox ? { sandbox: true } : {}),
+                sessionId: id,
+                backendUrl: hb.backendUrl,
+                ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+                ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
+                ...(hb.browserAllowedOrigins
+                  ? {
+                      browserAllowedOrigins: hb.browserAllowedOrigins,
+                      // Approved once per origin per session, in Postgres, so a
+                      // later turn (on any replica) does not ask again.
+                      approvedOrigins: await loadApprovedOrigins(sql, id),
+                      rememberOrigin: (origin: string, approvalId: string | undefined) =>
+                        rememberApprovedOrigin(sql, id, origin, approvalId),
+                    }
+                  : {}),
+                dir: sessionBrowserDir(this.deps.paths, id),
+                tmpDir: sessionBrowserTmpDir(id),
+                ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
+              }
+            : undefined
+        browserDirs = browser !== undefined
+        const run: HarnessRun = {
+          paths: this.deps.paths,
+          credential,
+          prompt,
+          cwd,
+          sessionStore: this.store,
+          includePartialMessages: true,
+          maxTurns: session.maxTurns,
+          maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
+          signal: controller.signal,
+          tierOf,
+          approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+          // The data/instruction boundary (#258, safety/untrusted.ts): only the
+          // user's messages are instructions; tool results are data. Then which
+          // browser each browser_* tool drives.
+          systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
+          ...(browser ? { headlessBrowser: browser } : {}),
+          // First turn: the SDK session gets OUR id; later turns resume it.
+          ...(resume ? { resume: id } : { sessionId: id }),
+          ...(typeof model === 'string' && model ? { model } : {}),
+          ...(this.deps.mcpServers || browser || http
+            ? {
+                mcpServers: {
+                  ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
+                  ...(http ? { [HTTP_SERVER]: http } : {}),
+                  // The one way past the backend's agent-actor gate: a human
+                  // approves one exact outward request (harness/headlessGrants.ts).
+                  ...(browser
+                    ? {
+                        [GRANT_SERVER]: headlessGrantServer({
+                          sql,
+                          sessionId: id,
+                          turnId,
+                          hash: (tool, input) => this.approvals.hash(tool, input),
+                        }),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(pluginPaths.length ? { pluginPaths } : {}),
+          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
+          ...(remotePlugins.length ? { remotePlugins } : {}),
+          ...(memory ? { memoryHooks: memory.hooks } : {}),
+          traceHooks: traced.hooks(),
+          ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
+        }
+        for await (const message of otelContext.with(traced.context(), () => this.run(run))) {
+          if (message.type === 'result') {
+            result = message
+            local.settling = true
+          }
+          await pluginCheck?.(message)
+          const events = mapper.map(message)
+          if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+          for (const e of events) traced.observe(e)
+          if (auditor) for (const e of events) await auditor.observe(e)
+        }
+      } catch (err) {
+        // For an error result the SDK yields the result and then throws
+        // ("Claude Code returned an error result", test/run.test.ts); the
+        // result is what counts then.
+        if (!result && !controller.signal.aborted) {
+          failure = redact(describe(err), secrets)
+          traced.fail(err)
+        }
+      } finally {
+        forwarded?.release()
+        packages?.release()
+        local.settling = true
+        clearInterval(renew)
+        await renewing
+        await auditor?.finish(
+          controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
+        )
+        // The query has ended, and with it the playwright server and Chromium:
+        // its screenshots and profile go now, not when the volume fills.
+        if (browserDirs) {
+          await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
+            this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
+          )
+        }
+      }
+      // The loop has ended only after the SDK's last transcript append (measured:
+      // `last-prompt` and `cost-state` entries arrive after the `result`
+      // message), so releasing the claim here means the next turn, on any
+      // replica, resumes from a complete transcript.
+      if (lost) {
+        outcome = { kind: 'lost_claim' }
+        return outcome
+      }
+      const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
       outcome = await this.finish(session, turnId, stopped, result, failure, secrets)
       return outcome
+    } catch (err) {
+      traced.fail(err)
+      throw err
     } finally {
       traced.finish(outcome, result)
     }

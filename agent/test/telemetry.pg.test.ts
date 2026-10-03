@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
+import { SpanStatusCode } from '@opentelemetry/api'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PROTOCOL_VERSION } from '../src/sessions/protocol.js'
@@ -70,6 +71,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`turn tracing${TEST_DATABASE_URL ? '' : ` (s
     expect(runs).toHaveLength(2)
     expect(out.filter((e) => e.type === 'error')).toEqual([])
     expect(turns().map((s) => s.parentSpanContext)).toEqual([undefined, undefined])
+  })
+
+  it('a cleanup step that throws still ends the turn’s span, failed with its class', async () => {
+    m.abortAll()
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      pollMs: 20,
+      remotePlugins: () =>
+        Promise.resolve({
+          plugins: [],
+          problems: [],
+          secrets: [],
+          release: () => {
+            throw new RangeError('release failed')
+          },
+        }),
+    })
+    const connection = new ChatConnection(m, () => {})
+    await connection.open()
+    await connection.receive(frame({}))
+    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
+    connection.close()
+    expect(turn.status.code).toBe(SpanStatusCode.ERROR)
+    expect(turn.attributes['scadbuddy.failure_class']).toBe('RangeError')
+  })
+
+  it('a turn whose finish throws ends its span failed with the class', async () => {
+    vi.spyOn(m as unknown as { finish: () => Promise<never> }, 'finish').mockRejectedValue(new TypeError('finish failed'))
+    const connection = new ChatConnection(m, () => {})
+    await connection.open()
+    await connection.receive(frame({}))
+    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
+    connection.close()
+    expect(turn.attributes).toMatchObject({ 'scadbuddy.outcome': 'failed', 'scadbuddy.failure_class': 'TypeError' })
   })
 
   it('an orphan approved after a restart resumes as a new turn under its decision', async () => {
