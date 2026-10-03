@@ -67,22 +67,12 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import detached_span, span
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
-
-
-def _call_span(method: str, scope: Scope) -> AbstractContextManager[Span]:
-    """Our side of a Bambuddy call (spec 2026-10-01 §4): no headers are injected; the
-    span holds the method, the status code and the scope, never a path or a body."""
-    return span(
-        f"bambuddy.{method}",
-        kind=SpanKind.CLIENT,
-        attributes={"http.request.method": method, "scadbuddy.bambuddy.scope": str(scope)},
-    )
 
 
 THREE_MF_MEDIA_TYPE = "model/3mf"
@@ -91,6 +81,19 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
+
+
+def _call_span(
+    method: str, scope: Scope, *, detached: bool = False
+) -> AbstractContextManager[Span]:
+    """Our side of a Bambuddy call (spec 2026-10-01 §4): no headers are injected; the
+    span holds the method, the status code and the scope, never a path or a body.
+    ``detached`` is for a call held open across a ``yield`` (a stream), which may be
+    closed from another task: that span is never made current."""
+    attributes = {"http.request.method": method, "scadbuddy.bambuddy.scope": str(scope)}
+    if detached:
+        return detached_span(f"bambuddy.{method}", kind=SpanKind.CLIENT, attributes=attributes)
+    return span(f"bambuddy.{method}", kind=SpanKind.CLIENT, attributes=attributes)
 
 
 @dataclass(frozen=True)
@@ -497,7 +500,7 @@ class BambuddyClient:
         if if_range is not None:
             headers["If-Range"] = if_range
         request = self._http.build_request("GET", self.config.url(path), headers=headers)
-        with _call_span("GET", Scope.READ_STATUS) as current:
+        with _call_span("GET", Scope.READ_STATUS, detached=True) as current:
             try:
                 response = await self._http.send(request, stream=True)
             except httpx.HTTPError as error:
@@ -612,7 +615,7 @@ class BambuddyClient:
         it in ``contextlib.aclosing``."""
         what = f"download library file {file_id}"
         path = f"/library/files/{file_id}/download"
-        with _call_span("GET", Scope.MANAGE_LIBRARY) as current:
+        with _call_span("GET", Scope.MANAGE_LIBRARY, detached=True) as current:
             try:
                 async with self._http.stream(
                     "GET",

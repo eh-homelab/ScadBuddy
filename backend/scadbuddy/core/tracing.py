@@ -19,7 +19,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.sampling import Decision, ParentBased, Sampler, SamplingResult
-from opentelemetry.trace import Link, Span, SpanKind
+from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import Attributes
 
@@ -132,6 +132,10 @@ def failure_class(error: BaseException) -> str:
     return type(error).__name__
 
 
+def _record_failure(current: Span, error: Exception) -> None:
+    current.set_attribute("scadbuddy.failure_class", failure_class(error))
+
+
 @contextmanager
 def span(
     name: str,
@@ -149,8 +153,33 @@ def span(
         try:
             yield current
         except Exception as error:
-            current.set_attribute("scadbuddy.failure_class", failure_class(error))
+            _record_failure(current, error)
             raise
+
+
+@contextmanager
+def detached_span(
+    name: str,
+    *,
+    kind: SpanKind = SpanKind.INTERNAL,
+    attributes: Mapping[str, AttributeValue] | None = None,
+) -> Iterator[Span]:
+    """Like `span`, but the span is never made current: its parent is the current span
+    at entry and nothing else sees it as current. That makes it safe to exit from another
+    task or context than the one that entered it, which a span held across the
+    ``yield`` of an async context manager (a streamed response closed by the response
+    body) needs: detaching a context token in a different context fails."""
+    tracer = trace.get_tracer(TRACER_NAME)
+    current = tracer.start_span(name, kind=kind, attributes=attributes)
+    try:
+        yield current
+    except Exception as error:
+        _record_failure(current, error)
+        current.record_exception(error)
+        current.set_status(Status(StatusCode.ERROR))
+        raise
+    finally:
+        current.end()
 
 
 def current_traceparent() -> str | None:
@@ -199,6 +228,7 @@ __all__ = [
     "build_provider",
     "configure_tracing",
     "current_traceparent",
+    "detached_span",
     "failure_class",
     "link_to",
     "span",

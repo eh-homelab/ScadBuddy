@@ -136,3 +136,20 @@ def test_span_records_the_failure_class_and_reraises(spans: InMemorySpanExporter
     assert finished.attributes is not None
     assert finished.attributes["scadbuddy.failure_class"] == "ValueError"
     assert finished.status.status_code is trace.StatusCode.ERROR
+
+
+def test_detached_span_is_never_current_and_records_the_failure(
+    spans: InMemorySpanExporter,
+) -> None:
+    with trace.get_tracer("t").start_as_current_span("outer") as outer:
+        with tracing.detached_span("inner") as inner:
+            assert trace.get_current_span() is outer
+        with pytest.raises(ValueError), tracing.detached_span("failing"):
+            raise ValueError("boom")
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    assert inner.get_span_context().trace_id == outer.get_span_context().trace_id
+    assert finished["inner"].parent is not None
+    assert finished["inner"].parent.span_id == outer.get_span_context().span_id
+    failing = finished["failing"]
+    assert (failing.attributes or {})["scadbuddy.failure_class"] == "ValueError"
+    assert failing.status.status_code is trace.StatusCode.ERROR
