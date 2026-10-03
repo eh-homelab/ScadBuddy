@@ -649,9 +649,14 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   (`/srv/agent`), as the store keys sessions by it.
 - **The credential** is read from `ai_credentials` and decrypted in Python with a port of
   `openSecret` (`agent/src/secrets.ts:187`):
+  - There may be several rows (#1093). A query takes them in the pool's fallback order
+    (`CredentialPool`, `agent/src/harness/fallback.ts`): by `priority`, skipping any
+    that are cooling down, disabled, or not openable with the mounted key.
   - AES-256-GCM, sealed format `version | IV(12) | tag(16) | ciphertext`;
-  - AAD `v2|ai_credentials:default:{"kind":…,"base_url":…}` for the secret, and
-    `dek:` + that for the data key;
+  - AAD `v2|ai_credentials:<row id>:{"kind":…,"base_url":…}` for the secret, as
+    `credentialAad` (`agent/src/credentials.ts`) builds it. The row id is `default`
+    for the row migrated from the single-credential table. The data key's AAD is
+    `dek:` + that;
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
   **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`

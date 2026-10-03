@@ -6,10 +6,9 @@ import {
   type CredentialRepo,
   credentialLabel,
   describeUnusable,
-  opensWith,
   soonestRecovery,
 } from '../credentials.js'
-import { type KekStatus, redact, SealError } from '../secrets.js'
+import { type KekStatus, redact } from '../secrets.js'
 import {
   classifyFailure,
   type FailureClass,
@@ -132,7 +131,7 @@ export type FallbackOptions = {
    * Asks the endpoint once more about a refused or rate-limited credential
    * (credentialErrors.ts `probeCredential` by default).
    */
-  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
+  probe?: (credential: Credential, model: string | undefined, signal: AbortSignal | undefined) => Promise<ProbeVerdict>
   transientRetries?: number
   /**
    * What the session had spent before this turn, when `resume` is set: a
@@ -221,13 +220,17 @@ export async function* runWithFallback(
   options: FallbackOptions,
 ): AsyncGenerator<SDKMessage, void, undefined> {
   const runOne = options.run ?? runHarness
-  const probe = options.probe ?? ((credential, model) => probeCredential(credential, { model }))
-  /** Rate-limit probes still running; their records are written before the generator returns. */
+  const probe = options.probe ?? ((credential, model, signal) => probeCredential(credential, { model, signal }))
+  /**
+   * Rate-limit probes still running; their records are written before the
+   * generator returns, unless the caller stopped the turn: then they finish
+   * on their own (aborted with it) and nothing waits for them.
+   */
   const pending: Promise<void>[] = []
   try {
     yield* attempts()
   } finally {
-    await Promise.all(pending)
+    if (!base.signal?.aborted) await Promise.all(pending)
   }
 
   async function* attempts(): AsyncGenerator<SDKMessage, void, undefined> {
@@ -369,8 +372,15 @@ export async function* runWithFallback(
     const reason = redact(failure.message || verdict, [secret])
     let outcome: AttemptOutcome
     if (verdict === 'permanent') {
-      // Confirmed before it disables (see the top of this file).
-      const check = await probe(current.credential, model)
+      // Confirmed before it disables (see the top of this file), on the
+      // probe's own model, so a refusal of this turn's model or features
+      // does not confirm itself.
+      const check = await probe(current.credential, undefined, base.signal)
+      if (base.signal?.aborted) {
+        yield* release()
+        if (thrown !== undefined) throw thrown
+        return
+      }
       if (check.verdict === 'answered') {
         yield* release()
         if (thrown !== undefined) throw thrown
@@ -399,19 +409,31 @@ export async function* runWithFallback(
     if (verdict === 'rate_limited' && outcome.class === 'rate_limited') {
       const provisional = outcome.until
       pending.push(
-        probe(current.credential, model).then((answer) =>
-          options.report(
-            current,
-            answer.verdict === 'refused'
-              ? { class: 'permanent', reason: redact(answer.reason, [secret]) }
-              : { class: 'rate_limited', reason, until: answer.until, replacing: provisional },
-            undefined,
-          ),
-        ),
+        probe(current.credential, model, base.signal)
+          .then((answer) =>
+            base.signal?.aborted
+              ? undefined
+              : options.report(
+                  current,
+                  answer.verdict === 'refused'
+                    ? { class: 'permanent', reason: redact(answer.reason, [secret]) }
+                    : { class: 'rate_limited', reason, until: answer.until, replacing: provisional },
+                  undefined,
+                ),
+          )
+          // Nothing awaits it after an abort; it must not reject unhandled.
+          .catch(() => {}),
       )
     }
     if (!fallTo) {
-      if (held.length === 0) throw new Error(`the Claude credential (${current.label}) was refused: ${reason}`)
+      if (held.length === 0) {
+        // Stopped at a retry, so nothing of the attempt is held: say what happened.
+        if (thrown !== undefined) throw thrown
+        const what =
+          outcome.class === 'permanent' ? 'was refused' : outcome.class === 'rate_limited' ? 'is rate limited' : 'failed'
+        const why = next ? "; no other credential was tried, since the turn's turns or budget are used up" : ''
+        throw new Error(`the Claude credential (${current.label}) ${what}: ${reason}${why}`)
+      }
       // With the totals as they were before this attempt: its result already counts itself.
       yield* release()
       if (thrown !== undefined) throw thrown
@@ -451,21 +473,14 @@ export class CredentialPool implements CredentialSource {
   async candidates(): Promise<PooledCredential[]> {
     const kek = this.kek
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
-    const list = await this.repo.list()
+    // One SELECT for every row, its state, epoch and sealed secret together:
+    // the epoch recorded against is always that of the secret the turn runs on.
+    const rows = await this.repo.revealAll(kek.kek)
+    const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
-    for (const c of list) {
-      if (c.status !== 'active' || !opensWith(c, kek)) continue
-      // The epoch comes with the secret, from one SELECT: a save committing
-      // after list() would otherwise run the turn on the new secret while
-      // recording its failures against the old epoch.
-      let entry: { credential: Credential; epoch: number } | undefined
-      try {
-        entry = await this.repo.revealEntry(kek.kek, c.id)
-      } catch (err) {
-        if (err instanceof SealError) continue
-        throw err
-      }
-      if (entry) out.push({ id: c.id, epoch: entry.epoch, label: credentialLabel(c), credential: entry.credential })
+    for (const { stored: c, credential } of rows) {
+      if (c.status !== 'active' || !credential) continue
+      out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))
     return out

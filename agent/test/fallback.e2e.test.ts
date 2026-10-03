@@ -13,6 +13,7 @@ import {
   type PooledCredential,
   runWithFallback,
 } from '../src/harness/fallback.js'
+import { PROBE_FALLBACK_MODEL } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -152,6 +153,24 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(error).toBeInstanceOf(Error)
     expect(callsWith(TOKEN_B)).toHaveLength(0)
     expect(reports.map((r) => r.outcome.class)).toEqual(['ok'])
+  }, 60_000)
+
+  it('disables nothing when every key is refused the turn’s model but the probe is answered', async () => {
+    // A 403 scoped to a model or a permission, not to the key: the probe asks
+    // on its own model (PROBE_FALLBACK_MODEL), is answered, and the turn ends
+    // with the error instead of disabling the chain.
+    const scoped = (r: RecordedRequest): Reply =>
+      r.body?.max_tokens === 1
+        ? { text: 'ok' }
+        : { error: { status: 403, type: 'permission_error', message: 'Your organization does not have access to this model' } }
+    forA = scoped
+    forB = scoped
+    const { error, reports } = await turn()
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('403 Your organization does not have access to this model')
+    expect(reports.filter((r) => r.outcome.class === 'permanent')).toEqual([])
+    expect(callsWith(TOKEN_B)).toHaveLength(0)
+    expect(callsWith(TOKEN_A).at(-1)?.body).toMatchObject({ max_tokens: 1, model: PROBE_FALLBACK_MODEL })
   }, 60_000)
 
   it('falls back on a billing refusal and disables the key', async () => {
