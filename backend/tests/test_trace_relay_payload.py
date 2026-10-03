@@ -7,7 +7,7 @@ import json
 import pytest
 
 from scadbuddy.telemetry import payload
-from scadbuddy.telemetry.payload import PayloadError, BatchTooLargeError, prepare
+from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, prepare
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
 
 
