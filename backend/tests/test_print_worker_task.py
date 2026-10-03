@@ -45,7 +45,24 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
 
     monkeypatch.setattr(main, "print_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
-    state = SimpleNamespace(
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    state = _state()
+    stop = asyncio.Event()
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        task = asyncio.create_task(main._run_print_worker(state, stop))  # type: ignore[arg-type]
+        await asyncio.wait_for(entered.wait(), 5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert len(built) == 2
+    assert "the print worker failed" in caplog.text
+
+
+async def _no_lost_runs(*args: Any, **kwargs: Any) -> int:
+    return 0
+
+
+def _state() -> SimpleNamespace:
+    return SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
         temporal=object(),
         settings_store=None,
@@ -57,11 +74,27 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
         print_watcher=None,
         components=SimpleNamespace(get=lambda key: None),
     )
+
+
+async def test_the_worker_task_ends_lost_runs_at_start_and_on_its_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1061 F1: a run whose execution closed without ending it is ended."""
+    passes = asyncio.Event()
+    calls: list[object] = []
+
+    async def reconcile(client: object, store: object, **kwargs: Any) -> int:
+        calls.append(store)
+        if len(calls) >= 2:
+            passes.set()
+        return 0
+
+    monkeypatch.setattr(main, "print_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "reconcile_lost_runs", reconcile)
+    monkeypatch.setattr(main, "LOST_RUN_INTERVAL", 0.01)
     stop = asyncio.Event()
-    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
-        task = asyncio.create_task(main._run_print_worker(state, stop))  # type: ignore[arg-type]
-        await asyncio.wait_for(entered.wait(), 5)
-        stop.set()
-        await asyncio.wait_for(task, 5)
-    assert len(built) == 2
-    assert "the print worker failed" in caplog.text
+    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(passes.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert len(calls) >= 2

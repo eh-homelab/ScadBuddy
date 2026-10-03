@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -26,14 +27,16 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.workflows.client import connect_lazily
+from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
     API,
@@ -590,3 +593,37 @@ def test_without_a_database_both_routes_are_a_503_and_nothing_is_uploaded(
     finally:
         state.print_runs = runs
     assert not uploaded.called
+
+
+@respx.mock
+def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 F2: the second start after a closing run gets what is left of one
+    budget under the proxy's 15 s, or the request is answered still-accepting."""
+    output_id = prepared(client, model)
+    ended_run = PrintRun(
+        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+    )
+    starts: list[timedelta] = []
+
+    async def slow_start(
+        *args: Any, deadline: timedelta = timedelta(seconds=10), **kwargs: Any
+    ) -> AcceptAnswer:
+        starts.append(deadline)
+        await asyncio.sleep(1.0)
+        return AcceptAnswer(run=ended_run, repeated=True)
+
+    async def stored(run_id: str) -> PrintRun:
+        return ended_run
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(printing_api, "ACCEPT_BUDGET", 1.5)
+    monkeypatch.setattr(printing_api, "start_command", slow_start)
+    monkeypatch.setattr(state.print_runs.store, "get", stored)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == printing_api.STILL_ACCEPTING_PROBLEM
+    assert len(starts) == 1
