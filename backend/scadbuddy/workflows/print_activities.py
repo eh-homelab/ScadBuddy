@@ -28,14 +28,16 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.dispatch import SliceStarted, enqueue_plate, start_slice, wait_slice
+from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
+    QueuedPlate,
     chosen_project,
     finish_run,
     plan_run,
     prepare_run,
+    queue_plate,
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
@@ -45,6 +47,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputStore, PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
@@ -74,6 +77,8 @@ class PrintDeps:
     catalogue: Catalogue
     store: PrintRunStore
     observer: ProgressObserver
+    #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
+    rack: RackUsage | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -152,7 +157,9 @@ class PrintActivities:
                 )
             async with client_for(settings) as client:
                 source = await self._source(client, spec, settings)
-                prepared = await prepare_run(client, source, settings, input.request)
+                prepared = await prepare_run(
+                    client, source, settings, input.request, rack=self.d.rack
+                )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
         except InvalidModelMetaError as error:
@@ -217,18 +224,17 @@ class PrintActivities:
         await self.d.store.start_enqueue(run_id)
 
     @activity.defn(name="print_enqueue")
-    async def enqueue(self, input: EnqueueInput) -> int:
+    async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
+        """The rack pick, ``POST /queue/`` once, then the picks saved (#836)."""
         try:
             async with client_for(self._settings()) as client:
-                return await enqueue_plate(
+                return await queue_plate(
                     client,
+                    planned=input.planned,
+                    plate=input.plate,
                     sliced=input.sliced,
-                    printer_id=input.printer_id,
-                    plate_id=input.plate_id,
-                    copies=input.copies,
-                    project_id=input.project_id,
-                    options=input.options,
-                    filaments=input.filaments,
+                    rack=self.d.rack,
+                    credit=input.credit,
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
@@ -261,7 +267,9 @@ class PrintActivities:
         try:
             async with client_for(settings) as client:
                 source = await self._source(client, spec, settings)
-                result = await finish_run(client, source, input.planned, input.outcomes)
+                result = await finish_run(
+                    client, source, input.planned, input.outcomes, input.queued
+                )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
         run = await self.d.store.succeed(input.run_id, input.input.slug, result)

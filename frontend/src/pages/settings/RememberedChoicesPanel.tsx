@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
+import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
 import { useAsync } from '../../lib/useAsync'
@@ -79,6 +80,15 @@ export function RememberedChoicesPanel({
         subject: printerName(printerId),
         value: bed,
         forget: () => api.putPrinterBedType(Number(printerId), null),
+      })
+    }
+    for (const [printerId, algorithm] of Object.entries(remembered.printer_rack_algorithms ?? {})) {
+      rows.push({
+        key: `rack:${printerId}`,
+        kind: 'Rack nozzle',
+        subject: printerName(printerId),
+        value: ALGORITHM_LABELS[algorithm],
+        forget: () => api.putPrinterRackAlgorithm(Number(printerId), null),
       })
     }
     for (const [projectId, target] of Object.entries(remembered.project_print_targets ?? {})) {

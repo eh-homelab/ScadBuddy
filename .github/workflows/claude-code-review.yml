@@ -109,7 +109,7 @@ jobs:
           # test tooling: this job reviews, it does not run the suite — ci.yml
           # already did, on the same SHA.
           claude_args: |
-            --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),Bash(shellcheck:*),Bash(jq:*),Bash(yq:*)" --model "claude-opus-5-5'"
+            --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),Bash(shellcheck:*),Bash(jq:*),Bash(yq:*)" --model "claude-opus-5-5"
 
           # Grant the action's GitHub App token actions: read so it installs the
           # github_ci MCP server for CI status checks (mirrors the job permission).

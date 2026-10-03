@@ -19,7 +19,7 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.jobs import _resolve_version
-from scadbuddy.api.models import _etag_matches, require_model_exists
+from scadbuddy.api.models import etag_matches, require_model_exists
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.jobs import source_directory
 
@@ -88,7 +88,7 @@ def _serve(file: FsPath, *, pinned: bool, if_none_match: str | None) -> Response
         "ETag": etag,
         "Cache-Control": PINNED_CACHE_CONTROL if pinned else LIVE_CACHE_CONTROL,
     }
-    if _etag_matches(if_none_match, etag):
+    if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(body, media_type=UI_MEDIA_TYPES[file.suffix.lower()], headers=headers)
 

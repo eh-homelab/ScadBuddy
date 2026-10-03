@@ -37,6 +37,7 @@ import fcntl
 import io
 import logging
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -136,8 +137,22 @@ class GitTimeoutError(GitError):
     """
 
 
+#: Git's modes for a regular file and for a symlink in a tree entry.
+FILE_MODES = ("100644", "100755")
+SYMLINK_MODE = "120000"
+TREE_MODE = "040000"
+#: As the kernel's own limit on symlinks followed in one lookup (`ELOOP`).
+MAX_SYMLINK_HOPS = 40
+#: The longest symlink target read: Linux's PATH_MAX.
+MAX_PATH_BYTES = 4096
+
+
 class RevisionNotFoundError(KeyError):
     pass
+
+
+class BlobTooLargeError(ValueError):
+    """A file at a revision is larger than the caller will read."""
 
 
 @dataclass(frozen=True)
@@ -658,6 +673,76 @@ class ModelHistory:
         assert isinstance(completed.stdout, bytes)
         return completed.stdout
 
+    def read_blob(self, commit: str, path: str, *, limit: int, root: str | None = None) -> bytes:
+        """The bytes of the file ``path`` at a revision, at most ``limit`` of them.
+
+        The revision is resolved once; the tree entry gives the blob's id and size, so
+        one over ``limit`` is refused (:class:`BlobTooLargeError`) without reading it,
+        and the bytes read are that blob's by id, the one that was sized.
+
+        A symlink (mode 120000, a blob holding its target's path), at the end of the
+        path or as a directory along it, is followed only with a ``root``, and only
+        while each target, relative and resolved against the link's directory, stays
+        under it -- as the working tree's reader follows a link inside a model's
+        directory and refuses one out of it. Without a root it is no file.
+        :class:`RevisionNotFoundError` when no regular file is there (a directory, a
+        symlink that leaves ``root`` or loops included); :class:`GitError` when git
+        cannot read the tree.
+        """
+        resolved = self.resolve(commit)
+        missing = RevisionNotFoundError(f"{path!r} is not a file at {commit}")
+        current = path
+        for _ in range(MAX_SYMLINK_HOPS + 1):
+            segments = current.split("/")
+            prefixes = ["/".join(segments[: i + 1]) for i in range(len(segments))]
+            # Every prefix in one tree read: a plain file costs one, a missing one too.
+            entries = self._tree_entries(resolved, prefixes)
+            for index, prefix in enumerate(prefixes):
+                entry = entries.get(prefix)
+                if entry is None:
+                    raise missing
+                mode, oid, size = entry
+                if mode == SYMLINK_MODE:
+                    if root is None or size > MAX_PATH_BYTES:
+                        raise missing
+                    target = self._blob(oid).decode("utf-8", "replace")
+                    followed = _follow(prefix, target, segments[index + 1 :], root)
+                    if followed is None:
+                        raise missing
+                    current = followed
+                    break
+                if index < len(prefixes) - 1:
+                    if mode != TREE_MODE:
+                        raise missing
+                elif mode in FILE_MODES:
+                    if size > limit:
+                        raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+                    return self._blob(oid)
+                else:
+                    raise missing
+        raise missing
+
+    def _tree_entries(self, resolved: str, paths: list[str]) -> dict[str, tuple[str, str, int]]:
+        """Each of ``paths`` that exists at ``resolved``, as its mode, object id and size
+        (0 for a directory), from one ``ls-tree``. :class:`GitError` when git cannot read
+        the tree."""
+        listing = self._out("ls-tree", "-z", "-l", "-t", resolved, "--", *paths)
+        entries: dict[str, tuple[str, str, int]] = {}
+        # `<mode> <type> <object> <size>\t<path>\0`, size `-` for a tree; `-t` lists a
+        # directory itself as well as what is under it on the way to a deeper path.
+        for record in listing.split("\0"):
+            meta, _, name = record.partition("\t")
+            fields = meta.split()
+            if len(fields) == 4 and fields[0] in (*FILE_MODES, SYMLINK_MODE, TREE_MODE):
+                size = int(fields[3]) if fields[3].isdigit() else 0
+                entries[name] = (fields[0], fields[2], size)
+        return entries
+
+    def _blob(self, oid: str) -> bytes:
+        completed = self._run("cat-file", "blob", oid, text=False)
+        assert isinstance(completed.stdout, bytes)
+        return completed.stdout
+
     def parent(self, commit: str) -> str | None:
         return self._parent_of(self.resolve(commit))
 
@@ -795,6 +880,20 @@ class ModelHistory:
 
     def _tracked(self, slug: str) -> list[str]:
         return [line for line in self._out("ls-files", "--", slug).splitlines() if line]
+
+
+def _follow(link: str, target: str, rest: list[str], root: str) -> str | None:
+    """The path a symlink at ``link`` leads to, with ``rest`` after it, or None when
+    its target is absolute, leaves ``root`` or names a hidden segment under it (a
+    dot-file or dot-directory, as no plain path may)."""
+    if target.startswith("/"):
+        return None
+    followed = posixpath.normpath(posixpath.join(posixpath.dirname(link), target))
+    if not followed.startswith(f"{root}/"):
+        return None
+    if any(part.startswith(".") for part in followed[len(root) + 1 :].split("/")):
+        return None
+    return "/".join([followed, *rest])
 
 
 def _model_id(path: str) -> str | None:

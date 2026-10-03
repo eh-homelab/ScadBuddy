@@ -1,26 +1,28 @@
 import type { ReactNode } from 'react'
-import { safeHttpUrl, safeImageSrc } from '../../lib/safeUrl'
+import { type ImageBase, safeHttpUrl, safeImageSrc } from '../../lib/safeUrl'
 import { parseBlocks } from './markdownBlocks'
 
 /**
  * A deliberately small Markdown renderer for assistant replies: paragraphs, `#`–`###`
  * headings, `-`/`*`/`1.` lists, fenced code, GFM tables (#820), and inline `code`,
- * **bold**, *italic*, [links](https://…) and ![images](/api/v1/…). The repo has no
+ * **bold**, *italic*, [links](https://…) and ![images](/api/v1/…, data:image/…). The repo has no
  * Markdown renderer to reuse and a full one is a lot of bundle for chat text.
  *
  * It builds React elements — never HTML strings — so model output cannot inject
  * markup, links render only for http(s) URLs (`safeHttpUrl`), and images only for
- * ScadBuddy's own API paths (`safeImageSrc`), so a render view the agent checked can
- * be shown while untrusted text never makes the browser fetch another host; any other
- * image is its alt text. It tolerates the
+ * ScadBuddy's own API paths and inline `data:` images (`safeImageSrc`), so a render
+ * view the agent checked can be shown while untrusted text never makes the browser
+ * fetch another host; any other image is its alt text. Given a `base` (the model a
+ * README belongs to, #951), a relative image such as `thumbnail.png` resolves to that
+ * model's image route; without one (agent chat) it stays alt text. It tolerates the
  * half-finished text of a stream: an unclosed fence is code to the end, and an
  * unclosed `**` is plain text until its partner arrives.
  */
-export function Markdown({ text }: { text: string }) {
-  return <div className="space-y-2 break-words">{blocks(text)}</div>
+export function Markdown({ text, base }: { text: string; base?: ImageBase }) {
+  return <div className="space-y-2 break-words">{blocks(text, base)}</div>
 }
 
-function blocks(text: string): ReactNode[] {
+function blocks(text: string, base: ImageBase | undefined): ReactNode[] {
   return parseBlocks(text).map((block, i) => {
     switch (block.kind) {
       case 'code':
@@ -36,7 +38,7 @@ function blocks(text: string): ReactNode[] {
         const Tag = (['h3', 'h4', 'h5'] as const)[block.level - 1] ?? 'h5'
         return (
           <Tag key={i} className="text-[13px] font-semibold">
-            {inline(block.text)}
+            {inline(block.text, base)}
           </Tag>
         )
       }
@@ -45,13 +47,13 @@ function blocks(text: string): ReactNode[] {
         return (
           <Tag key={i} className={`space-y-0.5 pl-5 ${block.ordered ? 'list-decimal' : 'list-disc'}`}>
             {block.items.map((item, j) => (
-              <li key={j}>{inline(item)}</li>
+              <li key={j}>{inline(item, base)}</li>
             ))}
           </Tag>
         )
       }
       case 'para':
-        return <p key={i}>{inline(block.text)}</p>
+        return <p key={i}>{inline(block.text, base)}</p>
       case 'table':
         return (
           <div key={i} className="overflow-x-auto">
@@ -65,7 +67,7 @@ function blocks(text: string): ReactNode[] {
                       style={{ textAlign: block.align[c] ?? undefined }}
                       className="border border-line bg-surface-3 px-2 py-1 font-semibold"
                     >
-                      {inline(cell)}
+                      {inline(cell, base)}
                     </th>
                   ))}
                 </tr>
@@ -75,7 +77,7 @@ function blocks(text: string): ReactNode[] {
                   <tr key={r}>
                     {row.map((cell, c) => (
                       <td key={c} style={{ textAlign: block.align[c] ?? undefined }} className="border border-line px-2 py-1">
-                        {inline(cell)}
+                        {inline(cell, base)}
                       </td>
                     ))}
                   </tr>
@@ -93,7 +95,7 @@ function blocks(text: string): ReactNode[] {
 const INLINE =
   /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[([^\]]+)\]\(([^)\s]+)\)|!\[([^\]]*)\]\(([^)\s]+)\)/g
 
-function inline(text: string): ReactNode[] {
+function inline(text: string, base: ImageBase | undefined): ReactNode[] {
   const out: ReactNode[] = []
   let last = 0
   for (const m of text.matchAll(INLINE)) {
@@ -107,11 +109,11 @@ function inline(text: string): ReactNode[] {
         </code>,
       )
     } else if (m[2] !== undefined) {
-      out.push(<strong key={key}>{inline(m[2])}</strong>)
+      out.push(<strong key={key}>{inline(m[2], base)}</strong>)
     } else if (m[3] !== undefined || m[4] !== undefined) {
-      out.push(<em key={key}>{inline(m[3] ?? m[4] ?? '')}</em>)
+      out.push(<em key={key}>{inline(m[3] ?? m[4] ?? '', base)}</em>)
     } else if (m[8] !== undefined) {
-      const src = safeImageSrc(m[8])
+      const src = safeImageSrc(m[8], base)
       out.push(
         src ? (
           <img

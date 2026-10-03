@@ -56,6 +56,7 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
         operations=SimpleNamespace(store=None, kinds={}),
         print_progress=None,
         print_follower=None,
+        components=SimpleNamespace(get=lambda key: None),
         projection=SimpleNamespace(pool=None),
     )
     stop = asyncio.Event()

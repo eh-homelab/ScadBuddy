@@ -17,7 +17,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
-from scadbuddy.bambuddy.models import Folder, Printer
+from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
@@ -208,6 +208,8 @@ class RememberedChoices(BaseModel):
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate last printed on it.
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
+    #: Stringified Bambuddy printer id -> its rack nozzle algorithm (#836).
+    printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -336,6 +338,7 @@ def _remembered(
         print_options=settings.print_options,
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,
+        printer_rack_algorithms=settings.printer_rack_algorithms,
     )
 
 
@@ -348,6 +351,7 @@ def _remembered(
 async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
+    ``PUT /print/printers/{id}/rack-algorithm`` with a ``null`` algorithm,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
     whole map back; a project's printer and nozzle go through
     ``DELETE /settings/remembered/projects/{project_id}``."""

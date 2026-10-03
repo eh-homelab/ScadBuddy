@@ -21,6 +21,8 @@ from scadbuddy.library.history import (
     LOCK_NAME,
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
+    BlobTooLargeError,
+    GitError,
     GitTimeoutError,
     ModelHistory,
     RevisionNotFoundError,
@@ -281,6 +283,197 @@ def test_show_rejects_an_unknown_revision(models: Path, history: ModelHistory) -
 
     with pytest.raises(RevisionNotFoundError):
         history.show("0" * 40, "keychain/model.scad")
+
+
+def test_read_blob_reads_a_file_at_a_revision_resolving_it_once(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    first = history.ensure_repo()
+    assert first is not None
+    write_model(models, "keychain", "cube(20);\n")
+    history.commit("Edit keychain source", "keychain")
+    calls: list[tuple[str, ...]] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args)
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted):
+        data = history.read_blob(first[:7], "keychain/model.scad", limit=100)
+
+    assert data == b"cube(10);\n"
+    assert [args[0] for args in calls] == ["rev-parse", "ls-tree", "cat-file"]
+
+
+def test_read_blob_refuses_a_blob_over_the_limit_without_reading_it(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+    calls: list[str] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted), pytest.raises(BlobTooLargeError):
+        history.read_blob(commit, "keychain/model.scad", limit=len("cube(10);\n") - 1)
+    assert "cat-file" not in calls
+    assert history.read_blob(commit, "keychain/model.scad", limit=len("cube(10);\n"))
+
+
+def test_read_blob_refuses_a_directory_a_missing_file_and_an_unknown_revision(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for revision, path in (
+        (commit, "keychain"),
+        (commit, "keychain/nope.png"),
+        ("0" * 40, "keychain/model.scad"),
+    ):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(revision, path, limit=100)
+
+
+def test_read_blob_refuses_a_committed_symlink_outside_its_root(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models, "other", "cube(1);\n")
+    (models / "other" / "secret.png").write_bytes(b"OTHER")
+    folder = models / "keychain"
+    (folder / "abs.png").symlink_to("/etc/passwd")
+    (folder / "out.png").symlink_to("../other/secret.png")
+    (folder / "loop.png").symlink_to("loop2.png")
+    (folder / "loop2.png").symlink_to("loop.png")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for name in ("abs.png", "out.png", "loop.png"):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, f"keychain/{name}", limit=100, root="keychain")
+    # Without a root, no symlink is followed at all.
+    (folder / "real.png").write_bytes(b"REAL")
+    (folder / "in.png").symlink_to("real.png")
+    commit = history.commit("Add an image and a link to it", "keychain")
+    assert commit is not None
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/in.png", limit=100)
+
+
+def test_read_blob_follows_a_symlink_that_stays_under_its_root(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / "images").mkdir()
+    (folder / "images" / "real.png").write_bytes(b"REAL")
+    (folder / "cover.png").symlink_to("images/real.png")
+    (folder / "images" / "again.png").symlink_to("../cover.png")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    assert history.read_blob(commit, "keychain/cover.png", limit=100, root="keychain") == b"REAL"
+    assert (
+        history.read_blob(commit, "keychain/images/again.png", limit=100, root="keychain")
+        == b"REAL"
+    )
+
+
+def test_read_blob_follows_a_symlinked_directory_under_its_root(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models, "other", "cube(1);\n")
+    (models / "other" / "secret.png").write_bytes(b"OTHER")
+    folder = models / "keychain"
+    (folder / "assets" / "deep").mkdir(parents=True)
+    (folder / "assets" / "deep" / "real.png").write_bytes(b"REAL")
+    (folder / "images").symlink_to("assets")
+    (folder / "nested").symlink_to("images/deep")
+    (folder / "away").symlink_to("../other")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for path in ("images/deep/real.png", "nested/real.png"):
+        assert history.read_blob(commit, f"keychain/{path}", limit=100, root="keychain") == (
+            b"REAL"
+        )
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/away/secret.png", limit=100, root="keychain")
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/images/deep/real.png", limit=100)
+
+
+def test_read_blob_never_follows_a_symlink_onto_a_hidden_path(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / ".hidden").mkdir()
+    (folder / ".hidden" / "x.png").write_bytes(b"HIDDEN")
+    (folder / "peek.png").symlink_to(".hidden/x.png")
+    (folder / "door").symlink_to(".hidden")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for path in ("peek.png", "door/x.png"):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, f"keychain/{path}", limit=100, root="keychain")
+
+
+def test_read_blob_reads_the_tree_once_per_symlink_hop_not_per_segment(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / "a" / "b").mkdir(parents=True)
+    (folder / "a" / "b" / "real.png").write_bytes(b"REAL")
+    (folder / "link").symlink_to("a/b")
+    commit = history.ensure_repo()
+    assert commit is not None
+    calls: list[str] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, "keychain/x/y/z/missing.png", limit=100, root="keychain")
+        assert calls.count("ls-tree") == 1
+        calls.clear()
+        assert history.read_blob(commit, "keychain/link/real.png", limit=100, root="keychain")
+        # One read of the tree, one of the link's target, one more of the tree.
+        assert calls.count("ls-tree") == 2
+
+
+def test_read_blob_reports_a_failed_tree_read_as_a_git_error(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+    run = history._run
+
+    def broken(*args: str, **kwargs: object) -> object:
+        if args[0] == "ls-tree":
+            # The real invocation, with the revision it names swapped for an object git
+            # cannot read, as a corrupt object or an I/O error leaves it.
+            assert commit in args
+            args = tuple("0" * 40 if arg == commit else arg for arg in args)
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", broken), pytest.raises(GitError):
+        history.read_blob(commit, "keychain/model.scad", limit=100)
 
 
 def test_diff_defaults_to_the_parent_and_handles_the_root_commit(

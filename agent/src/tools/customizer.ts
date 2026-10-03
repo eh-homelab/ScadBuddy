@@ -4,7 +4,7 @@ import { reattach } from '../api/command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
-import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { page, PAGED, pageInput } from './pagination.js'
@@ -215,13 +215,25 @@ export const customizerTools: Tool[] = [
         return json({ ...summary, note: 'still rendering; poll get_render_job with this job_id' })
       }
       if (!save_output) return json(summary)
-      const output = await ok(
-        ctx.backend.POST('/api/v1/models/{slug}/outputs', {
-          params: { path: { slug } },
-          body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
-        }),
-        `save output of ${job.id}`,
-      )
+      let output
+      try {
+        output = await ok(
+          ctx.backend.POST('/api/v1/models/{slug}/outputs', {
+            params: { path: { slug } },
+            body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
+          }),
+          `save output of ${job.id}`,
+        )
+      } catch (err) {
+        // The render is done; only the save failed. Still the job's summary, so the
+        // job can be saved again with save_output and is recorded as made (#931).
+        // The backend's reason is upstream text: wrapped under the error-detail
+        // source (toolErrorText), as a thrown ToolError's would be.
+        if (!(err instanceof ToolError)) throw err
+        // The audit row keeps the whole reason, as for any thrown ToolError.
+        ctx.report?.({ detail: err.message })
+        return { ...json({ ...summary, output: null, output_error: toolErrorText(err, 'render_model') }), isError: true }
+      }
       return json({ ...summary, output })
     },
   }),

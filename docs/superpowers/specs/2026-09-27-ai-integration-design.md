@@ -39,7 +39,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
 | D6 | **MCP auth modes `bearer` (default), `disabled`, later `oidc`** | Bearer now, OIDC per the MCP authorization spec later (#262), and an explicit off switch for trusted LANs | Hard-requiring auth; forking the code path per mode |
-| D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web. Amended by #896: `Skill` and `Agent`, for ScadBuddy's own plugin (§10) | Leaving Claude Code's built-in tools available |
+| D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web. Amended by #896: `Skill` and `Agent`, for ScadBuddy's own plugin (§10). Amended by #940: `AskUserQuestion`, in sessions the browser user owns (§8.2) | Leaving Claude Code's built-in tools available |
 | D8 | **Bambuddy is served by ScadBuddy itself** | Keeps the key server-side, scope-aware errors, tiers, approvals and the audit log | Third-party Bambuddy MCP servers |
 | D9 | **Plugins are Claude plugins, fetched and pinned** | The SDK loads plugins by local path only (§3.1) | Auto-updating plugins; stdio plugin servers |
 | D10 | **Citations are required** | Suggested settings, analyzers, agent edits and docs carry their sources; unsourced claims are labelled judgement and are never auto-applied | — |
@@ -787,6 +787,22 @@ including `disabled`. Where it is enforced:
   the end of the turn it belongs to; one that nobody decides expires
   (`approval_expiry_seconds` in `ai_settings`). The code is
   `agent/src/approvals/service.ts`.
+- **Questions for the user (#940):** the agent asks with Claude Code's built-in
+  `AskUserQuestion` (multiple choice, several answers when `multiSelect`, and a draft
+  to approve as an option's Markdown `preview`), not a registry tool. The SDK hands each
+  call to `canUseTool`, which parks it like an approval; the user's answer is returned
+  by allowing the call with `answers` added to its input, and Claude Code passes them to
+  the model as the tool result (measured on SDK 0.3.283,
+  `agent/test/questions.sdk.test.ts`). Only a session the browser user owns is offered
+  the tool, and only the browser user answers, over the chat socket's
+  `question.answer`; no tool result and no other principal can. The session waits in
+  `waiting_input`. Questions live in `ai_questions`, so any replica can take the
+  answer, but unlike an approval a question never outlives its turn: interrupt,
+  handoff, a shutdown and every other end of the turn cancel it, and the model is told
+  nobody answered. Nothing answers a question by itself. Expiry and notifications
+  belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
+  and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
+  `frontend/src/components/assistant/FeedItemView.tsx`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
   approval. The prepare is a pending row in `ai_approvals` with no session. It records

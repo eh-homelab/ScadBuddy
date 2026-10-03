@@ -35,6 +35,7 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
@@ -403,6 +404,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
+        rack=state.components.get(RACK_USAGE),
     )
     ops = state.operations
     activities = [
