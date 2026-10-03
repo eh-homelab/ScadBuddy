@@ -108,4 +108,37 @@ describe('framesOnly', () => {
     const stack = `Error: ${message}\n    at real (file:///app/x.js:1:2)`
     expect(framesOnly(stack, message)).toBe('at real (file:///app/x.js:1:2)')
   })
+
+  it('drops a message line starting with `at` when err.message was reassigned after construction', () => {
+    const err = new Error(`upstream said:\nat least 3 items ${SENTINEL}\nat most 10 (really)`)
+    const stack = err.stack ?? '' // V8 formats the stack on first read; read it before the reassignment, as a logger would
+    err.message = 'replaced'
+    expect(stack).toContain(`at least 3 items ${SENTINEL}`)
+    const frames = framesOnly(stack, err.message)
+    expect(frames).not.toContain(SENTINEL)
+    expect(frames).not.toMatch(/^at (least|most) /m)
+    for (const line of frames.split('\n')) expect(line).toMatch(/^at /)
+  })
+
+  it.each([
+    'at f (file:///app/x.js:1:2)',
+    'at async g (node:internal/process/task_queues:95:5)',
+    'at file:///app/x.js:1:2',
+    'at new Foo (/app/x.js:10:3)',
+    'at Array.map (<anonymous>)',
+    'at async Promise.all (index 0)',
+    'at <anonymous>',
+    'at native',
+    'at f (native)',
+    'at eval (eval at <anonymous> (file:///app/x.js:1:2), <anonymous>:1:1)',
+  ])('keeps the V8 frame %j', (frame) => {
+    expect(framesOnly(`Error: boom\n    ${frame}`, 'boom')).toBe(frame)
+  })
+
+  it.each(['at least 3 items', 'at most 10', 'at noon: 12:30', 'at x:1:2 later'])(
+    'drops the frame-like message line %j',
+    (line) => {
+      expect(framesOnly(`Error: boom\n    ${line}\n    at f (file:///app/x.js:1:2)`)).toBe('at f (file:///app/x.js:1:2)')
+    },
+  )
 })
