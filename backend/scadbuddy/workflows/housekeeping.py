@@ -56,6 +56,7 @@ SWEEPS = (
     "housekeeping_sweep_assets",
     "housekeeping_sweep_blobs",
     "housekeeping_sweep_staging",
+    "housekeeping_sweep_claims",
 )
 PRUNE_SWEEPS = SWEEPS[:1]
 #: An asset sweep converges with the store over Bambuddy, at length.

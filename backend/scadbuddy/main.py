@@ -45,6 +45,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.operations import library_kinds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
@@ -297,7 +298,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A crashed duplicate's staging otherwise waits for the next boot (#397).
         await _sweep_duplicate_staging_logged(state)
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
+    @activity.defn(name=SWEEPS[4])
+    async def sweep_claims() -> None:
+        try:
+            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+        except Exception:
+            logger.exception("could not sweep operation claims")
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
