@@ -141,6 +141,12 @@ export type NozzleInfo = Schemas['NozzleInfo']
 export type ModelPrintChoices = Schemas['ModelPrintChoices']
 /** #83 — the plate remembered per printer, and an output's plates. */
 export type PrinterBedType = Schemas['PrinterBedType']
+/** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
+export type RackPickView = Schemas['RackPickView']
+export type RackOption = Schemas['RackOption']
+export type RackSentPick = Schemas['RackSentPick']
+export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
+export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
 export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */

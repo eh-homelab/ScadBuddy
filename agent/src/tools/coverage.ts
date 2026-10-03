@@ -161,6 +161,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  {
+    operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
+    reason:
+      "Remembers how the print dialog ranks a printer's nozzle rack (#836). It lands UI-first, " +
+      'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
+      'remembered algorithm, and a tool for changing it is a follow-up.',
+  },
 ]
 
 /**

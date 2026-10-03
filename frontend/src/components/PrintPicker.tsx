@@ -8,6 +8,7 @@ import type {
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
+  RackAlgorithm,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
@@ -30,6 +31,7 @@ import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
+import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
@@ -123,6 +125,42 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /**
+   * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
+   * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
+   * names one hotend for one printer and one nozzle size, so either changing drops it.
+   */
+  /**
+   * Only an algorithm chosen in this dialog is sent; otherwise `null`, and the backend
+   * applies the printer's remembered one, so one printer's can never go out for another
+   * while the new printer's choices are read (claude-review on #1043).
+   */
+  const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
+  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? choices?.rack_algorithm ?? 'least_used'
+  const [rackPosition, setRackPosition] = useState<number | null>(null)
+  /** A failed save of the algorithm: this print still uses it, the next one may not. */
+  const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
+  // Only a change of printer drops the hand pick and the chosen algorithm.
+  useEffect(() => {
+    setChosenAlgorithm(null)
+    setRackPosition(null)
+    setAlgorithmUnsaved(false)
+  }, [printerId])
+  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
+  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
+  const { advanced } = picker
+  useEffect(() => {
+    if (!advanced) setRackPosition(null)
+  }, [advanced])
+  useEffect(() => {
+    setRackPosition(null)
+  }, [size])
+  function changeRackAlgorithm(next: RackAlgorithm) {
+    setChosenAlgorithm(next)
+    setAlgorithmUnsaved(false)
+    if (printerId !== null)
+      void api.putPrinterRackAlgorithm(printerId, next).catch(() => setAlgorithmUnsaved(true))
+  }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
@@ -156,6 +194,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     copies,
     projectId,
     options,
+    rackPosition,
+    rackAlgorithm: chosenAlgorithm,
     onRan,
   })
   const { run, running, runError, refused, result, unanswered } = runPrint
@@ -262,9 +302,19 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           choices: printChoices,
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
+          rack_position: rackPosition,
+          rack_algorithm: chosenAlgorithm,
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  // #836 — a hand pick the current check no longer offers (no rack this time, or the
+  // position gone from its options) would be sent unseen, so it goes back to Automatic.
+  // Only a current verdict decides: one still on its way keeps the pick.
+  const offered = check.current ? (check.verdict?.rack?.options ?? []) : null
+  const pickOffered = rackPosition === null || offered === null || offered.some((o) => o.position === rackPosition)
+  useEffect(() => {
+    if (!pickOffered) setRackPosition(null)
+  }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
    * #772 — Simple mode hides the notes about the nozzle step, which only Advanced shows.
@@ -276,10 +326,14 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
   const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
   const verdict = (
-    <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+    <>
+      <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
+      <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+    </>
   )
   const verdictShown =
     check.error !== undefined ||
+    Boolean(check.verdict?.rack) ||
     (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
@@ -291,6 +345,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    setRackPosition(null)
     runPrint.reset()
     picker.reset()
     onClose()
@@ -465,6 +520,16 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                     value={nozzles}
                     onChange={picker.changeNozzles}
                   />
+                  {check.verdict?.rack && (
+                    <RackNozzleStep
+                      rack={check.verdict.rack}
+                      algorithm={rackAlgorithm}
+                      position={rackPosition}
+                      algorithmUnsaved={algorithmUnsaved}
+                      onAlgorithm={changeRackAlgorithm}
+                      onPosition={setRackPosition}
+                    />
+                  )}
                   <QualityStep
                     size={size}
                     tiers={choices.tiers?.[size] ?? []}

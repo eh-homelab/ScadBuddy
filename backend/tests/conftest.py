@@ -33,6 +33,7 @@ from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
+from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     TEST_TEMPORAL_ADDRESS_ENV,
     TEST_TEMPORAL_DEV_SERVER_ENV,
@@ -516,3 +517,17 @@ def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 
     monkeypatch.setattr(url_import, "resolve_host", resolve)
     return answers
+
+
+@pytest.fixture(autouse=True)
+def rack_pick_swallows_only_expected_errors(
+    request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
+) -> Iterator[None]:
+    """``choose_rack`` swallows every exception by spec, so this is where a programming
+    error (TypeError, KeyError...) surfaces. A test that injects another type on purpose
+    opts out with ``@pytest.mark.rack_injects_errors``."""
+    yield
+    if request.node.get_closest_marker("rack_injects_errors"):
+        return
+    foreign = foreign_rack_errors(caplog.get_records("call"))
+    assert not foreign, f"rack pick swallowed a programming error: {foreign}"

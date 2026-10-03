@@ -8,6 +8,7 @@ describe('library print check mock (#755)', () => {
     await expect(api.checkLibraryPrint(MULTI_PLATE_FILE, {} as PrintRunRequest)).resolves.toEqual({
       errors: [],
       warnings: [],
+      rack: null,
     })
   })
 
