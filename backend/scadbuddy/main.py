@@ -42,7 +42,8 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import connect, print_worker
+from scadbuddy.workflows.client import bambuddy_worker, connect
+from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
@@ -409,12 +410,16 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         watcher=state.print_watcher,
     )
-    activities = PrintActivities(deps).all()
+    ops = state.operations
+    activities = [
+        *PrintActivities(deps).all(),
+        *operation_activities(ops.store, state.settings_store, ops.kinds),
+    ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
         try:
-            async with print_worker(client, settings.temporal_task_queue_bambuddy, activities):
+            async with bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities):
                 await stop.wait()
         except Exception:
             logger.exception("the print worker failed; starting it again")

@@ -30,6 +30,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     UploadsDep,
 )
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
@@ -71,10 +72,6 @@ from scadbuddy.workflows.print_models import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: Problem ``type``s for a print the route could not hand to Temporal (#1052).
-STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
-TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
 
 router = APIRouter(prefix="/print", tags=["print"])
 
