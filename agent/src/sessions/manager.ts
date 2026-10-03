@@ -6,6 +6,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
+import { context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
@@ -69,6 +70,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
+import { TurnTrace } from '../telemetry/turn.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -883,6 +885,16 @@ export class SessionManager {
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
     let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
     const mapper = new SdkEventMapper(id, (name, input) => eventTierOf(name, input))
+    // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
+    // whatever started it (the browser's traceparent from the chat frame, an
+    // MCP call, or the decision an orphan resumes under), else a root.
+    const traced = new TurnTrace({
+      sessionId: id,
+      turnId,
+      parent: otelContext.active(),
+      // Each tool's tier for its span (TierResolver takes an optional input).
+      tierOf: (name) => eventTierOf(name) ?? 'outward',
+    })
     let lost = false
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
@@ -1009,6 +1021,7 @@ export class SessionManager {
         ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
         secrets: () => secrets,
         signal: controller.signal,
+        trace: traced,
       })
       const sandbox =
         this.deps.headlessBrowser?.sandbox && browserSetting === true
@@ -1082,9 +1095,10 @@ export class SessionManager {
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(memory ? { memoryHooks: memory.hooks } : {}),
+        traceHooks: traced.hooks(),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
-      for await (const message of this.run(run)) {
+      for await (const message of otelContext.with(traced.context(), () => this.run(run))) {
         if (message.type === 'result') {
           result = message
           local.settling = true
@@ -1092,13 +1106,17 @@ export class SessionManager {
         await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        for (const e of events) traced.observe(e)
         if (auditor) for (const e of events) await auditor.observe(e)
       }
     } catch (err) {
       // For an error result the SDK yields the result and then throws
       // ("Claude Code returned an error result", test/run.test.ts); the
       // result is what counts then.
-      if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
+      if (!result && !controller.signal.aborted) {
+        failure = redact(describe(err), secrets)
+        traced.fail(err)
+      }
     } finally {
       forwarded?.release()
       packages?.release()
@@ -1120,9 +1138,18 @@ export class SessionManager {
     // `last-prompt` and `cost-state` entries arrive after the `result`
     // message), so releasing the claim here means the next turn, on any
     // replica, resumes from a complete transcript.
-    if (lost) return { kind: 'lost_claim' }
+    if (lost) {
+      traced.finish({ kind: 'lost_claim' }, result)
+      return { kind: 'lost_claim' }
+    }
     const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-    return this.finish(session, turnId, stopped, result, failure, secrets)
+    let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
+    try {
+      outcome = await this.finish(session, turnId, stopped, result, failure, secrets)
+      return outcome
+    } finally {
+      traced.finish(outcome, result)
+    }
   }
 
   /**

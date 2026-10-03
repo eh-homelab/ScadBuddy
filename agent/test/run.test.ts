@@ -89,6 +89,14 @@ describe('buildHarnessOptions', () => {
     expect(options.hooks?.PreToolUse).toHaveLength(1)
   })
 
+  it('adds the trace hooks after the permission seam (#988)', () => {
+    const traceHooks = { PreToolUse: [{ hooks: [() => Promise.resolve({})] }], PostToolUse: [{ hooks: [() => Promise.resolve({})] }] }
+    const options = buildHarnessOptions({ ...base, traceHooks })
+    expect(options.hooks?.PreToolUse).toHaveLength(2)
+    expect(options.hooks?.PreToolUse?.[1]).toBe(traceHooks.PreToolUse[0])
+    expect(options.hooks?.PostToolUse).toEqual(traceHooks.PostToolUse)
+  })
+
   it("loads ScadBuddy's own plugin first, with Skill and Agent at read and no other built-in (#896)", () => {
     const options = buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR, pluginPaths: ['../plugins/scadbuddy'] })
     expect(options.plugins).toEqual([
