@@ -133,7 +133,12 @@ def failure_class(error: BaseException) -> str:
 
 
 def _record_failure(current: Span, error: Exception) -> None:
+    """Only an `Exception` fails a span: a `BaseException` such as
+    `asyncio.CancelledError` (a superseded render) ends it UNSET, since its job settles
+    `cancelled`, not `failed` (spec §6). The scrubbing exporter drops the message."""
     current.set_attribute("scadbuddy.failure_class", failure_class(error))
+    current.record_exception(error)
+    current.set_status(Status(StatusCode.ERROR))
 
 
 @contextmanager
@@ -144,11 +149,17 @@ def span(
     attributes: Mapping[str, AttributeValue] | None = None,
     links: Sequence[Link] = (),
 ) -> Iterator[Span]:
-    """A span of our own: on an exception it adds `scadbuddy.failure_class`; the SDK
-    records the exception and sets ERROR, and the scrubbing exporter drops its message."""
+    """A span of our own, made current. On an `Exception` it records the exception, sets
+    ERROR and adds `scadbuddy.failure_class` (`_record_failure`); the SDK's own handling
+    is off, so nothing else decides what fails a span."""
     tracer = trace.get_tracer(TRACER_NAME)
     with tracer.start_as_current_span(
-        name, kind=kind, attributes=attributes, links=links
+        name,
+        kind=kind,
+        attributes=attributes,
+        links=links,
+        record_exception=False,
+        set_status_on_exception=False,
     ) as current:
         try:
             yield current
@@ -175,8 +186,6 @@ def detached_span(
         yield current
     except Exception as error:
         _record_failure(current, error)
-        current.record_exception(error)
-        current.set_status(Status(StatusCode.ERROR))
         raise
     finally:
         current.end()
