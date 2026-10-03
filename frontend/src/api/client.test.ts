@@ -818,3 +818,34 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
 })
+
+describe('render (#1053)', () => {
+  const defaults = { ...printRunPoll }
+  afterEach(() => {
+    Object.assign(printRunPoll, defaults)
+  })
+
+  it('sends a render again while the server is still accepting it', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return posts === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(posts).toBe(2)
+  })
+})
