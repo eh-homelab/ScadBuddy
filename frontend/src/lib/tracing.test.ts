@@ -1,8 +1,9 @@
 import { trace } from '@opentelemetry/api'
 import { HttpResponse, http } from 'msw'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { traceAction } from './traceAction'
+import { RELAY_PATH } from './relayExporter'
+import { TRACER_NAME, traceAction } from './traceAction'
 import { startTracing } from './tracing'
 
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
@@ -73,5 +74,63 @@ describe('startTracing', () => {
   it('is started once however often it is called', () => {
     stop = startTracing()
     expect(startTracing()).toBe(stop)
+  })
+
+  describe('flushing when the page goes away', () => {
+    /** Posts the relay receives, with the `traceparent` each carried. */
+    function relay(): (string | null)[] {
+      const posts: (string | null)[] = []
+      server.use(
+        http.post(RELAY_PATH, ({ request }) => {
+          posts.push(request.headers.get('traceparent'))
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      return posts
+    }
+    const endSpan = () => trace.getTracer(TRACER_NAME).startSpan('hidden-test').end()
+    const hide = () => {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+
+    afterEach(() => vi.restoreAllMocks())
+
+    it('flushes on visibilitychange to hidden, with no traceparent on the relay post', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      hide()
+      await vi.waitFor(() => expect(posts).toHaveLength(1))
+      expect(posts[0]).toBeNull()
+    })
+
+    it('does not flush on visibilitychange to visible', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(posts).toHaveLength(0)
+    })
+
+    it('flushes on pagehide', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.waitFor(() => expect(posts).toHaveLength(1))
+    })
+
+    it('stops listening once undone', async () => {
+      const posts = relay()
+      const undo = startTracing()
+      await undo()
+      stop = undefined
+      hide()
+      window.dispatchEvent(new Event('pagehide'))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(posts).toHaveLength(0)
+    })
   })
 })
