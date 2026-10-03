@@ -15,6 +15,8 @@ export const ARRAY_ITEMS_MAX = 32
 
 const URL_ATTRIBUTES = ['url.full', 'http.url', 'http.target']
 const DROPPED_ATTRIBUTES = ['url.query', 'http.user_agent', 'user_agent.original']
+/** §6: captured headers are dropped whatever the instrumentation's capture settings say. */
+const DROPPED_PREFIXES = ['http.request.header.', 'http.response.header.']
 /** Chromium's `    at f (url:1:2)`, and Firefox's and Safari's `f@url:1:2`. */
 const CHROME_FRAME = /^\s+at \S.*:\d+:\d+\)?$/
 const GECKO_FRAME = /^[^\s@]*@\S+:\d+:\d+$/
@@ -50,7 +52,7 @@ export function withoutQuery(url: string): string {
 function scrubAttributes(attributes: Attributes): Attributes {
   const out: Attributes = {}
   for (const [key, value] of Object.entries(attributes)) {
-    if (DROPPED_ATTRIBUTES.includes(key)) continue
+    if (DROPPED_ATTRIBUTES.includes(key) || DROPPED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue
     let next: AttributeValue | undefined = value
     if (URL_ATTRIBUTES.includes(key) && typeof value === 'string') next = withoutQuery(value)
     if (Array.isArray(value) && value.length > ARRAY_ITEMS_MAX) {

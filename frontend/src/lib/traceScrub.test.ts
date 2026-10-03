@@ -99,6 +99,8 @@ describe('scrubSpan', () => {
             'url.query': SENTINEL,
             'http.user_agent': SENTINEL,
             'user_agent.original': SENTINEL,
+            'http.request.header.cookie': SENTINEL,
+            'http.response.header.set-cookie': [SENTINEL],
           },
         })
         .end()
