@@ -54,8 +54,10 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     https://code.claude.com/docs/en/llm-gateway-connect ("Each variable sends
 //     the credential in a different HTTP header: `ANTHROPIC_AUTH_TOKEN` in
 //     `Authorization: Bearer`, `ANTHROPIC_API_KEY` in `x-api-key`"):
-//       anthropic_api_key → ANTHROPIC_API_KEY
-//       gateway           → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+//       anthropic_api_key  → ANTHROPIC_API_KEY
+//       claude_oauth_token → CLAUDE_CODE_OAUTH_TOKEN, the token `claude setup-token`
+//                            prints (an sk-ant-oat01- token in x-api-key is a 401)
+//       gateway            → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 //   - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1: without it Claude Code "also
 //     sends nonessential background traffic outside the gateway path, to
 //     Anthropic and to third-party services such as GitHub: version checks,
@@ -71,6 +73,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     were refused that way, read tools included (measured on Claude Code
 //     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
 //     through the permission seam below, and an outward one parks at the gate.
+//   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
+//     Claude Code's retries on one credential when there is another to fall
+//     back to (#1093);
 //   - limits: `maxTurns`, `maxBudgetUsd` ("The query will stop if this budget is
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
@@ -114,6 +119,12 @@ export type HarnessRun = {
   model?: string
   maxTurns?: number
   maxBudgetUsd?: number
+  /**
+   * How many times Claude Code retries a failed model request on this
+   * credential (CLAUDE_CODE_MAX_RETRIES); its own default when omitted. Set
+   * when there is another credential to fall back to (fallback.ts, #1093).
+   */
+  maxRetries?: number
   /** Aborting stops the query and its Claude Code process. */
   signal?: AbortSignal
   /**
@@ -208,6 +219,8 @@ export function credentialEnv(credential: Credential): Record<string, string> {
   switch (credential.kind) {
     case 'anthropic_api_key':
       return { ANTHROPIC_API_KEY: credential.secret }
+    case 'claude_oauth_token':
+      return { CLAUDE_CODE_OAUTH_TOKEN: credential.secret }
     case 'gateway':
       return { ANTHROPIC_BASE_URL: credential.baseUrl, ANTHROPIC_AUTH_TOKEN: credential.secret }
   }
@@ -407,6 +420,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
     },
     mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,

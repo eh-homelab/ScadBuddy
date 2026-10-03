@@ -1,7 +1,7 @@
 """Slicing one plate with resolved presets and queueing it against one printer.
 
-**Why this exists at all.** ``filament_overrides`` and ``required_filament_types``
-are fields of ``PrintQueueItemCreate`` and of nothing else.
+**Why this exists at all.** ``filament_overrides``, ``required_filament_types`` and
+``nozzle_rack_choice`` (#836) are fields of ``PrintQueueItemCreate`` and of nothing else.
 ``PipelineRunCreateRequest`` carries ``source_library_file_id`` / ``source_archive_id``
 / ``copies`` / ``force`` — no printer and no filament mapping — and the run's background
 task then builds each copy's queue entry from Bambuddy's own defaults. So a print that
@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
+from scadbuddy.rack.usage import PickedHotend
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,18 @@ class QueueOutcome(BaseModel):
     preset_key: str | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
     printer_id: int
+    #: What ``choose_rack`` picked, with each hotend's serial, for ``print_run.py`` to
+    #: record (spec 2026-10-01 §5). Never reported: ``_queued`` builds the run's result
+    #: from named fields and never dumps this model (spec §6, §7).
+    rack_picks: list[PickedHotend] = Field(default_factory=list)
+
+
+class RackChoice(BaseModel):
+    """What ``choose_rack`` answers: the queue field, keyed by stringified filament group
+    id, and the picks behind it (spec 2026-10-01 §5)."""
+
+    nozzle_rack_choice: dict[str, int]
+    picks: list[PickedHotend] = Field(default_factory=list)
 
 
 class SlicePlan(BaseModel):
@@ -69,6 +82,7 @@ async def slice_and_queue(
     project_id: int | None = None,
     options: PrintOptions | None = None,
     before_enqueue: Callable[[], Awaitable[None]] | None = None,
+    choose_rack: Callable[[int], Awaitable[RackChoice | None]] | None = None,
 ) -> QueueOutcome:
     """Slice ``plate_id`` with ``plan``, wait for it, then queue the result once.
 
@@ -85,6 +99,11 @@ async def slice_and_queue(
 
     ``before_enqueue`` is awaited just before ``POST /queue/``: past it, the print may
     be on the queue whatever this raises (#470).
+
+    ``choose_rack`` is awaited with the sliced file's id after the slice and before
+    ``before_enqueue``; its choice goes on the item and its picks on the outcome. It is
+    awaited bare, like ``before_enqueue``: the callback is what never raises (spec
+    2026-10-01 §5), so a ``try`` here would hide a broken one.
     """
     request = SliceRequest(
         printer_preset=plan.printer_preset,
@@ -117,6 +136,7 @@ async def slice_and_queue(
     remembered = options.queue_fields() if options is not None else {}
     remembered.pop("quantity", None)
     remembered.pop("project_id", None)
+    rack = await choose_rack(sliced) if choose_rack is not None else None
     if before_enqueue is not None:
         await before_enqueue()
     item = await client.enqueue(
@@ -131,6 +151,7 @@ async def slice_and_queue(
             # On this route the project can ride on the item itself, so there is no
             # window in which the entry exists unfiled (#79).
             project_id=project_id,
+            nozzle_rack_choice=rack.nozzle_rack_choice if rack is not None else None,
         )
     )
     return QueueOutcome(
@@ -139,4 +160,5 @@ async def slice_and_queue(
         preset_key=request.preset_key,
         queue_item_ids=[item.id],
         printer_id=printer_id,
+        rack_picks=list(rack.picks) if rack is not None else [],
     )
