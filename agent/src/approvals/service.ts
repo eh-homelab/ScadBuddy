@@ -1027,31 +1027,53 @@ export class ApprovalService {
   ): Promise<ApprovalRecord | undefined> {
     const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
     const by = request.requestedBy
-    const row = await this.deps.sql.begin(async (tx) => {
-      // One key for every MCP prepare: the per-principal and the global
-      // bound are both read and written under it. Held until commit.
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
-      const own = await tx<{ id: string }[]>`
-        SELECT id FROM ai_approvals
-        WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
-          AND decision IS NULL AND expires_at > now()
-        ORDER BY created_at, id`
-      const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
-      if (evict.length > 0) {
-        await tx`
-          UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = ${bounds.evictReason}
-          WHERE id = ANY(${evict}::uuid[]) AND decision IS NULL`
-      } else {
-        const [n] = await tx<{ n: number }[]>`
-          SELECT count(*)::int AS n FROM ai_approvals
-          WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
-        if ((n?.n ?? 0) >= bounds.total) return undefined
-      }
-      const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
-      if (!inserted) throw new Error('approval vanished after insert')
-      return inserted
-    })
-    return row ? record(row) : undefined
+    // An eviction is a system cancellation: each evicted row gets its root
+    // `agent.approval` span and `decision_traceparent` in this transaction, as
+    // settle() gives one. The spans end once the transaction has settled.
+    const evicted: Span[] = []
+    try {
+      const row = await this.deps.sql.begin(async (tx) => {
+        // One key for every MCP prepare: the per-principal and the global
+        // bound are both read and written under it. Held until commit.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
+        const own = await tx<{ id: string }[]>`
+          SELECT id FROM ai_approvals
+          WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
+            AND decision IS NULL AND expires_at > now()
+          ORDER BY created_at, id`
+        const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
+        if (evict.length > 0) {
+          const cancelled = await tx.unsafe<Row[]>(
+            `UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = $2
+             WHERE id = ANY($1::uuid[]) AND decision IS NULL
+             RETURNING ${COLUMNS}`,
+            [evict, bounds.evictReason],
+          )
+          for (const cancelledRow of cancelled) {
+            const span = decisionSpan(record(cancelledRow), undefined)
+            evicted.push(span)
+            const traceparent = traceparentOf(span)
+            if (traceparent !== undefined) {
+              await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${cancelledRow.id}`
+            }
+          }
+        } else {
+          const [n] = await tx<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM ai_approvals
+            WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+          if ((n?.n ?? 0) >= bounds.total) return undefined
+        }
+        const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
+        if (!inserted) throw new Error('approval vanished after insert')
+        return inserted
+      })
+      return row ? record(row) : undefined
+    } catch (err) {
+      for (const span of evicted) recordFailure(span, err)
+      throw err
+    } finally {
+      for (const span of evicted) span.end()
+    }
   }
 
   /** Expires this one approval if it is pending and past its time. */
