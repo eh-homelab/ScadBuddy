@@ -253,6 +253,31 @@ async def test_a_failure_is_logged_by_type_and_never_by_its_text(
     assert leaked not in caplog.text
 
 
+class UnreadableUsage(Usages):
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        raise RuntimeError(f"pool timeout near {serial(21)}")
+
+
+@pytest.mark.parametrize(("manual", "sent"), [(2, {"0": 2}), (None, {"0": 4})])
+async def test_an_unreadable_usage_ranks_without_it_and_keeps_a_hand_pick(
+    caplog: pytest.LogCaptureFixture, manual: int | None, sent: dict[str, int]
+) -> None:
+    """claude-review on #1043, finding 2: usage only ranks, so a failed read ranks as if
+    no hotend had printed (here, by color) and never drops a position picked by hand."""
+    warnings: list[FilamentWarning] = []
+    reads = Reads(grouped(requirement(color="#FF6A13")), status(slot(2), slot(4, color="FF6A13FF")))
+    with caplog.at_level(logging.WARNING, logger=print_run.__name__):
+        choice = await chooser(reads, warnings, usages=UnreadableUsage(), manual=manual)(77)
+    assert choice is not None and choice.nozzle_rack_choice == sent
+    assert "rack-left-to-bambuddy" not in [w.kind for w in warnings]
+    [record] = [r for r in caplog.records if r.name == print_run.__name__]
+    assert (record.getMessage(), getattr(record, "error", None)) == (
+        "rack usage unreadable; ranked without it",
+        "RuntimeError",
+    )
+    assert serial(21) not in caplog.text
+
+
 async def test_a_rack_with_no_eligible_position_says_so() -> None:
     warnings: list[FilamentWarning] = []
     assert await chooser(Reads(grouped(requirement()), status()), warnings)(77) is None

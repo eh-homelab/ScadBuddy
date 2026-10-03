@@ -64,6 +64,7 @@ from scadbuddy.rack.rank import (
     SLICED_VOLUME_TYPE,
     RackCandidate,
     RackGroup,
+    Usage,
     abrasive_type,
     candidates_for,
     eligible,
@@ -343,6 +344,24 @@ class RackReads(Protocol):
     async def printer_status(self, printer_id: int) -> PrinterStatus: ...
 
 
+async def _usage_or_empty(
+    rack: RackUsage | None, status: PrinterStatus, printer_id: int
+) -> dict[str, Usage]:
+    """The rack's usage, or none when it cannot be read: usage only ranks, so a failed
+    read ranks as if no hotend had printed and keeps a hand pick (claude-review on #1043).
+    Logged by type only, since a database error's text can carry a serial (§7)."""
+    if rack is None:
+        return {}
+    try:
+        return await rack.usage(rack_serials(status.nozzle_rack))
+    except Exception as exc:
+        logger.warning(
+            "rack usage unreadable; ranked without it",
+            extra={"printer_id": printer_id, "error": type(exc).__name__},
+        )
+        return {}
+
+
 def rack_chooser(
     client: RackReads,
     *,
@@ -373,11 +392,10 @@ def rack_chooser(
                 return None
             stage = "status unreadable"
             status_read = await client.printer_status(printer_id)
-            stage = "rack usage unreadable"
             # Read before this read is recorded as seen (#1015).
             usage = (
-                await rack.usage(rack_serials(status_read.nozzle_rack))
-                if rack is not None and algorithm != "bambuddy"
+                await _usage_or_empty(rack, status_read, printer_id)
+                if algorithm != "bambuddy"
                 else {}
             )
             await record_seen(rack, printer_id, status_read)
@@ -537,7 +555,7 @@ async def rack_preview(
             label="the rack side",
         )
         algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id)
-        usage = await rack.usage(rack_serials(status.nozzle_rack)) if rack is not None else {}
+        usage = await _usage_or_empty(rack, status, printer_id)
         manual = {0: request.rack_position} if request.rack_position is not None else {}
         picks = rank_rack([group], status.nozzle_rack, algorithm, usage, manual)
         options = candidates_for(group, status.nozzle_rack, algorithm, usage)

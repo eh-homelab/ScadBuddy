@@ -77,6 +77,8 @@ class Links:
 
 
 EXPECTED_MESSAGES = [
+    "rack usage unreadable; ranked without it",
+    "could not record the rack's hotends",
     "rack pick left to Bambuddy",
     "could not record the rack's hotends",
     "could not record the rack picks",
@@ -102,7 +104,19 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
             rack=Leaky(),
             warnings=warnings,
         )
-        assert await choose(77) is None  # usage() failed: no choice, a warning
+        # usage() and seen() fail: ranked without usage, so a choice is still made.
+        assert await choose(77) is not None
+        unreadable = rack_chooser(
+            Reads(grouped(requirement()), RuntimeError(leak(INVENTED_SERIALS[4]))),
+            printer_id=1,
+            plate_id=1,
+            spools={1: SpoolOption(spool_id=9, material="PLA")},
+            algorithm="least_used",
+            manual_position=None,
+            rack=Leaky(),
+            warnings=warnings,
+        )
+        assert await unreadable(77) is None  # status failed: no choice, a warning
         await record_seen(Leaky(), 1, rack)
         await save_picks(
             Leaky(), 1, [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
