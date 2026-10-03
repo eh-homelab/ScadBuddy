@@ -636,7 +636,7 @@ async def test_a_job_input_from_an_older_build_still_renders() -> None:
                 TemplatePipeline.run,
                 job,
                 id=f"render-{job.id}",
-                task_queue=queue,  # type: ignore[arg-type]
+                task_queue=queue,
             )
         assert acts.accepts == 0
         last = [p for p in acts.projections if p.state][-1]
