@@ -118,3 +118,18 @@ def test_a_malformed_setting_stops_the_start(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SCADBUDDY_TRUSTED_PROXIES", "10.0.0.0/33")
     with pytest.raises(ValidationError, match="SCADBUDDY_TRUSTED_PROXIES"):
         Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
+
+
+def test_an_ipv4_mapped_network_is_converted_to_its_ipv4_network() -> None:
+    assert parse_cidr_list("::ffff:10.0.0.0/104") == (ipaddress.ip_network("10.0.0.0/8"),)
+    assert parse_cidr_list("::ffff:10.0.0.7") == (ipaddress.ip_network("10.0.0.7/32"),)
+    assert in_networks(parse_cidr_list("::ffff:10.0.0.0/104"), "10.1.2.3")
+    assert in_networks(parse_cidr_list("::ffff:10.0.0.0/104"), "::ffff:10.1.2.3")
+    assert not in_networks(parse_cidr_list("::ffff:10.0.0.0/104"), "11.0.0.1")
+
+
+def test_a_mapped_network_wider_than_the_mapped_range_is_refused() -> None:
+    with pytest.raises(
+        ProxyConfigError, match=r'SCADBUDDY_TRUSTED_PROXIES: "::ffff:10\.0\.0\.0/95"'
+    ):
+        parse_cidr_list("::ffff:10.0.0.0/95")

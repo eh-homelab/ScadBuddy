@@ -146,3 +146,15 @@ def test_an_empty_last_value_falls_back_to_the_peer() -> None:
     forwarded = headers(("x-forwarded-for", "203.0.113.9, "))
     assert relay_client(forwarded, "10.42.0.5", settings("10.42.0.0/16")) == "10.42.0.5"
     assert relay_client(headers(), None, settings()) == "unknown"
+
+
+def test_a_refusal_by_the_process_bucket_does_not_spend_the_clients_own() -> None:
+    limits = RelayLimits(clock=lambda: 0.0, process_burst=1, client_burst=2)
+    limits.take("a")
+    for _ in range(5):
+        with pytest.raises(ApiError) as error:
+            limits.take("b")
+        assert refusal(error) == (429, "the relay is over its overall rate limit")
+    # "b" lost nothing to those refusals: both of its tokens are still there.
+    assert limits._clients["b"].take()
+    assert limits._clients["b"].take()

@@ -335,3 +335,26 @@ def test_a_forwarder_restarted_on_a_fresh_loop_forwards() -> None:
     asyncio.run(first())
     asyncio.run(second())
     assert forwarder_seen == [BATCH]
+
+
+async def test_a_forward_task_that_dies_still_closes_the_client_and_surfaces_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def collector(request: httpx.Request) -> httpx.Response:
+        raise ZeroDivisionError
+
+    forwarder, _ = make(collector)
+    closed: list[bool] = []
+    real_aclose = httpx.AsyncClient.aclose
+
+    async def aclose(self: httpx.AsyncClient) -> None:
+        closed.append(True)
+        await real_aclose(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", aclose)
+    with pytest.raises(ZeroDivisionError):
+        async with forwarder.running():
+            forwarder.offer(BATCH)
+            await asyncio.sleep(0.1)
+    assert closed == [True]
+    assert forwarder._client is None
