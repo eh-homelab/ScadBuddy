@@ -3,19 +3,34 @@ in any form, leaves the process."""
 
 from __future__ import annotations
 
+import linecache
+import os
 import traceback
+from collections.abc import Iterator
+from pathlib import Path
 from typing import cast
 
+import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Link, Status, StatusCode
 
+from scadbuddy.core import trace_scrub
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter, frames_only
 from scadbuddy.render.runner import ParameterValueError
 
 SENTINEL = "s3ntinel-9f1c"
+CODE_ROOTS = trace_scrub._CODE_ROOTS
+
+
+@pytest.fixture(autouse=True)
+def _tests_are_code(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """These tests raise in this file, which in production is no code root."""
+    tests = os.path.join(os.path.realpath(os.path.dirname(__file__)), "")
+    monkeypatch.setattr(trace_scrub, "_CODE_ROOTS", (*CODE_ROOTS, tests))
+    yield
 
 
 def _exported(raise_it: bool = True, description: str | None = None) -> InMemorySpanExporter:
@@ -271,3 +286,43 @@ def test_no_event_or_link_carries_what_a_span_may_not() -> None:
             assert key not in attributes
     assert event.name == "retry"
     assert exported_link.context == earlier.get_span_context()
+
+
+def test_a_real_file_outside_the_code_roots_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review 4 of #1064: a message's fake traceback naming a data file must not make
+    # the exporter read it, or keep it in linecache.
+    monkeypatch.setattr(trace_scrub, "_CODE_ROOTS", CODE_ROOTS)
+    data = tmp_path / "model.3mf"
+    data.write_text("def leaked():\n    pass\n")
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{data}", line 1, in <module>\n'
+        f'  File "{data}", line 1, in leaked\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text) == ""
+    assert str(data) not in linecache.cache
+
+
+def test_stdlib_and_scadbuddy_frames_are_kept_without_filling_linecache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(trace_scrub, "_CODE_ROOTS", CODE_ROOTS)
+    stdlib = os.path.realpath(os.__file__)
+    ours = os.path.realpath(trace_scrub.__file__)
+    linecache.cache.pop(stdlib, None)
+    linecache.cache.pop(ours, None)
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{stdlib}", line 1, in makedirs\n'
+        f'  File "{ours}", line 1, in frames_only\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text).splitlines() == [
+        f'File "{stdlib}", line 1, in makedirs',
+        f'File "{ours}", line 1, in frames_only',
+    ]
+    assert stdlib not in linecache.cache
+    assert ours not in linecache.cache
