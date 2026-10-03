@@ -6,9 +6,9 @@ loaded inside each activity and never passed in or out of one.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.filaments import QueueFilaments
@@ -53,6 +53,12 @@ class PrintRunInput(BaseModel):
     repeat_window_s: float = 600.0
     #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
     search_attributes: bool = False
+
+    @field_serializer("request")
+    def _keep_what_was_left_out(self, request: PrintRunRequest) -> dict[str, Any]:
+        # A field the client omitted reads back as omitted: an omitted `project_id` is
+        # the remembered project, an explicit null is none (`chosen_project`).
+        return request.model_dump(mode="json", exclude_unset=True)
 
 
 class Checked(BaseModel):

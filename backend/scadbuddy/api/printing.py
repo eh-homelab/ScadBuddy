@@ -273,12 +273,14 @@ async def accept_run(
 
     try:
         answer = await start()
-        if (
-            not has_request_id
-            and answer.repeated
-            and answer.run is not None
-            and answer.run.status != "running"
-        ):
+        if not has_request_id and answer.repeated and answer.run is not None:
+            # The record is the truth: the workflow's copy of the row may not have
+            # caught up with the run's end yet.
+            stored = await runs.store.get(answer.run.id)
+            ended = stored is not None and stored.status != "running"
+        else:
+            ended = False
+        if ended:
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
             with suppress(Exception):
