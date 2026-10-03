@@ -1,3 +1,4 @@
+import type { Attributes } from '@opentelemetry/api'
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
@@ -9,6 +10,7 @@ import type {
 } from '../api/types'
 import { printChoicesOf } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
+import { traceAction } from './traceAction'
 import type { PrintSelection } from './usePrintChoices'
 
 interface RunInput {
@@ -27,6 +29,18 @@ interface RunInput {
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   options: PrintOptions
   onRan: (result: PrintRunResult) => void
+}
+
+/** Spec 2026-10-01 §6: what is printed, on which printer, and which plate. */
+function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes {
+  return {
+    ...(source.kind === 'output'
+      ? { 'scadbuddy.output_id': source.output.id }
+      : { 'scadbuddy.library_file_id': source.file.id }),
+    ...(typeof body.printer_id === 'number' ? { 'scadbuddy.printer_id': body.printer_id } : {}),
+    'scadbuddy.plate_id': body.plate_id,
+    'scadbuddy.all_plates': body.all_plates,
+  }
 }
 
 /**
@@ -130,7 +144,10 @@ export function useRunPrint({
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),
       }
-      const ran = await sourceApi(source).run(body, controller.signal)
+      // The run's POST is the action's child; the polls that follow it are not (traceAction).
+      const ran = await traceAction('print', printAttributes(source, body), () =>
+        sourceApi(source).run(body, controller.signal),
+      )
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
