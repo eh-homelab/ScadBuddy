@@ -75,16 +75,13 @@ describe('SessionTouched', () => {
   })
 
   it('says when the session has touched nothing', async () => {
+    setSessionResources('sess-empty', [])
     renderPage(<SessionTouched sessionId="sess-empty" />)
     expect(await screen.findByText('Nothing changed by this session yet.')).toBeInTheDocument()
   })
 
   it('says why when the agent cannot answer', async () => {
-    server.use(
-      http.get('/api/v1/ai/sessions/:id/resources', () =>
-        HttpResponse.json({ detail: 'session not found' }, { status: 404 }),
-      ),
-    )
+    // The mock refuses a session it does not know, as the real route does.
     renderPage(<SessionTouched sessionId="sess-gone" />)
     expect(await screen.findByRole('alert')).toHaveTextContent('session not found')
   })

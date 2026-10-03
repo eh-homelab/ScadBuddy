@@ -8,7 +8,8 @@
  * #931 — what a session touched (`GET /sessions/:id/resources`) is a list per session
  * id that tests set with `setSessionResources`; the desktop agent's session
  * (`EXTERNAL_SESSION_ID`) starts with what its script did, so the mocked build shows
- * the panel filled. Any other session touched nothing.
+ * the panel filled. Any other session the open mock agent knows touched nothing; one it
+ * does not know is a 404, as the real route refuses a session it cannot find or show.
  */
 import { HttpResponse, http } from 'msw'
 import type { AiSessionView, SessionLimits, SessionResource } from '../../api/types'
@@ -93,9 +94,11 @@ export const handlers = [
     return HttpResponse.json(state.limits)
   }),
 
-  http.get(`${base}/sessions/:id/resources`, ({ params }) =>
-    HttpResponse.json({ resources: state.resources.get(String(params.id)) ?? [] }),
-  ),
+  http.get(`${base}/sessions/:id/resources`, ({ params }) => {
+    const id = String(params.id)
+    const resources = state.resources.get(id) ?? (mockAgentSessions()?.has(id) ? [] : undefined)
+    return resources ? HttpResponse.json({ resources }) : detail('session not found', 404)
+  }),
 
   http.post(`${base}/sessions/:id/fork`, ({ params }) => {
     const agent = mockAgentSessions()

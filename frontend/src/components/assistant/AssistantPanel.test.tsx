@@ -6,6 +6,7 @@ import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { setPendingApprovals } from '../../mocks/features/approvals'
+import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
 
@@ -336,6 +337,47 @@ describe('assistant panel', () => {
 
     await user.click(touched)
     expect(screen.queryByRole('region', { name: 'What this session touched' })).not.toBeInTheDocument()
+  })
+
+  it('reads Touched again when a tool call finishes, without waiting for the turn (#931)', async () => {
+    let inject: (frame: unknown) => void = () => {}
+    const spying = () => {
+      const inner = factory()
+      return {
+        ...inner,
+        connect: (h: Parameters<typeof inner.connect>[0]) => {
+          inject = (frame) => act(() => h.onFrame(frame as never))
+          inner.connect(h)
+        },
+      }
+    }
+    const view = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} assistantTransport={spying} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    await view.user.click(screen.getByRole('button', { name: 'Touched' }))
+    const panel = screen.getByRole('region', { name: 'What this session touched' })
+    await within(panel).findByRole('group', { name: 'Presets' })
+
+    setSessionResources(EXTERNAL_SESSION_ID, [
+      { type: 'output', id: 'out-mid', action: 'created', model: 'gridfinity-bin', before: null, after: null, tool: 'save_output', at: '2026-10-03T09:01:00.000Z' },
+    ])
+    const status = screen.getByTestId('agent-status').textContent
+    const base = { v: 1, sessionId: EXTERNAL_SESSION_ID }
+    inject({ ...base, type: 'tool.call', id: 'tool-ext-2', name: 'mcp__scadbuddy__save_output', input: { slug: 'gridfinity-bin' }, risk: 'write' })
+    inject({ ...base, type: 'tool.result', id: 'tool-ext-2', ok: true, summary: 'Saved.' })
+
+    expect(await within(panel).findByRole('link', { name: /out-mid/ })).toHaveAttribute('href', '/edit/out-mid')
+    // Read on the tool result alone: the session's status never moved.
+    expect(screen.getByTestId('agent-status').textContent).toBe(status)
   })
 
   it('reports a malformed frame instead of rendering it', async () => {
