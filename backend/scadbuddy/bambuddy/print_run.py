@@ -406,6 +406,8 @@ def rack_chooser(
                 if algorithm != "bambuddy"
                 else {}
             )
+            # Recorded again on purpose: this is a fresh read, per plate, and can show a
+            # hotend swapped in since prepare_run's. An unchanged rack writes nothing (#1082).
             await record_seen(rack, printer_id, status_read)
             stage = "rack pick failed"
             picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)

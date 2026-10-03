@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -13,7 +14,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
 from scadbuddy.rack.usage import STATEMENT_TIMEOUT_MS, PickedHotend, RackUsageStore
-from scadbuddy.render.pg_store import MIGRATION_LOCK
+from scadbuddy.render import pg_store
 from tests.rack.helpers import group, serial, slot
 
 pytestmark = pytest.mark.requires_postgres
@@ -177,8 +178,12 @@ async def test_migrating_waits_out_another_process_holding_the_lock(
     """#1086 review: another replica migrating for longer than the statement timeout
     must not cancel this store's wait for the migration lock."""
     monkeypatch.setattr(usage, "STATEMENT_TIMEOUT_MS", 200)
+    # Advisory locks are database-wide: a key of this test's own keeps a concurrent run
+    # on the same test database from waiting on, or holding, the real one.
+    lock = secrets.randbits(62)
+    monkeypatch.setattr(pg_store, "MIGRATION_LOCK", lock)
     with psycopg.connect(pg_conninfo) as holder:
-        holder.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (lock,))
         first = asyncio.create_task(store.seen(1, [A]))
         await asyncio.sleep(0.6)
         assert not first.done()
