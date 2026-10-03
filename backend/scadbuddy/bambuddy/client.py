@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
@@ -30,6 +30,7 @@ from typing import Any, Self
 
 import httpx
 from fastapi import status
+from opentelemetry.trace import Span, SpanKind
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
@@ -66,11 +67,24 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
+from scadbuddy.core.tracing import span
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
+
+
+def _call_span(method: str, scope: Scope) -> AbstractContextManager[Span]:
+    """Our side of a Bambuddy call (spec 2026-10-01 §4): no headers are injected; the
+    span holds the method, the status code and the scope, never a path or a body."""
+    return span(
+        f"bambuddy.{method}",
+        kind=SpanKind.CLIENT,
+        attributes={"http.request.method": method, "scadbuddy.bambuddy.scope": str(scope)},
+    )
+
+
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 DEFAULT_TIMEOUT = 30.0
@@ -147,22 +161,24 @@ class BambuddyClient:
         files: Any | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
-        try:
-            response = await self._http.request(
-                method,
-                self.config.url(path),
-                headers=self._headers,
-                params=dict(params) if params else None,
-                json=json,
-                files=files,
-                timeout=timeout or self.config.timeout,
-            )
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": method, "path": path})
-            raise map_transport(error, what=what) from error
-        if response.is_success:
-            return response
-        raise map_response(response, scope=scope, what=what)
+        with _call_span(method, scope) as current:
+            try:
+                response = await self._http.request(
+                    method,
+                    self.config.url(path),
+                    headers=self._headers,
+                    params=dict(params) if params else None,
+                    json=json,
+                    files=files,
+                    timeout=timeout or self.config.timeout,
+                )
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": method, "path": path})
+                raise map_transport(error, what=what) from error
+            current.set_attribute("http.response.status_code", response.status_code)
+            if response.is_success:
+                return response
+            raise map_response(response, scope=scope, what=what)
 
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
@@ -481,18 +497,20 @@ class BambuddyClient:
         if if_range is not None:
             headers["If-Range"] = if_range
         request = self._http.build_request("GET", self.config.url(path), headers=headers)
-        try:
-            response = await self._http.send(request, stream=True)
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
-            raise map_transport(error, what=what) from error
-        try:
-            if not response.is_success and response.status_code != 416:
-                await response.aread()
-                raise map_response(response, scope=Scope.READ_STATUS, what=what)
-            yield response
-        finally:
-            await response.aclose()
+        with _call_span("GET", Scope.READ_STATUS) as current:
+            try:
+                response = await self._http.send(request, stream=True)
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
+            current.set_attribute("http.response.status_code", response.status_code)
+            try:
+                if not response.is_success and response.status_code != 416:
+                    await response.aread()
+                    raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                yield response
+            finally:
+                await response.aclose()
 
     # --- library -------------------------------------------------------------
 
@@ -594,21 +612,23 @@ class BambuddyClient:
         it in ``contextlib.aclosing``."""
         what = f"download library file {file_id}"
         path = f"/library/files/{file_id}/download"
-        try:
-            async with self._http.stream(
-                "GET",
-                self.config.url(path),
-                headers=self._headers,
-                timeout=self.config.upload_timeout,
-            ) as response:
-                if not response.is_success:
-                    await response.aread()
-                    raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
-            raise map_transport(error, what=what) from error
+        with _call_span("GET", Scope.MANAGE_LIBRARY) as current:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    self.config.url(path),
+                    headers=self._headers,
+                    timeout=self.config.upload_timeout,
+                ) as response:
+                    current.set_attribute("http.response.status_code", response.status_code)
+                    if not response.is_success:
+                        await response.aread()
+                        raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
