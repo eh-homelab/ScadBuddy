@@ -36,9 +36,11 @@ CONNECT_TIMEOUT = 5.0
 #: Bounds every query on this store's connections, so a stuck read releases its thread
 #: and connection even after an awaiting caller has stopped waiting (#1086 review).
 STATEMENT_TIMEOUT_MS = 15_000
-#: How long one archive's read and record may take in a settle (#1086 review): a stall
-#: costs that archive alone, not the ones after it, which the watcher's whole-hook
-#: timeout (``SETTLE_TIMEOUT``) would otherwise cut off with it.
+#: How long one archive's read from Bambuddy may take in a settle (#1086 review): a
+#: stall costs that archive alone, not the ones after it, which the watcher's whole-hook
+#: timeout (``SETTLE_TIMEOUT``) would otherwise cut off with it. The write that follows
+#: is bounded by ``STATEMENT_TIMEOUT_MS`` instead: a write cut off here would run on in
+#: its thread and could land after a warning that said it had not.
 ARCHIVE_TIMEOUT = 15.0
 
 
@@ -125,7 +127,10 @@ class RackUsageStore:
                 try:
                     migrate(conn)
                 finally:
-                    conn.execute("SELECT set_config('statement_timeout', %s, false)", (bound,))
+                    # Not on a broken connection: the pool drops it, and a second error
+                    # here would replace the migration's own (#1086 review).
+                    if not conn.broken:
+                        conn.execute("SELECT set_config('statement_timeout', %s, false)", (bound,))
             self._migrated = True
         return self._pool
 
@@ -349,7 +354,8 @@ async def record_settled(
     wore either way (spec §10). One still running is left for its own settle. An
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
-    and ids and skipped, a stall past ``archive_timeout`` too; nothing is retried."""
+    and ids and skipped, as is an archive read that stalls past ``archive_timeout``;
+    nothing is retried."""
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -366,7 +372,7 @@ async def record_settled(
         return 0
 
     async def record_one(archive_id: int, queue_item_id: int) -> int:
-        archive = await client.archive(archive_id)
+        archive = await asyncio.wait_for(client.archive(archive_id), timeout=archive_timeout)
         if archive.status not in SETTLED_STATUSES:
             # Another print of this output, still running: its own settle counts it,
             # with its real time, which DO NOTHING would never let in after this.
@@ -389,9 +395,7 @@ async def record_settled(
         if queue_item_id not in picked or archive_id in recorded:
             continue
         try:
-            written += await asyncio.wait_for(
-                record_one(archive_id, queue_item_id), timeout=archive_timeout
-            )
+            written += await record_one(archive_id, queue_item_id)
         except Exception as exc:
             logger.warning(
                 "could not record a rack nozzle's print",

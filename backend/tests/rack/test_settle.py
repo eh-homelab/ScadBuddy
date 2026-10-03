@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +25,15 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
 from tests.bambuddy.conftest import BASE_URL, recording
-from tests.bambuddy.test_watcher import kinds, until_idle, watcher_for, write_output
+from tests.bambuddy.test_watcher import OUTPUT as WATCHED
+from tests.bambuddy.test_watcher import (
+    Script,
+    kinds,
+    progress,
+    until_idle,
+    watcher_for,
+    write_output,
+)
 from tests.conftest import PgPool, open_pg_pool
 from tests.rack.helpers import serial
 
@@ -308,3 +318,34 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     assert kinds(seen) == ["print.progress", "print.settled"]
     usage = (await store.usage([A]))[A]
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
+
+
+async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
+    store: RackUsageStore, pool: PgPool, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1083: the hook's settings read is a blocking database read. Run on the event
+    loop it would freeze the watch, and the watcher's timeout could never fire."""
+    release = threading.Event()
+    settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+
+    def load() -> StoredSettings:
+        release.wait(timeout=2)
+        return settings
+
+    write_output(paths)
+    watcher, seen = watcher_for(paths, Script(progress("done", settled=True, done=1)))
+    watcher.settle_timeout = 0.1
+    watcher.on_settled.append(settle_hook(store, PrintLinkStore(pool), load))
+    try:
+        with caplog.at_level(logging.DEBUG):
+            started = time.monotonic()
+            watcher.watch(WATCHED)
+            await until_idle(watcher)
+            # Well inside the read's 2 s block: the loop was never frozen by it.
+            assert time.monotonic() - started < 1
+    finally:
+        release.set()
+
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "TimeoutError"
