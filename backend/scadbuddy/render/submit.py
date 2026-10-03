@@ -83,7 +83,6 @@ class RenderService:
         config: Config,
         paths: DataPaths,
         metrics: Metrics,
-        prune_interval: float = 300.0,
         search_attributes: bool = False,
     ) -> None:
         self.store = projection
@@ -94,11 +93,8 @@ class RenderService:
         self.config = config
         self.paths = paths
         self.metrics = metrics
-        #: How often settled rows are pruned: they hold their blobs' refs until they go.
-        self.prune_interval = prune_interval
         #: Upsert §4.2's Search Attributes (registered on the cluster first).
         self.search_attributes = search_attributes
-        self._pruner: asyncio.Task[None] | None = None
         self._listened_before = False
         metrics.store_info.labels(projection.backend).set(1)
         self._publish_limits()
@@ -121,14 +117,9 @@ class RenderService:
             await self.settle_legacy()
         except Exception:
             logger.exception("could not settle the renders an older release left pending")
-        self._pruner = asyncio.create_task(self._prune_forever())
 
     async def aclose(self) -> None:
-        if self._pruner is not None:
-            self._pruner.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._pruner
-            self._pruner = None
+        """Nothing runs in the background any more: housekeeping prunes (#1054)."""
 
     def _memo(self) -> dict[str, Any]:
         return {"activity_timeout": self.config.activity_timeout}
@@ -406,14 +397,6 @@ class RenderService:
                 exc_info=True,
             )
             self.metrics.store_errors.labels("cancel_workflow").inc()
-
-    async def _prune_forever(self) -> None:
-        while True:
-            await asyncio.sleep(self.prune_interval)
-            try:
-                await self.prune()
-            except Exception:
-                logger.exception("could not prune settled render jobs")
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
         self.metrics.render_finished.labels(outcome).inc()

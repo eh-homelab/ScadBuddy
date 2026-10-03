@@ -857,9 +857,10 @@ async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
     assert await asyncio.to_thread(projection.list_jobs) == []
 
 
-async def test_settled_jobs_past_their_ttl_are_pruned_without_a_restart(
+async def test_settled_jobs_past_their_ttl_are_pruned(
     projection: JobProjection, deps: WorkerDeps
 ) -> None:
+    """The housekeeping Schedule's prune (#1054) calls this every interval."""
     old = _accepted(projection, finished_ago=timedelta(days=2))
     old.state, old.finished_at = "done", now() - timedelta(days=2)
     assert projection.finish(old)
@@ -873,20 +874,11 @@ async def test_settled_jobs_past_their_ttl_are_pruned_without_a_restart(
             config=replace(deps.config, job_ttl=86400.0),
             paths=deps.paths,
             metrics=Metrics(),
-            prune_interval=0.05,
         )
-        await service.start()
-        try:
-            async with asyncio.timeout(10):
-                while True:
-                    try:
-                        await asyncio.to_thread(projection.read, old.id)
-                    except JobNotFoundError:
-                        break
-                    await asyncio.sleep(0.05)
-        finally:
-            await service.aclose()
+        await service.prune()
 
+    with pytest.raises(JobNotFoundError):
+        await asyncio.to_thread(projection.read, old.id)
     assert (await asyncio.to_thread(projection.read, fresh.id)).state == "pending"
 
 

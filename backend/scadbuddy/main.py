@@ -12,6 +12,8 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
+from temporalio import activity
+from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
@@ -46,6 +48,7 @@ from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import bambuddy_worker, connect
 from scadbuddy.workflows.follow import resume_followed
+from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping, ensure_schedule
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -259,14 +262,31 @@ async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
-async def _asset_sweeper(state: AppState) -> None:
-    while True:
-        await asyncio.sleep(state.config.asset_sweep_interval)
+def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The Schedule's sweeps (#1054), each the loop's best-effort call: it logs a
+    failure and returns, so the next tick tries again."""
+
+    @activity.defn(name=SWEEPS[0])
+    async def prune_jobs() -> None:
+        try:
+            await state.render.prune()
+        except Exception:
+            logger.exception("could not prune settled render jobs")
+
+    @activity.defn(name=SWEEPS[1])
+    async def sweep_assets() -> None:
         await _sweep_assets_logged(state)
+
+    @activity.defn(name=SWEEPS[2])
+    async def sweep_blobs() -> None:
         await _sweep_blobs_logged(state)
-        # The periodic housekeeping pass: a crashed duplicate's staging otherwise
-        # waits for the next boot or duplicate (#397).
+
+    @activity.defn(name=SWEEPS[3])
+    async def sweep_staging() -> None:
+        # A crashed duplicate's staging otherwise waits for the next boot (#397).
         await _sweep_duplicate_staging_logged(state)
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -433,6 +453,39 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
+async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
+    """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
+    sweeps need the data volume this process holds. Once connected it sets the
+    Schedule up; Temporal down at boot only delays that."""
+    settings = state.settings
+    client = state.temporal
+    while client is None:
+        try:
+            client = await connect(settings.temporal_address, settings.temporal_namespace)
+        except Exception:
+            logger.warning("the library worker cannot reach Temporal yet; retrying", exc_info=True)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+            if stop.is_set():
+                return
+    queue = settings.temporal_task_queue_library
+    try:
+        await ensure_schedule(client, queue, state.config.asset_sweep_interval)
+    except Exception:
+        logger.exception("could not set up the housekeeping Schedule; the next start retries")
+    activities = _housekeeping_activities(state)
+    while not stop.is_set():
+        try:
+            async with Worker(
+                client, task_queue=queue, workflows=[Housekeeping], activities=activities
+            ):
+                await stop.wait()
+        except Exception:
+            logger.exception("the library worker failed; starting it again")
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+
+
 async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:
     if task is None:
         return
@@ -509,7 +562,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Everything from here holds the render service's resources (the Postgres pool,
     # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
-    sweeper: asyncio.Task[None] | None = None
+    library: asyncio.Task[None] | None = None
+    stop_library = asyncio.Event()
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
@@ -532,10 +586,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             worker = (task, deps)
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
-        # After the projection has opened: the jobs in it are references too.
-        if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state, converge=False)
-            sweeper = asyncio.create_task(_asset_sweeper(state))
+        # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
+        # run once at once (the boot's converging sweep), then every interval.
+        library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(
                 _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
@@ -569,7 +622,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
-        for background in (sweeper, backfill):
+        stop_library.set()
+        await _stop_print_worker(library)
+        for background in (backfill,):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
