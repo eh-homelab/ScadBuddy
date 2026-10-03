@@ -172,6 +172,25 @@ describe('SettingsPage', () => {
     put.mockRestore()
   })
 
+  it('keeps finished operations for the days given, and clearing keeps them again (#1053)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const days = screen.getByLabelText('Keep finished Bambuddy operations for (days)')
+    expect(days).toHaveAttribute('placeholder', 'Forever')
+    await user.type(days, '2')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ operation_retention_seconds: 172800 })
+
+    await user.clear(days)
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ operation_retention_seconds: null })
+    put.mockRestore()
+  })
+
   it('saves the display unit and switches every open view to it', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
