@@ -86,7 +86,18 @@ export function credentialEntry(over: Partial<AiCredentialEntry> & Pick<AiCreden
   return entry({ priority: 0, ...over })
 }
 
+/** As the agent reads it: a cooldown that has ended is `active` again, with no write. */
+function expire(): void {
+  const now = Date.now()
+  state.credentials = state.credentials.map((c) =>
+    c.status === 'cooling_down' && c.cooldown_until && Date.parse(c.cooldown_until) <= now
+      ? { ...c, status: 'active', cooldown_until: null }
+      : c,
+  )
+}
+
 function listView(): AiCredentialList {
+  expire()
   const usable = state.credentials.filter((c) => c.usable && c.status === 'active')
   const cooling = state.credentials
     .filter((c) => c.status === 'cooling_down' && c.cooldown_until)

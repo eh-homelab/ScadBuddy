@@ -118,7 +118,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(field).toHaveAttribute('type', 'password')
     await user.type(field, 'gw-token-new-NEW1')
     await user.click(screen.getByRole('button', { name: 'Save key' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for Gateway.')
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for credential 2 (Gateway ••••NEW1).')
     await waitFor(() => expect(within(rows()[1]!).getByLabelText('ending in NEW1')).toBeInTheDocument())
     expect(rows()[1]).toHaveTextContent('Active')
     expect(screen.queryByLabelText('New gateway token')).not.toBeInTheDocument()
@@ -223,7 +223,8 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     const { user } = renderPage(<AiCredentialSection />)
     await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
     const dialog = await screen.findByRole('dialog', { name: `Delete ${KEY}?` })
-    expect(dialog).toHaveTextContent('falls back to the next credential')
+    // The gateway behind it is rate limited, so nothing else is usable now.
+    expect(dialog).toHaveTextContent('No other credential is usable now, so the assistant stops working')
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(rows()).toHaveLength(2)
 
@@ -233,6 +234,63 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByTestId('ai-credentials-none-usable')).toBeInTheDocument()
     await waitFor(() => expect(rows()).toHaveLength(1))
     expect(rows()[0]).toHaveTextContent('1.Gateway')
+  })
+
+  it.each([
+    ['one behind the one in use', 'c3', `The assistant keeps using ${KEY}.`],
+    ['the one in use, with a usable one behind it', 'default', 'The assistant falls back to Anthropic API key ••••BBBB.'],
+  ])('says what deleting %s does', async (_, id, message) => {
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA' }),
+      credentialEntry({ id: 'c3', last4: 'BBBB' }),
+    ])
+    const { user } = renderPage(<AiCredentialSection />)
+    const name = id === 'default' ? KEY : 'Anthropic API key ••••BBBB'
+    await user.click(await screen.findByRole('button', { name: `Delete ${name}` }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent(message)
+  })
+
+  it('forgets a failed test once the key is replaced', async () => {
+    server.use(
+      http.post(`${entries}/default/test`, () =>
+        HttpResponse.json({ ok: false, detail: 'authentication_error', duration_ms: 500, model: null }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Test ${KEY}` }))
+    expect(await within(rows()[0]!).findByTestId('ai-credential-test')).toHaveTextContent('Failed')
+    await user.click(screen.getByRole('button', { name: `Replace the key of ${KEY}` }))
+    await user.type(screen.getByLabelText('New API key'), 'sk-ant-replaced-1234')
+    await user.click(screen.getByRole('button', { name: 'Save key' }))
+    expect(await screen.findByText(/Saved a new key for credential 1/)).toBeInTheDocument()
+    expect(within(rows()[0]!).queryByTestId('ai-credential-test')).not.toBeInTheDocument()
+  })
+
+  it('shows a credential deleted elsewhere refused, and drops it on the next read', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    // Another tab deletes the gateway.
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
+    await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no such credential')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+  })
+
+  it('reads the list again when a cooldown ends, so the status is not left stale', async () => {
+    setCredentials([
+      credentialEntry({
+        id: 'default',
+        last4: 'Q7xA',
+        status: 'cooling_down',
+        cooldown_until: new Date(Date.now() + 1000).toISOString(),
+      }),
+    ])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credentials-none-usable')).toBeInTheDocument()
+    expect(rows()[0]).toHaveTextContent(/Rate limited until/)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 5000 })
+    expect(screen.queryByTestId('ai-credentials-none-usable')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
   })
 
   it('says why it cannot save, and disables Add and Replace', async () => {

@@ -60,6 +60,21 @@ function nameOf(entry: AiCredentialEntry): string {
 
 type Busy = { id: string; action: 'up' | 'down' | 'test' | 'reset' | 'replace' | 'delete' } | null
 
+/** How long after a cooldown ends the list is read again, so the agent sees it ended too. */
+const REFRESH_SLACK_MS = 500
+/** setTimeout's ceiling (about 24.8 days); a later cooldown is read again then. */
+const MAX_TIMER_MS = 2 ** 31 - 1
+
+/** What deleting `entry` does to the assistant, for the confirmation. */
+function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[]): string {
+  const live = (c: AiCredentialEntry) => c.usable && c.status === 'active'
+  const inUse = credentials.find(live)
+  if (inUse && inUse.id !== entry.id) return `The assistant keeps using ${nameOf(inUse)}.`
+  const next = credentials.find((c) => c.id !== entry.id && live(c))
+  if (next) return `The assistant falls back to ${nameOf(next)}.`
+  return 'No other credential is usable now, so the assistant stops working until one is.'
+}
+
 /**
  * #1000, #1093 — Settings → "Claude credentials": the agent service's credentials in the
  * order it tries them (`/api/v1/ai/credentials/entries`, agent `routes/credentials.ts`). A
@@ -101,6 +116,19 @@ export function AiCredentialSection() {
     if (loadError && before !== 'checking') reload()
   }, [ai.state, loadError, reload])
 
+  // The agent works a cooldown out at read time, so read again just after the earliest one ends.
+  const { data: listed, refresh } = list
+  useEffect(() => {
+    const ends = (listed?.credentials ?? [])
+      .filter((c) => c.status === 'cooling_down' && c.cooldown_until)
+      .map((c) => Date.parse(c.cooldown_until!))
+      .filter((t) => Number.isFinite(t))
+    if (ends.length === 0) return
+    const wait = Math.min(Math.max(Math.min(...ends) - Date.now(), 0) + REFRESH_SLACK_MS, MAX_TIMER_MS)
+    const timer = setTimeout(() => refresh(), wait)
+    return () => clearTimeout(timer)
+  }, [listed, refresh])
+
   if (notDeployed(list.error)) return null
   const current = list.data
   if (!current) {
@@ -126,10 +154,10 @@ export function AiCredentialSection() {
     !adding && current.can_save && secret.trim() !== '' && (kind !== 'gateway' || baseUrl.trim() !== '')
 
   /** Runs one action, then shows the list as the agent now has it; true when it worked. */
-  async function act(
+  async function act<T extends AiCredentialList | AiCredentialEntry>(
     next: Busy,
-    run: () => Promise<AiCredentialList | AiCredentialEntry>,
-    done: string | null,
+    run: () => Promise<T>,
+    done: string | null | ((answer: T) => string),
     fallback: string,
   ): Promise<boolean> {
     setBusy(next)
@@ -139,7 +167,8 @@ export function AiCredentialSection() {
       const answer = await run()
       if ('credentials' in answer) list.setData(answer)
       else list.refresh()
-      if (done) setNotice(done)
+      if (next && next.action !== 'up' && next.action !== 'down') forgetTest(next.id)
+      if (done) setNotice(typeof done === 'function' ? done(answer) : done)
       void recheckAiAvailability({ force: true })
       return true
     } catch (caught) {
@@ -150,6 +179,10 @@ export function AiCredentialSection() {
     } finally {
       setBusy(null)
     }
+  }
+
+  function forgetTest(id: string) {
+    setTests(({ [id]: _, ...rest }) => rest)
   }
 
   async function add(event: FormEvent) {
@@ -193,7 +226,7 @@ export function AiCredentialSection() {
     setBusy({ id: entry.id, action: 'test' })
     setError(null)
     setNotice(null)
-    setTests(({ [entry.id]: _, ...rest }) => rest)
+    forgetTest(entry.id)
     try {
       const result = await api.testAiCredential(entry.id)
       setTests((all) => ({ ...all, [entry.id]: result }))
@@ -211,10 +244,11 @@ export function AiCredentialSection() {
 
   async function replace(event: FormEvent, entry: AiCredentialEntry) {
     event.preventDefault()
+    const position = credentials.findIndex((c) => c.id === entry.id) + 1
     const saved = await act(
       { id: entry.id, action: 'replace' },
       () => api.saveAiCredential(entry.id, { kind: entry.kind, base_url: entry.base_url, secret: replacement.trim() }),
-      `Saved a new key for ${KIND_LABEL[entry.kind]}.`,
+      (answer) => `Saved a new key for credential ${position} (${nameOf(answer)}).`,
       'Could not save the key',
     )
     if (saved) {
@@ -488,11 +522,7 @@ export function AiCredentialSection() {
           </>
         }
       >
-        <p className="text-[13px] text-muted">
-          {credentials.length === 1
-            ? 'The assistant stops working until a new credential is saved.'
-            : 'The assistant falls back to the next credential in the list.'}
-        </p>
+        <p className="text-[13px] text-muted">{confirmDelete && afterDelete(confirmDelete, credentials)}</p>
       </Dialog>
     </Frame>
   )
