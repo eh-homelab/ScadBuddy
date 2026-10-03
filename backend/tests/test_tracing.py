@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import Span, SpanKind
 
 from scadbuddy.core import tracing
 from scadbuddy.core.problems import ApiError
@@ -137,6 +141,21 @@ def test_span_records_the_failure_class_and_reraises(spans: InMemorySpanExporter
     assert finished.attributes is not None
     assert finished.attributes["scadbuddy.failure_class"] == "ValueError"
     assert finished.status.status_code is trace.StatusCode.ERROR
+    assert [event.name for event in finished.events] == ["exception"]
+
+
+@pytest.mark.parametrize("opener", [tracing.span, tracing.detached_span])
+def test_a_cancelled_span_is_not_an_error(
+    spans: InMemorySpanExporter, opener: Callable[[str], AbstractContextManager[Span]]
+) -> None:
+    # Review 2 of #1064: a superseded render is cancelled, and its row settles
+    # `cancelled`, not `failed` (spec §6), so its spans must not end in ERROR.
+    with pytest.raises(asyncio.CancelledError), opener("render.render"):
+        raise asyncio.CancelledError
+    (finished,) = spans.get_finished_spans()
+    assert finished.status.status_code is trace.StatusCode.UNSET
+    assert [event.name for event in finished.events] == []
+    assert "scadbuddy.failure_class" not in (finished.attributes or {})
 
 
 def test_detached_span_is_never_current_and_records_the_failure(
@@ -154,3 +173,14 @@ def test_detached_span_is_never_current_and_records_the_failure(
     failing = finished["failing"]
     assert (failing.attributes or {})["scadbuddy.failure_class"] == "ValueError"
     assert failing.status.status_code is trace.StatusCode.ERROR
+
+
+def test_a_span_made_without_the_spans_fixture() -> None:
+    with tracing.span("leftover"):
+        pass
+
+
+def test_is_gone_by_the_next_test(spans: InMemorySpanExporter) -> None:
+    # Review of #1064: the session exporter is cleared after every test, not only
+    # after tests that ask for `spans`, so it never grows across the session.
+    assert [s.name for s in spans.get_finished_spans()] == []

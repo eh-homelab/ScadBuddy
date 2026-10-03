@@ -395,16 +395,27 @@ def _export_attributes(args: Sequence[str]) -> dict[str, str]:
     return attributes
 
 
-async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+async def run_openscad(
+    args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+) -> ProcessOutput:
+    """``failure_is_fallback``: the caller handles an `OpenSCADError` as a fallback, not
+    a failure (a colour's solid, spec 09-22 §6.3), so the span records the exit code and
+    ends without ERROR: a trace's spans are ERROR exactly when its job fails (spec
+    2026-10-01 §6)."""
+    fallback: OpenSCADError | None = None
     with span("openscad.export", attributes=_export_attributes(args)) as current:
         try:
             output = await _run_openscad(args, cwd=cwd, config=config)
         except OpenSCADError as error:
             if error.returncode is not None:
                 current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
-            raise
-        current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
-        return output
+            if not failure_is_fallback:
+                raise
+            fallback = error
+        else:
+            current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
+            return output
+    raise fallback
 
 
 async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
@@ -456,6 +467,7 @@ async def render_3mf(
     *,
     config: Config,
     extra_defines: Sequence[str] = (),
+    failure_is_fallback: bool = False,
 ) -> ProcessOutput:
     args = [
         "--backend=Manifold",
@@ -467,4 +479,6 @@ async def render_3mf(
         str(out_path.resolve()),
         scad_path.name,
     ]
-    return await run_openscad(args, cwd=scad_path.parent, config=config)
+    return await run_openscad(
+        args, cwd=scad_path.parent, config=config, failure_is_fallback=failure_is_fallback
+    )

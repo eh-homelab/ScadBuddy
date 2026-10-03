@@ -31,7 +31,13 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.tracing import current_traceparent, link_to, span, use_traceparent
+from scadbuddy.core.tracing import (
+    current_traceparent,
+    link_to,
+    span,
+    use_traceparent,
+    valid_traceparent,
+)
 from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
@@ -232,9 +238,10 @@ class RenderService:
         started: list[str] = []
         for job in stale:
             try:
-                if job.traceparent is None:
-                    # No trace to rejoin: a root span, or the default sampler drops the
-                    # parentless StartWorkflow CLIENT span and the workflow with it.
+                if not valid_traceparent(job.traceparent):
+                    # No trace to rejoin (NULL, or a value the propagator rejects): a
+                    # root span, or the default sampler drops the parentless
+                    # StartWorkflow CLIENT span and the workflow with it.
                     with span(
                         "render.reconcile",
                         attributes={"scadbuddy.slug": job.slug, "scadbuddy.job_id": job.id},

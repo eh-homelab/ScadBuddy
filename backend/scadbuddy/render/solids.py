@@ -125,22 +125,31 @@ async def render_solids(
             # reaches the colour waiting on it: do not start an openscad to kill it.
             if stopping:
                 raise asyncio.CancelledError
+            fallback: OpenSCADError | None = None
             try:
-                with span("render.solid", attributes={"scadbuddy.colour_index": index}):
-                    await render_3mf(
-                        wrapper,
-                        schema,
-                        params,
-                        out_path,
-                        config=config,
-                        extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
-                    )
+                with span("render.solid", attributes={"scadbuddy.colour_index": index}) as current:
+                    try:
+                        await render_3mf(
+                            wrapper,
+                            schema,
+                            params,
+                            out_path,
+                            config=config,
+                            extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
+                            failure_is_fallback=True,
+                        )
+                    except OpenSCADError as error:
+                        # The colour's fallback, not the job's failure: no ERROR span.
+                        fallback = error
+                        current.set_attribute("scadbuddy.solid.fallback", True)
+                        if error.returncode is not None:
+                            current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
+                if fallback is not None:
+                    return f"{colour}: no closed solid ({fallback}); {SPLIT_FALLBACK}"
                 # Parsing and joining the mesh is CPU work: off the loop, which every
                 # other job's drain, the queue and /healthz share -- and several colours
                 # can now finish their `openscad` at nearly the same moment.
                 mesh = await asyncio.to_thread(solid_mesh, out_path)
-            except OpenSCADError as error:
-                return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
             except BaseException:
                 stopping = True
                 raise

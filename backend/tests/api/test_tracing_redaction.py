@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace import ReadableSpan
@@ -120,3 +121,65 @@ def test_a_query_string_never_appears(client: TestClient, spans: InMemorySpanExp
     )
     assert server is not None
     assert SENTINEL not in _everything(spans)
+
+
+def test_a_captured_header_never_appears(
+    settings: Settings, spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ASGI instrumentation turns header capture on from the environment; the
+    # scrub must hold whatever a deployment sets (review of #1064).
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST", ".*")
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE", ".*")
+    with TestClient(create_app(settings)) as client:
+        client.get("/api/v1/models", headers={"Cookie": f"session={SENTINEL}"})
+    server = wait_for_span(spans, lambda s: s.kind == SpanKind.SERVER)
+    assert (server.attributes or {}).get("http.route") == "/api/v1/models"
+    headers = [
+        key
+        for finished in spans.get_finished_spans()
+        for key in (finished.attributes or {})
+        if key.startswith(("http.request.header.", "http.response.header."))
+    ]
+    assert headers == []
+    assert SENTINEL not in _everything(spans)
+
+
+def _server_spans(spans: InMemorySpanExporter) -> list[ReadableSpan]:
+    return [s for s in spans.get_finished_spans() if s.kind == SpanKind.SERVER]
+
+
+def test_a_path_parameter_never_appears(
+    client: TestClient, model: str, spans: InMemorySpanExporter
+) -> None:
+    # Review 3 of #1064: a path segment is data (a file path a user chose, a photo
+    # filename Bambuddy returned); the route's template stands in for the path.
+    route = "/api/v1/models/{slug}/files/{path:path}"
+    assert client.get(f"/api/v1/models/{model}/files/{SENTINEL}.scad").status_code == 404
+    server = wait_for_span(
+        spans,
+        lambda s: s.kind == SpanKind.SERVER and (s.attributes or {}).get("http.route") == route,
+    )
+    attributes = server.attributes or {}
+    assert attributes["http.target"] == route
+    assert attributes["http.url"] == f"http://testserver{route}"
+    assert SENTINEL not in _everything(spans)
+    assert SENTINEL not in "\n".join(s.name for s in spans.get_finished_spans())
+
+
+def test_an_unmatched_path_never_appears(
+    settings: Settings, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    # The SPA fallback serves any path, and without a bundle any path is a 404: with
+    # no route to stand in for it, the path is not exported at all.
+    frontend = tmp_path / "dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    with_spa = settings.model_copy(update={"frontend_dir": frontend})
+    for app_settings in (with_spa, settings):
+        with TestClient(create_app(app_settings)) as client:
+            client.get(f"/models/{SENTINEL}")
+            client.get(f"/{SENTINEL}/x")
+    wait_for_span(spans, lambda s: s.kind == SpanKind.SERVER)
+    assert len(_server_spans(spans)) == 4
+    assert SENTINEL not in _everything(spans)
+    assert SENTINEL not in "\n".join(s.name for s in spans.get_finished_spans())
