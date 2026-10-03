@@ -500,6 +500,9 @@ class BambuddyClient:
         if if_range is not None:
             headers["If-Range"] = if_range
         request = self._http.build_request("GET", self.config.url(path), headers=headers)
+        # The span fails only on what Bambuddy did: an error the consumer raises inside
+        # the ``async with`` (a browser that went away) leaves it, and is raised after.
+        consumer_error: Exception | None = None
         with _call_span("GET", Scope.READ_STATUS, detached=True) as current:
             try:
                 response = await self._http.send(request, stream=True)
@@ -511,9 +514,14 @@ class BambuddyClient:
                 if not response.is_success and response.status_code != 416:
                     await response.aread()
                     raise map_response(response, scope=Scope.READ_STATUS, what=what)
-                yield response
+                try:
+                    yield response
+                except Exception as error:
+                    consumer_error = error
             finally:
                 await response.aclose()
+        if consumer_error is not None:
+            raise consumer_error
 
     # --- library -------------------------------------------------------------
 
