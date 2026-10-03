@@ -408,6 +408,63 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await turn!.done
   })
 
+  // #1075: a cancellation audits every question it ends, and an audit sink that
+  // fails costs neither the other rows nor the session's status.
+  it('cancelling two questions audits each, and a failing audit write costs neither the other row nor the status', async () => {
+    const real = new AuditLog({ sql: db.sql })
+    let failures = 1
+    const audit = {
+      hash: real.hash.bind(real),
+      record: (entry: Parameters<AuditLog['record']>[0]) => (failures-- > 0 ? Promise.reject(new Error('audit down')) : real.record(entry)),
+    }
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const second = { ...QUESTIONS[0]!, question: 'And the top?' }
+        verdicts.push(
+          ...(await Promise.all([
+            run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_a', signal }),
+            run.questionGate!({ tool: ASK_USER_TOOL, questions: [second], toolUseId: 'toolu_b', signal }),
+          ])),
+        )
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20, audit: audit as unknown as AuditLog })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me twice' })
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
+
+    expect(await m.questions.cancelPending(session.id, 'the test cancelled it')).toBe(2)
+    // Nothing is pending: the session no longer says it waits (running, or idle once the turn ends).
+    expect((await m.get(session.id, browser)).status).not.toBe('waiting_input')
+    await turn!.done
+    expect(verdicts).toHaveLength(2)
+    expect(verdicts.every((v) => !v.answered)).toBe(true)
+    // The first write failed; the second question's row still landed.
+    const rows = await db.sql<{ tool_use_id: string; detail: string }[]>`
+      SELECT tool_use_id, detail FROM ai_audit WHERE kind = 'question' AND action = 'cancelled'`
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.detail).toMatch(/the test cancelled it$/)
+  })
+
+  it('an answer given over the chat socket is audited with the socket client address', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const chat = new ChatConnection(m, () => {}, { snapshotMs: 60_000, clientIp: '198.51.100.4' })
+    try {
+      await chat.receive(JSON.stringify(answer(session.id, id, ['Red', 'Cancel'])))
+      await turn!.done
+    } finally {
+      chat.close()
+    }
+    expect(await db.sql`SELECT surface, client_ip, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { surface: 'http', client_ip: '198.51.100.4', outcome: 'ok' },
+    ])
+  })
+
   it('the chat socket names the question on an error that refused its answer', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })

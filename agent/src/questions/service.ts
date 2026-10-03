@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import { type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
+import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -193,24 +193,26 @@ export class QuestionService {
     })
     if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     this.wake(id)
-    // Hashed, never stored as text: an answer may be anything the user typed.
-    await this.deps.audit?.record({
-      kind: 'question',
-      action: 'answered',
-      surface: where.surface ?? 'http',
-      actor: principal,
-      clientIp: where.clientIp,
-      sessionId,
-      turnId: answered.turn_id,
-      toolUseId: answered.tool_use_id,
-      tier: 'read',
-      inputHash: this.deps.audit.hash(answered.tool, { answers }),
-      outcome: 'ok',
-      detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
-      startedAt: answered.created_at,
-      finishedAt: new Date(),
-    })
     await this.refreshStatus(sessionId)
+    // Hashed, never stored as text: an answer may be anything the user typed.
+    await this.audited([
+      {
+        kind: 'question',
+        action: 'answered',
+        surface: where.surface ?? 'http',
+        actor: principal,
+        clientIp: where.clientIp,
+        sessionId,
+        turnId: answered.turn_id,
+        toolUseId: answered.tool_use_id,
+        tier: 'read',
+        inputHash: this.deps.audit?.hash(answered.tool, { answers }),
+        outcome: 'ok',
+        detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+        startedAt: answered.created_at,
+        finishedAt: new Date(),
+      },
+    ])
   }
 
   /**
@@ -240,10 +242,11 @@ export class QuestionService {
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
+    if (options.refresh !== false) await this.refreshStatus(sessionId)
     // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
     // approval cancelled the same way is audited the same way.
-    for (const r of rows) {
-      await this.deps.audit?.record({
+    await this.audited(
+      rows.map((r) => ({
         kind: 'question',
         action: 'cancelled',
         surface: 'system',
@@ -256,10 +259,21 @@ export class QuestionService {
         detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
         startedAt: r.created_at,
         finishedAt: new Date(),
-      })
-    }
-    if (options.refresh !== false) await this.refreshStatus(sessionId)
+      })),
+    )
     return rows.length
+  }
+
+  /**
+   * The audit rows of resolved questions (#1075), after the state they report
+   * is committed and the session's status set: AuditLog never throws, but a
+   * sink that did must not leave the session showing a wait that is over, nor
+   * cost the other rows theirs.
+   */
+  private async audited(entries: AuditEntry[]): Promise<void> {
+    const audit = this.deps.audit
+    if (!audit) return
+    await Promise.allSettled(entries.map((entry) => audit.record(entry)))
   }
 
   // -- waiting -----------------------------------------------------------------
