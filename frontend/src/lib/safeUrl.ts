@@ -26,23 +26,112 @@ const IMAGE_ROUTES = new RegExp(
     `|outputs/${SEG}/(?:thumbnail|views/${SEG}\\.png|plates/\\d+/thumbnail)` +
     `|models/${SEG}/thumbnail)$`,
 )
+// A model's own image (#951), any path under its folder with an image extension in
+// any case, as `GET /models/{slug}/images/{path}` serves. A file name may hold any
+// character the URL parser leaves in a path (`a+b (1).png`), so that what a relative
+// path resolves to is accepted when written out too; `plainSegments` is what refuses
+// a dot segment or an encoded slash.
+const MODEL_IMAGE_ROUTE = new RegExp(`^/api/v1/models/${SEG}/images/[^/]+(?:/[^/]+)*$`)
+
+/** The model a Markdown text belongs to, which its relative images resolve against (#951). */
+export interface ImageBase {
+  slug: string
+  /** The revision being viewed; without one, the model's current files. */
+  revision?: string
+}
 
 /**
- * A `src` for an image in untrusted Markdown (#820): a same-origin path to one of
- * ScadBuddy's image routes (a render view, colour map, output or plate thumbnail, or
- * model thumbnail), normalised, else null. Text from the model, a README, a preset
- * description or a tool result can never make the browser fetch another host, or any
- * other API route. A backslash is refused because the URL parser reads it as `/`, and
- * `..` is resolved before the route is matched so it cannot climb to another route.
+ * The longest `data:` image shown (#951), in characters: about 384 KiB of base64. An
+ * inline blob past it is its alt text, so one huge image cannot stall the chat.
  */
-export function safeImageSrc(value: string | null | undefined): string | null {
-  if (!value || !value.startsWith('/api/v1/') || value.includes('\\')) return null
+export const MAX_DATA_IMAGE_CHARS = 512 * 1024
+
+// Inert as an `<img>` source. An SVG loaded as an image is processed in the HTML
+// spec's secure mode: no script, and no external resource of any kind (an
+// `<image href>`, a CSS `url()` or `@import`, a font). So an SVG data: image cannot
+// make the browser fetch another host either.
+const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp|svg\+xml)(?:;[^,;]+)*,/i
+
+// What `GET /models/{slug}/images/{path}` serves.
+const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|svg)$/i
+
+const ORIGIN = 'http://scadbuddy.invalid'
+
+/**
+ * A `src` for an image in untrusted Markdown (#820, #951), normalised, else null:
+ *
+ * - a same-origin path to one of ScadBuddy's image routes (a render view, colour map,
+ *   output or plate thumbnail, model thumbnail or model image), so text from the
+ *   model, a README, a preset description or a tool result can never make the browser
+ *   fetch another host, or any other API route. A backslash is refused because the URL
+ *   parser reads it as `/`, and `..` is resolved before the route is matched so it
+ *   cannot climb to another route.
+ * - a `data:image/*` of a type an `<img>` shows, up to `MAX_DATA_IMAGE_CHARS`.
+ * - with a `base`, a path relative to that model's folder (`thumbnail.png`,
+ *   `images/a.png`), as the model image route at the base's revision. The rules are
+ *   the route's: nothing that climbs out, no dot-file segment, an image extension.
+ *   Without a base (agent chat) such a path, like a filesystem path, is never fetched.
+ */
+export function safeImageSrc(value: string | null | undefined, base?: ImageBase): string | null {
+  if (!value) return null
+  // In a data: image a backslash is only text; in a path the URL parser reads it as `/`.
+  if (DATA_IMAGE.test(value)) return value.length <= MAX_DATA_IMAGE_CHARS ? value : null
+  if (value.includes('\\')) return null
+  if (value.startsWith('/api/v1/')) return apiPath(value)
+  return base ? modelImage(value, base) : null
+}
+
+function apiPath(value: string): string | null {
   let parsed: URL
   try {
-    parsed = new URL(value, 'http://scadbuddy.invalid')
+    parsed = new URL(value, ORIGIN)
   } catch {
     return null
   }
-  if (parsed.origin !== 'http://scadbuddy.invalid' || !IMAGE_ROUTES.test(parsed.pathname)) return null
+  const path = parsed.pathname
+  // The parser resolves `%2e%2e` as `..`, but not a `%2F` or `%5C` inside a segment,
+  // which the server decodes; so each segment is checked as the server will read it.
+  if (parsed.origin !== ORIGIN || !plainSegments(path.slice(1).split('/'))) return null
+  const decoded = decodeURIComponent(path)
+  const allowed = IMAGE_ROUTES.test(path) || (MODEL_IMAGE_ROUTE.test(path) && IMAGE_EXTENSION.test(decoded))
+  if (!allowed) return null
   return parsed.pathname + parsed.search
+}
+
+function modelImage(value: string, base: ImageBase): string | null {
+  // No scheme (which covers `C:/`), no absolute or protocol-relative path, and no
+  // query or fragment: the route takes a plain file path and nothing else.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/') || /[?#]/.test(value)) return null
+  // A `%` that starts no escape is a literal one in the file's name, sent as `%25`
+  // since the server decodes the path once.
+  const escaped = value.replace(/%(?![0-9A-Fa-f]{2})/g, '%25')
+  let parsed: URL
+  try {
+    parsed = new URL(escaped, `${ORIGIN}/m/`)
+  } catch {
+    return null
+  }
+  if (parsed.origin !== ORIGIN || !parsed.pathname.startsWith('/m/')) return null
+  const path = parsed.pathname.slice('/m/'.length)
+  if (!plainSegments(path.split('/')) || !IMAGE_EXTENSION.test(decodeURIComponent(path))) return null
+  const revision = base.revision ? `?commit=${encodeURIComponent(base.revision)}` : ''
+  return `/api/v1/models/${encodeURIComponent(base.slug)}/images/${path}${revision}`
+}
+
+/**
+ * Whether every segment, percent-decoded as the server reads it, is a plain name: not
+ * empty, not a dot-file, `.` or `..`, and holding no `/` or `\\`. False for a segment
+ * that is not valid percent-encoding.
+ */
+function plainSegments(segments: string[]): boolean {
+  for (const segment of segments) {
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return false
+    }
+    if (!decoded || decoded.startsWith('.') || /[/\\]/.test(decoded)) return false
+  }
+  return true
 }

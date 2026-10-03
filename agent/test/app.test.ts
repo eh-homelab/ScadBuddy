@@ -195,7 +195,25 @@ describe('/api/v1/ai/credentials', () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
     const res = await app.request('/api/v1/ai/credentials')
     expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect(await res.json()).toEqual({
+      detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
+      code: 'no_database',
+    })
+  })
+
+  it.each([
+    ['PUT', '/api/v1/ai/credentials'],
+    ['DELETE', '/api/v1/ai/credentials'],
+    ['POST', '/api/v1/ai/credentials/test'],
+  ] as const)('answers %s %s with code no_database too', async (method, path) => {
+    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const res = await app.request(path, {
+      method,
+      headers: { ...UI, 'content-type': 'application/json' },
+      ...(method === 'PUT' ? { body: JSON.stringify({ kind: 'anthropic_api_key', secret: SECRET }) } : {}),
+    })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ code: 'no_database' })
   })
 
   describe('writes only through the UI ingress path (interim, until #258)', () => {

@@ -14,8 +14,8 @@ const LABEL: Record<AiState, string> = {
 /**
  * Settings' view of the assistant (#256): whether the agent service is reachable and
  * set up, with the agent's own reason when it isn't (`useAiAvailability`). It shows
- * status only. The Claude credential lives in the agent service and never passes
- * through the browser.
+ * status only; the credential is set in `AiCredentialSection` (#1000), and the agent
+ * never returns it to the browser.
  */
 export function AiStatusSection() {
   const ai = useAiAvailability()
@@ -43,7 +43,7 @@ export function AiStatusSection() {
         </p>
         <p className="text-[12px] text-muted">
           The assistant runs in ScadBuddy&rsquo;s agent service, which holds the Claude
-          credential; your browser never sees it.
+          credential; your browser never reads it back.
         </p>
         <Button onClick={() => void again()} disabled={checking} aria-busy={checking}>
           {checking && <Spinner />}

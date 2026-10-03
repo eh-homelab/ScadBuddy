@@ -6,7 +6,15 @@ import { describe, expect, it } from 'vitest'
 import { HTTP_TOOL_NAME, httpTierOf } from '../src/harness/httpRequest.js'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
 import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
-import { expectPanelAccepts, frontendParseServerEvent } from './support/frontendProtocol.js'
+import {
+  ANSWER_MAX,
+  OPTIONS_MAX,
+  OPTIONS_MIN,
+  PREVIEW_MAX,
+  QUESTION_TEXT_MAX,
+  QUESTIONS_MAX,
+} from '../src/harness/questions.js'
+import { expectPanelAccepts, frontendClientMessages, frontendParseServerEvent } from './support/frontendProtocol.js'
 
 const S = '11111111-2222-4333-8444-555555555555'
 const tiers = (name: string) => (name === 'mcp__scadbuddy__catalogue_list' ? ('read' as const) : undefined)
@@ -167,10 +175,31 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'approval.required', sessionId: S, id: 'a1', tool: 't1', summary: 'print box.3mf', risk: 'outward' }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false }),
+    event({
+      type: 'question.asked',
+      sessionId: S,
+      id: 'q1',
+      tool: 't2',
+      questions: [
+        {
+          question: 'Approve the draft?',
+          header: 'Draft',
+          multiSelect: false,
+          options: [
+            { label: 'Approve', description: 'File it', preview: '## Title' },
+            { label: 'Cancel', description: 'Do not' },
+          ],
+        },
+      ],
+    }),
+    event({ type: 'question.resolved', sessionId: S, id: 'q1', answered: true, answers: ['Approve'], by: { kind: 'browser', id: 'browser', label: 'You' } }),
+    event({ type: 'question.resolved', sessionId: S, id: 'q2', answered: false, reason: 'the turn ended' }),
+    event({ type: 'session.status', sessionId: S, status: 'waiting_input' }),
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3, budgetUsd: 1 }),
     event({ type: 'session.budget', sessionId: S, costUsd: 1.02, budgetUsd: 2 }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
+    event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer waiting', questionId: 'q1' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]
@@ -180,6 +209,18 @@ describe('the agent’s protocol mirror', () => {
     // …and that schema is really in force: a bad status is dropped.
     const parse = await frontendParseServerEvent()
     expect(parse({ v: 1, type: 'session.status', sessionId: S, status: 'paused' }).ok).toBe(false)
+  })
+
+  it('bounds questions and answers in the panel exactly where the agent does (#940)', async () => {
+    const panel = (await frontendClientMessages()) as unknown as Record<string, number>
+    expect({
+      ANSWER_MAX: panel.ANSWER_MAX,
+      QUESTIONS_MAX: panel.QUESTIONS_MAX,
+      OPTIONS_MIN: panel.OPTIONS_MIN,
+      OPTIONS_MAX: panel.OPTIONS_MAX,
+      QUESTION_TEXT_MAX: panel.QUESTION_TEXT_MAX,
+      PREVIEW_MAX: panel.PREVIEW_MAX,
+    }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX })
   })
 
   it('covers every server event type the panel declares', async () => {
