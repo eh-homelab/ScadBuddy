@@ -1,5 +1,24 @@
 const KEY = 'scadbuddy:stale-chunk-reload'
 
+/** Optional chunks whose import is in flight; a preload error meanwhile is theirs. */
+let optionalLoads = 0
+
+/**
+ * Runs the dynamic import of a chunk the page can do without (the tracing SDK). Its
+ * failure is often not staleness (blockers match names like `tracing-<hash>.js`), and a
+ * reload would lose the user's first edits and fail again, so a `vite:preloadError` fired
+ * while it is in flight (Vite dispatches it before the import rejects) does not reload.
+ * The rejection still reaches the caller.
+ */
+export async function loadOptionalChunk<T>(load: () => Promise<T>): Promise<T> {
+  optionalLoads += 1
+  try {
+    return await load()
+  } finally {
+    optionalLoads -= 1
+  }
+}
+
 /**
  * Reloads the page when a lazy chunk fails to load (#395).
  *
@@ -25,6 +44,7 @@ export function installStaleChunkReload(
   build: string = import.meta.url,
 ): () => void {
   const onPreloadError = (event: Event) => {
+    if (optionalLoads > 0) return
     if (read(target) === build) return
     if (!write(target, build)) return
     event.preventDefault()

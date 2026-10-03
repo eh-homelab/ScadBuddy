@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { installStaleChunkReload } from './staleChunks'
+import { installStaleChunkReload, loadOptionalChunk } from './staleChunks'
 
 function preloadError(): Event {
   const event = new Event('vite:preloadError', { cancelable: true })
@@ -67,6 +67,22 @@ describe('installStaleChunkReload', () => {
     const event = preloadError()
     expect(reload).not.toHaveBeenCalled()
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('does not reload for an optional chunk that fails, and still does for another', async () => {
+    const reload = load('old')
+    let rejectImport: (error: Error) => void = () => undefined
+    const pending = loadOptionalChunk(
+      () => new Promise<never>((_, reject) => (rejectImport = reject)),
+    ).catch(() => 'failed')
+    const optional = preloadError()
+    rejectImport(new Error('blocked'))
+    await expect(pending).resolves.toBe('failed')
+    expect(reload).not.toHaveBeenCalled()
+    expect(optional.defaultPrevented).toBe(false)
+    // The failed optional chunk used up nothing: a stale chunk afterwards still reloads.
+    preloadError()
+    expect(reload).toHaveBeenCalledTimes(1)
   })
 })
 
