@@ -315,16 +315,16 @@ def test_a_trailing_newline_is_not_a_valid_id(field: str) -> None:
 
 def test_a_trailing_newline_is_not_a_valid_id_or_time() -> None:
     assert (
-        []
-        == forwarded(export(span(spanId="c" * 16 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
+        forwarded(export(span(spanId="c" * 16 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
             "spans"
         ]
+        == []
     )
     assert (
-        []
-        == forwarded(export(span(traceId="c" * 32 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
+        forwarded(export(span(traceId="c" * 32 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
             "spans"
         ]
+        == []
     )
     result = only_span(export(span(startTimeUnixNano="12\n")))
     assert "startTimeUnixNano" not in result
