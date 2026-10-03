@@ -27,9 +27,10 @@ _TRACEBACK: Final = re.compile(r"^(?:Exception Group )?Traceback \(most recent c
 _FRAME: Final = re.compile(r'^ {2}File "(?P<path>[^"\n]*)", line \d+, in [\w.<>]+$')
 _PSEUDO_FILE: Final = re.compile(r"^<(?:frozen [\w.]+|string|stdin)>$")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
-#: string can carry anything a user typed, a user agent is a header value.
-_DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
-_CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
+#: string can carry anything a user typed, a user agent is a header value. The browser
+#: relay applies the same two sets to the page's spans (`telemetry/payload.py`).
+DROPPED_ATTRIBUTES: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
+CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
 
 
 def _frames(stacktrace: str) -> Iterator[str]:
@@ -82,9 +83,9 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
     kept: dict[str, AttributeValue] = {}
     for key, value in (attributes or {}).items():
-        if key in _DROPPED:
+        if key in DROPPED_ATTRIBUTES:
             continue
-        if key in _CUT_AT_QUERY and isinstance(value, str):
+        if key in CUT_AT_QUERY and isinstance(value, str):
             value = value.split("?", 1)[0]
         kept[key] = value
     return kept
@@ -125,4 +126,10 @@ class ScrubbingSpanExporter(SpanExporter):
         return self._inner.force_flush(timeout_millis)
 
 
-__all__ = ["ScrubbingSpanExporter", "frames_only", "scrub"]
+__all__ = [
+    "CUT_AT_QUERY",
+    "DROPPED_ATTRIBUTES",
+    "ScrubbingSpanExporter",
+    "frames_only",
+    "scrub",
+]
