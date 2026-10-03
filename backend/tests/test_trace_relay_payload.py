@@ -152,6 +152,36 @@ def test_query_strings_and_user_agents_are_scrubbed_as_the_backend_does() -> Non
     assert result["droppedAttributesCount"] == 0
 
 
+def test_a_query_string_is_cut_from_each_item_of_an_array_valued_url() -> None:
+    urls = {
+        "arrayValue": {
+            "values": [
+                {"stringValue": f"https://scadbuddy.example/a?q={SENTINEL}"},
+                {"stringValue": "https://scadbuddy.example/b"},
+                {"intValue": 3},
+            ]
+        }
+    }
+    result = only_span(export(span(attributes=[{"key": "url.full", "value": urls}])))
+    assert result["attributes"] == [
+        {
+            "key": "url.full",
+            "value": {
+                "arrayValue": {
+                    "values": [
+                        {"stringValue": "https://scadbuddy.example/a"},
+                        {"stringValue": "https://scadbuddy.example/b"},
+                        {"intValue": 3},
+                    ]
+                }
+            },
+        }
+    ]
+    assert SENTINEL.encode() not in _prepared(
+        export(span(attributes=[{"key": "url.full", "value": urls}]))
+    )
+
+
 def test_an_exception_keeps_its_type_and_frames_only() -> None:
     stack = (
         f"TypeError: {SENTINEL}\n"

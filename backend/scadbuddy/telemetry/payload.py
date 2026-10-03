@@ -200,6 +200,19 @@ def _value(value: object) -> Json | None:
     return {"arrayValue": {"values": kept}}
 
 
+def _without_query(value: Json) -> Json:
+    """A URL value without its query string: a string, or each string of an array."""
+    if "stringValue" in value:
+        return {"stringValue": value["stringValue"].split("?", 1)[0]}
+    if "arrayValue" in value:
+        return {
+            "arrayValue": {
+                "values": [_without_query(item) for item in value["arrayValue"]["values"]]
+            }
+        }
+    return value
+
+
 def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
     """At most ``limit`` attributes, scrubbed, and how many were dropped for the cap or
     for a value no page sends. A scrubbed key is removed without being counted."""
@@ -216,8 +229,8 @@ def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
         if value is None or len(kept) >= limit:
             dropped += 1
             continue
-        if key in CUT_AT_QUERY and "stringValue" in value:
-            value = {"stringValue": value["stringValue"].split("?", 1)[0]}
+        if key in CUT_AT_QUERY:
+            value = _without_query(value)
         kept.append({"key": key[:MAX_STRING_CHARS], "value": value})
     return kept, dropped
 
