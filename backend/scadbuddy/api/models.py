@@ -610,6 +610,15 @@ async def create_model(
     )
 
 
+def _meta_request(meta: ModelMeta) -> dict[str, Any]:
+    """``meta`` as JSON that reads back as itself: a ``ui`` that could not be read goes
+    as written, so the run's read reports it again rather than dropping it."""
+    dumped: dict[str, Any] = meta.model_dump(mode="json")
+    if meta.unread_ui is not None:
+        dumped["ui"] = meta.unread_ui
+    return dumped
+
+
 async def _create_command(
     ops: OperationCommands,
     response: Response,
@@ -638,7 +647,7 @@ async def _create_command(
         "source": await asyncio.to_thread(claim, source.encode()),
         "thumbnail": await asyncio.to_thread(claim, thumbnail),
         "readme": await asyncio.to_thread(claim, None if readme is None else readme.encode()),
-        "meta": meta.model_dump(mode="json"),
+        "meta": _meta_request(meta),
         "libraries": libraries,
         "force": force,
         "fetch": fetch,
