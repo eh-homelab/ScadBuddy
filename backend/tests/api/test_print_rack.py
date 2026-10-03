@@ -436,3 +436,35 @@ def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
         assert not [s for s in INVENTED_SERIALS if s in text], record.getMessage()
         assert record.exc_info is None and record.exc_text is None
     assert not [s for s in INVENTED_SERIALS if s in response.text]
+
+
+@respx.mock
+def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: str) -> None:
+    """claude-review on #1043, finding 3.1: a readable status with no nozzle rack (an X1C,
+    a P1S) reads no sliced requirements for the rack and carries no rack warning, even
+    when that read would have failed."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    status = recording("printer-status-rack.json")
+    status["nozzle_rack"] = []
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+    base = recording("filament-requirements.json")
+    sliced_reads = respx.route(
+        method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements"
+    )
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if "/library/files/77/" in request.url.path:
+            return httpx.Response(503, json={"detail": "down"})
+        return httpx.Response(200, json=base)
+
+    sliced_reads.mock(side_effect=answer)
+
+    response = run_print(client, output_id, json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert not [c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]
+    assert not [w for w in response.json()["warnings"] if w["kind"].startswith("rack-")]

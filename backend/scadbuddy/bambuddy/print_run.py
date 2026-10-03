@@ -816,6 +816,10 @@ async def execute_run(
     )
     hardware += high_flow_warnings(printer_status, choices.nozzles)
     algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id)
+    # A readable status with no rack (any printer but an H2C) has nothing to pick: no
+    # extra read per plate, and no rack warning on a printer without one. An unreadable
+    # status still tries, since the pick reads a fresh one (claude-review on #1043).
+    has_rack = printer_status is None or bool(rack_positions(printer_status.nozzle_rack))
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
     warnings: list[FilamentWarning] = []
@@ -832,15 +836,19 @@ async def execute_run(
             project_id=project_id,
             options=print_options,
             before_enqueue=before_enqueue,
-            choose_rack=rack_chooser(
-                client,
-                printer_id=printer_id,
-                plate_id=plate_id,
-                spools=_spools_by_slot(options, request.filament_plan),
-                algorithm=algorithm,
-                manual_position=request.rack_position,
-                rack=rack,
-                warnings=rack_notes,
+            choose_rack=(
+                rack_chooser(
+                    client,
+                    printer_id=printer_id,
+                    plate_id=plate_id,
+                    spools=_spools_by_slot(options, request.filament_plan),
+                    algorithm=algorithm,
+                    manual_position=request.rack_position,
+                    rack=rack,
+                    warnings=rack_notes,
+                )
+                if has_rack
+                else None
             ),
         )
         if isinstance(source, OutputSource):
