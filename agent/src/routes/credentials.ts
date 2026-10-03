@@ -59,6 +59,11 @@ const PutBody = z.strictObject({
 })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
+/**
+ * Says "no AI database here" to a machine: the Settings section hides on it
+ * (frontend `AiCredentialSection` `notDeployed`) instead of matching the text above.
+ */
+export const NO_DATABASE_CODE = 'no_database'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 
@@ -88,9 +93,14 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     return (await deps.ready()) ? deps.credentials : NOT_READY
   }
 
+  /** The 503 for `store()`'s refusal, with `code` when there is no database at all. */
+  function unavailable(detail: string) {
+    return { detail, ...(detail === NO_DATABASE ? { code: NO_DATABASE_CODE } : {}) }
+  }
+
   app.get(base, async (c) => {
     const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    if (typeof repo === 'string') return c.json(unavailable(repo), 503)
     return c.json(view(await repo.get(), deps.kek))
   })
 
@@ -103,7 +113,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
 
   app.put(base, async (c) => {
     const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    if (typeof repo === 'string') return c.json(unavailable(repo), 503)
     let body: z.infer<typeof PutBody>
     try {
       body = PutBody.parse(await c.req.json())
@@ -138,7 +148,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
 
   app.delete(base, async (c) => {
     const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    if (typeof repo === 'string') return c.json(unavailable(repo), 503)
     await repo.delete()
     return c.json(view(undefined, deps.kek))
   })
@@ -164,7 +174,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     testing = true
     try {
       const repo = await store()
-      if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+      if (typeof repo === 'string') return c.json(unavailable(repo), 503)
       if (!deps.kek.ok) return c.json({ detail: `no key-encryption key: ${deps.kek.reason}` }, 503)
       let credential: Credential | undefined
       try {
