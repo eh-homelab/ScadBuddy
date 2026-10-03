@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models
+from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
@@ -62,7 +62,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 
 #: The `scadbuddy.api` modules whose router sits at the root rather than under
 #: :data:`API_PREFIX`.
-ROOT_ROUTE_MODULES = frozenset({"health", "metrics"})
+ROOT_ROUTE_MODULES = frozenset({"health", "metrics", "telemetry"})
 
 
 def _api_router() -> APIRouter:
@@ -574,7 +574,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
-            )
+            ),
+            # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
+            telemetry.RELAY_ROUTE_LIMIT,
         ],
     )
     # Outermost of all (added last): the gate answers a 413 itself without calling
@@ -584,6 +586,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(metrics.router)
+    # The browser trace relay: at the root like the two above, before the SPA's mount.
+    app.include_router(telemetry.router)
     app.include_router(_api_router())
     _name_in_openapi(app, models.PastedSource, media.MediaUpload)
 

@@ -781,6 +781,23 @@ database queries and Bambuddy calls from background loops; it keeps everything t
 starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
 
+**Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
+`POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
+(`backend/scadbuddy/telemetry/`) forwards it in the background to
+`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`. It accepts only the UI's own origins (the
+public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does), at
+most 256 KiB and 512 spans a batch, and rewrites every batch's resource to
+`service.name=scadbuddy-web`. Without an endpoint, or with `OTEL_SDK_DISABLED=true`, it
+answers `204` with `X-ScadBuddy-Tracing: off` and the page stops exporting. Its rate
+limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+client), so with more than one API replica the overall ceiling multiplies.
+**`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
+whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
+`SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
+gets a bucket of its own. Empty, every browser behind the gateway shares one.
+`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
+`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+
 ## Development
 
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
