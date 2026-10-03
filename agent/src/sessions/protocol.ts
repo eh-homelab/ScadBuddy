@@ -64,7 +64,7 @@ export type ServerEvent = V &
     /** Expired and cancelled approvals resolve as not approved, without `by`. */
     | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
     /**
-     * The agent asks the user (#940): `tool` is the AskUserQuestion tool.call id.
+     * The agent asks the user (#940): `tool` is the AskUserQuestion (or a subagent's ask_user) tool_use id.
      * The turn waits (`waiting_input`) until `question.resolved`.
      */
     | { type: 'question.asked'; sessionId: string; id: string; tool: string; questions: QuestionView[] }
