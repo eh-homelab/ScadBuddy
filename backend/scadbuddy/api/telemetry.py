@@ -19,13 +19,14 @@ import asyncio
 import re
 from typing import Final
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, FastAPI, Request, Response
 
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.telemetry.admission import check_content_type, check_origin, relay_client
 from scadbuddy.telemetry.component import TraceRelayDep
-from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, prepare
+from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, RouteMatcher, prepare
+from scadbuddy.telemetry.routes import route_matcher
 
 RELAY_PATH: Final = "/telemetry/v1/traces"
 #: On the 204 when tracing is off (no endpoint, or ``OTEL_SDK_DISABLED``): the page's
@@ -48,6 +49,18 @@ _NOT_POST: Final = ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 router = APIRouter(tags=["telemetry"])
 
+_MATCHER_ATTR: Final = "trace_relay_route_matcher"
+
+
+def _route_matcher(app: FastAPI) -> RouteMatcher:
+    """The app's routes as a `RouteMatcher`, built on the first batch, when every route
+    is registered, and kept on the app: `prepare` runs it off the event loop."""
+    matcher: RouteMatcher | None = getattr(app.state, _MATCHER_ATTR, None)
+    if matcher is None:
+        matcher = route_matcher(app.routes)
+        setattr(app.state, _MATCHER_ATTR, matcher)
+    return matcher
+
 
 @router.post(RELAY_PATH, include_in_schema=False, status_code=204)
 async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
@@ -63,7 +76,7 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
     peer = request.client.host if request.client is not None else None
     relay.limits.take(relay_client(request.headers, peer, settings))
     try:
-        batch = await asyncio.to_thread(prepare, await request.body())
+        batch = await asyncio.to_thread(prepare, await request.body(), _route_matcher(request.app))
     except BatchTooLargeError as error:
         raise ApiError(413, str(error)) from error
     except PayloadError as error:

@@ -6,7 +6,11 @@ through by default. The resource is rebuilt with ``service.name`` forced to
 list and string is capped at the limits the browser SDK's provider is configured with
 (the frontend ``RelayExporter``'s ``spanLimits``), so a well-behaved page never meets
 them; and the backend's own scrub (`core/trace_scrub.py`) is applied: no exception
-message, no query string, no user agent, no captured header on a span.
+message, no query string, no user agent, no captured header on a span. A URL keeps no
+path of its own either, as a server span keeps none: a path on one of the app's routes
+becomes that route's template (after the ``scheme://host`` of an absolute URL); any
+other leaves only the ``scheme://host``, or nothing when the URL is relative. The
+SPA's routes are the browser's own, so a page's URL keeps only its origin.
 
 What is dropped for a cap is counted in OTLP's own field for its kind, as the SDK's
 limits count it: ``droppedAttributesCount`` on the span, an event or a link,
@@ -19,9 +23,11 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable
 from typing import Any, Final
+from urllib.parse import unquote, urlsplit
 
-from scadbuddy.core.trace_scrub import CUT_AT_QUERY, DROPPED_ATTRIBUTES, HEADER_PREFIXES
+from scadbuddy.core.trace_scrub import DROPPED_ATTRIBUTES, HEADER_PREFIXES, URL_ATTRIBUTES
 
 MAX_SPANS: Final = 512
 #: Bound what an empty ``{}`` entry can be rewritten into: each resource and scope is
@@ -56,6 +62,9 @@ _INT_STRING: Final = re.compile(r"^-?[0-9]{1,19}$")
 _BROWSER_FRAME: Final = re.compile(r"^(?:\s+at \S.*:\d+:\d+\)?|[^\s@]*@\S+:\d+:\d+)$")
 
 type Json = dict[str, Any]
+#: A request path (decoded, without query or fragment) to the template of the app's
+#: route it names, or None. `telemetry/routes.py` builds one from the app.
+type RouteMatcher = Callable[[str], str | None]
 
 
 def _id(value: object, pattern: re.Pattern[str]) -> str | None:
@@ -200,22 +209,42 @@ def _value(value: object) -> Json | None:
     return {"arrayValue": {"values": kept}}
 
 
-def _without_query(value: Json) -> Json:
-    """A URL value without its query string: a string, or each string of an array."""
+def _reduced_url(url: str, match_route: RouteMatcher) -> str | None:
+    """``url`` with its path replaced by the template of the route it names, without
+    query or fragment. An absolute URL (``scheme://host`` or ``//host``) on no route
+    keeps its origin, without any userinfo; any other URL on no route is None."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    origin = None
+    if parts.netloc:
+        host = parts.netloc.rpartition("@")[2]
+        origin = f"{parts.scheme}://{host}" if parts.scheme else f"//{host}"
+    elif parts.scheme:
+        return None
+    template = match_route(unquote(parts.path)) if parts.path.startswith("/") else None
+    if template:
+        return (origin or "") + template
+    return origin
+
+
+def _reduced_url_value(value: Json, match_route: RouteMatcher) -> Json | None:
+    """A URL value reduced (`_reduced_url`): a string, or each string of an array, an
+    item that reduces to nothing left out. None when a string reduces to nothing."""
     if "stringValue" in value:
-        return {"stringValue": value["stringValue"].split("?", 1)[0]}
+        reduced = _reduced_url(value["stringValue"], match_route)
+        return None if reduced is None else {"stringValue": reduced}
     if "arrayValue" in value:
-        return {
-            "arrayValue": {
-                "values": [_without_query(item) for item in value["arrayValue"]["values"]]
-            }
-        }
+        items = (_reduced_url_value(item, match_route) for item in value["arrayValue"]["values"])
+        return {"arrayValue": {"values": [item for item in items if item is not None]}}
     return value
 
 
-def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
+def _attributes(raw: object, limit: int, match_route: RouteMatcher) -> tuple[list[Json], int]:
     """At most ``limit`` attributes, scrubbed, and how many were dropped for the cap or
-    for a value no page sends. A scrubbed key is removed without being counted."""
+    for a value no page sends. A scrubbed key is removed without being counted, as is a
+    URL that reduces to nothing (`_reduced_url`)."""
     kept: list[Json] = []
     dropped = 0
     for item in raw if isinstance(raw, list) else []:
@@ -229,8 +258,10 @@ def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
         if value is None or len(kept) >= limit:
             dropped += 1
             continue
-        if key in CUT_AT_QUERY:
-            value = _without_query(value)
+        if key in URL_ATTRIBUTES:
+            value = _reduced_url_value(value, match_route)
+            if value is None:
+                continue
         kept.append({"key": key[:MAX_STRING_CHARS], "value": value})
     return kept, dropped
 
@@ -288,12 +319,12 @@ def _name(value: object) -> str:
     return value[:MAX_NAME_CHARS] if isinstance(value, str) else ""
 
 
-def _event(raw: Json) -> Json:
+def _event(raw: Json, match_route: RouteMatcher) -> Json:
     name = _name(raw.get("name"))
     attributes = raw.get("attributes")
     if name == "exception":
         attributes = _scrub_exception(attributes)
-    kept, dropped = _attributes(attributes, MAX_EVENT_ATTRIBUTES)
+    kept, dropped = _attributes(attributes, MAX_EVENT_ATTRIBUTES, match_route)
     event: Json = {"name": name, "attributes": kept}
     _set_valid(event, "timeUnixNano", _uint(raw.get("timeUnixNano"), _MAX_INT64))
     event["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
@@ -304,12 +335,12 @@ def _trace_state(value: object) -> str | None:
     return value[:_MAX_TRACE_STATE_CHARS] if isinstance(value, str) else None
 
 
-def _link(raw: Json) -> Json | None:
+def _link(raw: Json, match_route: RouteMatcher) -> Json | None:
     trace_id = _id(raw.get("traceId"), _TRACE_ID)
     span_id = _id(raw.get("spanId"), _SPAN_ID)
     if trace_id is None or span_id is None:
         return None
-    kept, dropped = _attributes(raw.get("attributes"), MAX_LINK_ATTRIBUTES)
+    kept, dropped = _attributes(raw.get("attributes"), MAX_LINK_ATTRIBUTES, match_route)
     link: Json = {"traceId": trace_id, "spanId": span_id}
     _set_valid(link, "traceState", _trace_state(raw.get("traceState")))
     _set_valid(link, "flags", _uint(raw.get("flags"), _MAX_UINT32))
@@ -352,7 +383,7 @@ def _status(raw: object, events: list[Json]) -> Json:
     return status
 
 
-def _span(raw: Json) -> Json | None:
+def _span(raw: Json, match_route: RouteMatcher) -> Json | None:
     trace_id = _id(raw.get("traceId"), _TRACE_ID)
     span_id = _id(raw.get("spanId"), _SPAN_ID)
     if trace_id is None or span_id is None:
@@ -367,14 +398,16 @@ def _span(raw: Json) -> Json | None:
     for field in ("startTimeUnixNano", "endTimeUnixNano"):
         _set_valid(span, field, _uint(raw.get(field), _MAX_INT64))
     span["name"] = _name(raw.get("name"))
-    attributes, dropped = _attributes(raw.get("attributes"), MAX_ATTRIBUTES)
+    attributes, dropped = _attributes(raw.get("attributes"), MAX_ATTRIBUTES, match_route)
     span["attributes"] = attributes
     span["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
     events, dropped_events = _capped(raw.get("events"), MAX_EVENTS)
-    span["events"] = [_event(event) for event in events]
+    span["events"] = [_event(event, match_route) for event in events]
     span["droppedEventsCount"] = _total(raw.get("droppedEventsCount"), dropped_events)
     links, dropped_links = _capped(raw.get("links"), MAX_LINKS)
-    valid_links = [link for link in map(_link, links) if link is not None]
+    valid_links = [
+        link for link in (_link(item, match_route) for item in links) if link is not None
+    ]
     span["links"] = valid_links
     span["droppedLinksCount"] = _total(
         raw.get("droppedLinksCount"), dropped_links + len(links) - len(valid_links)
@@ -408,12 +441,16 @@ def _scope(raw: object) -> Json:
     }
 
 
-def _scope_spans(raw: Json) -> Json | None:
-    spans = [span for span in map(_span, raw.get("spans", [])) if span is not None]
+def _scope_spans(raw: Json, match_route: RouteMatcher) -> Json | None:
+    spans = [
+        span
+        for span in (_span(item, match_route) for item in raw.get("spans", []))
+        if span is not None
+    ]
     return {"scope": _scope(raw.get("scope")), "spans": spans} if spans else None
 
 
-def rewrite(payload: Json) -> Json | None:
+def rewrite(payload: Json, match_route: RouteMatcher) -> Json | None:
     """The export rebuilt from what `parse` accepted: only the fields listed here
     survive. A scope with no surviving span is dropped, and a resource with no surviving
     scope; None when no span is left."""
@@ -421,7 +458,9 @@ def rewrite(payload: Json) -> Json | None:
     for resource_spans in payload["resourceSpans"]:
         scopes = [
             scope
-            for scope in map(_scope_spans, resource_spans.get("scopeSpans", []))
+            for scope in (
+                _scope_spans(raw, match_route) for raw in resource_spans.get("scopeSpans", [])
+            )
             if scope is not None
         ]
         if scopes:
@@ -431,10 +470,12 @@ def rewrite(payload: Json) -> Json | None:
     return {"resourceSpans": resources} if resources else None
 
 
-def prepare(body: bytes) -> bytes | None:
+def prepare(body: bytes, match_route: RouteMatcher) -> bytes | None:
     """The body as the relay forwards it, or None when no span survives. ASCII JSON, so
-    a lone surrogate the page escaped stays an escape rather than failing to encode."""
-    rewritten = rewrite(parse(body))
+    a lone surrogate the page escaped stays an escape rather than failing to encode.
+    ``match_route`` names the app's routes; it runs in this thread, so it must not
+    touch the event loop."""
+    rewritten = rewrite(parse(body), match_route)
     if rewritten is None:
         return None
     return json.dumps(rewritten, separators=(",", ":")).encode("ascii")
@@ -456,6 +497,7 @@ __all__ = [
     "WEB_SERVICE_NAME",
     "BatchTooLargeError",
     "PayloadError",
+    "RouteMatcher",
     "browser_frames_only",
     "parse",
     "prepare",

@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from scadbuddy.telemetry import payload
-from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, prepare
+from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
+
+FILES_ROUTE = "/api/v1/models/{slug}/files/{path:path}"
+
+
+def routes(path: str) -> str | None:
+    """Stands in for the app's routes: two of them."""
+    if path == "/api/v1/models":
+        return path
+    if re.fullmatch(r"/api/v1/models/[^/]+/files/.+", path):
+        return FILES_ROUTE
+    return None
+
+
+def prepare(body: bytes) -> bytes | None:
+    return payload.prepare(body, routes)
 
 
 def _prepared(body: bytes) -> bytes:
@@ -169,8 +185,8 @@ def test_a_query_string_is_cut_from_each_item_of_an_array_valued_url() -> None:
             "value": {
                 "arrayValue": {
                     "values": [
-                        {"stringValue": "https://scadbuddy.example/a"},
-                        {"stringValue": "https://scadbuddy.example/b"},
+                        {"stringValue": "https://scadbuddy.example"},
+                        {"stringValue": "https://scadbuddy.example"},
                         {"intValue": 3},
                     ]
                 }
@@ -528,3 +544,88 @@ def test_header_attributes_are_removed_from_a_span_an_event_and_a_link() -> None
     for scrubbed in (result, result["events"][0], result["links"][0]):
         assert scrubbed["attributes"] == [string("http.method", "GET")]
         assert scrubbed["droppedAttributesCount"] == 0
+
+
+@pytest.mark.parametrize("key", ["url.full", "http.url"])
+def test_a_url_on_a_route_keeps_its_origin_and_the_route_template(key: str) -> None:
+    url = f"https://scadbuddy.example/api/v1/models/box/files/{SENTINEL}.scad?x={SENTINEL}#f"
+    result = only_span(export(span(attributes=[string(key, url)])))
+    assert result["attributes"] == [string(key, f"https://scadbuddy.example{FILES_ROUTE}")]
+
+
+@pytest.mark.parametrize("key", ["http.target", "url.path"])
+def test_a_path_on_a_route_becomes_the_route_template(key: str) -> None:
+    path = f"/api/v1/models/box/files/{SENTINEL}.scad?x={SENTINEL}"
+    result = only_span(export(span(attributes=[string(key, path)])))
+    assert result["attributes"] == [string(key, FILES_ROUTE)]
+
+
+def test_a_url_on_no_route_keeps_only_its_origin() -> None:
+    """A document-load span's page URL: the SPA's routes are the browser's own."""
+    url = f"https://user:{SENTINEL}@scadbuddy.example:8443/m/{SENTINEL}?q=1"
+    result = only_span(export(span(attributes=[string("url.full", url)])))
+    assert result["attributes"] == [string("url.full", "https://scadbuddy.example:8443")]
+
+
+@pytest.mark.parametrize(
+    "value", [f"/m/{SENTINEL}", f"m/{SENTINEL}", f"javascript:{SENTINEL}", f"?{SENTINEL}", ""]
+)
+def test_a_relative_url_on_no_route_is_dropped_uncounted(value: str) -> None:
+    attributes = [string("http.target", value), string("http.method", "GET")]
+    result = only_span(export(span(attributes=attributes)))
+    assert result["attributes"] == [string("http.method", "GET")]
+    assert result["droppedAttributesCount"] == 0
+
+
+def test_each_url_of_an_array_is_reduced_and_an_unmatched_relative_one_left_out() -> None:
+    urls = {
+        "arrayValue": {
+            "values": [
+                {"stringValue": f"https://h.example/api/v1/models/a/files/{SENTINEL}"},
+                {"stringValue": f"/api/v1/models/b/files/{SENTINEL}"},
+                {"stringValue": f"/m/{SENTINEL}"},
+                {"boolValue": True},
+            ]
+        }
+    }
+    result = only_span(export(span(attributes=[{"key": "url.full", "value": urls}])))
+    assert result["attributes"] == [
+        {
+            "key": "url.full",
+            "value": {
+                "arrayValue": {
+                    "values": [
+                        {"stringValue": f"https://h.example{FILES_ROUTE}"},
+                        {"stringValue": FILES_ROUTE},
+                        {"boolValue": True},
+                    ]
+                }
+            },
+        }
+    ]
+
+
+def test_urls_on_events_and_links_are_reduced_too() -> None:
+    urls = [
+        string("url.full", f"http://h.example/api/v1/models/a/files/{SENTINEL}"),
+        string("http.target", f"/m/{SENTINEL}"),
+    ]
+    event = {"name": "fetch", "attributes": urls}
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": urls}
+    body = export(span(attributes=urls, events=[event], links=[link]))
+    assert SENTINEL not in (prepare(body) or b"").decode()
+    result = only_span(body)
+    for scrubbed in (result, result["events"][0], result["links"][0]):
+        assert scrubbed["attributes"] == [string("url.full", f"http://h.example{FILES_ROUTE}")]
+
+
+def test_the_matcher_is_given_the_decoded_path_without_query_or_fragment() -> None:
+    seen: list[str] = []
+
+    def spy(path: str) -> str | None:
+        seen.append(path)
+        return None
+
+    url = "https://h.example/api/v1/models/a%20b/files/x?y=1#z"
+    payload.prepare(export(span(attributes=[string("url.full", url)])), spy)
+    assert seen == ["/api/v1/models/a b/files/x"]

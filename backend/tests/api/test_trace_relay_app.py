@@ -6,6 +6,7 @@ mount after it, the excluded server span, the component and its counter."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
@@ -21,7 +22,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.telemetry import component
 from scadbuddy.telemetry.forwarder import TraceForwarder
-from tests.support.otlp import export, span
+from tests.support.otlp import SENTINEL, export, span, string
 
 PATH = "/telemetry/v1/traces"
 UI = {"Origin": "http://localhost:5173", "Content-Type": "application/json"}
@@ -129,3 +130,19 @@ def test_its_counter_is_scraped_from_zero(relay_client: TestClient) -> None:
 def test_it_is_not_in_the_openapi_schema(relay_client: TestClient) -> None:
     paths = relay_client.get("/openapi.json").json()["paths"]
     assert not [path for path in paths if path.startswith("/telemetry")]
+
+
+def test_a_page_spans_url_reaches_the_collector_as_its_route_template(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collected: list[bytes] = []
+    url = f"http://localhost/api/v1/models/box/files/{SENTINEL}.scad?x=1"
+    body = export(span(attributes=[string("url.full", url)]))
+    with app_client(settings, tmp_path, monkeypatch, COLLECTOR, collected) as client:
+        assert client.post(PATH, content=body, headers=UI).status_code == 204
+    (sent,) = collected
+    assert SENTINEL.encode() not in sent
+    (forwarded,) = json.loads(sent)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert forwarded["attributes"] == [
+        string("url.full", "http://localhost/api/v1/models/{slug}/files/{path:path}")
+    ]

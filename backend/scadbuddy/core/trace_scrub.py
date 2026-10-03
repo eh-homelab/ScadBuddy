@@ -40,13 +40,14 @@ _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: string can carry anything a user typed, a user agent is a header value. The browser
 #: relay applies the same set to the page's spans (`telemetry/payload.py`).
 DROPPED_ATTRIBUTES: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
-#: URL attributes the relay cuts at the query: a page's spans carry no route to stand in.
-CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
 #: Attributes that hold the request's path, which is data too: a file path a user
 #: chose, a photo filename Bambuddy returned, whatever the SPA fallback was asked for.
 #: The route's template stands in for it; with no route, the attribute is dropped.
 _PATH_ONLY: Final = frozenset({"http.target", "url.path"})
 _WITH_ORIGIN: Final = frozenset({"http.url", "url.full"})
+#: Every attribute that holds a path. The browser relay reduces each on a page's
+#: spans to the backend route its path names, or its origin (`telemetry/payload.py`).
+URL_ATTRIBUTES: Final = _PATH_ONLY | _WITH_ORIGIN
 #: An absolute URL's ``scheme://host[:port]``, kept in front of the route.
 _ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 #: Headers the instrumentation captures when a deployment sets
@@ -201,9 +202,9 @@ class ScrubbingSpanExporter(SpanExporter):
 
 
 __all__ = [
-    "CUT_AT_QUERY",
     "DROPPED_ATTRIBUTES",
     "HEADER_PREFIXES",
+    "URL_ATTRIBUTES",
     "ScrubbingSpanExporter",
     "frames_only",
     "scrub",
