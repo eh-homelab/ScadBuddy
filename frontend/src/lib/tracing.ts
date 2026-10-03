@@ -34,10 +34,13 @@ let stop: (() => Promise<void>) | null = null
  * `ScrubbingSpanExporter` → `RelayExporter`; W3C trace context only, no baggage (§4);
  * fetch instrumentation that injects `traceparent` only into same-origin requests
  * (never Bambuddy or Google Fonts), and document-load instrumentation. Calling it
- * again does nothing. Spans are flushed when the page is hidden. Returns the function that undoes it, for tests.
+ * again does nothing. When the relay answers `X-ScadBuddy-Tracing: off` it undoes itself, so no `traceparent` is sent any more. Spans are flushed when the page is hidden. Returns the function that undoes it, for tests.
  */
 export function startTracing(): () => Promise<void> {
   if (stop) return stop
+  // The relay's off is the backend's only, but the page's `traceparent` would make every
+  // downstream span the child of one nobody exports: so off undoes the tracing itself.
+  const exporter = new RelayExporter(() => void undo())
   const provider = new WebTracerProvider({
     resource: resourceFromAttributes({
       'service.name': TRACER_NAME,
@@ -46,7 +49,7 @@ export function startTracing(): () => Promise<void> {
     }),
     spanLimits: SPAN_LIMITS,
     spanProcessors: [
-      new BatchSpanProcessor(new ScrubbingSpanExporter(new RelayExporter()), {
+      new BatchSpanProcessor(new ScrubbingSpanExporter(exporter), {
         maxExportBatchSize: MAX_EXPORT_BATCH_SIZE,
       }),
     ],
@@ -73,7 +76,7 @@ export function startTracing(): () => Promise<void> {
   }
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('pagehide', flush)
-  const undo = async () => {
+  async function undo() {
     document.removeEventListener('visibilitychange', onVisibility)
     window.removeEventListener('pagehide', flush)
     unload()

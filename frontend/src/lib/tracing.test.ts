@@ -5,7 +5,7 @@ import { api, printRunPoll } from '../api/client'
 import { queuedResult } from '../mocks/choices'
 import { server } from '../mocks/server'
 import { RELAY_PATH } from './relayExporter'
-import { TRACER_NAME, traceAction } from './traceAction'
+import { TRACER_NAME, messageTraceparent, traceAction } from './traceAction'
 import { startTracing } from './tracing'
 
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
@@ -123,6 +123,22 @@ describe('startTracing', () => {
   it('is started once however often it is called', () => {
     stop = startTracing()
     expect(startTracing()).toBe(stop)
+  })
+
+  it('stops tracing for good once the relay answers off', async () => {
+    const seen = capture('/api/v1/models')
+    stop = startTracing()
+    // msw's default relay answers off.
+    trace.getTracer(TRACER_NAME).startSpan('before-off').end()
+    window.dispatchEvent(new Event('pagehide'))
+    await vi.waitFor(async () => {
+      await fetch('/api/v1/models')
+      expect(seen.at(-1)).toBeNull()
+    })
+    await traceAction('assistant.message', {}, async () => {
+      expect(messageTraceparent()).toBeUndefined()
+    })
+    expect(messageTraceparent()).toBeUndefined()
   })
 
   describe('flushing when the page goes away', () => {
