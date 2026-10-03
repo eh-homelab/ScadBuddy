@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -67,6 +67,25 @@ def operation_activities(
     return activities
 
 
+#: How often a run tells Temporal it is alive (the workflow's ``RUN_HEARTBEAT`` is 30 s).
+HEARTBEAT_EVERY = 5.0
+
+
+async def _heartbeating[T](work: Awaitable[T]) -> T:
+    """Await ``work``, heartbeating: the Python SDK delivers a timeout or a cancel to an
+    activity only through a heartbeat, so without one a run past its timeout would go
+    on to finish an effect the record already calls failed."""
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_EVERY)
+            if done:
+                return task.result()
+            activity.heartbeat()
+    finally:
+        task.cancel()
+
+
 def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=check_activity(kind.name))
     async def check(request: dict[str, Any]) -> dict[str, Any]:
@@ -88,7 +107,7 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=run_activity(kind.name))
     async def run(input: RunOp) -> dict[str, Any]:
         try:
-            return await kind.run(input.request, input.checked)
+            return await _heartbeating(kind.run(input.request, input.checked))
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 

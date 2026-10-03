@@ -9,6 +9,7 @@ import dataclasses
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any
 
 import psycopg
@@ -32,6 +33,7 @@ pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 class Counts:
     def __init__(self) -> None:
         self.runs = 0
+        self.cancelled = 0
 
 
 @pytest.fixture
@@ -60,6 +62,18 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
 
     state.operations.kinds["test"] = OperationKind("test", check, run)
     state.operations.kinds["test_where"] = OperationKind("test_where", check, where)
+
+    async def slow(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            counts.cancelled += 1
+            raise
+        return {}
+
+    state.operations.kinds["test_slow"] = OperationKind(
+        "test_slow", check, slow, run_timeout=timedelta(seconds=2)
+    )
     state.operations.kinds["test_library"] = OperationKind(
         "test_library", check, where, queue="library"
     )
@@ -178,3 +192,16 @@ def test_each_kind_runs_on_its_own_queue(client: TestClient) -> None:
     assert library.status_code == bambuddy.status_code == 200, library.text
     assert library.json()["queue"].endswith("-library")
     assert not bambuddy.json()["queue"].endswith("-library")
+
+
+def test_a_run_past_its_kinds_timeout_is_cancelled_and_recorded_failed(
+    client: TestClient, counts: Counts
+) -> None:
+    """Review I2: the run heartbeats, so its timeout reaches the coroutine, which then
+    stops rather than finishing an effect the record calls failed."""
+    response = client.post("/api/v1/test-op?kind=test_slow", json={})
+    assert response.status_code == 500, response.text
+    deadline = time.monotonic() + 30
+    while counts.cancelled == 0 and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert counts.cancelled == 1

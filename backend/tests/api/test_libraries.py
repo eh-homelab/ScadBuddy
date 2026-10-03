@@ -46,6 +46,7 @@ from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.includes import resolve_dependencies
 from scadbuddy.library.libraries import (
+    CLONE_TIMEOUT,
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
@@ -1766,3 +1767,24 @@ def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
         op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
     assert op["status"] == "succeeded", op
     assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]
+
+
+def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """Review I1: the run answers a model.json it cannot read as every route does."""
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    (state.paths.model_dir(SLUG) / "model.json").write_text("{not json", encoding="utf-8")
+    refused = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["title"] == "Invalid Model Metadata"
+
+
+def test_a_pin_may_run_longer_than_its_clone() -> None:
+    """Review I2: the run outlives the clone's own limit, so a slow clone is never
+    recorded failed while it goes on to commit."""
+    kinds = library_operations.library_kinds(None)  # type: ignore[arg-type]
+    for name in ("library_pin", "library_repin"):
+        timeout = kinds[name].run_timeout
+        assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT

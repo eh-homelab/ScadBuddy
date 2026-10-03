@@ -10,7 +10,9 @@ kind runs once: a git commit is not deduped.
 from __future__ import annotations
 
 import asyncio
-from functools import partial
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -20,6 +22,7 @@ from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
+    InvalidModelMetaError,
     LibraryNotDeclaredError,
     LibraryPinChangedError,
     ModelNotFoundError,
@@ -27,9 +30,11 @@ from scadbuddy.library.catalogue import (
 )
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import (
+    CLONE_TIMEOUT,
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
+    LibraryNotInstalledError,
     ModelLibrary,
     declared_libraries,
 )
@@ -37,6 +42,30 @@ from scadbuddy.operations.kinds import OperationKind
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
+
+
+#: A pin's run: the clone's own limit, plus waiting its turn (installs, a removal holding
+#: the gate) and the commit. Past it the run is cancelled, never left to commit late.
+PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
+
+
+def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """A model.json that cannot be read, or a pin whose checkout is gone, as the 409
+    every route answers it with (``api/models.py``, ``install_library_handlers``),
+    rather than the operation's unexpected 500."""
+
+    @wraps(fn)
+    async def answered(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await fn(*args, **kwargs)
+        except InvalidModelMetaError as error:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata"
+            ) from None
+        except LibraryNotInstalledError as error:
+            raise ApiError(status.HTTP_409_CONFLICT, str(error.args[0])) from None
+
+    return answered
 
 
 def library_changed(events: EventBus, slug: str, name: str) -> None:
@@ -189,9 +218,23 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         return {}
 
     kinds = [
-        OperationKind("library_pin", model_check, pin_run, queue="library"),
-        OperationKind("library_repin", repin_check, repin_run, queue="library"),
-        OperationKind("library_unpin", model_check, unpin_run, queue="library"),
+        OperationKind(
+            "library_pin",
+            _answered(model_check),
+            _answered(pin_run),
+            queue="library",
+            run_timeout=PIN_TIMEOUT,
+        ),
+        OperationKind(
+            "library_repin",
+            _answered(repin_check),
+            _answered(repin_run),
+            queue="library",
+            run_timeout=PIN_TIMEOUT,
+        ),
+        OperationKind(
+            "library_unpin", _answered(model_check), _answered(unpin_run), queue="library"
+        ),
         OperationKind("library_remove", no_check, remove_run, queue="library"),
     ]
     return {kind.name: kind for kind in kinds}

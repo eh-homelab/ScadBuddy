@@ -106,6 +106,7 @@ async def run_operation(
         key=key,
         request=body,
         run_attempts=kind.run_attempts,
+        run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
     )
     try:
