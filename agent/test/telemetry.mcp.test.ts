@@ -1,6 +1,7 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { ROOT_CONTEXT, trace } from '@opentelemetry/api'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -10,7 +11,7 @@ import { mcpMethodOf } from '../src/mcp/http.js'
 import { bindToolContext, tracer, unbindToolContext } from '../src/telemetry/trace.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createHarnessServer } from '../src/tools/projections.js'
-import { BACKEND, connect, services, testApp } from './helpers/mcp.js'
+import { appFetch, BACKEND, connect, MCP_URL, services, testApp } from './helpers/mcp.js'
 import { browser } from './support/sessions.js'
 import { flushTracing, PARENT_SPAN_ID, resetTracing, TRACE_ID, TRACEPARENT, testTracing } from './support/tracing.js'
 
@@ -60,33 +61,65 @@ describe('/mcp spans', () => {
     expect(seen).toEqual([`00-${TRACE_ID}-${request!.spanContext().spanId}-01`])
   })
 
-  it('names the span after the JSON-RPC method, and only a well-formed one', async () => {
-    const post = (body: string) => new Request('http://x/mcp', { method: 'POST', body })
-    expect(await mcpMethodOf(post('{"jsonrpc":"2.0","id":1,"method":"tools/list"}'))).toBe('tools/list')
-    expect(await mcpMethodOf(post('[{"jsonrpc":"2.0","method":"notifications/initialized"}]'))).toBe('notifications/initialized')
-    expect(await mcpMethodOf(post('{"method":"x y <script>"}'))).toBe('unknown')
-    expect(await mcpMethodOf(post('not json'))).toBe('unknown')
+  it('names the span after the JSON-RPC method, and only a well-formed one', () => {
+    expect(mcpMethodOf({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).toBe('tools/list')
+    expect(mcpMethodOf([{ jsonrpc: '2.0', method: 'notifications/initialized' }])).toBe('notifications/initialized')
+    expect(mcpMethodOf({ method: 'x y <script>' })).toBe('unknown')
+    for (const body of [undefined, null, 'tools/list', [], 7]) expect(mcpMethodOf(body)).toBe('unknown')
     for (const method of ['a1', 'tools/call2', 'x'.repeat(64), 'notifications/made_up']) {
-      expect(await mcpMethodOf(post(JSON.stringify({ jsonrpc: '2.0', id: 1, method })))).toBe('unknown')
+      expect(mcpMethodOf({ jsonrpc: '2.0', id: 1, method })).toBe('unknown')
     }
   })
 
-  it('reads no body for a span that is not recording', async () => {
+  it.each([
+    ['sampled', TRACEPARENT],
+    ['unsampled', TRACEPARENT.replace(/-01$/, '-00')],
+  ])('reads a %s POST body once and hands the transport the parsed body', async (_, traceparent) => {
     const t = testApp()
     const { token } = await t.tokens.mint({ name: 'test', tier: 'read' })
-    // An unsampled caller: the span is not recording, so it is never named.
-    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}`, traceparent: TRACEPARENT.replace(/-01$/, '-00') } })
-    clients.push(client)
     const clone = vi.spyOn(Request.prototype, 'clone')
+    const handle = vi.spyOn(WebStandardStreamableHTTPServerTransport.prototype, 'handleRequest')
     try {
+      const client = await connect(t.app, { headers: { authorization: `Bearer ${token}`, traceparent } })
+      clients.push(client)
       await client.callTool({ name: 'list_models', arguments: {} })
       // msw clones the backend request; no /mcp request is cloned.
       expect(clone.mock.contexts.map((r) => new URL((r as Request).url).pathname).filter((p) => p.startsWith('/mcp'))).toEqual([])
+      const posts = handle.mock.calls.filter(([request]) => request.method === 'POST')
+      expect(posts.map(([, options]) => mcpMethodOf(options?.parsedBody))).toEqual(
+        expect.arrayContaining(['initialize', 'notifications/initialized', 'tools/call']),
+      )
+      expect(posts.every(([, options]) => options?.parsedBody !== undefined)).toBe(true)
     } finally {
       clone.mockRestore()
+      handle.mockRestore()
     }
     await flushTracing()
-    expect(spans.getFinishedSpans().filter((s) => s.name.startsWith('agent.mcp'))).toEqual([])
+    const mcpSpans = spans.getFinishedSpans().filter((s) => s.name.startsWith('agent.mcp'))
+    if (traceparent === TRACEPARENT) expect(mcpSpans.map((s) => s.name)).toContain('agent.mcp/tools/call')
+    else expect(mcpSpans).toEqual([])
+  })
+
+  it('a body that is not JSON, too large, or the wrong type gets the transport’s own answer', async () => {
+    const t = testApp()
+    const { token } = await t.tokens.mint({ name: 'test', tier: 'read' })
+    const post = (body: string, contentType = 'application/json') =>
+      appFetch(t.app, {
+        headers: { authorization: `Bearer ${token}`, 'content-type': contentType, accept: 'application/json, text/event-stream' },
+      })(MCP_URL, { method: 'POST', body })
+    const initialize = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+    })
+
+    const garbage = await post('not json')
+    expect(garbage.status).toBe(400)
+    expect(await garbage.json()).toMatchObject({ error: { code: -32700 } })
+    const huge = await post(`{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"${'x'.repeat(4 * 1024 * 1024)}"}}`)
+    expect(huge.status).toBe(413)
+    expect((await post(initialize, 'text/plain')).status).toBe(415)
   })
 
   it('the mcp span outlives its tool span, whatever the response framing', async () => {
