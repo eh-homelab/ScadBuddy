@@ -29,6 +29,7 @@ test.describe('tracing', () => {
     await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible()
 
     await expect.poll(() => sentWith(page, page, '/api/v1/models'), { timeout: 15_000 }).toMatch(TRACEPARENT)
+    await page.route('https://fonts.googleapis.com/**', (route) => route.fulfill({ status: 200, body: '' }))
     expect(await sentWith(page, page, 'https://fonts.googleapis.com/css2?family=Lobster+Two')).toBeUndefined()
     // And again on the page's own origin, so the absence above is the origin's doing.
     expect(await sentWith(page, page, '/api/v1/models')).toMatch(TRACEPARENT)
