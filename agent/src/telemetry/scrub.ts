@@ -10,8 +10,8 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 // own. So the rule is enforced here, once, in front of the exporter, not at
 // each call site:
 //   - `exception.message` is dropped from every exception event;
-//   - `exception.stacktrace` keeps only its `at …` frame lines, after every
-//     occurrence of the message is cut out (a message can imitate a frame);
+//   - `exception.stacktrace` keeps only its `at …` frame lines, after the
+//     message is cut out of the stack's head (a message can imitate a frame);
 //   - a non-empty status description becomes the exception's type, or `error`;
 //   - `url.query` and user agents are dropped; URLs lose their query.
 
@@ -23,9 +23,21 @@ const DROPPED: ReadonlySet<string> = new Set([
 ])
 const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url', 'http.target'])
 
-/** The `at …` lines of a Node stack, with `message` cut out first; nothing else. */
+const FRAME_NEXT = /^\n\s+at \S/
+
+/** `stacktrace` with `message` cut out of its head only: V8 writes `<name>: <message>` (or the bare message) before the first frame, and a global cut would mangle frames when the message is short. */
+function withoutHeadMessage(stacktrace: string, message: string): string {
+  for (let i = stacktrace.indexOf(message); i !== -1; i = stacktrace.indexOf(message, i + 1)) {
+    const rest = stacktrace.slice(i + message.length)
+    const atHead = i === 0 || stacktrace.slice(i - 2, i) === ': '
+    if (atHead && (rest === '' || FRAME_NEXT.test(rest))) return stacktrace.slice(0, i) + rest
+  }
+  return stacktrace
+}
+
+/** The `at …` lines of a Node stack, with the head's `message` cut out first; nothing else. */
 export function framesOnly(stacktrace: string, message?: string): string {
-  const text = message ? stacktrace.split(message).join('') : stacktrace
+  const text = message ? withoutHeadMessage(stacktrace, message) : stacktrace
   return text
     .split('\n')
     .map((line) => line.trim())
