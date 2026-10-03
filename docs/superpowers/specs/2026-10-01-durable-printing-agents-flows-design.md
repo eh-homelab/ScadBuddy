@@ -717,7 +717,7 @@ the most constrained runtime in the system.
 
   It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
   `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`), `ai_input_responses` (§6.6) and the
+  `ai_durable_entries` (or `ai_session_entries`), `ai_pending_input` and `ai_input_responses` (§6.6) and the
   session counters. It can do
   nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
@@ -887,21 +887,43 @@ happens, and there is no separate request system.
   `name`, `input`), joined with the entry's policy and times, which the workflow keeps
   in its own state when the call parks. The plugin runs one durable call at a time
   (§3.2), so a durable session has at most one entry.
+- **How a durable entry opens and closes.** Two activities on the `agent` queue, run by
+  `DurableSession`, own every write about an entry:
+  - `open_input`: `DurableSession` waits with `workflow.wait_condition` for
+    `agent.pending_approvals()` to gain a call, using only the plugin's public API. It
+    then runs `open_input`, which inserts the `ai_pending_input` row and appends
+    `input.requested` to `ai_session_events` in one transaction, and starts the entry's
+    timer.
+  - `resolve_input`: every resolution, by `respond` or by the timer and of either kind,
+    runs it *before* `agent.decide`. In one transaction it writes the outcome to
+    `ai_input_responses` (for an `answer`), deletes the `ai_pending_input` row and
+    appends `input.resolved`. So no resolution reaches the plugin without the
+    projection and the event recording it.
+  - `ai_pending_input(request_id primary key, session_id, kind, tool, summary,
+    input_hash, prompt, requested_by, responders, created_at, expires_at)` and
+    `ai_input_responses` are one new agent migration in phase 5. The `agent-durable`
+    role writes both (§6.3a).
 - **Two reads, two sources.**
   - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
     one it sends the Query: it is the source of truth, and it reconciles the projection
     below.
   - `GET /api/v1/ai/pending-input` answers for everything the principal may see, the
     badge's read. It is **one Postgres read of a projection**, `ai_pending_input`,
-    maintained by the `input.requested` and `input.resolved` events (Notifications),
-    as `render_jobs` is projected. It never fans a Query out per workflow: that would
+    written by `open_input` and `resolve_input` (above), as `render_jobs` is projected
+    by its workflow's activities. It never fans a Query out per workflow: that would
     cost one worker round-trip per open session per poll, and every poll would time
-    out while the `agent-durable` worker is down. Classic entries come from their own
-    tables, as today.
+    out while the `agent-durable` worker is down. It is the union of that table
+    (durable entries) and the classic stores' pending rows.
   - The aggregate includes **session-less entries**: an MCP prepare (`mcp.ts:97`,
     `session_id` null, `tool_use_id` `mcp:<uuid>`) that `GET /api/v1/ai/approvals`
     lists today, so the badge keeps counting them.
-  - Both are reads (§4.1), and each has a tool, as the coverage test requires.
+  - Both are reads (§4.1). Each gets a `read`-tier tool. `agent/test/coverage.test.ts`
+    checks only `backend/openapi.json`'s operations, not the agent's own
+    `/api/v1/ai/*` routes, so §8 adds a check for these three routes.
+  - `respond` gets **no tool** for the `answer` kinds: only the browser user answers
+    them. For `approval`, the existing `outward` tools `sessions_approve` /
+    `sessions_deny` (`tools/sessions.ts:30`) stay its tool, for a principal holding
+    the approval grant, as today.
 
 #### Responses: the `respond` Update
 
@@ -949,6 +971,16 @@ happens, and there is no separate request system.
       Update fails and the person sees the error and can answer again. If the timer
       came due meanwhile, it fires at once. So a failed write never leaves the call
       parked with no timer and no way to answer.
+    - On the `respond` path, `resolve_input` has a bounded retry policy
+      (`schedule_to_close_timeout` 30 s), because a person is waiting on the Update's
+      answer.
+    - On the **timer** path nobody is waiting, so `resolve_input` retries with no
+      deadline (backoff capped at 5 minutes) until Postgres takes the write. Meanwhile
+      the entry stays *resolving*: it is still listed, `respond` is refused as "being
+      resolved", and the call stays parked. That is the right state while the outcome
+      cannot be recorded. `agent.decide` runs only after the write succeeds, so the
+      tool's activity always finds its row. If the row is missing anyway (an operator
+      deleted it), the activity returns the `cancelled` outcome, never an answer.
     - The plugin also keeps only the first decision.
 
 #### Timeouts
@@ -968,7 +1000,8 @@ happens, and there is no separate request system.
   proceed. #815's `approval_pending` reason is refused as malformed: the approval is
   already its own entry, with its own notification.
 - In a durable session the timer is a workflow timer, and in a classic one the existing
-  expiry sweep (`expireDue()`) or its question counterpart. A timer that fires goes
+  expiry sweep (`expireDue()`, `approvals/service.ts:100`) or a new sweep for
+  `ai_questions`, which phase 5 adds: #998 has no expiry of its own. A timer that fires goes
   through the same resolution as `respond`, recorded as `expired`, `cancelled` or
   `timed_out`, with the system as the responder. For an `answer` kind that means the
   outcome is written and the call is let through, and the tool's activity returns the
@@ -981,10 +1014,10 @@ happens, and there is no separate request system.
   kind and both modes:
   - in-app: the badge and the panel;
   - then OS notifications and webhooks as #815 adds them.
-- The trigger in a durable session is the plugin's `approval_needed` stream event, which
-  the backend subscriber (§6.2) already reads. In a classic one it is the gate's insert.
-  Both emit one `input.requested` event and one `input.resolved` event to the bus, with
-  the entry. The panel's existing cards (`approval.required`; `question.asked` in
+- The trigger in a durable session is `open_input`'s `input.requested` event, not the
+  plugin's `approval_needed` stream event, so a notification and the projection come
+  from one write. In a classic one it is the gate's insert. Both modes emit one
+  `input.requested` and one `input.resolved` event to the bus, with the entry. The panel's existing cards (`approval.required`; `question.asked` in
   PR #998) are what renders them.
 - #815's throttling (one open request per session per reason, a per-user rate limit)
   applies to attention requests, which an agent creates at will. Approvals and questions
@@ -1005,7 +1038,12 @@ happens, and there is no separate request system.
   shape, whichever mode the session runs in.
   - `fetchPendingApprovals()` (`frontend/src/agent/attention.ts:26`) reads
     `GET /api/v1/ai/pending-input` and counts every kind, session-less MCP approvals
-    included.
+    included. **The badge's meaning changes, by decision:** from "actions waiting for
+    your approval" to "things waiting for you". The accessible name becomes
+    `Assistant, N waiting for you`, and the title lists the counts by kind ("2
+    approvals, 1 question"). Attention requests count, `proceed` ones included: they
+    are bounded by #815's throttle (one open per session per reason), and while one is
+    open the agent is in fact waiting.
   - The approval routes (`routes/approvals.ts:13-16`) and `sessions_approve` /
     `sessions_deny` stay as aliases of `respond` for the `approval` kind.
 - The session's status projection is the same in both modes: `waiting_approval` while an
@@ -1190,7 +1228,18 @@ happens, and there is no separate request system.
     and still times out;
   - `DurableSession` registers no Signal and no Update other than `send_message` and
     `respond` that reaches `agent.decide`;
-  - the aggregate read includes a session-less MCP approval;
+  - the aggregate read includes a session-less MCP approval, and a durable entry
+    leaves it when it is answered or times out;
+  - the validator refusals (stale, resolved, being resolved, wrong responder, self,
+    malformed, over 16 KiB) are **shared vectors**, `agent/test/fixtures/pending-input-vectors.json`,
+    run against the classic TypeScript validators and the durable Python ones, as the
+    credential vectors are, so the two cannot drift;
+  - the timer path's `resolve_input` failing: the entry stays listed and refuses
+    `respond`, and is resolved once the write succeeds;
+  - a durable `wait_for_user`'s input schema offers only `on_timeout: proceed` until
+    phase 5 has verified cancelling the turn;
+  - the three `pending-input` routes are checked for their tools, as the coverage test
+    does for `backend/openapi.json`;
   - `mode` refused on an existing session;
   - an end-to-end test from the chat socket to a durable turn.
 - **Flows:**
@@ -1246,8 +1295,15 @@ Each phase is its own implementation plan and ships alone.
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4, §6.6): `agent-durable/`, the plugin pin,
    the `SessionStore`, the credential port, the event subscriber, the tool-call gate
-   (`pending_input`, `respond`, the timers, and the one route over classic and durable),
-   the mode UI and setting.
+   (§6.6), the mode UI and setting. The gate's work, both modes:
+   - durable: `pending_input`, `respond`, the timers, `open_input` / `resolve_input`,
+     the `ai_pending_input` and `ai_input_responses` migration, and `ask_user` /
+     `wait_for_user` as tools;
+   - classic: the `pending-input` and `respond` routes over `ai_approvals` and
+     `ai_questions`, the approval routes and `sessions_approve` / `sessions_deny` as
+     aliases, the `question_expiry_seconds` setting and its sweep (after PR #998
+     merges), and #815's attention tools;
+   - frontend: `fetchPendingApprovals()` on the new route and the badge's new wording.
 6. **Flows** (§7): the harness verification, `ProjectWorkflow`, host functions, records,
    routes, Reset, and the Workflows page.
 
