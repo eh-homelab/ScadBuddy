@@ -12,6 +12,7 @@ import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
+import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 
@@ -56,6 +57,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  // #931 — the active session's "Touched" panel.
+  const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -71,6 +74,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const composer = useRef<HTMLTextAreaElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
+  const touchedId = useId()
   const voiceNoteId = useId()
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -243,6 +247,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
               Stop
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={touchedOpen}
+            aria-controls={touchedId}
+            title="What this session's tool calls created, changed or deleted"
+            onClick={() => setTouchedOpen((o) => !o)}
+          >
+            Touched
+          </Button>
           <BudgetMeter session={active} />
           {!owned && (
             <div className="flex w-full items-center gap-2">
@@ -253,6 +267,17 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
             </div>
           )}
         </div>
+      )}
+
+      {active && touchedOpen && (
+        <section
+          id={touchedId}
+          aria-label="What this session touched"
+          className="shrink-0 border-b border-line bg-surface-2"
+        >
+          {/* Read again whenever the session's status moves, so a finished turn's changes show. */}
+          <SessionTouched sessionId={active.id} refreshKey={active.status} />
+        </section>
       )}
 
       <div

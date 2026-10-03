@@ -316,6 +316,28 @@ describe('assistant panel', () => {
     expect(screen.queryByText('Controlled by Claude Desktop')).not.toBeInTheDocument()
   })
 
+  it("shows what a session touched, linking to each resource's page (#931)", async () => {
+    const { user } = renderShell('/')
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    const touched = screen.getByRole('button', { name: 'Touched' })
+    expect(touched).toHaveAttribute('aria-expanded', 'false')
+    await user.click(touched)
+    expect(touched).toHaveAttribute('aria-expanded', 'true')
+    const panel = screen.getByRole('region', { name: 'What this session touched' })
+    const revisions = await within(panel).findByRole('group', { name: 'Revisions' })
+    expect(within(revisions).getByRole('link', { name: /3f9c2a1/ })).toHaveAttribute(
+      'href',
+      '/m/gridfinity-bin?version=3f9c2a1b7d4e',
+    )
+
+    await user.click(touched)
+    expect(screen.queryByRole('region', { name: 'What this session touched' })).not.toBeInTheDocument()
+  })
+
   it('reports a malformed frame instead of rendering it', async () => {
     const bad = () => ({
       connect: ({ onFrame }: { onFrame: (f: unknown) => void }) => {
