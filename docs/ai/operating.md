@@ -303,6 +303,10 @@ The routes without `/entries` are the single-credential routes from #1000: they 
 the first credential by priority, for scripts written against them. The UI no longer
 uses them.
 
+The routes without `/entries` are the single-credential routes that section uses: they
+act on the first credential by priority. The `/entries` and `/order` routes manage every
+credential (#1093).
+
 | Route | Guarded | What it does |
 |---|---|---|
 | `GET /api/v1/ai/credentials` | No | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
