@@ -240,7 +240,10 @@ def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) ->
     require_history(history)
     try:
         # Sized from the tree before it is read, as the working tree's file is stat'ed.
-        return history.read_blob(commit, f"{model_path(slug)}/{path}", limit=MAX_MODEL_IMAGE_BYTES)
+        folder = model_path(slug)
+        return history.read_blob(
+            commit, f"{folder}/{path}", limit=MAX_MODEL_IMAGE_BYTES, root=folder
+        )
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
     except BlobTooLargeError:

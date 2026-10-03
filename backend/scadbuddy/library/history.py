@@ -37,6 +37,7 @@ import fcntl
 import io
 import logging
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -134,6 +135,15 @@ class GitTimeoutError(GitError):
     hung rather than one commit slow. A deadline turns that into an ordinary
     :class:`GitError`, which the callers already log and degrade around.
     """
+
+
+#: Git's modes for a regular file and for a symlink in a tree entry.
+FILE_MODES = ("100644", "100755")
+SYMLINK_MODE = "120000"
+#: As the kernel's own limit on symlinks followed in one lookup (`ELOOP`).
+MAX_SYMLINK_HOPS = 40
+#: The longest symlink target read: Linux's PATH_MAX.
+MAX_PATH_BYTES = 4096
 
 
 class RevisionNotFoundError(KeyError):
@@ -662,31 +672,55 @@ class ModelHistory:
         assert isinstance(completed.stdout, bytes)
         return completed.stdout
 
-    def read_blob(self, commit: str, path: str, *, limit: int) -> bytes:
+    def read_blob(self, commit: str, path: str, *, limit: int, root: str | None = None) -> bytes:
         """The bytes of the file ``path`` at a revision, at most ``limit`` of them.
 
         The revision is resolved once; the tree entry gives the blob's id and size, so
         one over ``limit`` is refused (:class:`BlobTooLargeError`) without reading it,
         and the bytes read are that blob's by id, the one that was sized.
-        :class:`RevisionNotFoundError` when no regular file is there (a directory or a
-        symlink included).
+
+        A symlink (mode 120000, a blob holding its target's path) is followed only with
+        a ``root``, and only while each target, relative and resolved against the link's
+        directory, stays under it -- as the working tree's reader follows a link inside
+        a model's directory and refuses one out of it. Without a root it is no file.
+        :class:`RevisionNotFoundError` when no regular file is there (a directory, a
+        symlink that leaves ``root`` or loops included); :class:`GitError` when git
+        cannot read the tree.
         """
         resolved = self.resolve(commit)
-        listing = self._out("ls-tree", "-l", resolved, "--", path, check=False)
-        # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory.
+        current = path
+        for _ in range(MAX_SYMLINK_HOPS):
+            mode, oid, size = self._tree_entry(resolved, current, commit)
+            if mode != SYMLINK_MODE:
+                if size > limit:
+                    raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+                return self._blob(oid)
+            if root is None or size > MAX_PATH_BYTES:
+                break
+            target = self._blob(oid).decode("utf-8", "replace")
+            current = posixpath.normpath(posixpath.join(posixpath.dirname(current), target))
+            if target.startswith("/") or not current.startswith(f"{root}/"):
+                break
+        raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
+
+    def _tree_entry(self, resolved: str, path: str, commit: str) -> tuple[str, str, int]:
+        """``path``'s mode, blob id and size at ``resolved``: a regular file or a symlink,
+        else :class:`RevisionNotFoundError`."""
+        listing = self._out("ls-tree", "-l", resolved, "--", path)
+        # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory;
+        # nothing at all for a path that is not there.
         fields = listing.partition("\t")[0].split()
-        # A symlink is a blob too (mode 120000) whose bytes are its target's path: it is
-        # no file of the model's, as the working tree's reader refuses one out of it.
         if (
             len(fields) != 4
-            or fields[0] not in ("100644", "100755")
+            or fields[0] not in (*FILE_MODES, SYMLINK_MODE)
             or fields[1] != "blob"
             or not fields[3].isdigit()
         ):
             raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-        if int(fields[3]) > limit:
-            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-        completed = self._run("cat-file", "blob", fields[2], text=False)
+        return fields[0], fields[2], int(fields[3])
+
+    def _blob(self, oid: str) -> bytes:
+        completed = self._run("cat-file", "blob", oid, text=False)
         assert isinstance(completed.stdout, bytes)
         return completed.stdout
 

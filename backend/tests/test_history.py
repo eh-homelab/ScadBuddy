@@ -22,6 +22,7 @@ from scadbuddy.library.history import (
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
     BlobTooLargeError,
+    GitError,
     GitTimeoutError,
     ModelHistory,
     RevisionNotFoundError,
@@ -341,14 +342,67 @@ def test_read_blob_refuses_a_directory_a_missing_file_and_an_unknown_revision(
             history.read_blob(revision, path, limit=100)
 
 
-def test_read_blob_refuses_a_committed_symlink(models: Path, history: ModelHistory) -> None:
+def test_read_blob_refuses_a_committed_symlink_outside_its_root(
+    models: Path, history: ModelHistory
+) -> None:
     write_model(models, "keychain", "cube(10);\n")
-    (models / "keychain" / "link.png").symlink_to("/etc/passwd")
+    write_model(models, "other", "cube(1);\n")
+    (models / "other" / "secret.png").write_bytes(b"OTHER")
+    folder = models / "keychain"
+    (folder / "abs.png").symlink_to("/etc/passwd")
+    (folder / "out.png").symlink_to("../other/secret.png")
+    (folder / "loop.png").symlink_to("loop2.png")
+    (folder / "loop2.png").symlink_to("loop.png")
     commit = history.ensure_repo()
     assert commit is not None
 
+    for name in ("abs.png", "out.png", "loop.png"):
+        with pytest.raises(RevisionNotFoundError):
+            history.read_blob(commit, f"keychain/{name}", limit=100, root="keychain")
+    # Without a root, no symlink is followed at all.
+    (folder / "real.png").write_bytes(b"REAL")
+    (folder / "in.png").symlink_to("real.png")
+    commit = history.commit("Add an image and a link to it", "keychain")
+    assert commit is not None
     with pytest.raises(RevisionNotFoundError):
-        history.read_blob(commit, "keychain/link.png", limit=100)
+        history.read_blob(commit, "keychain/in.png", limit=100)
+
+
+def test_read_blob_follows_a_symlink_that_stays_under_its_root(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    folder = models / "keychain"
+    (folder / "images").mkdir()
+    (folder / "images" / "real.png").write_bytes(b"REAL")
+    (folder / "cover.png").symlink_to("images/real.png")
+    (folder / "images" / "again.png").symlink_to("../cover.png")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    assert history.read_blob(commit, "keychain/cover.png", limit=100, root="keychain") == b"REAL"
+    assert (
+        history.read_blob(commit, "keychain/images/again.png", limit=100, root="keychain")
+        == b"REAL"
+    )
+
+
+def test_read_blob_reports_a_failed_tree_read_as_a_git_error(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+    run = history._run
+
+    def broken(*args: str, **kwargs: object) -> object:
+        if args[0] == "ls-tree":
+            # A tree git cannot read, as a corrupt object or an I/O error leaves it.
+            args = ("ls-tree", "-l", "0" * 40, *args[3:])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", broken), pytest.raises(GitError):
+        history.read_blob(commit, "keychain/model.scad", limit=100)
 
 
 def test_diff_defaults_to_the_parent_and_handles_the_root_commit(

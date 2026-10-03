@@ -238,3 +238,35 @@ def test_a_committed_symlink_at_a_revision_is_a_404_not_its_target_path(
 
     assert response.status_code == 404
     assert b"/etc/passwd" not in response.content
+
+
+def test_a_symlink_inside_the_directory_is_followed(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    (paths.model_dir(model) / "images").mkdir()
+    (paths.model_dir(model) / "images" / "real.png").write_bytes(PNG)
+    (paths.model_dir(model) / "cover.png").symlink_to("images/real.png")
+
+    response = client.get(f"/api/v1/models/{model}/images/cover.png")
+
+    assert response.status_code == 200, response.text
+    assert response.content == PNG
+
+
+@pytest.mark.requires_git
+def test_a_symlink_inside_the_directory_is_followed_at_a_revision_too(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _upload(client)
+    (paths.model_dir(SLUG) / "real.png").write_bytes(PNG)
+    (paths.model_dir(SLUG) / "cover.png").symlink_to("real.png")
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    commit = state.history.commit("Add a cover link", model_path(SLUG))
+    assert commit is not None
+
+    live = client.get(f"/api/v1/models/{SLUG}/images/cover.png")
+    pinned = client.get(f"/api/v1/models/{SLUG}/images/cover.png", params={"commit": commit})
+
+    assert live.content == PNG
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.content == PNG
