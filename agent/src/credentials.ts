@@ -62,7 +62,7 @@ export type StoredCredential = CredentialSummary & {
   status: CredentialStatus
   /** Set only while `status` is `cooling_down`. */
   cooldown_until: string | null
-  /** Why it was last refused, redacted of the secret. */
+  /** Why it was last refused, redacted of the secret; cleared by a reset and by a new secret. */
   last_error: string | null
   last_error_at: string | null
   last_used_at: string | null
@@ -397,7 +397,7 @@ export class CredentialStore implements CredentialRepo {
           kind = ${kind}, base_url = ${baseUrl},
           secret_sealed = ${envelope.secretSealed}, dek_sealed = ${envelope.dekSealed},
           kek_id = ${envelope.kekId}, last4 = ${tail}, updated_at = now(),
-          status = 'active', cooldown_until = NULL, epoch = epoch + 1
+          status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL, epoch = epoch + 1
         WHERE id = ${current.id}`
       return await this.one(tx, current.id)
     })
@@ -462,7 +462,9 @@ export class CredentialStore implements CredentialRepo {
 
   async reset(id: string): Promise<StoredCredential | undefined> {
     const updated = await this.sql`
-      UPDATE ai_credentials SET status = 'active', cooldown_until = NULL, epoch = epoch + 1 WHERE id = ${id}`
+      UPDATE ai_credentials SET status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL,
+        epoch = epoch + 1
+      WHERE id = ${id}`
     return updated.count === 0 ? undefined : await this.get(id)
   }
 

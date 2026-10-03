@@ -23,6 +23,7 @@ export type AiStatus =
   | 'unavailable (stored credential is in an outdated format; save it again)'
   | 'unavailable (every Claude credential is rate limited)'
   | 'unavailable (every Claude credential is disabled)'
+  | 'unavailable (no Claude credential is usable now)'
 
 export type CredentialState = 'configured' | 'not configured' | 'unknown'
 
@@ -79,10 +80,14 @@ export async function aiStatus(
       ? { ai: 'unavailable (stored credential was sealed with a different key-encryption key)', credential }
       : { ai: 'unavailable (stored credential is in an outdated format; save it again)', credential }
   }
-  // #1093: usable now, or when the first one will be again.
+  // #1093: usable now, or when the first one will be again. "Rate limited"
+  // only when that is all of them; a mix (some disabled, or some the key
+  // cannot open) is "not usable now", with the time one recovers.
   if (opening.some((c) => c.status === 'active')) return { ai: 'enabled', credential }
   const soonest = soonestRecovery(list, deps.kek)
-  return soonest
-    ? { ai: 'unavailable (every Claude credential is rate limited)', credential, recoversAt: soonest.toISOString() }
-    : { ai: 'unavailable (every Claude credential is disabled)', credential }
+  if (!soonest) return { ai: 'unavailable (every Claude credential is disabled)', credential }
+  const recoversAt = soonest.toISOString()
+  return list.every((c) => c.status === 'cooling_down' && opensWith(c, deps.kek))
+    ? { ai: 'unavailable (every Claude credential is rate limited)', credential, recoversAt }
+    : { ai: 'unavailable (no Claude credential is usable now)', credential, recoversAt }
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  CLEARED_COOLDOWN_MS,
   classifyFailure,
   cooldownUntil,
   DEFAULT_COOLDOWN_MS,
@@ -128,7 +129,7 @@ describe('probeRateLimit', () => {
       },
     }))
     const until = await probeRateLimit({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-probe-token' }, { model: 'claude-sonnet-4-5', now })
-    expect(until.toISOString()).toBe('2026-10-03T12:03:00.000Z')
+    expect(until).toEqual({ until: new Date('2026-10-03T12:03:00.000Z') })
     const [call] = fake.messageCalls()
     expect(fake.messageCalls()).toHaveLength(1)
     expect(call?.headers.authorization).toBe('Bearer gw-probe-token')
@@ -142,7 +143,7 @@ describe('probeRateLimit', () => {
       return Promise.resolve(new Response('{}', { status: 429, headers: { 'retry-after': '30' } }))
     }
     const until = await probeRateLimit({ kind: 'anthropic_api_key', secret: 'sk-ant-probe' }, { model: undefined, fetch: fetchStub, now })
-    expect(until.getTime()).toBe(now() + 30_000)
+    expect(until).toEqual({ until: new Date(now() + 30_000) })
     expect(seen[0]?.url).toBe('https://api.anthropic.com/v1/messages')
     expect(seen[0]?.headers['x-api-key']).toBe('sk-ant-probe')
     expect(seen[0]?.headers.authorization).toBeUndefined()
@@ -151,13 +152,42 @@ describe('probeRateLimit', () => {
 
   it('falls back to the default cooldown when the endpoint cannot be asked or names no time', async () => {
     const failing: typeof fetch = () => Promise.reject(new Error('connection refused'))
-    expect((await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: failing, now })).getTime()).toBe(
-      now() + DEFAULT_COOLDOWN_MS,
-    )
-    const bare: typeof fetch = () => Promise.resolve(new Response('{}', { status: 200 }))
-    expect((await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: bare, now })).getTime()).toBe(
-      now() + DEFAULT_COOLDOWN_MS,
-    )
+    expect(await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: failing, now })).toEqual({
+      until: new Date(now() + DEFAULT_COOLDOWN_MS),
+    })
+    const bare: typeof fetch = () => Promise.resolve(new Response('{}', { status: 429 }))
+    expect(await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: bare, now })).toEqual({
+      until: new Date(now() + DEFAULT_COOLDOWN_MS),
+    })
+    const broken: typeof fetch = () => Promise.resolve(new Response('{}', { status: 500, headers: { 'retry-after': '900' } }))
+    expect(await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: broken, now })).toEqual({
+      until: new Date(now() + DEFAULT_COOLDOWN_MS),
+    })
+  })
+
+  it('calls an answered probe usable again in a second, whatever its reset headers say', async () => {
+    const ok: typeof fetch = () =>
+      Promise.resolve(
+        new Response('{}', {
+          status: 200,
+          headers: {
+            'anthropic-ratelimit-tokens-remaining': '100',
+            'anthropic-ratelimit-tokens-reset': '2026-10-03T13:00:00Z',
+            'anthropic-ratelimit-unified-reset': String(now() / 1000 + 86_000),
+          },
+        }),
+      )
+    expect(await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: ok, now })).toEqual({
+      until: new Date(now() + CLEARED_COOLDOWN_MS),
+    })
+  })
+
+  it.each([401, 402, 403])('reports a probe answered %i as refused outright', async (status) => {
+    const refused: typeof fetch = () =>
+      Promise.resolve(new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error' } }), { status }))
+    const verdict = await probeRateLimit({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: refused, now })
+    expect('refused' in verdict && verdict.refused).toMatch(`the rate-limit probe was refused (HTTP ${status}): `)
+    expect('refused' in verdict && verdict.refused).toContain('authentication_error')
   })
 
   it('does not probe a gateway host the egress rules refuse', async () => {
@@ -171,6 +201,6 @@ describe('probeRateLimit', () => {
       { model: undefined, fetch: fetchStub, now, resolveHost: () => Promise.resolve(['169.254.169.254']) },
     )
     expect(called).toBe(false)
-    expect(until.getTime()).toBe(now() + DEFAULT_COOLDOWN_MS)
+    expect(until).toEqual({ until: new Date(now() + DEFAULT_COOLDOWN_MS) })
   })
 })

@@ -10,7 +10,13 @@ import {
   soonestRecovery,
 } from '../credentials.js'
 import { type KekStatus, redact, SealError } from '../secrets.js'
-import { classifyFailure, type FailureClass, type FailureEvidence, probeRateLimit } from './credentialErrors.js'
+import {
+  classifyFailure,
+  type FailureClass,
+  type FailureEvidence,
+  type ProbeVerdict,
+  probeRateLimit,
+} from './credentialErrors.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
 // Several Claude credentials, in priority order, with fallback (#1093).
@@ -102,9 +108,17 @@ export type FallbackOptions = {
   report: (attempt: PooledCredential, outcome: AttemptOutcome, next: PooledCredential | undefined) => Promise<void>
   /** Runs one query; runHarness by default. */
   run?: (run: HarnessRun) => AsyncIterable<SDKMessage>
-  /** When a rate-limited credential is usable again; asks the endpoint (credentialErrors.ts) by default. */
-  rateLimitUntil?: (credential: Credential, model: string | undefined) => Promise<Date>
+  /**
+   * When a rate-limited credential is usable again, or that it is refused
+   * outright after all; asks the endpoint (credentialErrors.ts) by default.
+   */
+  rateLimitProbe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   transientRetries?: number
+  /**
+   * What the session had spent before this turn, when `resume` is set: a
+   * resumed query's `total_cost_usd` includes it (see `Spend`). 0 by default.
+   */
+  priorCostUsd?: number
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -140,10 +154,38 @@ function apiFailure(
   }
 }
 
-/** The final result, with what the earlier attempts spent added in. */
-function withSpent(message: SDKMessage, usd: number, turns: number): SDKMessage {
-  if (message.type !== 'result' || (usd === 0 && turns === 0)) return message
-  return { ...message, total_cost_usd: message.total_cost_usd + usd, num_turns: message.num_turns + turns }
+/**
+ * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
+ * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * already includes everything the session spent before it, restored from the
+ * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
+ * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check
+ * are the query's own (a resumed query with maxBudgetUsd 0.00015 ran to 0.00021
+ * total without stopping; with 0.00005 it stopped). So the earlier attempts'
+ * spend is never added to a resumed total, but their turns are, and it is
+ * taken off the next attempt's budget.
+ */
+type Spend = {
+  /** What the session had spent before this turn, as a resumed total counts it. */
+  prior: number
+  /** What this turn's earlier attempts spent themselves. */
+  usd: number
+  turns: number
+}
+
+/** What a result's total says this attempt spent itself. */
+function ownCost(result: SDKResultMessage, spend: Spend, resumed: boolean): number {
+  const carried = resumed ? spend.prior + spend.usd : 0
+  // A total below what it should have carried in: the restore did not happen.
+  return result.total_cost_usd >= carried ? result.total_cost_usd - carried : result.total_cost_usd
+}
+
+/** The final result, with the earlier attempts' turns, and their cost when its total does not already hold it. */
+function withSpent(message: SDKMessage, spend: Spend, resumed: boolean): SDKMessage {
+  if (message.type !== 'result' || (spend.usd === 0 && spend.turns === 0)) return message
+  const carried = resumed ? spend.prior + spend.usd : 0
+  const total = resumed && message.total_cost_usd >= carried ? message.total_cost_usd : message.total_cost_usd + spend.usd
+  return { ...message, total_cost_usd: total, num_turns: message.num_turns + spend.turns }
 }
 
 const isCredentialFailure = (c: FailureClass | undefined): c is 'permanent' | 'rate_limited' | 'transient' =>
@@ -159,7 +201,7 @@ export async function* runWithFallback(
   options: FallbackOptions,
 ): AsyncGenerator<SDKMessage, void, undefined> {
   const runOne = options.run ?? runHarness
-  const rateLimitUntil = options.rateLimitUntil ?? ((credential, model) => probeRateLimit(credential, { model }))
+  const rateLimitProbe = options.rateLimitProbe ?? ((credential, model) => probeRateLimit(credential, { model }))
   const { candidates } = options
   if (candidates.length === 0) throw new NoUsableCredentialError('no Claude credential is usable', undefined)
 
@@ -168,9 +210,10 @@ export async function* runWithFallback(
     ...(base.resume === undefined ? {} : { resume: base.resume }),
     ...(base.sessionId === undefined ? {} : { sessionId: base.sessionId }),
   }
-  let spentUsd = 0
-  let spentTurns = 0
+  const spend: Spend = { prior: options.priorCostUsd ?? 0, usd: 0, turns: 0 }
   let sawInit = false
+  /** Whether this attempt resumes a session, so its total carries what came before. */
+  let resumed = base.resume !== undefined
 
   for (let i = 0; i < candidates.length; i++) {
     const current = candidates[i] as PooledCredential
@@ -185,8 +228,8 @@ export async function* runWithFallback(
       signal: controller.signal,
       ...(i > 0
         ? {
-            maxTurns: Math.max(1, (base.maxTurns ?? DEFAULT_MAX_TURNS) - spentTurns),
-            maxBudgetUsd: Math.max((base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD) - spentUsd, 0.000001),
+            maxTurns: Math.max(1, (base.maxTurns ?? DEFAULT_MAX_TURNS) - spend.turns),
+            maxBudgetUsd: Math.max((base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD) - spend.usd, 0.000001),
           }
         : {}),
       ...(next ? { maxRetries: options.transientRetries ?? DEFAULT_TRANSIENT_RETRIES } : {}),
@@ -257,7 +300,7 @@ export async function* runWithFallback(
           }
           for (const h of held) yield h
           held.length = 0
-          yield withSpent(message, spentUsd, spentTurns)
+          yield withSpent(message, spend, resumed)
           continue
         }
         // Anything else is the turn going on: whatever was held was not its end.
@@ -275,7 +318,7 @@ export async function* runWithFallback(
     }
 
     const release = function* (): Generator<SDKMessage> {
-      for (const m of held) yield withSpent(m, spentUsd, spentTurns)
+      for (const m of held) yield withSpent(m, spend, resumed)
     }
     if (base.signal?.aborted) {
       yield* release()
@@ -294,24 +337,30 @@ export async function* runWithFallback(
     }
 
     const reason = redact(failure.message || verdict, [current.credential.secret])
-    const outcome: AttemptOutcome =
-      verdict === 'rate_limited'
-        ? { class: verdict, reason, until: await rateLimitUntil(current.credential, model) }
-        : { class: verdict, reason }
-    if (result) {
-      spentUsd += result.total_cost_usd
-      spentTurns += result.num_turns
+    let outcome: AttemptOutcome = { class: verdict as 'permanent' | 'transient', reason }
+    if (verdict === 'rate_limited') {
+      const probe = await rateLimitProbe(current.credential, model)
+      outcome =
+        'refused' in probe
+          ? { class: 'permanent', reason: redact(probe.refused, [current.credential.secret]) }
+          : { class: verdict, reason, until: probe.until }
     }
     await options.report(current, outcome, next)
     if (!next) {
       if (held.length === 0) throw new Error(`the Claude credential (${current.label}) was refused: ${reason}`)
+      // With the totals as they were before this attempt: its result already counts itself.
       yield* release()
       if (thrown !== undefined) throw thrown
       return
     }
+    if (result) {
+      spend.usd += ownCost(result, spend, resumed)
+      spend.turns += result.num_turns
+    }
     if (sessionSeen !== undefined) {
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT
+      resumed = true
     }
   }
 }

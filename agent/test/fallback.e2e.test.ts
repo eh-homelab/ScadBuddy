@@ -185,5 +185,15 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const sent = callsWith(TOKEN_B).at(-1)?.body?.messages ?? []
     expect(JSON.stringify(sent)).toContain('tool_result')
     expect(JSON.stringify(sent)).toContain(CONTINUE_PROMPT)
+    // The cost is what the endpoint billed, once: two answered requests (A's
+    // tool call, B's reply), each priced as one plain reply is. The resumed
+    // attempt's total already held A's (fallback.ts `Spend`), and the rejected
+    // requests (the 429 and the probe) cost nothing.
+    forA = () => ({ text: 'One reply.' })
+    const reference = await turn({ sessionId: randomUUID() })
+    const one = reference.result?.type === 'result' ? reference.result.total_cost_usd : NaN
+    expect(one).toBeGreaterThan(0)
+    expect(result?.type === 'result' ? result.total_cost_usd : NaN).toBeCloseTo(2 * one, 12)
+    expect(result).toMatchObject({ num_turns: 3 })
   }, 60_000)
 })

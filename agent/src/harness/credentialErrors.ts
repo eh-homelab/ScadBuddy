@@ -142,12 +142,27 @@ export const PROBE_FALLBACK_MODEL = 'claude-haiku-4-5'
 const ANTHROPIC_API = 'https://api.anthropic.com'
 
 /**
- * Asks the endpoint once, with the credential that was rate limited, when it
- * will take requests again: a one-token Messages request whose response
- * headers name the time (`rateLimitResetFromHeaders`). Any failure (network,
- * timeout, a gateway host the egress rules refuse) gives the default cooldown.
+ * What the probe found: the time the credential is usable again, or that it
+ * is refused outright (revoked or out of credit since the 429), which the
+ * caller records as permanent.
  */
-export async function probeRateLimit(credential: Credential, options: ProbeOptions): Promise<Date> {
+export type ProbeVerdict = { until: Date } | { refused: string }
+
+/** A probe that was answered: the limit has cleared (or hit a bucket a one-token request does not). */
+export const CLEARED_COOLDOWN_MS = 1000
+
+/**
+ * Asks the endpoint once, with the credential that was rate limited, when it
+ * will take requests again: a one-token Messages request. By its status:
+ *
+ *   - 429: the reset its headers name (`rateLimitResetFromHeaders`), else the default;
+ *   - 2xx: answered, so usable again in a second. The `-reset` headers of a
+ *     success say when a bucket is full again, not when it can be used;
+ *   - 401, 402, 403: refused outright;
+ *   - anything else, or no answer (network, timeout, a gateway host the
+ *     egress rules refuse): the default cooldown.
+ */
+export async function probeRateLimit(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
   const now = options.now ?? Date.now
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
@@ -171,9 +186,15 @@ export async function probeRateLimit(credential: Credential, options: ProbeOptio
         messages: [{ role: 'user', content: 'ok' }],
       }),
     })
+    if (res.status === 401 || res.status === 402 || res.status === 403) {
+      const body = (await res.text().catch(() => '')).slice(0, 300)
+      return { refused: `the rate-limit probe was refused (HTTP ${res.status})${body ? `: ${body}` : ''}` }
+    }
     await res.body?.cancel()
-    return cooldownUntil(rateLimitResetFromHeaders(res.headers, now()), now())
+    if (res.ok) return { until: cooldownUntil(now() + CLEARED_COOLDOWN_MS, now()) }
+    if (res.status === 429) return { until: cooldownUntil(rateLimitResetFromHeaders(res.headers, now()), now()) }
+    return { until: cooldownUntil(undefined, now()) }
   } catch {
-    return cooldownUntil(undefined, now())
+    return { until: cooldownUntil(undefined, now()) }
   }
 }

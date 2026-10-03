@@ -167,7 +167,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
         await store.record(saved.id, saved.epoch, { kind: 'disabled', reason: 'HTTP 401' })
         const reset = await store.reset(saved.id)
-        expect(reset).toMatchObject({ status: 'active', epoch: saved.epoch + 1, last_error: 'HTTP 401' })
+        expect(reset).toMatchObject({ status: 'active', epoch: saved.epoch + 1, last_error: null, last_error_at: null })
         expect(await store.reset('nope')).toBeUndefined()
       })
 
@@ -176,9 +176,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await store.record(a.id, a.epoch, { kind: 'disabled', reason: 'HTTP 403' })
         expect(await store.put({ kind: 'gateway', base_url: 'https://llm.example' }, kek, a.id)).toMatchObject({
           status: 'disabled',
+          last_error: 'HTTP 403',
         })
         expect(await store.put({ kind: 'gateway', base_url: 'https://llm.example', secret: `${GW}2` }, kek, a.id)).toMatchObject(
-          { status: 'active' },
+          { status: 'active', last_error: null, last_error_at: null },
         )
       })
 

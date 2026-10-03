@@ -101,6 +101,8 @@ export class MemoryCredentials implements CredentialRepo {
       envelope,
       status: 'active',
       cooldownUntil: null,
+      last_error: null,
+      last_error_at: null,
       epoch: row.epoch + 1,
     })
     return (await this.get(row.id)) as StoredCredential
@@ -149,7 +151,7 @@ export class MemoryCredentials implements CredentialRepo {
   async reset(id: string): Promise<StoredCredential | undefined> {
     const row = this.find(id)
     if (!row) return undefined
-    Object.assign(row, { status: 'active', cooldownUntil: null, epoch: row.epoch + 1 })
+    Object.assign(row, { status: 'active', cooldownUntil: null, last_error: null, last_error_at: null, epoch: row.epoch + 1 })
     return this.get(id)
   }
 

@@ -25,7 +25,7 @@ export type AiStatusView = {
   reason?: string
   /** Set when this request would be refused by the chat socket's gate. */
   chat?: 'refused'
-  /** When every credential is rate limited: the soonest one is usable again (#1093). */
+  /** When no credential is usable now but one is rate limited: the soonest one is usable again (#1093). */
   recovers_at?: string
 }
 
@@ -36,6 +36,12 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
   if (ai === 'disabled (no Claude credential)') return 'No Claude credential is configured yet.'
   if (ai === 'unavailable (every Claude credential is rate limited)') {
     return `Every Claude credential is rate limited${recoversAt ? `; the first is usable again at ${recoversAt}` : ''}.`
+  }
+  if (ai === 'unavailable (no Claude credential is usable now)') {
+    return (
+      `No Claude credential is usable now: some are rate limited${recoversAt ? ` (the first is usable again at ${recoversAt})` : ''}, ` +
+      'and the rest need attention in Settings.'
+    )
   }
   if (ai === 'unavailable (every Claude credential is disabled)') {
     return 'Every Claude credential was refused and is disabled; reset one, or save a new secret for it, in Settings.'

@@ -158,7 +158,7 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
       base_url: 'https://llm.example',
       secret: `${GW}-new`,
     })
-    expect(saved.body).toMatchObject({ status: 'active', last4: '-new' })
+    expect(saved.body).toMatchObject({ status: 'active', last4: '-new', last_error: null, last_error_at: null })
     expect((await call('PUT', '/entries/nope', { kind: 'anthropic_api_key', secret: KEY_A })).status).toBe(404)
   })
 
@@ -259,6 +259,22 @@ describe('GET /api/v1/ai/status with several credentials (#1093)', () => {
     // Once that passes, it is usable again with nothing written.
     credentials.now = () => soon.getTime() + 1
     expect(await status(app)).toMatchObject({ available: true, ai: 'enabled' })
+  })
+
+  it('does not call a mix of disabled and rate-limited credentials all rate limited', async () => {
+    const { app, create, credentials } = setup()
+    const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
+    const b = await create({ kind: 'anthropic_api_key', secret: KEY_B })
+    const soon = new Date(Date.now() + 60_000)
+    await credentials.record(a.id, 0, { kind: 'disabled', reason: 'HTTP 401' })
+    await credentials.record(b.id, 0, { kind: 'cooling_down', until: soon, reason: 'HTTP 429' })
+    expect(await status(app)).toEqual({
+      available: false,
+      state: 'unavailable',
+      ai: 'unavailable (no Claude credential is usable now)',
+      reason: `No Claude credential is usable now: some are rate limited (the first is usable again at ${soon.toISOString()}), and the rest need attention in Settings.`,
+      recovers_at: soon.toISOString(),
+    })
   })
 
   it('says a person must act when every credential is disabled', async () => {

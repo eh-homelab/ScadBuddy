@@ -256,7 +256,7 @@ is `classifyFailure()` in
 | Failure | Examples | What happens |
 |---|---|---|
 | Permanent | 401, 403, 402, a billing or credit message | The credential becomes `disabled`, with the reason in `last_error`. It is not tried again until someone resets it or saves a new secret for it. |
-| Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential (`probeRateLimit()`, a one-token request; a refused one is not billed) and reads `retry-after`, then the `anthropic-ratelimit-*-reset` headers. With no time named, 60 s. |
+| Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential (`probeRateLimit()`, a one-token request; a refused one is not billed) and reads `retry-after`, then the `anthropic-ratelimit-*-reset` headers, from its 429. With no time named, 60 s. A probe that is answered makes it usable again in 1 s; one refused with 401, 402 or 403 disables it instead. |
 | Transient | 5xx, 529, network errors | Claude Code retries on the same credential, at most twice when there is another to fall back to (`CLAUDE_CODE_MAX_RETRIES`), then the turn moves on for this call only. The credential is not marked. |
 | Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. |
 
@@ -267,8 +267,15 @@ recovery and fallback is an audit row of kind `credential` (`CredentialPool`), n
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
 is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
-`ai` set to `unavailable (every Claude credential is rate limited)` (and
-`recovers_at`) or `unavailable (every Claude credential is disabled)`.
+`ai` set to one of:
+
+- `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
+  credential is cooling down and will be usable again on its own;
+- `unavailable (no Claude credential is usable now)`, with `recovers_at`: some are
+  cooling down, and the rest are disabled or cannot be opened, which needs a person;
+- `unavailable (every Claude credential is disabled)`: nothing recovers on its own.
+
+A reset, or a new secret, clears `last_error` and `last_error_at` as well as the status.
 
 Several pods share this state. A cooldown that has passed reads as `active` on the
 database's clock without a write; a rate limit never downgrades a disabled credential;

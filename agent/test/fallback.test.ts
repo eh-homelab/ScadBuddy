@@ -9,6 +9,7 @@ import {
   type PooledCredential,
   runWithFallback,
 } from '../src/harness/fallback.js'
+import type { ProbeVerdict } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
@@ -80,6 +81,8 @@ function harness(script: Script) {
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
+      probeVerdict: ProbeVerdict = { until: new Date('2026-10-03T12:05:00Z') },
+      priorCostUsd?: number,
     ): Promise<{ messages: SDKMessage[]; error: unknown }> {
       const messages: SDKMessage[] = []
       let error: unknown
@@ -93,10 +96,11 @@ function harness(script: Script) {
               reports.push({ id: attempt.id, outcome, next: next?.id })
               return Promise.resolve()
             },
-            rateLimitUntil: (credential, model) => {
+            rateLimitProbe: (credential, model) => {
               probes.push({ ...credential, model })
-              return Promise.resolve(new Date('2026-10-03T12:05:00Z'))
+              return Promise.resolve(probeVerdict)
             },
+            ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
           },
         )) {
           messages.push(m)
@@ -240,12 +244,63 @@ describe('runWithFallback (#1093)', () => {
             messages: [init(), toolUse(), toolResult(), apiError('API Error: Request rejected (429)', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429)', 0.03, 2)],
             throws: new Error('error result'),
           }
-        : [init(), text('done'), success('done', 0.01, 1)],
+        : // Resumed: its total already holds the first attempt's 0.03 (measured, fallback.e2e.test.ts).
+          [init(), text('done'), success('done', 0.04, 1)],
     )
     const { messages } = await h.collect([A, B], { maxTurns: 10, maxBudgetUsd: 1 })
     expect(kinds(messages)).toEqual(['system/init', 'assistant', 'user', 'assistant', 'result/success'])
+    // The cost is not added again; the turns are, since num_turns is the query's own.
     expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.04, num_turns: 3 })
+    // The budget check is the query's own spend, so the next attempt gets what is left.
     expect(h.runs[1]).toMatchObject({ resume: SESSION, prompt: CONTINUE_PROMPT, maxTurns: 8, maxBudgetUsd: 0.97 })
+  })
+
+  it('counts what the session spent before this turn once, on a turn that itself resumed', async () => {
+    // The session had spent 0.5 before; attempt A (resumed) reports 0.5 + 0.03, B 0.5 + 0.03 + 0.01.
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.53, 2)], throws: new Error('x') }
+        : [init(), success('done', 0.54, 1)],
+    )
+    const { messages } = await h.collect([A, B], { resume: SESSION, sessionId: undefined, maxBudgetUsd: 0.5 }, undefined, 0.5)
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.54, num_turns: 3 })
+    expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.47, 10)
+  })
+
+  it('leaves the last credential’s failed result as it came: its cost and turns count themselves once', async () => {
+    const h = harness(() => ({
+      messages: [init(), toolUse(), toolResult(), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded', 0.03, 2)],
+      throws: new Error('Claude Code returned an error result'),
+    }))
+    const { messages, error } = await h.collect([A])
+    expect(messages.at(-1)).toMatchObject({ type: 'result', total_cost_usd: 0.03, num_turns: 2 })
+    expect(error).toBeInstanceOf(Error)
+    expect(h.reports).toEqual([{ id: 'a', outcome: { class: 'transient', reason: 'API Error: 529 Overloaded' }, next: undefined }])
+  })
+
+  it('adds only an earlier attempt’s turns to the last credential’s failed result after a fallback', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.03, 2)], throws: new Error('x') }
+        : { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.05, 1)], throws: new Error('x') },
+    )
+    const { messages } = await h.collect([A, B])
+    // B resumed: its 0.05 already holds A's 0.03.
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 3 })
+  })
+
+  it('disables a rate-limited credential the probe finds refused outright', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), apiError('API Error: Request rejected (429)', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429)')], throws: new Error('x') }
+        : [init(), success('ok')],
+    )
+    await h.collect([A, B], {}, { refused: `the rate-limit probe was refused (HTTP 401): bad ${A.credential.secret}` })
+    expect(h.reports[0]).toEqual({
+      id: 'a',
+      outcome: { class: 'permanent', reason: 'the rate-limit probe was refused (HTTP 401): bad [redacted]' },
+      next: 'b',
+    })
   })
 
   it('does not stop a turn that has made progress at a retry: its result says what it spent', async () => {

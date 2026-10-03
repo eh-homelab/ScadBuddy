@@ -10,6 +10,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
@@ -316,8 +317,8 @@ export type SessionManagerDeps = {
    * throws when none is usable now.
    */
   credentials: CredentialSource
-  /** When a rate-limited credential is usable again; fallback.ts asks the endpoint when omitted. */
-  rateLimitUntil?: (credential: Credential, model: string | undefined) => Promise<Date>
+  /** When a rate-limited credential is usable again, or that it is refused; fallback.ts asks the endpoint when omitted. */
+  rateLimitProbe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
@@ -1127,7 +1128,9 @@ export class SessionManager {
         candidates,
         report: this.deps.credentials.reporter({ sessionId: id, turnId }),
         run: this.run,
-        ...(this.deps.rateLimitUntil ? { rateLimitUntil: this.deps.rateLimitUntil } : {}),
+        ...(this.deps.rateLimitProbe ? { rateLimitProbe: this.deps.rateLimitProbe } : {}),
+        // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
+        ...(resume ? { priorCostUsd: session.costUsd } : {}),
       })
       for await (const message of turn) {
         if (message.type === 'result') {
