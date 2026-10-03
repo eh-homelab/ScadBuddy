@@ -28,11 +28,10 @@ from temporalio.exceptions import ActivityError, ApplicationError
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun
-    from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
+    from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
-        FAILED,
         PRINT_RUN_WORKFLOW,
         REFUSED,
         AcceptAnswer,
@@ -47,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
         RecordInput,
         SliceStartInput,
     )
+    from scadbuddy.workflows.problems import problem_of
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -81,16 +81,6 @@ STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 MAY_HAVE_QUEUED = SearchAttributeKey.for_bool("ScadbuddyMayHaveQueued")
 
 
-def _problem(error: BaseException) -> PrintRunError:
-    """The problem an activity reported (``REFUSED``/``FAILED`` details), else the
-    unexpected failure's: never the exception's own text, which may say anything."""
-    cause = error.cause if isinstance(error, ActivityError) else error
-    if isinstance(cause, ApplicationError) and cause.type in (REFUSED, FAILED) and cause.details:
-        detail: Any = cause.details[0]
-        return detail if isinstance(detail, PrintRunError) else PrintRunError.model_validate(detail)
-    return PrintRunError(status=500, title="Internal Server Error", detail=UNEXPECTED_DETAIL)
-
-
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
 class PrintRunWorkflow:
     def __init__(self) -> None:
@@ -122,7 +112,7 @@ class PrintRunWorkflow:
             )
         except ActivityError as error:
             # Nothing was written: the execution fails, and a retry may start again.
-            self.refusal = _problem(error)
+            self.refusal = problem_of(error)
             self._upsert(status="refused")
             await workflow.wait_condition(workflow.all_handlers_finished)
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
@@ -142,7 +132,7 @@ class PrintRunWorkflow:
             # The record exists: whatever happened is recorded, and the execution completes.
             self.row = await workflow.execute_activity(
                 "print_fail",
-                FailInput(run_id=accepted.run.id, slug=input.slug, error=_problem(error)),
+                FailInput(run_id=accepted.run.id, slug=input.slug, error=problem_of(error)),
                 result_type=PrintRun,
                 start_to_close_timeout=SHORT,
                 retry_policy=RECORD_RETRY,
