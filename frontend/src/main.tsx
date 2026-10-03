@@ -41,7 +41,9 @@ async function start() {
  * Tracing spec 2026-10-01 §5.3: the SDK is its own chunk, fetched after the first
  * paint (the frame after the next one), so it never delays the page or the 3D viewer.
  * Until it loads, `lib/traceAction.ts` makes no-op spans. A chunk that fails to load
- * leaves the page untraced; `installStaleChunkReload` handles a stale deploy.
+ * fires `vite:preloadError` like any other, so `installStaleChunkReload` reloads the
+ * page once per build (right for a stale deploy); the `catch` only keeps the rejection
+ * from surfacing, and a page that stays untraced is the fallback.
  */
 function loadTracingAfterFirstPaint() {
   requestAnimationFrame(() => {
