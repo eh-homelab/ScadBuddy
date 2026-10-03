@@ -87,6 +87,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     expect(decision.links[0]?.context.spanId).toBe(PARENT_SPAN_ID)
   })
 
+  it('a prepare evicted by a newer one is a cancelled root decision, linked to its parked span', async () => {
+    const prepare = (traceparent: string, n: number) =>
+      m.approvals.createPrepared(
+        { toolUseId: `prep_${n}`, tool: 'mcp__stub__print', input: { job: `box${n}.3mf` }, tier: 'outward', requestedBy: agentA, traceparent },
+        { perPrincipal: 1, total: 100, evictReason: 'superseded' },
+      )
+    const otherParent = 'b7ad6b7169203331'
+    const first = await prepare(TRACEPARENT, 1)
+    await prepare(`00-${TRACE_ID}-${otherParent}-01`, 2)
+    const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
+    expect(decision.parentSpanContext).toBeUndefined()
+    expect(decision.links.map((l) => [l.context.traceId, l.context.spanId])).toEqual([[TRACE_ID, PARENT_SPAN_ID]])
+    expect(decision.attributes).toMatchObject({ 'scadbuddy.approval_id': first!.id, 'scadbuddy.outcome': 'cancelled' })
+    const [row] = await db.sql<{ decision: string; decision_traceparent: string | null }[]>`
+      SELECT decision, decision_traceparent FROM ai_approvals WHERE id = ${first!.id}`
+    expect(row).toEqual({
+      decision: 'cancelled',
+      decision_traceparent: `00-${decision.spanContext().traceId}-${decision.spanContext().spanId}-01`,
+    })
+  })
+
   it('a row with no stored context (written before the migration) is decided without a link or an error', async () => {
     const { approval } = await orphan()
     expect(approval.traceparent).toBeNull()
