@@ -166,7 +166,10 @@ describe('SettingsPage', () => {
     expect((await api.getSettings()).print_run_retention_seconds).toBe(604800)
 
     await user.clear(days)
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    // The button is disabled while the first save is in flight.
+    const save = screen.getByRole('button', { name: 'Save Printing defaults' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toMatchObject({ print_run_retention_seconds: null })
     put.mockRestore()
@@ -185,7 +188,10 @@ describe('SettingsPage', () => {
     expect(put.mock.calls[0]?.[0]).toMatchObject({ operation_retention_seconds: 172800 })
 
     await user.clear(days)
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    // The button is disabled while the first save is in flight.
+    const save = screen.getByRole('button', { name: 'Save Printing defaults' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toMatchObject({ operation_retention_seconds: null })
     put.mockRestore()
