@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ROOT_CONTEXT, trace } from '@opentelemetry/api'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { mcpMethodOf } from '../src/mcp/http.js'
 import { bindToolContext, tracer, unbindToolContext } from '../src/telemetry/trace.js'
@@ -69,6 +69,24 @@ describe('/mcp spans', () => {
     for (const method of ['a1', 'tools/call2', 'x'.repeat(64), 'notifications/made_up']) {
       expect(await mcpMethodOf(post(JSON.stringify({ jsonrpc: '2.0', id: 1, method })))).toBe('unknown')
     }
+  })
+
+  it('reads no body for a span that is not recording', async () => {
+    const t = testApp()
+    const { token } = await t.tokens.mint({ name: 'test', tier: 'read' })
+    // An unsampled caller: the span is not recording, so it is never named.
+    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}`, traceparent: TRACEPARENT.replace(/-01$/, '-00') } })
+    clients.push(client)
+    const clone = vi.spyOn(Request.prototype, 'clone')
+    try {
+      await client.callTool({ name: 'list_models', arguments: {} })
+      // msw clones the backend request; no /mcp request is cloned.
+      expect(clone.mock.contexts.map((r) => new URL(r.url).pathname).filter((p) => p.startsWith('/mcp'))).toEqual([])
+    } finally {
+      clone.mockRestore()
+    }
+    await flushTracing()
+    expect(spans.getFinishedSpans().filter((s) => s.name.startsWith('agent.mcp'))).toEqual([])
   })
 
   it('the mcp span outlives its tool span, whatever the response framing', async () => {

@@ -177,7 +177,6 @@ export async function mcpMethodOf(request: Request): Promise<string> {
  */
 async function traced(request: Request, handle: () => Promise<Response>): Promise<Response> {
   if (request.method !== 'POST') return handle()
-  const method = await mcpMethodOf(request)
   const active = context.active()
   const parent = trace.getSpan(active)
     ? active
@@ -185,7 +184,14 @@ async function traced(request: Request, handle: () => Promise<Response>): Promis
         keys: (headers) => [...headers.keys()],
         get: (headers, key) => headers.get(key) ?? undefined,
       })
-  const span = tracer().startSpan(`agent.mcp/${method}`, { attributes: { 'rpc.method': method } }, parent)
+  const span = tracer().startSpan('agent.mcp', {}, parent)
+  // The body is cloned and parsed for the name only when the span is kept:
+  // never with tracing off or for an unsampled caller (uploads are large).
+  if (span.isRecording()) {
+    const method = await mcpMethodOf(request)
+    span.updateName(`agent.mcp/${method}`)
+    span.setAttribute('rpc.method', method)
+  }
   try {
     const response = await context.with(trace.setSpan(parent, span), handle)
     span.setAttribute('http.response.status_code', response.status)
