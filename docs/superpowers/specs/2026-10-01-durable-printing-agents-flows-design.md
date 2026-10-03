@@ -717,8 +717,9 @@ the most constrained runtime in the system.
 
   It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
   `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`), `ai_pending_input` and `ai_input_responses` (§6.6) and the
-  session counters. It can do
+  `ai_durable_entries` (or `ai_session_entries`), `ai_pending_input`,
+  `ai_input_responses` and `ai_audit` rows of kind `approval` (§6.6), and the session
+  counters. It can do
   nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
   DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
@@ -875,8 +876,9 @@ happens, and there is no separate request system.
   - `id` is the `request_id` that `respond` takes. It is opaque to clients: the row id
     for a classic entry (an `ai_approvals` or `ai_questions` row, whose `tool_use_id`
     is not unique, since cancelled, expired and re-asked rows are kept), and
-    `durable:<session id>:<tool_use_id>` for a durable one, where the plugin runs each
-    `tool_use_id` once (§3.2);
+    `durable:<session id>:<tool_use_id>` for a durable session's, where the plugin runs
+    each `tool_use_id` once (§3.2), and `flow:<run id>:<call id>` for a flow run's, where
+    `<call id>` is the harness's id for the host call;
   - `kind` and `responders` come from the tool's HITL policy;
   - for an `approval`, the entry carries the scrubbed `summary` and the `input_hash`
     and **never the call's raw input**, as the approval reads already do
@@ -886,7 +888,14 @@ happens, and there is no separate request system.
 - In a durable session it is built from the plugin's `pending_approvals()` (`id`,
   `name`, `input`), joined with the entry's policy and times, which the workflow keeps
   in its own state when the call parks. The plugin runs one durable call at a time
-  (§3.2), so a durable session has at most one entry.
+  (§3.2), so a durable session has at most one entry. A flow run can hold several: its
+  host calls may run in parallel (`asyncio.gather`, §3.2), and each parked one is an
+  entry.
+- **Flow entries stay out of the assistant's reads.** They are listed and answered on
+  the Workflows page only (§7.2, §7.3), through `ProjectWorkflow`'s own `pending_input`
+  and `respond`. They get no `ai_pending_input` row, so `GET /api/v1/ai/pending-input`
+  and the badge never count them. An `agent(...)` step's entries are its own durable
+  session's, and do appear there (§7.2).
 - **How a durable entry opens and closes.** Two activities on the `agent` queue, run by
   `DurableSession`, own every write about an entry:
   - `open_input`: `DurableSession` waits with `workflow.wait_condition` for
@@ -896,17 +905,22 @@ happens, and there is no separate request system.
     timer.
   - `resolve_input`: every resolution, by `respond` or by the timer and of either kind,
     runs it *before* `agent.decide`. In one transaction it writes the outcome to
-    `ai_input_responses` (for an `answer`), deletes the `ai_pending_input` row and
-    appends `input.resolved`. So no resolution reaches the plugin without the
-    projection and the event recording it.
+    `ai_input_responses` (every kind: `approved`, `denied`, `expired`, `answered`,
+    `cancelled`, `timed_out`), deletes the `ai_pending_input` row, appends
+    `input.resolved`, and, for an `approval`, writes the `ai_audit` row that
+    `approvals/service.ts` writes for a classic decision or expiry (`audit/log.ts:276`).
+    So no resolution reaches the plugin without the projection, the event and the audit
+    recording it, and a durable expiry is recorded as `expired` there.
   - `ai_pending_input(request_id primary key, session_id, kind, tool, summary,
     input_hash, prompt, requested_by, responders, created_at, expires_at)` and
     `ai_input_responses` are one new agent migration in phase 5. The `agent-durable`
     role writes both (§6.3a).
 - **Two reads, two sources.**
   - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
-    one it sends the Query: it is the source of truth, and it reconciles the projection
-    below.
+    one it sends the Query, which is the source of truth. It writes nothing. The
+    projection below needs no reconciler: only `open_input` and `resolve_input` write
+    it, each in one transaction with its event, and both run before the plugin is
+    told, so the two cannot disagree for longer than a retrying activity.
   - `GET /api/v1/ai/pending-input` answers for everything the principal may see, the
     badge's read. It is **one Postgres read of a projection**, `ai_pending_input`,
     written by `open_input` and `resolve_input` (above), as `render_jobs` is projected
@@ -927,10 +941,22 @@ happens, and there is no separate request system.
 
 #### Responses: the `respond` Update
 
-- `respond(request_id, response)` answers one entry. The route is
+- `respond(request_id, response, responder)` answers one entry. The route is
   `POST /api/v1/ai/pending-input/{request_id}`, for a session's entry and a session-less
-  one alike; the route resolves `request_id` to its store or its workflow. The principal
-  is the authenticated caller, never a field of the body.
+  one alike; the route resolves `request_id` to its store or its workflow. In the HTTP
+  request the principal is the authenticated caller, never a field of the body. The
+  route then passes it to the Update as `responder`.
+- **The route is the Update's only legitimate caller, and the Update cannot tell.** A
+  Temporal client is trusted with whatever it puts in an Update's arguments, so a client
+  that reaches the Temporal frontend can send `respond` naming any responder. Today
+  nothing narrows who that is: `eh-homelab/clusters` has no ingress policy and no mTLS
+  on the `scadbuddy` Temporal frontend (only `networkpolicy-agent.yaml`, which selects
+  the agent pod). That client could equally terminate or reset the workflow, so this is
+  the frontend's boundary, not the gate's. Phase 5 adds it: a `CiliumNetworkPolicy`
+  ingress on the Temporal frontend that admits only the ScadBuddy pod (the backend and
+  the agent service), `scadbuddy-agent-durable`, the ScadBuddy worker Deployments and
+  the Temporal UI (#668, an operator surface). §8 asserts the policy, since a forged
+  responder cannot be refused at the Update layer.
 - **The validator** refuses, before anything is written to history:
   - a stale id, meaning no such call is parked;
   - an entry that is already resolved (decided, answered, timed out or cancelled);
@@ -951,7 +977,9 @@ happens, and there is no separate request system.
   ("already answered", "not yours to answer") at once, and a rejected Update is never
   written to history. The cookbook allows either; the plugin documents both.
 - **How each kind resolves.**
-  - `approval`: the handler calls `agent.decide(tool_use_id, approved, approver)`.
+  - `approval`: the handler is async. It marks the entry *resolving*, runs
+    `resolve_input` (no answer to write, only the outcome, the projection, the event
+    and the audit), then calls `agent.decide(tool_use_id, approved, responder)`.
   - `answer`: the handler is async. It writes the outcome with an activity to
     `ai_input_responses(request_id primary key, session_id, kind, outcome, response
     jsonb, responder, created_at)`, a new agent migration in phase 5, then calls
@@ -962,11 +990,11 @@ happens, and there is no separate request system.
     and attention requests); it does not depend on PR #998's `ai_questions`, which stays
     the classic store. Phase 5 checks this at its start; anything that needs the
     plugin's private state goes to the user (§9).
-  - Whichever comes first wins. The handler marks the entry *resolving* in workflow
-    state before its first `await`: the validator refuses another response, and a timer
+  - Whichever comes first wins, for both kinds. The handler marks the entry
+    *resolving* in workflow state before its first `await`: the validator refuses another response, and a timer
     that fires meanwhile waits for the handler rather than acting.
-    - If the write succeeds, the entry is resolved and the plugin is told.
-    - **If the write fails** (the activity's retries are exhausted, or it fails
+    - If `resolve_input` succeeds, the entry is resolved and the plugin is told.
+    - **If `resolve_input` fails** (its retries are exhausted, or it fails
       non-retryably), the handler puts the entry back to pending and re-raises, so the
       Update fails and the person sees the error and can answer again. If the timer
       came due meanwhile, it fires at once. So a failed write never leaves the call
@@ -1017,7 +1045,13 @@ happens, and there is no separate request system.
 - The trigger in a durable session is `open_input`'s `input.requested` event, not the
   plugin's `approval_needed` stream event, so a notification and the projection come
   from one write. In a classic one it is the gate's insert. Both modes emit one
-  `input.requested` and one `input.resolved` event to the bus, with the entry. The panel's existing cards (`approval.required`; `question.asked` in
+  `input.requested` and one `input.resolved` event to the bus, with the entry.
+- The panel's cards keep their events. `approval.required` (`approvals/service.ts:120`)
+  and PR #998's `question.asked` / `question.resolved` are still emitted, beside
+  `input.requested` / `input.resolved`, as the approval routes stay beside `respond`.
+  A durable session emits them too: its subscriber (§6.2) maps `input.requested` for an
+  `approval` to `approval.required`, and for a question to `question.asked`. Moving
+  the cards onto the `input.*` events is a later cleanup, not phase 5's. The panel's existing cards (`approval.required`; `question.asked` in
   PR #998) are what renders them.
 - #815's throttling (one open request per session per reason, a per-user rate limit)
   applies to attention requests, which an agent creates at will. Approvals and questions
@@ -1219,9 +1253,9 @@ happens, and there is no separate request system.
     `agent/test/support/fakeAnthropic.ts` as a gateway; tests never call Anthropic;
   - the `agent-tools` activities use `@temporalio/testing`;
   - the shared credential vectors (regenerated and compared in TypeScript, all opened in Python);
-  - `respond` approve, deny, and expiry (deny); a question answered, timed out
-    (cancelled, never answered) and answered after the timer (refused); each validator
-    refusal (stale id, resolved, wrong responder, malformed, over 16 KiB);
+  - `respond` approve, deny, and expiry (deny, recorded `expired` in `ai_audit`); a
+    question answered, timed out (cancelled, never answered) and answered after the
+    timer (refused);
   - `pending_input` returns the same entry shape for a classic and a durable session,
     and an `approval` entry never carries the call's raw input;
   - an `answer` whose write activity fails returns to pending, can be answered again,
@@ -1230,10 +1264,16 @@ happens, and there is no separate request system.
     `respond` that reaches `agent.decide`;
   - the aggregate read includes a session-less MCP approval, and a durable entry
     leaves it when it is answered or times out;
-  - the validator refusals (stale, resolved, being resolved, wrong responder, self,
-    malformed, over 16 KiB) are **shared vectors**, `agent/test/fixtures/pending-input-vectors.json`,
+  - every validator refusal (stale id, resolved, wrong responder, self, malformed, over
+    16 KiB) is a **shared vector** in `agent/test/fixtures/pending-input-vectors.json`,
     run against the classic TypeScript validators and the durable Python ones, as the
-    credential vectors are, so the two cannot drift;
+    credential vectors are, so the two cannot drift. *Being resolved* is marked
+    `durable_only`: classic decisions are one guarded `UPDATE` (`approvals/service.ts`
+    `settle`), with no in-between state, and a classic run skips those vectors by that
+    flag, never silently;
+  - the Temporal frontend's ingress policy admits only the listed workloads, since a
+    forged `responder` cannot be refused by the Update itself;
+  - flow entries never appear in `GET /api/v1/ai/pending-input`;
   - the timer path's `resolve_input` failing: the entry stays listed and refuses
     `respond`, and is resolved once the write succeeds;
   - a durable `wait_for_user`'s input schema offers only `on_timeout: proceed` until
@@ -1297,8 +1337,10 @@ Each phase is its own implementation plan and ships alone.
    the `SessionStore`, the credential port, the event subscriber, the tool-call gate
    (§6.6), the mode UI and setting. The gate's work, both modes:
    - durable: `pending_input`, `respond`, the timers, `open_input` / `resolve_input`,
-     the `ai_pending_input` and `ai_input_responses` migration, and `ask_user` /
-     `wait_for_user` as tools;
+     the `ai_pending_input` and `ai_input_responses` migration, `ask_user` /
+     `wait_for_user` as tools, and the subscriber's `approval.required` /
+     `question.asked` mapping;
+   - clusters: the Temporal frontend's ingress `CiliumNetworkPolicy`;
    - classic: the `pending-input` and `respond` routes over `ai_approvals` and
      `ai_questions`, the approval routes and `sessions_approve` / `sessions_deny` as
      aliases, the `question_expiry_seconds` setting and its sweep (after PR #998
