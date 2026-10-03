@@ -1,9 +1,9 @@
 """`render_jobs` as a projection (spec 2026-09-27 §3.2).
 
-The API inserts a row and starts the workflow named by it; the workflow's `project`
-activity moves `state` forward in place. Every write is guarded by the state it
-expects, so a retried activity cannot move a job backwards, and every state change
-publishes its ``job.*`` event on the bus inside its own transaction
+The workflow `render-<render_key>` inserts its row in its first activity (`accept`,
+#1053) and its `project` activity moves `state` forward in place. Every write is
+guarded by the state it expects, so a retried activity cannot move a job backwards,
+and every state change publishes its ``job.*`` event on the bus inside its own transaction
 (`PgNotifyEventBus.publish_in`), so it is heard on commit or not at all.
 """
 
@@ -23,21 +23,20 @@ from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
-    SUPERSEDED_ERROR,
+    CANCELLED_ERROR,
     Job,
     JobNotFoundError,
     QueueCounts,
     QueueFullError,
     StepInfo,
-    Submitted,
     now,
 )
 from scadbuddy.render.pg_store import TransactionalEvents, migrate
 
 logger = logging.getLogger(__name__)
 
-CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
+LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
 
 PROJECTION_COLUMNS = (
     "id",
@@ -60,6 +59,7 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "workflow_run_id",
 )
 
 
@@ -72,7 +72,13 @@ _FINISHED_KINDS: dict[str, JobKind] = {
 
 
 def workflow_id_for(job_id: str) -> str:
+    """A legacy job's workflow, from before renders were keyed by content (#1053)."""
     return f"render-{job_id}"
+
+
+def workflow_id_for_key(key: str) -> str:
+    """The execution every request for one render shares (spec 2026-10-01 §4.5)."""
+    return f"render-{key}"
 
 
 def _job(row: DictRow) -> Job:
@@ -132,38 +138,31 @@ class JobProjection:
 
     # -- the API's writes -------------------------------------------------------
 
-    def submit(
-        self, job: Job, key: str, *, supersedes: str | None = None, max_pending: int = 0
-    ) -> Submitted:
-        superseded: Job | None = None
+    def accept(
+        self, job: Job, key: str, *, workflow_id: str, run_id: str, max_pending: int = 0
+    ) -> Job:
+        """The first activity of `render-<render_key>` (#1053): the execution's row, or
+        `QueueFullError` with nothing written. A retried activity finds its row."""
         with self._pool.connection() as conn, conn.transaction():
-            if supersedes is not None:
-                previous = conn.execute(
-                    "SELECT * FROM render_jobs WHERE id = %s AND state IN ('pending', 'running')"
-                    " AND slug = %s FOR UPDATE",
-                    (supersedes, job.slug),
-                ).fetchone()
-                if previous is not None and previous["render_key"] == key:
-                    return Submitted(_job(previous), coalesced=True)
-                if previous is not None:
-                    superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE workflow_id = %s AND workflow_run_id = %s",
+                (workflow_id, run_id),
+            ).fetchone()
+            if row is not None:
+                return _job(row)
             if max_pending:
-                twin = conn.execute(
-                    "SELECT 1 FROM render_jobs WHERE state = 'pending' AND render_key = %s", (key,)
+                counted = conn.execute(
+                    "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
                 ).fetchone()
-                if twin is None:
-                    counted = conn.execute(
-                        "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
-                    ).fetchone()
-                    assert counted is not None
-                    if counted["pending"] >= max_pending:
-                        raise QueueFullError(counted["pending"])
+                assert counted is not None
+                if counted["pending"] >= max_pending:
+                    raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
-                " created_at, render_key, workflow_id, kind)"
-                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)"
-                " ON CONFLICT (render_key) WHERE state = 'pending'"
-                " DO UPDATE SET claims = render_jobs.claims + 1"
+                " created_at, render_key, workflow_id, workflow_run_id, kind)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)"
+                " ON CONFLICT (workflow_id, workflow_run_id)"
+                " DO UPDATE SET claims = render_jobs.claims"
                 " RETURNING *, (xmax = 0) AS inserted",
                 (
                     job.id,
@@ -173,14 +172,47 @@ class JobProjection:
                     job.model_version,
                     job.created_at,
                     key,
-                    workflow_id_for(job.id),
+                    workflow_id,
+                    run_id,
                     job.kind,
                 ),
             ).fetchone()
             assert row is not None
             if row["inserted"]:
                 self._announce(conn, row["id"], row["slug"], "job.pending")
-        return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
+        return _job(row)
+
+    def set_claims(self, job_id: str, claims: int) -> None:
+        """The workflow's claim count, projected (#1053)."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE render_jobs SET claims = %s"
+                " WHERE id = %s AND state IN ('pending', 'running')",
+                (claims, job_id),
+            )
+
+    def legacy_pending(self) -> list[Job]:
+        """Pending rows inserted before renders moved to update-with-start: no
+        execution of `render-<render_key>` owns them."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state = 'pending' AND workflow_run_id IS NULL"
+                " ORDER BY created_at, id"
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def fail_legacy(self, job_ids: list[str], error: str) -> list[Job]:
+        """Fail legacy pending rows nothing will run; any other row is left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE id = ANY(%s) AND state = 'pending' AND workflow_run_id IS NULL"
+                " RETURNING *",
+                (error, job_ids),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
 
     def _release(self, conn: Connection[Any], row: DictRow, *, error: str) -> Job | None:
         """Take one claim off an unfinished row; the last one cancels it. Returns the
@@ -197,7 +229,7 @@ class JobProjection:
         self._announce(conn, row["id"], row["slug"], "job.superseded")
         return _job(dropped)
 
-    def release_claim(self, job_id: str, *, slug: str) -> Job | None:
+    def release_claim(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT * FROM render_jobs WHERE id = %s AND slug = %s"
@@ -206,31 +238,11 @@ class JobProjection:
             ).fetchone()
             if row is None:
                 return None
-            return self._release(conn, row, error=CANCELLED_ERROR)
-
-    def adopt_legacy_pending(self) -> list[str]:
-        """At boot: give each row a pre-Temporal release's queue left pending the
-        workflow id the reconciler starts it under (`stale_pending` takes only rows
-        that name one). Returns their ids."""
-        with self._pool.connection() as conn, conn.transaction():
-            ids = [
-                row["id"]
-                for row in conn.execute(
-                    "SELECT id FROM render_jobs WHERE state = 'pending' AND workflow_id IS NULL"
-                    " ORDER BY created_at, id FOR UPDATE"
-                ).fetchall()
-            ]
-            for job_id in ids:
-                conn.execute(
-                    "UPDATE render_jobs SET workflow_id = %s WHERE id = %s",
-                    (workflow_id_for(job_id), job_id),
-                )
-        return ids
+            return self._release(conn, row, error=error)
 
     def fail_legacy_running(self) -> list[Job]:
         """At start-up: fail the rows a pre-Temporal release's queue left running (no
-        workflow), which nothing will finish. Its pending rows are
-        `adopt_legacy_pending`'s."""
+        workflow), which nothing will finish. Its pending rows are `fail_legacy`'s."""
         with self._pool.connection() as conn, conn.transaction():
             rows = conn.execute(
                 "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
@@ -310,18 +322,6 @@ class JobProjection:
             return cursor.rowcount == 1
 
     # -- reads ------------------------------------------------------------------
-
-    def stale_pending(self, older_than: float) -> list[Job]:
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                # Only rows a workflow owns: a legacy pending row (no workflow_id) is
-                # the legacy queue's during a rolling deploy, never the reconciler's.
-                "SELECT * FROM render_jobs WHERE state = 'pending' AND started_at IS NULL"
-                " AND workflow_id IS NOT NULL"
-                " AND created_at < now() - make_interval(secs => %s) ORDER BY created_at",
-                (older_than,),
-            ).fetchall()
-        return [_job(row) for row in rows]
 
     def read(self, job_id: str) -> Job:
         with self._pool.connection() as conn:

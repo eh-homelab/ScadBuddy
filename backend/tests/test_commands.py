@@ -234,3 +234,21 @@ async def test_an_update_slower_than_the_default_deadline_is_still_accepting(
         with pytest.raises(CommandStillAcceptingError):
             await echo(client, queue, workflow_id, EchoInput(delay_s=20))
         await client.get_workflow_handle(workflow_id).terminate()
+
+
+async def test_the_memo_reaches_the_execution(client: Client, queue: str) -> None:
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        await start_command(
+            client,
+            "EchoCommand",
+            EchoInput(finish_at_once=True),
+            id=workflow_id,
+            task_queue=queue,
+            update="accepted",
+            result_type=EchoAnswer,
+            reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            memo={"activity_timeout": 42.0},
+        )
+        described = await client.get_workflow_handle(workflow_id).describe()
+    assert await described.memo_value("activity_timeout") == 42.0

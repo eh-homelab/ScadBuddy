@@ -765,14 +765,18 @@ export const api = {
    * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
    */
   render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-      method: 'POST',
-      body: JSON.stringify({
-        inputs,
-        version: version ?? null,
-        ...(supersedes ? { supersedes } : {}),
+    // Sent again while the server is still accepting it (#1053): a render is keyed by
+    // its content, so the same request joins the job the first one is starting.
+    reattach(() =>
+      request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+        method: 'POST',
+        body: JSON.stringify({
+          inputs,
+          version: version ?? null,
+          ...(supersedes ? { supersedes } : {}),
+        }),
       }),
-    }),
+    ),
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 

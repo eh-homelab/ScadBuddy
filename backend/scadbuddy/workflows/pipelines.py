@@ -3,10 +3,12 @@ built-in default pipeline: one piece, one plate layout, one output."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
 from temporalio.exceptions import (
     ActivityError,
     ApplicationError,
@@ -17,18 +19,27 @@ from temporalio.exceptions import (
 )
 
 with workflow.unsafe.imports_passed_through():
-    from scadbuddy.render.job_models import Job, StepInfo
+    from scadbuddy.render.job_models import CANCELLED_ERROR, SUPERSEDED_ERROR, Job, StepInfo
     from scadbuddy.workflows.models import (
+        ACCEPT_ACTIVITY,
+        CLAIMS_ACTIVITY,
+        QUEUE_FULL,
+        RELEASE_UPDATE,
+        AcceptRender,
         Failure,
         PieceOutcome,
         PieceRequest,
         PieceResult,
         PrepareResult,
         Projection,
+        ReleaseAnswer,
+        RenderAnswer,
         RenderMainResult,
+        RenderStart,
         input_problem,
         piece_key,
     )
+    from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
 
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
@@ -44,6 +55,10 @@ PROJECT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 SHORT = timedelta(seconds=60)
+
+KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
+SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
+STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 #: One piece up to or down from the store: the Bambuddy client's per-request budget
 #: (`bambuddy.client.DEFAULT_UPLOAD_TIMEOUT`, 180 s), written out here because a
 #: workflow module keeps its imports to the workflow's own models. That client budget
@@ -240,22 +255,139 @@ class RenderPreview:
 
 @workflow.defn(name="TemplatePipeline")
 class TemplatePipeline:
+    """One render job, started as ``render-<render_key>`` with update-with-start
+    (spec 2026-10-01 §4.5, #1053). Its first step inserts the job's row; every
+    identical request that reaches the open execution joins it as one more claim, and
+    the last claim released cancels it."""
+
     def __init__(self) -> None:
         self._outcome: PieceOutcome | None = None
+        self._job: Job | None = None
+        self._queue_full: int | None = None
+        self._answered = False
+        self._claims = 0
+        #: Why the last claim was released: the error the cancelled job keeps.
+        self._released: str | None = None
+        self._work: asyncio.Task[None] | None = None
+        self._search_attributes = False
 
     @workflow.signal
     def piece_finished(self, outcome: PieceOutcome) -> None:
         self._outcome = outcome
 
+    @workflow.update(name=ACCEPTED_UPDATE)
+    async def accepted(self) -> RenderAnswer:
+        await workflow.wait_condition(
+            lambda: self._work is not None or self._queue_full is not None
+        )
+        if self._queue_full is not None:
+            return RenderAnswer(queue_full=self._queue_full)
+        if self._released is not None:
+            return RenderAnswer(closing=True)
+        assert self._job is not None
+        coalesced = self._answered
+        self._answered = True
+        if coalesced:
+            self._claims += 1
+            await self._project_claims()
+        return RenderAnswer(
+            job=self._job.model_copy(update={"claims": self._claims}), coalesced=coalesced
+        )
+
+    @workflow.update(name=RELEASE_UPDATE)
+    async def release(self, reason: str) -> ReleaseAnswer:
+        await workflow.wait_condition(
+            lambda: self._work is not None or self._queue_full is not None
+        )
+        if self._work is None or self._released is not None:
+            return ReleaseAnswer()
+        assert self._job is not None
+        self._claims -= 1
+        if self._claims > 0:
+            await self._project_claims()
+            return ReleaseAnswer()
+        self._released = SUPERSEDED_ERROR if reason == "superseded" else CANCELLED_ERROR
+        work = self._work
+        work.cancel()
+        await workflow.wait_condition(work.done)
+        return ReleaseAnswer(
+            cancelled=self._job.model_copy(
+                update={"state": "cancelled", "claims": 0, "error": self._released}
+            )
+        )
+
+    async def _project_claims(self) -> None:
+        assert self._job is not None
+        await workflow.execute_local_activity(
+            CLAIMS_ACTIVITY,
+            args=[self._job.id, self._claims],
+            start_to_close_timeout=SHORT,
+            retry_policy=PROJECT_RETRY,
+        )
+
+    def _upsert(self, *pairs: SearchAttributeUpdate[Any]) -> None:
+        """§4.2's attributes: identifiers and states only, never content."""
+        if self._search_attributes:
+            workflow.upsert_search_attributes(list(pairs))
+
     @workflow.run
-    async def run(self, job: Job) -> None:
+    async def run(self, start: RenderStart | Job) -> None:
+        if isinstance(start, Job):
+            # An older build's start (`render-<job id>`, its row inserted by its API),
+            # reaching this build during a rolling deploy: it renders as it did.
+            self._job, self._claims = start, 1
+            await self._render(start)
+            return
+        self._search_attributes = start.search_attributes
+        self._upsert(
+            KIND.value_set("render"), SUBJECT.value_set(start.slug), STATUS.value_set("pending")
+        )
+        info = workflow.info()
+        try:
+            job: Job = await workflow.execute_local_activity(
+                ACCEPT_ACTIVITY,
+                AcceptRender(start=start, workflow_id=info.workflow_id, run_id=info.run_id),
+                result_type=Job,
+                start_to_close_timeout=SHORT,
+                retry_policy=PROJECT_RETRY,
+            )
+        except (ActivityError, ApplicationError) as error:
+            # A local activity's failure arrives as its ApplicationError itself
+            # (temporalio 1.33), a regular one's as the ActivityError's cause.
+            cause = error.cause if isinstance(error, ActivityError) else error
+            if not (isinstance(cause, ApplicationError) and cause.type == QUEUE_FULL):
+                raise
+            # Nothing was written: the refusal answers the Update and fails the run.
+            self._queue_full = int(cause.details[0]) if cause.details else 0
+            self._upsert(STATUS.value_set("refused"))
+            await workflow.wait_condition(workflow.all_handlers_finished)
+            raise ApplicationError(str(cause), type=REFUSED, non_retryable=True) from None
+        self._job, self._claims = job, 1
+        self._work = asyncio.create_task(self._render(job))
+        try:
+            await self._work
+        except asyncio.CancelledError:
+            if self._released is None:
+                raise
+        self._upsert(STATUS.value_set("settled" if self._released is None else "cancelled"))
+        await workflow.wait_condition(workflow.all_handlers_finished)
+
+    async def _render(self, job: Job) -> None:
         async def project(**fields: object) -> None:
             await workflow.execute_activity(
                 "project",
                 Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields}),
                 start_to_close_timeout=SHORT,
                 retry_policy=PROJECT_RETRY,
+                # A release that cancels the job mid-projection waits for the write to
+                # resolve: its outcome must be in history before the run completes, or
+                # Temporal rejects that workflow task and the release with it.
+                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             )
+            if self._released is not None and fields.get("state") in (None, "running"):
+                # A write that completed despite the cancel returns normally: the
+                # release still stands.
+                raise asyncio.CancelledError
 
         problem = input_problem(job.slug, job.model_version)
         if problem is not None:
@@ -264,6 +396,7 @@ class TemplatePipeline:
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
             await project(state="running")
+            self._upsert(STATUS.value_set("running"))
             params = job.inputs.get("params", job.params)
             # Without a revision the source is live and may change before the next job,
             # so the piece is this job's own: its blob directory and workflow (#642).
@@ -292,10 +425,29 @@ class TemplatePipeline:
                 blob_key=key,
             )
         except BaseException as error:
-            if is_cancelled_exception(error) and workflow.cancellation_reason() is not None:
-                # A superseded/withdrawn job. The API may already have moved the row to
-                # cancelled; the projection is idempotent for the case it did not.
+            released = self._released is not None and is_cancelled_exception(error)
+            if released or (
+                is_cancelled_exception(error) and workflow.cancellation_reason() is not None
+            ):
+                # Its last claim released (superseded or withdrawn), or the run cancelled
+                # by hand: the piece goes on (ABANDON), the job is cancelled.
                 steps[0].state = "cancelled"
+                if released:
+                    # Local, so it never waits behind openscad runs (the piece goes on)
+                    # for one of the worker's activity slots: `release` waits for it.
+                    await workflow.execute_local_activity(
+                        "project",
+                        Projection(
+                            job_id=job.id,
+                            slug=job.slug,
+                            state="cancelled",
+                            failure=Failure(error=self._released or "cancelled"),
+                            steps=steps,
+                        ),
+                        start_to_close_timeout=SHORT,
+                        retry_policy=PROJECT_RETRY,
+                    )
+                    return  # a released job is an outcome: the run completes
                 await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
                 raise
             if not isinstance(error, Exception):
@@ -350,6 +502,8 @@ class TemplatePipeline:
             try:
                 return PieceOutcome(result=await child)
             except ChildWorkflowError as error:
-                if is_cancelled_exception(error) and workflow.cancellation_reason() is not None:
+                if is_cancelled_exception(error) and (
+                    workflow.cancellation_reason() is not None or self._released is not None
+                ):
                     raise  # this job was cancelled: ABANDON resolves the child as cancelled
                 return PieceOutcome(failure=_failure_of(error))

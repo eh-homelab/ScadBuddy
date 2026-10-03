@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { reattach } from '../api/command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
@@ -184,12 +185,16 @@ export const customizerTools: Tool[] = [
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        const accepted = await ok(
-          ctx.backend.POST('/api/v1/models/{slug}/render', {
-            params: { path: { slug } },
-            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
-            signal: ctx.signal,
-          }),
+        // Sent again while the backend is still accepting it (#1053): a render is keyed
+        // by its content, so the same request joins the job the first one is starting.
+        const accepted = await reattach(
+          ctx,
+          () =>
+            ctx.backend.POST('/api/v1/models/{slug}/render', {
+              params: { path: { slug } },
+              body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
+              signal: ctx.signal,
+            }),
           `render ${slug}`,
         )
         submitted = accepted.job_id
