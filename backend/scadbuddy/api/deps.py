@@ -64,10 +64,11 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
-#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
+#: `POST /models/{slug}/assets/fetch` share it. An in-process cap, because what it
 #: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
 #: N x this. As many as the resolver has threads. Library installs share those
-#: threads; an import that finds none free is the same retryable 503.
+#: threads; a fetch that finds none free is the same retryable 503.
 IMPORT_CONCURRENCY = RESOLVER_THREADS
 #: `POST /models/{slug}/dependencies` reports worked out at once per replica (#253,
 #: review of #740). Each reads the model's files and every model.json in a worker
@@ -161,10 +162,11 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
-    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
-    #: replica. Held for the fetch only -- the parse check after it takes `checks`
-    #: like any create -- and an import that finds it full is refused at once, not
-    #: queued.
+    #: At most IMPORT_CONCURRENCY `POST /models/import` and `POST
+    #: /models/{slug}/assets/fetch` fetches at once on this replica, together. Held for
+    #: the fetch only -- an import's parse check takes `checks` like any create, an
+    #: asset's sanitising runs after it -- and a fetch that finds it full is refused at
+    #: once, not queued.
     imports: ImportPermits = field(default_factory=lambda: ImportPermits(IMPORT_CONCURRENCY))
     #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
     dependency_checks: asyncio.Semaphore = field(

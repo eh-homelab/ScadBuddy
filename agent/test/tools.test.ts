@@ -715,6 +715,27 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     })
   })
 
+  it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
+    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())
+    expect(firstText(pending)).toMatchObject({
+      status: 'pending_approval',
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset`,
+    })
+    expect(tool('fetch_asset').risk).toBe('outward')
+
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'unicorn.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
+      }),
+    )
+    const done = await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url }, ctx())
+    expect(firstText(done)).toMatchObject({ id: 'a'.repeat(64), source_url: url })
+    expect(bodies).toEqual([{ url }])
+  })
+
   it('pin_library runs unattended for a catalogue library, with or without its own URL', async () => {
     const puts: unknown[] = []
     server.use(
