@@ -75,6 +75,21 @@ describe('scrubSpan', () => {
     expect(JSON.stringify(scrubbed.events)).not.toContain('SECRET')
   })
 
+  it.each(['a', '1', 'at'])('keeps the frames intact when the message is %j', (message) => {
+    const [span] = record((tracer) => {
+      const s = tracer.startSpan('x')
+      s.recordException({
+        name: 'Error',
+        message,
+        stack: `Error: ${message}\n    at sendOutput (http://host/assets/index-abc.js:1:2)\n    at at (http://host/a1.js:3:4)`,
+      })
+      s.end()
+    })
+    expect(scrubSpan(span!).events[0]!.attributes?.['exception.stacktrace']).toBe(
+      '    at sendOutput (http://host/assets/index-abc.js:1:2)\n    at at (http://host/a1.js:3:4)',
+    )
+  })
+
   it('cuts http.target and drops query and user-agent attributes', () => {
     const [span] = record((tracer) => {
       tracer

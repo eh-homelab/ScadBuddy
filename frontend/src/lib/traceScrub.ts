@@ -28,6 +28,20 @@ export function frameLines(stack: string): string {
     .join('\n')
 }
 
+/**
+ * `stack` without its header, the leading `<type>: <message>` block that Chromium
+ * prepends (as many lines as the message has). Only there: a short message must not be
+ * cut out of the frames. A stack with no such header (Firefox, Safari) is left as is.
+ */
+function withoutHeader(stack: string, message: string): string {
+  const lines = stack.split('\n')
+  const count = message.split('\n').length
+  const head = lines.slice(0, count).join('\n')
+  const first = lines[0] ?? ''
+  if (!head.endsWith(message) || CHROME_FRAME.test(first) || GECKO_FRAME.test(first)) return stack
+  return lines.slice(count).join('\n')
+}
+
 /** A URL without its query or fragment (§6: "URLs are recorded without the query"). */
 export function withoutQuery(url: string): string {
   return url.split(/[?#]/, 1)[0] ?? ''
@@ -54,7 +68,7 @@ function scrubEvent(event: TimedEvent): TimedEvent {
   const message = event.attributes['exception.message']
   const stack = attributes['exception.stacktrace']
   if (typeof stack === 'string') {
-    const bare = typeof message === 'string' && message !== '' ? stack.split(message).join('') : stack
+    const bare = typeof message === 'string' && message !== '' ? withoutHeader(stack, message) : stack
     attributes['exception.stacktrace'] = frameLines(bare)
   }
   return { ...event, attributes }
