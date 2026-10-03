@@ -188,13 +188,15 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 
 ### 4.1 What a session touched (#931)
 
-Every ScadBuddy tool call a session makes, once it
-succeeds, is mapped to the resources it created, changed or deleted, one
+Every ScadBuddy tool call a session makes that succeeds (and a `render_model` that
+fails, since its job was made all the same) is mapped to the resources it created,
+changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
 extractor reads the call's parsed input and its result: models, revisions (the new
 commit, and its parent when the call names one, as `apply_patch`'s `base` does), presets, assets, render jobs, outputs, print runs and prints (a `print` is always a Bambuddy queue item id, whichever tool queued it). A `write` or
 `outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
-gap stays visible; a `read` tool records nothing. It is recorded in `runToolWithOutcome`
+gap stays visible; a `read` tool records nothing, and neither does session control
+(`sessions_*`), `browser_pair` or `confirm_action` itself (the call it ran is recorded). It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
 projection, so the tool activities a durable session would run record the same way
 (proposed in PR #972,

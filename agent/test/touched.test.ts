@@ -4,7 +4,7 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { markUntrusted } from '../src/safety/untrusted.js'
-import { EXTRACTORS, resultJson, type TouchedCall, touchesOf } from '../src/sessions/touched.js'
+import { EXTRACTORS, RECORDED_WHEN_FAILED, resultJson, TOUCHES_NOTHING, type TouchedCall, touchesOf } from '../src/sessions/touched.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -33,6 +33,8 @@ describe('the extractor registry', () => {
   it('names only registered tools', () => {
     const names = new Set(ALL_TOOLS.map((t) => t.name))
     expect(Object.keys(EXTRACTORS).filter((name) => !names.has(name))).toEqual([])
+    expect([...TOUCHES_NOTHING].filter((name) => !names.has(name))).toEqual([])
+    expect([...RECORDED_WHEN_FAILED].filter((name) => !names.has(name))).toEqual([])
   })
 
   it('reads a result out of its untrusted-data envelope', () => {
@@ -171,6 +173,9 @@ describe('extractors', () => {
   it('records a write with no extractor as unclassified, and a read with none as nothing', () => {
     expect(touches('set_print_options', {}, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
     expect(touches('get_model', { slug: 'box' }, { slug: 'box' }, 'read')).toEqual([])
+    // Session control changes no recorded resource: no unclassified noise.
+    expect(touches('sessions_send', { session_id: 's', text: 'hi' }, { turn_id: 't' })).toEqual([])
+    expect(touches('sessions_approve', { approval_id: 'a' }, {}, 'outward')).toEqual([])
   })
 })
 

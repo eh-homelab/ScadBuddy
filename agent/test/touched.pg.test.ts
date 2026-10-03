@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { MAX_TOUCHES_PER_CALL, SessionResources } from '../src/sessions/touched.js'
+import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -154,6 +154,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       result: { content: [] },
     })
     expect(errors).toHaveLength(1)
+    expect(await db.sql`SELECT 1 FROM ai_session_resources`).toHaveLength(0)
+  })
+
+  it('reports a row the CHECK refuses through onError, and writes none of the call', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const errors: unknown[] = []
+    const broken = new SessionResources(db.sql, (err) => errors.push(err))
+    // An action outside the CHECK: the whole call's INSERT is refused, the valid row with it.
+    const bad = { content: [{ type: 'text' as const, text: JSON.stringify({ id: 'p1' }) }] }
+    const original = EXTRACTORS.save_preset!
+    ;(EXTRACTORS as Record<string, Extractor>).save_preset = (input, result) => [
+      ...original(input, result),
+      { type: 'preset', id: 'p2', action: 'renamed' as never },
+    ]
+    try {
+      await broken.record({ sessionId: session.id, tool: { name: 'save_preset', risk: 'write' }, input: { slug: 'box' }, result: bad })
+    } finally {
+      ;(EXTRACTORS as Record<string, Extractor>).save_preset = original
+    }
+    expect(errors).toHaveLength(1)
+    expect(String(errors[0])).toMatch(/check/i)
+    expect(await m.resources(session.id, browser)).toEqual([])
   })
 
   it("goes with its session, and is read only by those who may see the session", async () => {

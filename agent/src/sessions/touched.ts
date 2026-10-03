@@ -193,6 +193,27 @@ export function resultJson(result: CallToolResult): unknown {
 }
 
 /**
+ * Write tools that change no resource of the kinds recorded here: session
+ * control (it changes ScadBuddy's own session state, which the session list
+ * already shows), pairing a browser tab, and confirm_action itself (the call
+ * it ran is recorded as that tool). Not `unclassified`: there is nothing to
+ * classify. A name that is not a registered tool fails test/touched.test.ts.
+ */
+export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
+  'sessions_start',
+  'sessions_send',
+  'sessions_fork',
+  'sessions_interrupt',
+  'sessions_handoff',
+  'sessions_accept_handoff',
+  'sessions_cancel_handoff',
+  'sessions_approve',
+  'sessions_deny',
+  'browser_pair',
+  'confirm_action',
+])
+
+/**
  * Tools whose error result still names what they made, so a failed call is
  * recorded too: a render_model whose render failed, or whose save_output did,
  * created its job all the same, and its error result is the job's summary.
@@ -211,6 +232,7 @@ export function touchesOf(
   ok = true,
 ): Touch[] {
   if (!ok && !RECORDED_WHEN_FAILED.has(tool.name)) return []
+  if (TOUCHES_NOTHING.has(tool.name)) return []
   const extract = EXTRACTORS[tool.name]
   if (extract) return extract(input, resultJson(result))
   return tool.risk === 'read' ? [] : [{ type: 'unclassified', id: null, action: 'modified' }]
