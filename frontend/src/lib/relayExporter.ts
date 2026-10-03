@@ -37,7 +37,8 @@ function failed(error: unknown): ExportResult {
  *   hides still go; a request queued behind one in flight may start after `pagehide`.
  *   A request unanswered after `REQUEST_TIMEOUT_MS` is aborted and the batch failed.
  * - `X-ScadBuddy-Tracing: off` switches the exporter off for the rest of the page's
- *   life: every later batch is reported a success and never sent.
+ *   life: every later batch is reported a success and never sent, and `onOff` is
+ *   called so the page stops tracing altogether (`startTracing`).
  * - Anything else that is not a 2xx (413, 429, 403, 503), or a `fetch` that rejects,
  *   drops the batch's remaining requests and reports the batch failed. Nothing is
  *   retried: the relay's 429 says not to, and a page going away cannot wait.
@@ -46,8 +47,14 @@ export class RelayExporter implements SpanExporter {
   /** Spans dropped because one alone was over `MAX_REQUEST_BYTES`. */
   droppedSpans = 0
   #off = false
+  readonly #onOff: (() => void) | undefined
   /** The request in flight, if any; the next one starts after it settles. */
   #tail: Promise<unknown> = Promise.resolve()
+
+  /** `onOff` is called once, when the relay answers off, so the page can stop tracing. */
+  constructor(onOff?: () => void) {
+    this.#onOff = onOff
+  }
 
   /** The relay said tracing is off; nothing more is sent. */
   get off(): boolean {
@@ -99,6 +106,7 @@ export class RelayExporter implements SpanExporter {
       }
       if (response.headers.get(TRACING_HEADER) === 'off') {
         this.#off = true
+        this.#onOff?.()
         return SUCCESS
       }
       if (!response.ok) return failed(new Error(`the trace relay answered ${response.status}`))
