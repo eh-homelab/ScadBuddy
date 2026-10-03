@@ -37,6 +37,8 @@ def app_client(
     monkeypatch: pytest.MonkeyPatch,
     endpoint: str | None,
     collected: list[bytes] | None = None,
+    sent: list[httpx.Request] | None = None,
+    env: dict[str, str] | None = None,
 ) -> Iterator[TestClient]:
     """The real app, with a bundle so the SPA's fallback is mounted. The endpoint is read
     when the app is built; the tests' own span provider is kept either way. The
@@ -46,6 +48,8 @@ def app_client(
 
     async def collector(request: httpx.Request) -> httpx.Response:
         bodies.append(request.content)
+        if sent is not None:
+            sent.append(request)
         return httpx.Response(200)
 
     monkeypatch.setattr(
@@ -54,6 +58,15 @@ def app_client(
         partial(TraceForwarder, transport=httpx.MockTransport(collector)),
     )
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    for name in (
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in (env or {}).items():
+        monkeypatch.setenv(name, value)
     if endpoint is None:
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     else:
@@ -80,6 +93,32 @@ def test_without_a_collector_the_relay_answers_off(
         response = client.post(PATH, content=export(span()), headers=UI)
     assert response.status_code == 204
     assert response.headers["x-scadbuddy-tracing"] == "off"
+
+
+def test_a_traces_exporter_of_none_answers_off(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app_client(
+        settings, tmp_path, monkeypatch, COLLECTOR, env={"OTEL_TRACES_EXPORTER": "none"}
+    ) as client:
+        response = client.post(PATH, content=export(span()), headers=UI)
+    assert response.status_code == 204
+    assert response.headers["x-scadbuddy-tracing"] == "off"
+
+
+def test_the_collector_headers_and_traces_endpoint_are_used(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[httpx.Request] = []
+    env = {
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer%20abc",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": COLLECTOR + "/t",
+    }
+    with app_client(settings, tmp_path, monkeypatch, None, sent=sent, env=env) as client:
+        assert client.post(PATH, content=export(span()), headers=UI).status_code == 204
+    (request,) = sent
+    assert str(request.url) == COLLECTOR + "/t"
+    assert request.headers["authorization"] == "Bearer abc"
 
 
 def test_with_a_collector_a_batch_is_accepted_and_forwarded(

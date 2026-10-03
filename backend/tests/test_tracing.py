@@ -15,6 +15,9 @@ from opentelemetry.trace import Span, SpanKind
 
 from scadbuddy.core import tracing
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import otlp_traces_target
+
+COLLECTOR = "http://collector.test:4318"
 
 
 def _provider(
@@ -184,3 +187,54 @@ def test_is_gone_by_the_next_test(spans: InMemorySpanExporter) -> None:
     # Review of #1064: the session exporter is cleared after every test, not only
     # after tests that ask for `spans`, so it never grows across the session.
     assert [s.name for s in spans.get_finished_spans()] == []
+
+
+def clear_otel(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "OTEL_SDK_DISABLED",
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_traces_target_follows_the_backend_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_otel(monkeypatch)
+    assert otlp_traces_target() is None
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", COLLECTOR + "/")
+    assert otlp_traces_target() == (COLLECTOR + "/v1/traces", {})
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    assert otlp_traces_target() is None
+
+
+def test_a_traces_only_endpoint_is_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", COLLECTOR + "/custom/path")
+    assert otlp_traces_target() == (COLLECTOR + "/custom/path", {})
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://other.test:4318")
+    assert otlp_traces_target() == (COLLECTOR + "/custom/path", {})
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", " None "])
+def test_the_traces_exporter_none_turns_it_off(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", COLLECTOR)
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", value)
+    assert otlp_traces_target() is None
+
+
+def test_headers_are_parsed_and_the_traces_ones_win(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", COLLECTOR)
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_HEADERS", " Authorization = Bearer%20abc , bad,x-k=a%2Cb,=v,k2="
+    )
+    assert otlp_traces_target() == (
+        COLLECTOR + "/v1/traces",
+        {"Authorization": "Bearer abc", "x-k": "a,b", "k2": ""},
+    )
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "X-Only=traces")
+    assert otlp_traces_target() == (COLLECTOR + "/v1/traces", {"X-Only": "traces"})

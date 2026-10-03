@@ -327,7 +327,7 @@ path except `/api/v1/ai/*` to the backend.
   - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
   - A refusal's `detail` names the rule ("Origin not allowed", "the relay
     accepts application/json only"), never the request's own values.
-- **Tracing off** (no endpoint, or `OTEL_SDK_DISABLED=true`): `204` with
+- **Tracing off** (no endpoint, `OTEL_TRACES_EXPORTER=none`, or `OTEL_SDK_DISABLED=true`): `204` with
   `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.

@@ -12,6 +12,7 @@ import socket
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Final
+from urllib.parse import unquote
 
 from opentelemetry import context, propagate, trace
 from opentelemetry.context import Context
@@ -63,6 +64,38 @@ DEFAULT_SAMPLER: Final[Sampler] = ParentBased(root=NoParentlessClients())
 
 def tracing_disabled() -> bool:
     return os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true"
+
+
+def _parse_headers(raw: str) -> dict[str, str]:
+    """``k=v,k2=v2`` as the OTLP exporter spec reads it: keys and values percent-decoded
+    and trimmed, an entry with no ``=`` or an empty key skipped."""
+    headers: dict[str, str] = {}
+    for entry in raw.split(","):
+        key, separator, value = entry.partition("=")
+        key = unquote(key.strip())
+        if separator and key:
+            headers[key] = unquote(value.strip())
+    return headers
+
+
+def otlp_traces_target() -> tuple[str, dict[str, str]] | None:
+    """Where traces go and with which headers, per the SDK's precedence, or None when
+    export is off: neither ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` nor
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set, ``OTEL_TRACES_EXPORTER`` is ``none``, or
+    ``OTEL_SDK_DISABLED=true``. The traces endpoint is used verbatim; the general one
+    gets ``/v1/traces`` appended. ``OTEL_EXPORTER_OTLP_TRACES_HEADERS`` replaces
+    ``OTEL_EXPORTER_OTLP_HEADERS`` when set."""
+    env = os.environ
+    if tracing_disabled() or env.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none":
+        return None
+    if url := env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
+        pass
+    elif general := env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        url = general.rstrip("/") + "/v1/traces"
+    else:
+        return None
+    raw = env.get("OTEL_EXPORTER_OTLP_TRACES_HEADERS") or env.get("OTEL_EXPORTER_OTLP_HEADERS")
+    return url, _parse_headers(raw or "")
 
 
 def build_provider(

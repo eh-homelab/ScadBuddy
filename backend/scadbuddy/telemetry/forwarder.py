@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -35,7 +34,6 @@ from typing import Final
 import httpx
 
 from scadbuddy.core.metrics import Metrics, TraceRelayOutcome
-from scadbuddy.core.tracing import tracing_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +43,6 @@ MAX_QUEUED_BYTES: Final = 16 * 1024 * 1024
 FORWARD_TIMEOUT: Final = 5.0
 DRAIN_SECONDS: Final = 5.0
 WARNING_INTERVAL: Final = 60.0
-#: The OTLP/HTTP signal path under ``OTEL_EXPORTER_OTLP_ENDPOINT``, as the SDK's exporter
-#: appends it.
-TRACES_PATH: Final = "/v1/traces"
-
-
-def relay_endpoint() -> str | None:
-    """The collector the relay forwards to, or None when tracing is off: no
-    ``OTEL_EXPORTER_OTLP_ENDPOINT``, or ``OTEL_SDK_DISABLED=true`` (spec §3). The same
-    rule `core/tracing.py` ``build_provider`` applies to the backend's own spans."""
-    if tracing_disabled():
-        return None
-    return os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or None
 
 
 class TraceForwarder:
@@ -64,14 +50,14 @@ class TraceForwarder:
         self,
         *,
         metrics: Metrics,
-        endpoint: str | None,
+        target: tuple[str, dict[str, str]] | None,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         forward_timeout: float = FORWARD_TIMEOUT,
         drain_seconds: float = DRAIN_SECONDS,
     ) -> None:
         self.metrics = metrics
-        self.endpoint = endpoint
+        self.target = target
         self._transport = transport
         self._clock = clock
         self._forward_timeout = forward_timeout
@@ -87,13 +73,19 @@ class TraceForwarder:
 
     @property
     def off(self) -> bool:
-        return self.endpoint is None
+        return self.target is None
 
     @property
     def url(self) -> str:
-        if self.endpoint is None:
+        if self.target is None:
             raise RuntimeError("tracing is off: there is no collector to forward to")
-        return self.endpoint.rstrip("/") + TRACES_PATH
+        return self.target[0]
+
+    @property
+    def headers(self) -> dict[str, str]:
+        if self.target is None:
+            raise RuntimeError("tracing is off: there is no collector to forward to")
+        return self.target[1]
 
     def offer(self, batch: bytes) -> None:
         """Queue ``batch`` for the collector. When the queue is full it is dropped and
@@ -183,7 +175,9 @@ class TraceForwarder:
         try:
             async with asyncio.timeout(timeout):
                 response = await client.post(
-                    self.url, content=batch, headers={"Content-Type": "application/json"}
+                    self.url,
+                    content=batch,
+                    headers={**self.headers, "Content-Type": "application/json"},
                 )
         except asyncio.CancelledError:
             self._count("shutdown")
@@ -219,5 +213,4 @@ __all__ = [
     "MAX_QUEUED_BATCHES",
     "MAX_QUEUED_BYTES",
     "TraceForwarder",
-    "relay_endpoint",
 ]

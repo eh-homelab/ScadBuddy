@@ -17,10 +17,10 @@ from scadbuddy.telemetry.forwarder import (
     MAX_QUEUED_BATCHES,
     MAX_QUEUED_BYTES,
     TraceForwarder,
-    relay_endpoint,
 )
 
 ENDPOINT = "http://collector.test:4318"
+TARGET: tuple[str, dict[str, str]] = (ENDPOINT + "/v1/traces", {})
 BATCH = b'{"resourceSpans":[]}'
 
 type Handler = Callable[[httpx.Request], Coroutine[None, None, httpx.Response]]
@@ -37,14 +37,14 @@ def outcome(metrics: Metrics, name: str) -> float:
 def make(
     handler: Handler,
     *,
-    endpoint: str | None = ENDPOINT,
+    target: tuple[str, dict[str, str]] | None = TARGET,
     forward_timeout: float = 5.0,
     drain_seconds: float = 5.0,
 ) -> tuple[TraceForwarder, Metrics]:
     metrics = Metrics()
     forwarder = TraceForwarder(
         metrics=metrics,
-        endpoint=endpoint,
+        target=target,
         transport=httpx.MockTransport(handler),
         forward_timeout=forward_timeout,
         drain_seconds=drain_seconds,
@@ -65,7 +65,7 @@ async def test_an_accepted_batch_is_posted_to_the_traces_path() -> None:
         seen.append(request)
         return httpx.Response(200)
 
-    forwarder, metrics = make(collector, endpoint=ENDPOINT + "/")
+    forwarder, metrics = make(collector)
     async with forwarder.running():
         forwarder.offer(BATCH)
         await until(lambda: outcome(metrics, "forwarded") == 1)
@@ -124,7 +124,7 @@ async def test_failures_warn_once_a_minute(caplog: pytest.LogCaptureFixture) -> 
     metrics = Metrics()
     forwarder = TraceForwarder(
         metrics=metrics,
-        endpoint=ENDPOINT,
+        target=TARGET,
         transport=httpx.MockTransport(collector),
         clock=lambda: now[0],
     )
@@ -259,28 +259,36 @@ async def test_off_starts_nothing_and_posts_nothing() -> None:
         calls += 1
         return httpx.Response(200)
 
-    forwarder, _ = make(collector, endpoint=None)
+    forwarder, _ = make(collector, target=None)
     assert forwarder.off
     async with forwarder.running():
         pass
     assert calls == 0
 
 
-def test_the_endpoint_follows_the_backend_rule(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    assert relay_endpoint() is None
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", ENDPOINT)
-    assert relay_endpoint() == ENDPOINT
-    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
-    assert relay_endpoint() is None
+async def test_the_headers_reach_the_collector() -> None:
+    seen: list[httpx.Request] = []
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(
+        collector, target=(ENDPOINT + "/v1/traces", {"Authorization": "Bearer abc"})
+    )
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await until(lambda: outcome(metrics, "forwarded") == 1)
+    (request,) = seen
+    assert request.headers["authorization"] == "Bearer abc"
+    assert request.headers["content-type"] == "application/json"
 
 
 async def test_off_queues_nothing_and_counts_nothing() -> None:
     async def collector(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200)
 
-    forwarder, metrics = make(collector, endpoint=None)
+    forwarder, metrics = make(collector, target=None)
     forwarder.offer(BATCH)
     assert not forwarder._pending
     assert all(
