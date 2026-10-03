@@ -14,6 +14,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
@@ -27,7 +28,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.tracing import current_traceparent
+from scadbuddy.core.tracing import current_traceparent, use_traceparent
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
 from scadbuddy.render.jobs import SnapshotUnavailableError
@@ -922,14 +923,36 @@ async def test_the_reconciler_starts_a_row_in_its_first_callers_trace(
 
 
 async def test_with_no_valid_span_rows_carry_no_traceparent(
-    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("scadbuddy.render.submit.current_traceparent", lambda: None)
+    # Review 2 of #1064: no stub of current_traceparent. Spec §4: the column is NULL
+    # when the sampler dropped the first request (a `traceparent: ...-00` parent) or the
+    # SDK is off (its no-op tracer gives no valid context). Outside any span the submit
+    # span is a sampled root of its own, so that row does carry one: the control that
+    # shows the two NULLs are not NULL by accident.
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
-        job = await service.submit(SLUG, {"width": 11})
+        with use_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"):
+            unsampled = await service.submit(SLUG, {"width": 11})
+        with monkeypatch.context() as off:
+            off.setattr(trace, "get_tracer", lambda *_args, **_kwargs: trace.NoOpTracer())
+            disabled = await service.submit(SLUG, {"width": 12})
+        root = await service.submit(SLUG, {"width": 13})
         await service.aclose()
-    assert (await asyncio.to_thread(projection.read, job.id)).traceparent is None
+    assert (await asyncio.to_thread(projection.read, unsampled.id)).traceparent is None
+    assert (await asyncio.to_thread(projection.read, disabled.id)).traceparent is None
+    stored = (await asyncio.to_thread(projection.read, root.id)).traceparent
+    (submit_span,) = [
+        s
+        for s in spans.get_finished_spans()
+        if s.name == "render.submit" and (s.attributes or {}).get("scadbuddy.job_id") == root.id
+    ]
+    assert submit_span.parent is None
+    assert stored is not None
+    assert stored.split("-")[1] == f"{submit_span.context.trace_id:032x}"
 
 
 async def test_the_reconciler_roots_a_row_with_no_traceparent_in_a_span_of_its_own(
