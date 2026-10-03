@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from datetime import timedelta
+from typing import Any
 
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
@@ -14,6 +16,7 @@ from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVe
 
 from scadbuddy.workflows.activities import RenderActivities
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.printing import PrintRunWorkflow
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -68,6 +71,25 @@ def render_worker(
     )
 
 
+def print_worker(
+    client: Client,
+    task_queue: str,
+    activities: Sequence[Callable[..., Any]],
+    *,
+    graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+) -> Worker:
+    """The ``bambuddy`` worker (#1052, spec 2026-10-01 §5.5). Unversioned: a change to
+    ``PrintRun`` that alters its commands is made with ``workflow.patched``, so a run
+    started on the old code finishes on the new."""
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[PrintRunWorkflow],
+        activities=activities,
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
+    )
+
+
 async def make_current(client: Client, *, namespace: str, build_id: str) -> None:
     """Make `build_id` the deployment's current version: a versioned worker takes new
     workflows only once its version is current."""
@@ -118,6 +140,7 @@ __all__ = [
     "drained",
     "is_current",
     "make_current",
+    "print_worker",
     "pydantic_data_converter",
     "render_worker",
 ]

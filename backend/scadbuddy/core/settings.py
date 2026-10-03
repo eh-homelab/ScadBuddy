@@ -176,6 +176,13 @@ class Settings(BaseSettings):
     temporal_address: str = Field(default="", validate_default=True)
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs run (#1052, spec
+    # 2026-10-01 §4.3). The API serves it itself in this phase (#1060).
+    temporal_task_queue_bambuddy: str = "bambuddy"
+    # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
+    # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
+    # an unregistered attribute fails the workflow task.
+    temporal_search_attributes: bool = False
     # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
     # process (one replica, dev and tests). Production runs `python -m
     # scadbuddy.worker` as its own Deployment and leaves this off.
@@ -200,7 +207,12 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_TEMPORAL_UI_URL must be an http(s) URL, not {value!r}")
         return value
 
-    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @field_validator(
+        "temporal_address",
+        "temporal_namespace",
+        "temporal_task_queue_render",
+        "temporal_task_queue_bambuddy",
+    )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
         # As `database_url`: a value that is only whitespace would read as "set" (the
@@ -355,6 +367,14 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_render": (
             "Paired with the Temporal address: the API and the render workers must name the"
             " same queue, and only the deployment sets both."
+        ),
+        "temporal_task_queue_bambuddy": (
+            "Paired with the Temporal address: the API starts print runs on it, and the"
+            " worker that serves it must name the same queue."
+        ),
+        "temporal_search_attributes": (
+            "Whether the namespace has ScadBuddy's Search Attributes registered, which the"
+            " deployment's Temporal manifests decide."
         ),
         "temporal_worker_inprocess": (
             "Whether this process runs a render worker at all, decided by how the deployment"

@@ -86,6 +86,43 @@ async def slice_and_queue(
     ``before_enqueue`` is awaited just before ``POST /queue/``: past it, the print may
     be on the queue whatever this raises (#470).
     """
+    started = await start_slice(
+        client, library_file_id=library_file_id, plan=plan, plate_id=plate_id
+    )
+    sliced = await wait_slice(client, started.job_id)
+    if before_enqueue is not None:
+        await before_enqueue()
+    item = await enqueue_plate(
+        client,
+        sliced=sliced,
+        printer_id=printer_id,
+        filaments=filaments,
+        plate_id=plate_id,
+        copies=copies,
+        project_id=project_id,
+        options=options,
+    )
+    return QueueOutcome(
+        slice_job_id=started.job_id,
+        sliced_library_file_id=sliced,
+        preset_key=started.preset_key,
+        queue_item_ids=[item],
+        printer_id=printer_id,
+    )
+
+
+class SliceStarted(BaseModel):
+    """A slice Bambuddy accepted: its job, and the key the sliced file is recorded by."""
+
+    job_id: int
+    preset_key: str | None = None
+
+
+async def start_slice(
+    client: BambuddyClient, *, library_file_id: int, plan: SlicePlan, plate_id: int = 1
+) -> SliceStarted:
+    """``POST /library/files/{id}/slice``. Every call starts a **new** job, so the
+    workflow runs this once (spec 2026-10-01 §5.3, ``maximum_attempts = 1``)."""
     request = SliceRequest(
         printer_preset=plan.printer_preset,
         process_preset=plan.process_preset,
@@ -96,7 +133,13 @@ async def slice_and_queue(
         process_overrides=plan.process_overrides or None,
     )
     accepted = await client.slice(library_file_id, request)
-    job = await client.await_slice(accepted.job_id)
+    return SliceStarted(job_id=accepted.job_id, preset_key=request.preset_key)
+
+
+async def wait_slice(client: BambuddyClient, job_id: int) -> int:
+    """Wait for slice job ``job_id``; the sliced file's id. Reading a job again is
+    safe, so this may be retried."""
+    job = await client.await_slice(job_id)
     failure = job.failure
     if failure is not None:
         # Bambuddy's own words, not a paraphrase: the slicer's message is what tells the
@@ -104,21 +147,34 @@ async def slice_and_queue(
         raise ApiError(
             status.HTTP_502_BAD_GATEWAY,
             f"Bambuddy failed to slice the plate: {failure}",
-            slice_job_id=accepted.job_id,
+            slice_job_id=job_id,
         )
     sliced = job.result.library_file_id if job.result else None
     if sliced is None:
         raise ApiError(
             status.HTTP_502_BAD_GATEWAY,
-            f"Bambuddy slice job {accepted.job_id} completed without a sliced file",
-            slice_job_id=accepted.job_id,
+            f"Bambuddy slice job {job_id} completed without a sliced file",
+            slice_job_id=job_id,
         )
+    return sliced
 
+
+async def enqueue_plate(
+    client: BambuddyClient,
+    *,
+    sliced: int,
+    printer_id: int,
+    plate_id: int,
+    copies: int,
+    project_id: int | None,
+    options: PrintOptions | None,
+    filaments: QueueFilaments | None = None,
+) -> int:
+    """``POST /queue/`` for one sliced plate, once; the item's id. Past this call the
+    print may be on the queue whatever it raised (#470), so it is never retried."""
     remembered = options.queue_fields() if options is not None else {}
     remembered.pop("quantity", None)
     remembered.pop("project_id", None)
-    if before_enqueue is not None:
-        await before_enqueue()
     item = await client.enqueue(
         QueueItemCreate(
             **remembered,
@@ -133,10 +189,4 @@ async def slice_and_queue(
             project_id=project_id,
         )
     )
-    return QueueOutcome(
-        slice_job_id=accepted.job_id,
-        sliced_library_file_id=sliced,
-        preset_key=request.preset_key,
-        queue_item_ids=[item.id],
-        printer_id=printer_id,
-    )
+    return item.id

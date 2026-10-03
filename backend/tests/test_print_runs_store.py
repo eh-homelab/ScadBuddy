@@ -1,28 +1,36 @@
-"""`PrintRunStore` and `PrintRuns` (#470): a run's record in Postgres, and its task."""
+"""`PrintRunStore` (#470, #1052): a run's record in Postgres, written only by its
+`PrintRun` workflow's activities."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
 from datetime import timedelta
+from typing import Any
 
 import pytest
+from psycopg import Connection
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.runs import (
-    LOST_DETAIL,
-    LOST_UNQUEUED_DETAIL,
-    BeforeEnqueue,
-    PrintRuns,
-    PrintRunStore,
-)
-from scadbuddy.core.events import InProcessEventBus
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.render.projection import JobProjection
 
 pytestmark = pytest.mark.requires_postgres
 
 OUTPUT = "a" * 32
 RESULT = PrintRunResult(library_file_id=1, copies=1, bambuddy_url="http://b/queue")
+REFUSED = PrintRunError(status=422, title="Unprocessable Content", detail="no spool")
+
+
+class Events:
+    """Records what is published inside a transaction."""
+
+    def __init__(self) -> None:
+        self.published: list[Event] = []
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None:
+        self.published.append(event)
 
 
 @pytest.fixture
@@ -36,200 +44,122 @@ def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
         store.close()
 
 
-async def test_two_claims_of_one_key_racing_get_one_run(jobs: JobProjection) -> None:
-    store = PrintRunStore(jobs.pool)
-    claims = await asyncio.gather(*(store.claim(OUTPUT, "k") for _ in range(8)))
-    assert len({run.id for run, _ in claims}) == 1
-    assert sum(created for _, created in claims) == 1
+@pytest.fixture
+def events() -> Events:
+    return Events()
 
 
-async def test_a_success_is_repeated_only_within_the_window(jobs: JobProjection) -> None:
-    store = PrintRunStore(jobs.pool, repeat_window=timedelta(0))
-    run, _ = await store.claim(OUTPUT, "k")
-    await store.succeed(run.id, RESULT)
-
-    assert await store.find("k") is None
-    again, created = await store.claim(OUTPUT, "k")
-    assert created and again.id != run.id
-    assert (await store.get(run.id)).result == RESULT  # type: ignore[union-attr]
+@pytest.fixture
+def store(jobs: JobProjection, events: Events) -> PrintRunStore:
+    return PrintRunStore(jobs.pool, events=events)
 
 
-async def test_a_run_this_process_is_still_running_at_shutdown_is_failed(
-    jobs: JobProjection,
+async def accept(
+    store: PrintRunStore, key: str = "k", *, run_id: str = "r1", wf_run: str = "w1"
+) -> PrintRun:
+    return await store.insert_accepted(
+        run_id,
+        subject=OUTPUT,
+        key=key,
+        slug="demo",
+        workflow_id=f"print-{key}",
+        workflow_run_id=wf_run,
+        retention=None,
+    )
+
+
+async def test_insert_accepted_twice_returns_the_first_row_and_publishes_once(
+    store: PrintRunStore, events: Events
 ) -> None:
-    store = PrintRunStore(jobs.pool)
-    runs = PrintRuns(store, InProcessEventBus())
-    run, _ = await store.claim(OUTPUT, "k")
-    started = asyncio.Event()
+    """Temporal retries the first activity when its worker died after the commit but
+    before it reported (§4.2 step 3): the retry must not add a row or announce twice."""
+    first = await accept(store, run_id="r1")
+    again = await accept(store, run_id="r2")
 
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        started.set()
-        await asyncio.Event().wait()
-        raise AssertionError("never reached")
-
-    runs.start(run, "demo", work)
-    await started.wait()
-    await runs.aclose()
-
-    ended = await store.get(run.id)
-    assert ended is not None and ended.status == "failed"
-    # It never reached the queue, so it says nothing was queued and frees its key.
-    assert ended.error is not None and ended.error.detail == LOST_UNQUEUED_DETAIL
-    assert not ended.may_have_queued
-    assert await store.find("k") is None
-    assert runs.running == frozenset()
+    assert again.id == first.id == "r1"
+    assert again.status == "running"
+    assert [type(e) for e in events.published] == [PrintRunEvent]
 
 
-async def test_a_live_run_keeps_its_heartbeat(jobs: JobProjection) -> None:
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(milliseconds=300))
-    runs = PrintRuns(store, None, heartbeat_interval=0.05)
-    run, _ = await store.claim(OUTPUT, "k")
-    release = asyncio.Event()
-
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        await release.wait()
-        return RESULT
-
-    runs.start(run, "demo", work)
-    await asyncio.sleep(0.6)
-    assert (await store.get(run.id)).status == "running"  # type: ignore[union-attr]
-    release.set()
-    while run.id in runs.running:
-        await asyncio.sleep(0.01)
-    assert (await store.get(run.id)).status == "succeeded"  # type: ignore[union-attr]
+async def test_a_new_execution_of_the_same_workflow_id_is_a_new_row(store: PrintRunStore) -> None:
+    first = await accept(store, run_id="r1", wf_run="w1")
+    second = await accept(store, run_id="r2", wf_run="w2")
+    assert {first.id, second.id} == {"r1", "r2"}
 
 
-async def _until_ended(runs: PrintRuns, run_id: str) -> None:
-    while run_id in runs.running:
-        await asyncio.sleep(0.01)
-
-
-async def test_a_run_whose_heartbeat_lapsed_is_not_expired_by_its_own_process(
-    jobs: JobProjection,
+async def test_finish_is_guarded_on_running_and_publishes_in_the_transaction(
+    store: PrintRunStore, events: Events
 ) -> None:
-    """A database blip or a saturated thread pool stops the beats; the process that is
-    running the run knows it is alive and does not fail it."""
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    runs = PrintRuns(store, None, heartbeat_interval=3600)
-    run, _ = await store.claim(OUTPUT, "k")
-    release = asyncio.Event()
+    run = await accept(store)
+    done = await store.succeed(run.id, "demo", RESULT)
+    late = await store.fail(run.id, "demo", REFUSED)
 
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        await release.wait()
-        await before_enqueue()
-        return RESULT
-
-    runs.start(run, "demo", work)
-    await asyncio.sleep(0.05)
-    assert (await store.get(run.id)).status == "running"  # type: ignore[union-attr]
-    again, created = await store.claim(OUTPUT, "k")
-    assert not created and again.id == run.id
-    release.set()
-    await _until_ended(runs, run.id)
-    assert (await store.get(run.id)).status == "succeeded"  # type: ignore[union-attr]
+    assert done.status == "succeeded" and done.result == RESULT
+    assert late.status == "succeeded"  # the second end changed nothing
+    assert len(events.published) == 2  # accepted, succeeded; not the no-op fail
 
 
-async def test_a_lapsed_run_expired_by_another_replica_before_it_queues_never_queues(
-    jobs: JobProjection,
-) -> None:
-    """Another replica cannot tell a slow run from a dead one and fails it, freeing the
-    key for a retry. The slow run then finds itself failed at its ``before_enqueue`` and
-    stops, so only the retry can queue; its own end does not flip the row back."""
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    runs = PrintRuns(store, None, heartbeat_interval=3600)
-    run, _ = await store.claim(OUTPUT, "k")
-    release = asyncio.Event()
-    enqueued: list[str] = []
-
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        await release.wait()
-        await before_enqueue()
-        enqueued.append(run.id)
-        return RESULT
-
-    runs.start(run, "demo", work)
-    await asyncio.sleep(0.05)
-    assert await other.find("k") is None  # expired there, and the key is free
-    release.set()
-    await _until_ended(runs, run.id)
-
-    ended = await store.get(run.id)
-    assert ended is not None and ended.status == "failed"
-    assert ended.error is not None and ended.error.detail == LOST_UNQUEUED_DETAIL
-    assert enqueued == []
-
-
-async def test_a_lapsed_run_expired_after_it_started_queueing_keeps_its_key(
-    jobs: JobProjection,
-) -> None:
-    """Expired once it had begun queueing: the print may be on the queue, so a retry
-    on the other replica answers with this run, and the slow run's end stays out."""
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    runs = PrintRuns(store, None, heartbeat_interval=3600)
-    run, _ = await store.claim(OUTPUT, "k")
-    queueing = asyncio.Event()
-    release = asyncio.Event()
-
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        await before_enqueue()
-        queueing.set()
-        await release.wait()
-        return RESULT
-
-    runs.start(run, "demo", work)
-    await queueing.wait()
-    await asyncio.sleep(0.01)
-    held, created = await other.claim(OUTPUT, "k")
-    assert not created and held.id == run.id
-    assert held.status == "failed" and held.may_have_queued
-    assert held.error is not None and held.error.detail == LOST_DETAIL
-    release.set()
-    await _until_ended(runs, run.id)
-    assert (await store.get(run.id)).status == "failed"  # type: ignore[union-attr]
-
-
-async def test_a_run_expired_after_it_started_queueing_holds_its_key_from_its_real_end(
-    jobs: JobProjection,
-) -> None:
-    """Expired as lost while it queues, the slow run goes on: each beat and its end
-    move ``finished_at``, so the key is held for the repeat window after the run
-    really stopped, not after the expiry."""
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    run, _ = await store.claim(OUTPUT, "k")
+async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: PrintRunStore) -> None:
+    run = await accept(store)
     await store.start_enqueue(run.id)
-    held, created = await other.claim(OUTPUT, "k")
-    assert not created and held.status == "failed" and held.may_have_queued
-
-    def backdate() -> None:
-        with jobs.pool.connection() as conn:
-            conn.execute(
-                "UPDATE print_runs SET finished_at = now() - interval '1 hour' WHERE id = %s",
-                (run.id,),
-            )
-
-    # The expiry was long ago: without the run's own beats the key would be free.
-    await asyncio.to_thread(backdate)
-    assert await other.find("k") is None
-    await store.heartbeat(run.id)
-    assert (await other.find("k")).id == run.id  # type: ignore[union-attr]
-
-    await asyncio.to_thread(backdate)
-    await store.succeed(run.id, RESULT)
-    ended = await other.find("k")
-    assert ended is not None and ended.id == run.id
-    assert ended.status == "failed" and ended.error is not None
-    assert ended.error.detail == LOST_DETAIL
+    failed = await store.fail(run.id, "demo", REFUSED)
+    assert failed.may_have_queued
 
 
-async def test_a_run_expired_before_it_queued_is_not_held_by_its_beats(
-    jobs: JobProjection,
+async def test_a_failure_before_any_enqueue_may_not_have_queued(store: PrintRunStore) -> None:
+    run = await accept(store)
+    failed = await store.fail(run.id, "demo", REFUSED)
+    assert not failed.may_have_queued
+
+
+async def test_find_with_a_request_id_returns_a_failed_run_of_any_age(
+    jobs: JobProjection, events: Events
 ) -> None:
-    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
-    run, _ = await store.claim(OUTPUT, "k")
-    assert await other.find("k") is None  # expired, never queued: the key is free
-    await store.heartbeat(run.id)
-    assert await other.find("k") is None
+    store = PrintRunStore(jobs.pool, events=events, repeat_window=timedelta(0))
+    run = await accept(store)
+    await store.fail(run.id, "demo", REFUSED)
+
+    found = await store.find("k", has_request_id=True)
+    assert found is not None and found.id == run.id
+    assert await store.find("k", has_request_id=False) is None
+
+
+async def test_find_without_a_request_id_keeps_the_repeat_window(store: PrintRunStore) -> None:
+    run = await accept(store)
+    running = await store.find("k", has_request_id=False)
+    assert running is not None and running.id == run.id
+    await store.succeed(run.id, "demo", RESULT)
+    found = await store.find("k", has_request_id=False)
+    assert found is not None and found.status == "succeeded"
+    other = await accept(store, "other", run_id="r9", wf_run="w9")
+    await store.fail(other.id, "demo", REFUSED)
+    assert await store.find("other", has_request_id=False) is None
+
+
+async def test_retention_none_keeps_every_row_and_a_number_prunes_older_finished_rows(
+    store: PrintRunStore,
+) -> None:
+    old = await accept(store, "old", run_id="old", wf_run="w-old")
+    await store.succeed(old.id, "demo", RESULT)
+    await accept(store, "a", run_id="a", wf_run="w-a")
+    assert await store.get("old") is not None
+
+    await asyncio.sleep(0.05)
+    await store.insert_accepted(
+        "b",
+        subject=OUTPUT,
+        key="b",
+        slug="demo",
+        workflow_id="print-b",
+        workflow_run_id="w-b",
+        retention=timedelta(milliseconds=10),
+    )
+    assert await store.get("old") is None
+    assert await store.get("a") is not None  # still running: never pruned
+
+
+async def test_get_reads_a_row_and_an_unknown_id_is_none(store: PrintRunStore) -> None:
+    run = await accept(store)
+    got = await store.get(run.id)
+    assert got is not None and got.output_id == OUTPUT
+    assert await store.get("nope") is None
