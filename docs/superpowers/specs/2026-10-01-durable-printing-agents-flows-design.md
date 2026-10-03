@@ -1169,7 +1169,7 @@ happens, and there is no separate request system.
   proceed. #815's `approval_pending` reason is refused as malformed: the approval is
   already its own entry, with its own notification.
 - In a durable session the timer is a workflow timer, and in a classic one the existing
-  expiry sweep (`expireDue()`, `approvals/service.ts:100`) or a new sweep for
+  expiry sweep (`ApprovalService.expireDue`) or a new sweep for
   `ai_questions`, which phase 5 adds: #998 has no expiry of its own. A timer that fires goes
   through the same resolution as `respond`, recorded as `expired`, `cancelled` or
   `timed_out`, with the system as the responder. For an `answer` kind that means the
@@ -1187,7 +1187,7 @@ happens, and there is no separate request system.
   plugin's `approval_needed` stream event, so a notification and the projection come
   from one write. In a classic one it is the gate's insert. Both modes emit one
   `input.requested` and one `input.resolved` event to the bus, with the entry.
-- The panel's cards keep their events. `approval.required` (`approvals/service.ts:120`)
+- The panel's cards keep their events. `approval.required` (emitted by `ApprovalService.create`)
   and PR #998's `question.asked` / `question.resolved` are still emitted, beside
   `input.requested` / `input.resolved`, as the approval routes stay beside `respond`.
   - In a durable session, **`open_input` and `resolve_input` write them**, in the same
