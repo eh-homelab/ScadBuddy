@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
 import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuestion } from '../src/harness/questions.js'
@@ -122,7 +122,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
 
   // #1075: the answer is in the AI audit log, tied to the tool call, as a
   // hash: an answer can be free text the user typed.
-  // Which tool asked tells the session's agent from a subagent.
+  // Which tool asked is recorded (ask_user is a subagent's way, but not only a subagent's).
   it.each([ASK_USER_QUESTION, ASK_USER_TOOL])("records the answer to %s in the audit log: who answered, which call and tool, a hash, never the text", async (tool) => {
     const audit = new AuditLog({ sql: db.sql })
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingWith(tool), approvalPollMs: 20, audit })
@@ -446,6 +446,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       SELECT tool_use_id, detail FROM ai_audit WHERE kind = 'question' AND action = 'cancelled'`
     expect(rows).toHaveLength(1)
     expect(rows[0]?.detail).toMatch(/the test cancelled it$/)
+  })
+
+  it('an answer committed before a failed status refresh is still audited', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    vi.spyOn(m.questions, 'refreshStatus').mockRejectedValueOnce(new Error('status write failed'))
+    await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    await turn!.done
+    expect(await db.sql`SELECT action, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([{ action: 'answered', outcome: 'ok' }])
   })
 
   it('an answer given over the chat socket is audited with the socket client address', async () => {

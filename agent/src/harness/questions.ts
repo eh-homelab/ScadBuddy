@@ -81,7 +81,11 @@ const InputSchema = z.object({ questions: QuestionsSchema })
 
 /** One AskUserQuestion call waiting for the user. */
 export type QuestionRequest = {
-  /** The tool that asked: ASK_USER_QUESTION, or ASK_USER_TOOL from a subagent. */
+  /**
+   * The tool that asked: ASK_USER_QUESTION, or ASK_USER_TOOL. Only a subagent
+   * needs ask_user, but the session's agent may call it too, so ask_user does
+   * not by itself mean a subagent asked (#1109).
+   */
   tool: string
   questions: UserQuestion[]
   /** The tool_use block's id: the panel's `tool.call` id. */

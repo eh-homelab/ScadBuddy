@@ -193,26 +193,30 @@ export class QuestionService {
     })
     if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     this.wake(id)
-    await this.refreshStatus(sessionId)
-    // Hashed, never stored as text: an answer may be anything the user typed.
-    await this.audited([
-      {
-        kind: 'question',
-        action: 'answered',
-        surface: where.surface ?? 'http',
-        actor: principal,
-        clientIp: where.clientIp,
-        sessionId,
-        turnId: answered.turn_id,
-        toolUseId: answered.tool_use_id,
-        tier: 'read',
-        inputHash: this.deps.audit?.hash(answered.tool, { answers }),
-        outcome: 'ok',
-        detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
-        startedAt: answered.created_at,
-        finishedAt: new Date(),
-      },
-    ])
+    try {
+      await this.refreshStatus(sessionId)
+    } finally {
+      // The answer is committed: its row is written even if the status refresh failed.
+      // Hashed, never stored as text: an answer may be anything the user typed.
+      await this.audited([
+        {
+          kind: 'question',
+          action: 'answered',
+          surface: where.surface ?? 'http',
+          actor: principal,
+          clientIp: where.clientIp,
+          sessionId,
+          turnId: answered.turn_id,
+          toolUseId: answered.tool_use_id,
+          tier: 'read',
+          inputHash: this.deps.audit?.hash(answered.tool, { answers }),
+          outcome: 'ok',
+          detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+          startedAt: answered.created_at,
+          finishedAt: new Date(),
+        },
+      ])
+    }
   }
 
   /**
@@ -242,25 +246,28 @@ export class QuestionService {
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
-    if (options.refresh !== false) await this.refreshStatus(sessionId)
-    // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
-    // approval cancelled the same way is audited the same way.
-    await this.audited(
-      rows.map((r) => ({
-        kind: 'question',
-        action: 'cancelled',
-        surface: 'system',
-        actor: SYSTEM_ACTOR,
-        sessionId,
-        turnId: r.turn_id,
-        toolUseId: r.tool_use_id,
-        tier: 'read',
-        outcome: 'refused',
-        detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
-        startedAt: r.created_at,
-        finishedAt: new Date(),
-      })),
-    )
+    try {
+      if (options.refresh !== false) await this.refreshStatus(sessionId)
+    } finally {
+      // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
+      // approval cancelled the same way is audited the same way.
+      await this.audited(
+        rows.map((r) => ({
+          kind: 'question',
+          action: 'cancelled',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'refused',
+          detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+    }
     return rows.length
   }
 
