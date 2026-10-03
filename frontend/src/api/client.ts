@@ -310,16 +310,18 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
+export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ * Or ScadBuddy answered that the same request is still being accepted.
  */
 function unanswered(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    caught.problem.type === UNANSWERED &&
-    [0, 502, 503, 504, 524].includes(caught.status)
-  )
+  if (!(caught instanceof ApiError)) return false
+  if (caught.problem.type === STILL_ACCEPTING) return true
+  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */

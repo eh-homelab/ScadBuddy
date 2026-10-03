@@ -457,6 +457,27 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
+    it('re-sends while the backend is still accepting the same request (#1052)', async () => {
+      const { ids, handler } = posts([
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/command-still-accepting',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'ScadBuddy is still checking this print.',
+            },
+            { status: 503, headers: { 'Retry-After': '2' } },
+          ),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
     it("never re-sends a problem the backend wrote, even a 503", async () => {
       const { ids, handler } = posts([
         () => HttpResponse.json({ title: 'Service Unavailable', detail: 'Bambuddy is not reachable.' }, { status: 503 }),

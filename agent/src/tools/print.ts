@@ -44,15 +44,20 @@ type FetchResult<T> = { data?: T; error?: unknown; response: Response }
 /** How many more times a print run request no ScadBuddy answer described is sent (#470). */
 export const RUN_REATTEMPTS = 3
 
+/** The backend's 503 while Temporal has not yet answered a print's start (#1052). */
+const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
 /**
  * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
  * from something in between, whose body is not one of the backend's problems (they
- * always carry a `detail`). The same list as the browser client's `unanswered`.
+ * always carry a `detail`). Or the backend answered that it is still accepting the same
+ * request. The same rule as the browser client's `unanswered`.
  */
 function unanswered(result: FetchResult<unknown>): boolean {
   const { error, response } = result
-  const detail = typeof error === 'object' && error !== null && typeof (error as { detail?: unknown }).detail === 'string'
-  return [502, 503, 504, 524].includes(response.status) && !detail
+  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
+  if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
+  return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
 }
 
 /**
