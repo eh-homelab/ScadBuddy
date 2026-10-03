@@ -421,8 +421,8 @@ def projecting(
 
 def _submitted(projection: JobProjection) -> Job:
     job = _job(width=1)
-    projection.submit(job, render_key("demo", {"width": 1}, None))
-    return job
+    key = render_key("demo", {"width": 1}, None)
+    return projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
 
 
 @pytest.mark.requires_postgres

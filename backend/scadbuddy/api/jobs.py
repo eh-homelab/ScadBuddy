@@ -25,6 +25,7 @@ from scadbuddy.api.deps import (
     StateDep,
 )
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.operations import still_accepting, temporal_unavailable
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
@@ -62,6 +63,7 @@ from scadbuddy.render.thumbnail import (
 )
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
 
 router = APIRouter(tags=["jobs"])
 
@@ -208,7 +210,10 @@ def require_job(render: RenderService, job_id: str) -> Job:
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); retry after `Retry-After` seconds"
+                "limit is set); or Temporal, where renders run, is unreachable "
+                "(`temporal-unavailable`, nothing was queued); or the render is still "
+                "being accepted (`command-still-accepting`: send the same request again "
+                "to follow it). Retry after `Retry-After` seconds"
             )
         }
     },
@@ -270,6 +275,11 @@ async def render_model(
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
         ) from None
+    except CommandStillAcceptingError:
+        # The render's first activity has not answered yet; the same request joins it.
+        raise still_accepting() from None
+    except TemporalUnavailableError:
+        raise temporal_unavailable("renders") from None
     except StoreFullError as error:
         # `submit` pins the template's snapshot in the blob store before the job exists.
         raise ApiError(

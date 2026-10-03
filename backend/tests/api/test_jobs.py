@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
@@ -16,6 +17,7 @@ from scadbuddy.render.job_models import Job, QueueFullError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 
 
@@ -153,6 +155,28 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     body = response.json()
     assert body["retry_after"] == 7
     assert "queue is full" in body["detail"]
+
+
+def test_a_render_when_temporal_is_unreachable_is_a_503_naming_it(
+    client: TestClient, model: str
+) -> None:
+    down = mock.AsyncMock(side_effect=TemporalUnavailableError("render-x"))
+    with mock.patch.object(RenderService, "submit", down):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert response.headers["retry-after"] == "5"
+
+
+def test_a_render_still_being_accepted_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert response.headers["retry-after"] == "2"
 
 
 def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(

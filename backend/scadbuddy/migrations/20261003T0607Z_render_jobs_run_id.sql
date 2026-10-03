@@ -5,3 +5,4 @@
 -- new one while the old build drains).
 ALTER TABLE render_jobs ADD COLUMN workflow_run_id text;
 CREATE UNIQUE INDEX render_jobs_execution ON render_jobs (workflow_id, workflow_run_id);
+DROP INDEX render_jobs_pending_key;
