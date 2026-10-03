@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import type { AuditLog, AuditSurface } from '../audit/log.js'
+import { type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -227,12 +227,12 @@ export class QuestionService {
     const turnId = options.turnId ?? null
     const questionId = options.questionId ?? null
     const rows = await this.atomically(sessionId, async (tx) => {
-      const cancelled = await tx<{ id: string }[]>`
+      const cancelled = await tx<{ id: string; turn_id: string; tool: string; tool_use_id: string; created_at: Date }[]>`
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
-        RETURNING id`
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
         events: cancelled.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
@@ -240,6 +240,24 @@ export class QuestionService {
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
+    // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
+    // approval cancelled the same way is audited the same way.
+    for (const r of rows) {
+      await this.deps.audit?.record({
+        kind: 'question',
+        action: 'cancelled',
+        surface: 'system',
+        actor: SYSTEM_ACTOR,
+        sessionId,
+        turnId: r.turn_id,
+        toolUseId: r.tool_use_id,
+        tier: 'read',
+        outcome: 'refused',
+        detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+        startedAt: r.created_at,
+        finishedAt: new Date(),
+      })
+    }
     if (options.refresh !== false) await this.refreshStatus(sessionId)
     return rows.length
   }

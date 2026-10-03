@@ -243,6 +243,32 @@ describe.skipIf(cliMissing !== undefined)(`AskUserQuestion through the question 
     expect(result?.subtype).toBe('success')
   }, 60_000)
 
+  // ask_user is an MCP call, which Claude Code cuts off at the server's
+  // `timeout`, else MCP_TOOL_TIMEOUT, else a default (2.1.283). A question
+  // waits for a person, so the server's own timeout must be the one in force:
+  // with MCP_TOOL_TIMEOUT at 1 s, an answer given after 2.5 s still arrives.
+  it("ask_user's own timeout outlasts MCP_TOOL_TIMEOUT: a slow answer still arrives", async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result') ? { text: 'ok' } : { toolUse: { name: ASK_USER_TOOL, input: { questions: QUESTIONS } } }
+    const options = buildHarnessOptions({
+      paths: { stateDir },
+      credential: { kind: 'gateway', baseUrl: fake.url, secret: GATEWAY_TOKEN },
+      model: 'claude-sonnet-4-5',
+      prompt: 'Ask me',
+      questionGate: () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ answered: true, answers: { 'Which colour should the base be?': 'Blue' } }), 2500),
+        ),
+    })
+    options.env = { ...options.env, MCP_TOOL_TIMEOUT: '1000' }
+    const messages: SDKMessage[] = []
+    for await (const m of query({ prompt: 'Ask me', options })) messages.push(m)
+    expect(messages.find((m): m is SDKResultMessage => m.type === 'result')?.subtype).toBe('success')
+    const followUp = lastContent(fake.messageCalls().at(-1)!)
+    expect(followUp).toContain('User has answered your questions')
+    expect(followUp).not.toMatch(/timed out/)
+  }, 60_000)
+
   it('without a gate the tool is not offered at all', async () => {
     script = () => ({ text: 'Nothing to ask.' })
     const { init } = await collect({ prompt: 'Ask me' })

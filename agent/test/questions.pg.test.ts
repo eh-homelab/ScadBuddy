@@ -185,7 +185,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
   })
 
   it('an interrupt cancels the question: the model is told nobody answered, and nothing was chosen', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
 
@@ -198,6 +199,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(resolved).toMatchObject({ id, answered: false, reason: expect.stringMatching(/interrupted/) })
     expect(resolved).not.toHaveProperty('answers')
     expect((await m.get(session.id, browser)).status).toBe('idle')
+    // #1075: a question nobody answered is in the audit log too, as ScadBuddy's cancellation.
+    expect(await db.sql`SELECT action, surface, principal_kind, tool_use_id, outcome, detail FROM ai_audit WHERE kind = 'question'`).toEqual([
+      {
+        action: 'cancelled',
+        surface: 'system',
+        principal_kind: 'system',
+        tool_use_id: 'toolu_q1',
+        outcome: 'refused',
+        detail: expect.stringMatching(new RegExp(`^AskUserQuestion question ${id}: .*interrupted`)),
+      },
+    ])
   })
 
   it('a question and an approval pending together: deciding the approval leaves the session waiting for the answer', async () => {
