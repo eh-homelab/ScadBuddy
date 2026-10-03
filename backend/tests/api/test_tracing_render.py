@@ -31,3 +31,5 @@ def test_a_render_is_one_trace_from_request_to_activities(
     assert "StartWorkflow:TemplatePipeline" in in_trace
     assert "RunWorkflow:TemplatePipeline" in in_trace
     assert any(name.startswith("RunActivity:") for name in in_trace)
+    assert "openscad.export" in in_trace
+    assert "render.render" in in_trace

@@ -111,6 +111,7 @@ def test_use_traceparent_parents_the_next_span(monkeypatch: pytest.MonkeyPatch) 
 def test_an_unreachable_collector_raises_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     # Review Focus 1: nothing listens on port 9 (discard); export errors stay in the SDK.
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1")
     provider = tracing.build_provider("scadbuddy-api", version="v", revision="r")
     with provider.get_tracer("t").start_as_current_span("request"):
         pass

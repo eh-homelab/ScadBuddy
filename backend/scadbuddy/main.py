@@ -49,7 +49,11 @@ from scadbuddy.workflows.client import connect
 API_PREFIX = "/api/v1"
 
 #: Never traced (spec §6): set in code so no deployment can drop it.
-EXCLUDED_URLS: Final = "/healthz,/metrics,/telemetry/v1/traces"
+#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
+#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
+EXCLUDED_URLS: Final = ",".join(
+    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
+)
 
 logger = logging.getLogger(__name__)
 
@@ -590,5 +594,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     else:
         logger.info("no frontend bundle found; serving the API only")
     # Outermost, so the server span covers every middleware, the body gate included.
-    FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_URLS)
+    FastAPIInstrumentor.instrument_app(
+        app, excluded_urls=EXCLUDED_URLS, exclude_spans=["receive", "send"]
+    )
     return app

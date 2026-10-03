@@ -53,6 +53,22 @@ def test_the_infrastructure_paths_are_not_traced(
     assert _server_spans(spans) == []
 
 
+def test_a_path_that_only_contains_an_excluded_one_is_traced(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    assert client.get("/api/v1/models/metrics-x").status_code == 404
+    wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+
+
+def test_body_chunks_and_messages_are_not_spans(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    assert client.get("/api/v1/models").status_code == 200
+    wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    names = [s.name for s in spans.get_finished_spans()]
+    assert not [n for n in names if n.endswith((" http send", " http receive"))], names
+
+
 def test_a_garbage_traceparent_starts_a_fresh_trace(
     client: TestClient, spans: InMemorySpanExporter
 ) -> None:
