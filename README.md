@@ -370,7 +370,7 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (or use a `Recreate` rollout) before the new API starts, and start the API before
   the render workers. At start the API fails every render the old queue left
   `running` (no workflow; nothing would finish it), with an error naming the
-  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  upgrade; its `pending` renders are failed too (#1053: nothing reconciles them). From a release
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
