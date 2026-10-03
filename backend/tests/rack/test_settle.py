@@ -233,6 +233,35 @@ async def test_an_archive_that_stalls_costs_only_itself(
     )
 
 
+async def test_a_settle_cut_off_mid_write_still_records_that_archive(
+    store: RackUsageStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1086 review: the watcher's timeout cancels the hook, not the write already
+    running in its thread. That archive is recorded anyway, as SETTLE_TIMEOUT says."""
+    writing = threading.Event()
+    write = store._record_prints
+
+    def slow_write(*args: object, **kwargs: object) -> int:
+        writing.set()
+        time.sleep(0.3)
+        return write(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "_record_prints", slow_write)
+    archives = Archives(ArchiveDetail(id=101, status="completed", actual_time_seconds=40))
+    hook = asyncio.ensure_future(settle(store, Links(link(101, 51)), archives))
+    await asyncio.to_thread(writing.wait, 2)
+    hook.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hook
+
+    for _ in range(40):
+        if await store.recorded_archives([101]):
+            break
+        await asyncio.sleep(0.05)
+    assert await store.recorded_archives([101]) == {101}
+    assert (await store.usage([A]))[A].prints == 1
+
+
 class FailingLinks:
     async def for_output(self, output_id: str) -> list[PrintLink]:
         raise RuntimeError(f"connection lost near {A}")

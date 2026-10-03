@@ -36,11 +36,13 @@ CONNECT_TIMEOUT = 5.0
 #: Bounds every query on this store's connections, so a stuck read releases its thread
 #: and connection even after an awaiting caller has stopped waiting (#1086 review).
 STATEMENT_TIMEOUT_MS = 15_000
-#: How long one archive's read from Bambuddy may take in a settle (#1086 review): a
-#: stall costs that archive alone, not the ones after it, which the watcher's whole-hook
-#: timeout (``SETTLE_TIMEOUT``) would otherwise cut off with it. The write that follows
-#: is bounded by ``STATEMENT_TIMEOUT_MS`` instead: a write cut off here would run on in
-#: its thread and could land after a warning that said it had not.
+#: How long one archive's read from Bambuddy may take in a settle (#1086 review), so a
+#: stalled read costs that archive and not the ones after it. The write that follows is
+#: bounded by ``STATEMENT_TIMEOUT_MS`` instead: a write cut off here would run on in its
+#: thread and could land after a warning that said it had not. Read, write and a wait
+#: for a pool connection can take ~35 s, so the watcher's ``SETTLE_TIMEOUT`` (60 s)
+#: covers one or two slow archives; it can cut the hook off mid-write, and that
+#: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
 
 
