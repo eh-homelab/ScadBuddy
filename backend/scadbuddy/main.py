@@ -6,7 +6,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -21,6 +21,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.operations import bambuddy_kinds
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -44,6 +45,7 @@ from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import bambuddy_worker, connect
+from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -401,13 +403,24 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
-        watcher=state.print_watcher,
     )
     ops = state.operations
     activities = [
         *PrintActivities(deps).all(),
+        FollowActivities(state.print_follower).follow_print,
         *operation_activities(ops.store, state.settings_store, ops.kinds),
     ]
+    try:
+        resumed = await resume_followed(
+            state.projection.pool, client, settings.temporal_task_queue_bambuddy, datetime.now(UTC)
+        )
+        if resumed:
+            logger.info(
+                "following on Temporal the prints the old watcher followed",
+                extra={"output_ids": resumed},
+            )
+    except Exception:
+        logger.exception("could not hand the old watcher's prints to FollowPrint")
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
@@ -517,8 +530,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
-        # Follows the prints a previous process was following (#268).
-        await state.print_watcher.start()
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
         # After the projection has opened: the jobs in it are references too.
@@ -563,10 +574,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
-        # Before the watcher: a run's last activity starts one.
         stop_printing.set()
         await _stop_print_worker(printing)
-        await state.print_watcher.aclose()
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)

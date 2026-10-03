@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import httpx
 import pytest
 import respx
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client
+from temporalio.service import RPCError
 
-from scadbuddy.api.deps import STATE_ATTR, get_print_watcher
+from scadbuddy.api import printing
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.workflows.follow import follow_id
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
@@ -19,25 +24,24 @@ from tests.api.test_send import BASE, configure, make_output, upload_route
 API = f"{BASE}/api/v1"
 
 
-def recording_watcher(client: TestClient) -> list[str]:
-    """Swap the app's print watcher for one that records what it is asked to watch."""
-    watched: list[str] = []
+@pytest.fixture
+def watched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The prints the progress route asks to follow, recorded instead (#1053)."""
+    asked: list[str] = []
 
-    class Recording:
-        def watch(self, output_id: str) -> None:
-            watched.append(output_id)
+    async def recording(client: object, task_queue: str, output_id: str) -> None:
+        asked.append(output_id)
 
-    app = client.app
-    assert isinstance(app, FastAPI)
-    app.dependency_overrides[get_print_watcher] = Recording
-    return watched
+    monkeypatch.setattr(printing, "follow", recording)
+    return asked
 
 
 @respx.mock
-def test_an_output_that_has_never_printed_answers_null(client: TestClient, model: str) -> None:
+def test_an_output_that_has_never_printed_answers_null(
+    client: TestClient, model: str, watched: list[str]
+) -> None:
     configure(client)
     output_id = make_output(client, model)
-    watched = recording_watcher(client)
     response = client.get(f"/api/v1/print/outputs/{output_id}/progress")
     assert response.status_code == 200
     assert response.json() is None
@@ -47,7 +51,7 @@ def test_an_output_that_has_never_printed_answers_null(client: TestClient, model
 @pytest.mark.requires_postgres
 @respx.mock
 def test_the_slice_and_queue_route_reports_through_the_same_shape(
-    client: TestClient, model: str
+    client: TestClient, model: str, watched: list[str]
 ) -> None:
     """#87's route records a queue item rather than a run, and #89 must still follow it
     — that is the gap the print-options work flagged."""
@@ -73,9 +77,12 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
             },
         )
     )
-    watched = recording_watcher(client)
     body = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
     # Not settled: the read makes sure the backend follows it (#268).
+    # The route asks in the background, so its read never waits on Temporal.
+    deadline = time.monotonic() + 5
+    while not watched and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert watched == [output_id]
     assert body["route"] == "slice_queue"
     assert body["queue_item_id"] == 51
@@ -110,8 +117,8 @@ def test_an_output_last_printed_by_a_pipeline_run_still_opens(
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
-    """#268: the backend follows the print itself from the moment it starts."""
+def test_a_run_starts_its_follow(client: TestClient, model: str) -> None:
+    """#268, #1053: the print is followed on Temporal from the moment it starts."""
     configure(client)
     output_id = make_output(client, model)
     upload_route()
@@ -122,4 +129,18 @@ def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     assert ran.status_code == 200, ran.text
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    assert output_id in state.print_watcher.watching
+
+    async def described() -> str:
+        temporal = await Client.connect(
+            state.settings.temporal_address, namespace=state.settings.temporal_namespace
+        )
+        handle = temporal.get_workflow_handle(follow_id(output_id))
+        # Started just after the run recorded its success, in the workflow's next task.
+        async with asyncio.timeout(10):
+            while True:
+                try:
+                    return (await handle.describe()).workflow_type
+                except RPCError:
+                    await asyncio.sleep(0.1)
+
+    assert asyncio.run(described()) == "FollowPrint"
