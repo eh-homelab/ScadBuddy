@@ -20,7 +20,6 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from tests.conftest import write_openscad_3mf
-from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     WorkflowReaper,
     temporal_available,
@@ -173,17 +172,3 @@ def wait_for_job(client: TestClient, job_id: str, timeout: float = 60) -> dict[s
             return body
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} never finished")
-
-
-@pytest.fixture(autouse=True)
-def rack_pick_swallows_only_expected_errors(
-    request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
-) -> Iterator[None]:
-    """``choose_rack`` swallows every exception by spec, so this is where a programming
-    error (TypeError, KeyError...) surfaces. A test that injects another type on purpose
-    opts out with ``@pytest.mark.rack_injects_errors``."""
-    yield
-    if request.node.get_closest_marker("rack_injects_errors"):
-        return
-    foreign = foreign_rack_errors(caplog.get_records("call"))
-    assert not foreign, f"rack pick swallowed a programming error: {foreign}"

@@ -9,9 +9,10 @@ import httpx
 
 from scadbuddy.core.problems import ApiError
 
-#: The error type names a rack pick may legitimately fall back on: Bambuddy's answers,
-#: transport failures and a stub's exhausted response list.
-_EXPECTED = {ApiError.__name__, StopIteration.__name__} | {
+#: The error type names a rack pick may legitimately fall back on: Bambuddy's answers
+#: and transport failures. Never ``StopIteration``: a bare ``next()`` on an empty
+#: iterator is a real bug, so a stub that runs out must raise ``ApiError`` instead.
+_EXPECTED = {ApiError.__name__} | {
     name
     for name, value in vars(httpx).items()
     if isinstance(value, type) and issubclass(value, Exception)

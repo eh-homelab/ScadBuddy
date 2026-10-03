@@ -227,6 +227,7 @@ async def test_a_refused_multi_group_manual_pick_is_not_also_reported_as_given()
     assert "got position" not in note.message
 
 
+@pytest.mark.rack_injects_errors
 async def test_rank_rack_raising_queues_without_a_choice_and_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,6 +242,7 @@ async def test_rank_rack_raising_queues_without_a_choice_and_warns(
     assert [w.message for w in warnings] == ["Rack pick left to Bambuddy: rack pick failed."]
 
 
+@pytest.mark.rack_injects_errors
 async def test_a_failure_is_logged_by_type_and_never_by_its_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

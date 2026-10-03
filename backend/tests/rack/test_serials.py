@@ -91,6 +91,7 @@ EXPECTED_MESSAGES = [
 ]
 
 
+@pytest.mark.rack_injects_errors
 async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) -> None:
     rack = status(
         slot(2, serial_number=INVENTED_SERIALS[2]), slot(4, serial_number=INVENTED_SERIALS[4])
@@ -155,4 +156,5 @@ def test_the_guard_flags_a_programming_error_but_not_an_api_one() -> None:
             for name in ("ApiError", "ReadTimeout", "StopIteration", "TypeError", "KeyError")
         ]
     )
-    assert flagged == ["TypeError", "KeyError"]
+    # claude-review on #1043, finding 5: StopIteration is a real bug's error, never expected.
+    assert flagged == ["StopIteration", "TypeError", "KeyError"]
