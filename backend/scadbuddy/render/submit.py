@@ -21,7 +21,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
@@ -282,10 +282,13 @@ class RenderService:
         for job in await asyncio.to_thread(self.store.legacy_pending):
             if job.workflow_id is not None:
                 try:
-                    await self.client.get_workflow_handle(job.workflow_id).describe(
+                    described = await self.client.get_workflow_handle(job.workflow_id).describe(
                         rpc_timeout=RPC_TIMEOUT
                     )
-                    continue
+                    # A closed run (terminated, failed) that retention still keeps will
+                    # never settle its row either.
+                    if described.status == WorkflowExecutionStatus.RUNNING:
+                        continue
                 except RPCError as error:
                     if error.status != RPCStatusCode.NOT_FOUND:
                         logger.warning(

@@ -331,7 +331,13 @@ class TemplatePipeline:
             workflow.upsert_search_attributes(list(pairs))
 
     @workflow.run
-    async def run(self, start: RenderStart) -> None:
+    async def run(self, start: RenderStart | Job) -> None:
+        if isinstance(start, Job):
+            # An older build's start (`render-<job id>`, its row inserted by its API),
+            # reaching this build during a rolling deploy: it renders as it did.
+            self._job, self._claims = start, 1
+            await self._render(start)
+            return
         self._search_attributes = start.search_attributes
         self._upsert(
             KIND.value_set("render"), SUBJECT.value_set(start.slug), STATUS.value_set("pending")
@@ -373,7 +379,15 @@ class TemplatePipeline:
                 Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields}),
                 start_to_close_timeout=SHORT,
                 retry_policy=PROJECT_RETRY,
+                # A release that cancels the job mid-projection waits for the write to
+                # resolve: its outcome must be in history before the run completes, or
+                # Temporal rejects that workflow task and the release with it.
+                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             )
+            if self._released is not None and fields.get("state") in (None, "running"):
+                # A write that completed despite the cancel returns normally: the
+                # release still stands.
+                raise asyncio.CancelledError
 
         problem = input_problem(job.slug, job.model_version)
         if problem is not None:
@@ -418,13 +432,23 @@ class TemplatePipeline:
                 # Its last claim released (superseded or withdrawn), or the run cancelled
                 # by hand: the piece goes on (ABANDON), the job is cancelled.
                 steps[0].state = "cancelled"
-                await project(
-                    state="cancelled",
-                    failure=Failure(error=self._released or "cancelled"),
-                    steps=steps,
-                )
                 if released:
+                    # Local, so it never waits behind openscad runs (the piece goes on)
+                    # for one of the worker's activity slots: `release` waits for it.
+                    await workflow.execute_local_activity(
+                        "project",
+                        Projection(
+                            job_id=job.id,
+                            slug=job.slug,
+                            state="cancelled",
+                            failure=Failure(error=self._released or "cancelled"),
+                            steps=steps,
+                        ),
+                        start_to_close_timeout=SHORT,
+                        retry_policy=PROJECT_RETRY,
+                    )
                     return  # a released job is an outcome: the run completes
+                await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
                 raise
             if not isinstance(error, Exception):
                 raise  # the SDK's own (an eviction), or another cancel: not a job outcome
