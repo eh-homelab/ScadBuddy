@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import type { AuditLog } from '../audit/log.js'
+import type { AuditLog, AuditSurface } from '../audit/log.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -155,8 +155,16 @@ export class QuestionService {
     })
   }
 
-  /** The panel's `question.answer`, from the user in the panel. */
-  async answer(principal: Owner, message: QuestionAnswerMessage): Promise<void> {
+  /**
+   * The panel's `question.answer`, from the user in the panel. `where` is for
+   * the audit log, as for an approval decision: the answerer's address and the
+   * surface ('http', the panel, when omitted).
+   */
+  async answer(
+    principal: Owner,
+    message: QuestionAnswerMessage,
+    where: { clientIp?: string | undefined; surface?: AuditSurface } = {},
+  ): Promise<void> {
     if (message.v !== PROTOCOL_VERSION || message.type !== 'question.answer') {
       throw new QuestionError('invalid', 'not a question.answer message')
     }
@@ -189,8 +197,9 @@ export class QuestionService {
     await this.deps.audit?.record({
       kind: 'question',
       action: 'answered',
-      surface: 'harness',
+      surface: where.surface ?? 'http',
       actor: principal,
+      clientIp: where.clientIp,
       sessionId,
       turnId: answered.turn_id,
       toolUseId: answered.tool_use_id,

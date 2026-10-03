@@ -128,17 +128,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingWith(tool), approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
-    await m.questions.answer(browser, answer(session.id, id, ['Make it teal, like my car', 'Approve']))
+    await m.questions.answer(browser, answer(session.id, id, ['Make it teal, like my car', 'Approve']), { clientIp: '192.0.2.7' })
     await turn!.done
 
     const rows = await db.sql`
-      SELECT action, surface, principal_kind, principal_id, session_id, turn_id, tool_use_id, tier,
+      SELECT action, surface, client_ip, principal_kind, principal_id, session_id, turn_id, tool_use_id, tier,
              input_hash, input_summary, outcome, detail
       FROM ai_audit WHERE kind = 'question'`
     expect(rows).toEqual([
       {
         action: 'answered',
-        surface: 'harness',
+        surface: 'http',
+        client_ip: '192.0.2.7',
         principal_kind: 'browser',
         principal_id: browser.id,
         session_id: session.id,
