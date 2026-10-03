@@ -296,6 +296,14 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  // #836 — a hand pick the current check no longer offers (no rack this time, or the
+  // position gone from its options) would be sent unseen, so it goes back to Automatic.
+  // Only a current verdict decides: one still on its way keeps the pick.
+  const offered = check.current ? (check.verdict?.rack?.options ?? []) : null
+  const pickOffered = rackPosition === null || offered === null || offered.some((o) => o.position === rackPosition)
+  useEffect(() => {
+    if (!pickOffered) setRackPosition(null)
+  }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
    * #772 — Simple mode hides the notes about the nozzle step, which only Advanced shows.

@@ -1908,6 +1908,46 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 
+  it('drops a hand pick the check no longer offers, so it is never sent unseen', async () => {
+    // claude-review on #1043, finding 3: the re-check with the pick comes back without
+    // the rack (unreadable this time), so the step and its select vanish.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as { rack_position?: number | null }
+        return HttpResponse.json({ errors: [], warnings: [], rack: body.rack_position === 2 ? null : rack })
+      }),
+    )
+    const runs = watch('POST', '/run')
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+  })
+
+  it('drops a hand pick whose position a re-check no longer lists', async () => {
+    let options = rack.options
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack: { ...rack, options } })))
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
+    options = rack.options.filter((option) => option.position !== 2)
+    fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
+    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('')
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')
