@@ -724,9 +724,12 @@ the most constrained runtime in the system.
   has exactly `SELECT, INSERT, UPDATE, DELETE` on `ai_pending_input` (the upsert and
   the guarded `DELETE … RETURNING` need all four), `SELECT, INSERT` on
   `ai_input_responses`, and `INSERT` on `ai_audit` under an RLS `INSERT` policy for
-  the `agent-durable` role, `WITH CHECK (kind = 'approval')`. The agent service's role,
-  which writes every other kind, gets its own permissive policy, so enabling RLS
-  blocks no existing writer. It can do nothing else.
+  the `agent-durable` role, `WITH CHECK (kind = 'approval')`. The agent service's role
+  owns `ai_audit` (it runs the agent migrations) and `FORCE ROW LEVEL SECURITY` is not
+  set, so the owner bypasses RLS and its writes and the audit read routes are
+  unchanged. Phase 5 confirms that ownership before enabling RLS. If the owner differs,
+  the service role gets `FOR ALL USING (true) WITH CHECK (true)` instead. §8 asserts
+  the audit read routes still return rows after the migration. It can do nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
   DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
   blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
@@ -958,8 +961,13 @@ happens, and there is no separate request system.
     attention `stop` path (Timeouts) is an interrupt and goes through it too.
     The Update needs the `agent-durable` worker, so each caller waits at most 10 s,
     then:
-    - **interrupt** proceeds anyway, and the turn is cancelled when the worker
-      returns. Stop is what a person presses when a session is stuck, so it must not
+    - **interrupt** proceeds anyway. It also sends `DurableSession` an `interrupt`
+      **Signal**, which Temporal records in history even with no worker running (an
+      Update is not recorded until a worker accepts it). When the worker returns, the
+      Signal's handler cancels the turn's `agent.run` task. The handler can only
+      cancel: like `cancel_input` it resolves the entry as `cancelled` and calls
+      `agent.decide(…, False, "system:cancel")`, and it takes no decision from its
+      caller. Stop is what a person presses when a session is stuck, so it must not
       hang. The entry is not left to its timer: whenever the turn's `agent.run` is
       cancelled, for any cause (an interrupt after this timeout, the attention `stop`),
       `DurableSession` first resolves any parked entry as `cancelled` through
@@ -973,11 +981,15 @@ happens, and there is no separate request system.
     `forgetSubject`), nothing in it runs. Two things clean up:
     - `forgetSubject` deletes the subject's `ai_pending_input` and `ai_input_responses`
       rows with its other rows (§6.5 step 3);
-    - every entry has an `expires_at` of at most 86 400 s, so the agent service's
-      periodic sweep, the one that runs `expireDue()` (`approvals/service.ts:100`),
-      also looks at every `ai_pending_input` row older than 10 minutes, whatever its
-      `expires_at`. For each one it asks Temporal (`DescribeWorkflowExecution` on the
-      row's `workflow_id` and `workflow_run_id` columns). Only a run that is closed or
+    - every entry has an `expires_at` of at most 86 400 s, which bounds how long any
+      entry can live. Separately, the agent service's sweep that runs `expireDue()`
+      every 30 s (`APPROVAL_SWEEP_MS`, `main.ts:49`) checks `ai_pending_input` rows
+      older than 10 minutes against Temporal, so that a closed run's entry is removed
+      promptly rather than at its expiry. It calls `DescribeWorkflowExecution` on the
+      row's `workflow_id` and `workflow_run_id` columns. The work is bounded: it
+      describes each distinct run at most once per tick, and a run found open is not
+      described again for 10 minutes (`last_checked_at` on the row). So the load is
+      one Describe per open durable run per 10 minutes, not one per badge poll. Only a run that is closed or
       not found is an orphan, so a terminated run's entry leaves the badge within one
       sweep, not at its expiry. A row whose run is still open is left alone, because
       it is a live entry, perhaps one whose `resolve_input` is still retrying (the
@@ -993,7 +1005,7 @@ happens, and there is no separate request system.
       is still an upsert on `request_id`, so a retried activity adds no second row.
   - `ai_pending_input(request_id primary key, session_id, workflow_id, workflow_run_id,
     kind, tool, summary, input_hash, prompt, requested_by, responders, created_at,
-    expires_at)` and `ai_input_responses(request_id primary key, session_id, kind,
+    expires_at, last_checked_at)` and `ai_input_responses(request_id primary key, session_id, kind,
     outcome, response jsonb, responder, created_at)` are one new agent migration in
     phase 5, and the `agent-durable` role writes both (§6.3a). The workflow pair is the
     one `workflow_runs` records too. The sweep reads it, and nothing but the route's
@@ -1028,7 +1040,8 @@ happens, and there is no separate request system.
 
 #### Responses: the `respond` Update
 
-- `respond(request_id, response, responder)` answers one entry. The route is
+- `respond(request_id, response, responder, role)` answers one entry; `role` is
+  defined under "Authorization" below. The route is
   `POST /api/v1/ai/pending-input/{request_id}`, for a session's entry and a session-less
   one alike; the route dispatches on the id's prefix (`approval:`, `question:`,
   `durable:`, `flow:`) to its store or its workflow, and refuses an unknown prefix, or
@@ -1044,8 +1057,16 @@ happens, and there is no separate request system.
   the frontend's boundary, not the gate's. Phase 5 adds it: a `CiliumNetworkPolicy`
   ingress on the Temporal frontend that admits only the ScadBuddy pod (the backend and
   the agent service), `scadbuddy-agent-durable`, the ScadBuddy worker Deployments and
-  the Temporal UI (#668, an operator surface). §8 asserts the policy, since a forged
-  responder cannot be refused at the Update layer.
+  the Temporal UI (#668, an operator surface), each by its pod label in the
+  `scadbuddy` namespace. §8 asserts the policy, since a forged responder cannot be
+  refused at the Update layer.
+  - **Residual risk.** The worker Deployments include the render worker, which runs
+    `openscad` on user-supplied templates. It must reach the frontend to poll its
+    queue, and a network policy cannot let a client poll but not send Updates. So a
+    compromised render worker could forge a `respond`. Closing that needs per-client
+    authorization at Temporal itself (a frontend authorizer, or mTLS identities per
+    worker with a claim mapper that refuses `respond` from any identity but the agent
+    service's). That is a phase-5 follow-up, recorded in §9, not this spec's design.
 - **The validator** refuses, before anything is written to history:
   - a stale id, meaning no such call is parked;
   - an entry that is already resolved (decided, answered, timed out or cancelled);
@@ -1056,7 +1077,7 @@ happens, and there is no separate request system.
     own session;
   - a response that does not match the kind's shape, and any response over 16 KiB.
   For an `approval` it also runs the plugin's `validate_decision`, and it checks
-  `input_hash` when one is sent, as `approvals/service.ts:737` does.
+  `input_hash` when one is sent, as `ApprovalService.decide` does.
 - **Authorization is the route's; the validator checks what the workflow knows.** An
   Update validator must be deterministic and can read neither Postgres nor a grant
   that changes. So the split is:
@@ -1066,7 +1087,11 @@ happens, and there is no separate request system.
     the result to the Update as `responder` plus `role`, the outcome of `authorize`:
     `browser` (the browser user, who may decide an `approval` whoever owns the session,
     and answers every `answer`), `grant` (a non-browser principal holding the grant),
-    or `owner` (a non-browser owner, which no kind accepts on its own);
+    or `owner` (a non-browser owner, which no kind accepts). **Ownership wins:** a
+    non-browser principal that owns the session gets `owner`, never `grant`, even when
+    it holds the grant, so it cannot approve calls in its own session, as classic
+    `authorize` refuses (`approvals/service.ts:78-80`). A shared vector covers that
+    principal;
   - the **validator** checks only what the workflow holds: staleness, *resolving*,
     the kind's allowed roles, self-decision against the `requested_by` and session
     starter it recorded at `open_input`, and the shape.
@@ -1078,8 +1103,8 @@ happens, and there is no separate request system.
   plugin's single list cannot say, so our validator decides. With `approvers` unset the
   plugin accepts any approver name (`_workflow.py:360`), so the guard is structural:
   `DurableSession` registers **no decision Signal**, and the only handlers that reach
-  `agent.decide` are `respond`, `cancel_input` (which can only cancel) and the entry's
-  timer. A test in §8 reads the running workflow's handlers rather than our source. It
+  `agent.decide` are `respond`, `cancel_input` and the `interrupt` Signal (both of
+  which can only cancel) and the entry's timer. A test in §8 reads the running workflow's handlers rather than our source. It
   allows the plugin's own, such as the Workflow Streams poll Update that
   `live_output=True` registers, by name, and fails on any other, so a handler the
   plugin or harness adds later is caught too. Phase 5 checks whether the plugin registers any.
@@ -1388,8 +1413,9 @@ happens, and there is no separate request system.
     and still times out;
   - from the running workflow's registered handlers (not our source): no handler other
     than `respond`, `cancel_input` and the entry's timer reaches `agent.decide`. The
-    expected set is ours (`send_message`, `respond`, `cancel_input`) plus what the
-    plugin registers by default, such as the Workflow Streams poll Update that
+    expected set is every handler `DurableSession` registers, Queries included:
+    the Updates `send_message`, `respond` and `cancel_input`, the Signal `interrupt`,
+    and the Query `pending_input`, plus what the plugin registers by default, such as the Workflow Streams poll Update that
     `live_output=True` adds (§3.2, §6.2), each listed by name with why it cannot decide.
     A new, unlisted handler fails the test;
   - interrupt, handoff and a superseding send each cancel a parked durable entry
@@ -1409,6 +1435,13 @@ happens, and there is no separate request system.
   - after a Reset the aggregate read shows exactly one entry for the call, and a
     terminated run's entry leaves it within one sweep;
   - a classic id with an unknown prefix, or with no row, is refused as stale;
+  - classic question expiry: an expired `ai_questions` row is resolved `cancelled` by
+    the new sweep, never answered; the parked `AskUserQuestion` call returns the error
+    result; `question_expiry_seconds` is bounded to 10–86 400 like
+    `approval_expiry_seconds`;
+  - a non-browser owner holding the grant is given role `owner` and cannot approve a
+    call in its own session, in both modes;
+  - the audit read routes still return rows after `ai_audit`'s RLS migration;
   - flow `wait_for_human` `timeout` outside 10–86 400 s is refused at type check for a
     literal, and raises at run time for a computed value;
   - an interrupt with the `agent-durable` worker down: when the worker returns, the
@@ -1466,6 +1499,7 @@ None. The ones considered, and how each was resolved:
 | Vendoring the unmerged `temporalio-claude-agent-sdk` | Not vendored, by the user's decision. The residual risk (an unreachable commit) is monitored by a scheduled `uv lock --check` (§6.2). This is not a deviation from Temporal. |
 | Encrypting session and flow payloads | Temporal's documented Payload Codec with serialization context (§6.5). Not a deviation. |
 | A durable approval that expires, or is cancelled by an interrupt, handoff or superseding send, reaches the model as the plugin's rejection text ("A human reviewer rejected this action. Do not retry it.") | Not a deviation: the plugin's `decide` takes no message. It fails closed, and the panel and audit record `expired` or `cancelled` (§6.6). The cost is the model's reading: after a handoff, "do not retry" steers the new owner's turn away from a legitimate call. Phase 5 asks upstream for a reason on `decide` covering both, and adopts it once released. Until then, an interrupt or handoff that ends the turn anyway (cancelling `agent.run`, as `stop` does) is preferred over `decide(False)` once phase 5 verifies that path. |
+| A render worker on the Temporal frontend could send `respond` | Not a deviation; a known residual risk (§6.6). Network policy cannot split polling from Updates. Per-client authorization (a frontend authorizer or per-worker mTLS identities) is a phase-5 follow-up. |
 | Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
