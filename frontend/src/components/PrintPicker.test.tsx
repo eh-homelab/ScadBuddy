@@ -185,7 +185,8 @@ describe('PrintPicker', () => {
       project_id: null,
       options: {},
       rack_position: null,
-      rack_algorithm: 'least_used',
+      // Not chosen in this dialog, so the backend applies the printer's remembered one.
+      rack_algorithm: null,
       request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
@@ -1968,6 +1969,31 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     fireEvent.click(screen.getByTestId('run-print'))
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_algorithm: 'oldest_first' })
+  })
+
+  it("never sends one printer's algorithm for another", async () => {
+    // claude-review on #1043, finding 4: after a printer switch, the old printer's
+    // algorithm went out until the new choices arrived, overriding the remembered one.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      // Printer 2's choices arrive late: the window the old algorithm leaked through.
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        if (asked === '2') await delay(400)
+        return HttpResponse.json({ ...choicesView, printer_id: asked === null ? choicesView.printer_id : Number(asked) })
+      }),
+    )
+    const checks = watch('POST', '/check')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer_id: 2 }))
+    expect(checks.bodies.filter((b) => (b as { printer_id?: number }).printer_id === 2)).toEqual(
+      expect.not.arrayContaining([expect.objectContaining({ rack_algorithm: 'oldest_first' })]),
+    )
   })
 
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {

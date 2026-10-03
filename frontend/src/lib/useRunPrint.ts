@@ -29,8 +29,8 @@ interface RunInput {
   options: PrintOptions
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
-  /** #836 — how the rack is ranked for this print. */
-  rackAlgorithm: RackAlgorithm
+  /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
+  rackAlgorithm: RackAlgorithm | null
   onRan: (result: PrintRunResult) => void
 }
 

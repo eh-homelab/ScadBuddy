@@ -130,17 +130,19 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
    * names one hotend for one printer and one nozzle size, so either changing drops it.
    */
-  const [rackAlgorithm, setRackAlgorithm] = useState<RackAlgorithm>('least_used')
+  /**
+   * Only an algorithm chosen in this dialog is sent; otherwise `null`, and the backend
+   * applies the printer's remembered one, so one printer's can never go out for another
+   * while the new printer's choices are read (claude-review on #1043).
+   */
+  const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
+  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? choices?.rack_algorithm ?? 'least_used'
   const [rackPosition, setRackPosition] = useState<number | null>(null)
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
-  const openedAlgorithm = choices?.rack_algorithm
+  // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
-    setRackAlgorithm(openedAlgorithm ?? 'least_used')
-  }, [openedAlgorithm, printerId])
-  // Only a change of printer drops the hand pick: a choices read that catches up with an
-  // algorithm the user just saved must not (claude-review on #1043, finding 4).
-  useEffect(() => {
+    setChosenAlgorithm(null)
     setRackPosition(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
@@ -154,7 +156,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setRackPosition(null)
   }, [size])
   function changeRackAlgorithm(next: RackAlgorithm) {
-    setRackAlgorithm(next)
+    setChosenAlgorithm(next)
     setAlgorithmUnsaved(false)
     if (printerId !== null)
       void api.putPrinterRackAlgorithm(printerId, next).catch(() => setAlgorithmUnsaved(true))
@@ -193,7 +195,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     projectId,
     options,
     rackPosition,
-    rackAlgorithm,
+    rackAlgorithm: chosenAlgorithm,
     onRan,
   })
   const { run, running, runError, refused, result, unanswered } = runPrint
@@ -301,7 +303,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
           rack_position: rackPosition,
-          rack_algorithm: rackAlgorithm,
+          rack_algorithm: chosenAlgorithm,
         }
       : null
   const check = usePrintCheck(source, checkRequest)
