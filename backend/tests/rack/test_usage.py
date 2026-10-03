@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import psycopg
 import pytest
 
+from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
 from scadbuddy.rack.usage import STATEMENT_TIMEOUT_MS, PickedHotend, RackUsageStore
+from scadbuddy.render.pg_store import MIGRATION_LOCK
 from tests.rack.helpers import group, serial, slot
 
 pytestmark = pytest.mark.requires_postgres
@@ -147,3 +150,21 @@ async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> Non
     with store._ready().connection() as conn:
         row = conn.execute("SHOW statement_timeout").fetchone()
     assert row is not None and row["statement_timeout"] == f"{STATEMENT_TIMEOUT_MS // 1000}s"
+
+
+async def test_migrating_waits_out_another_process_holding_the_lock(
+    store: RackUsageStore, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1086 review: another replica migrating for longer than the statement timeout
+    must not cancel this store's wait for the migration lock."""
+    monkeypatch.setattr(usage, "STATEMENT_TIMEOUT_MS", 200)
+    with psycopg.connect(pg_conninfo) as holder:
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        first = asyncio.create_task(store.seen(1, [A]))
+        await asyncio.sleep(0.6)
+        assert not first.done()
+        holder.commit()
+    await first
+    with store._ready().connection() as conn:
+        row = conn.execute("SHOW statement_timeout").fetchone()
+    assert row is not None and row["statement_timeout"] == "200ms"

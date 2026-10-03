@@ -106,7 +106,13 @@ class RackUsageStore:
                 self._pool_open = True
         if not self._migrated:
             with self._pool.connection() as conn:
-                migrate(conn)
+                # Unbounded while migrating (#1086 review): the wait for another
+                # process's migration lock, and a slow migration, count toward it.
+                conn.execute("SET statement_timeout = 0")
+                try:
+                    migrate(conn)
+                finally:
+                    _bound_statements(conn)
             self._migrated = True
         return self._pool
 
