@@ -782,8 +782,10 @@ what makes the running image knowable.
 ### Tracing (#988)
 
 The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
-`OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the cluster, the `alloy-receiver`; see
-eh-homelab/clusters#1596). Without it nothing is exported. Only standard `OTEL_*`
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, or with
+`OTEL_TRACES_EXPORTER=none`, nothing is exported; `OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
 variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
 `OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
 database queries and Bambuddy calls from background loops; it keeps everything that

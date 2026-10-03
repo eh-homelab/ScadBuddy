@@ -150,7 +150,12 @@ class RenderService:
             )
             current.set_attribute("scadbuddy.job_id", job.id)
             current.set_attribute("scadbuddy.coalesced", coalesced)
-            if coalesced and (link := link_to(job.traceparent)) is not None:
+            # A row with no trace of its own took this caller's: no link to itself.
+            if (
+                coalesced
+                and job.traceparent != current_traceparent()
+                and (link := link_to(job.traceparent)) is not None
+            ):
                 current.add_link(link.context)
             return job
 
