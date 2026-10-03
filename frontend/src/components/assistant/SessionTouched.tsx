@@ -105,7 +105,7 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
 
 interface Props {
   sessionId: string
-  /** Changes when the session may have touched more (a turn ended), so the list reads again. */
+  /** Changes when the session may have touched more (its status moved or a tool call finished), so the list reads again. */
   refreshKey?: unknown
 }
 
