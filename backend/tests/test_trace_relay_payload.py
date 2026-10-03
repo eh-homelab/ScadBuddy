@@ -11,6 +11,12 @@ from scadbuddy.telemetry.payload import PayloadError, TooManySpansError, prepare
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
 
 
+def _prepared(body: bytes) -> bytes:
+    prepared = prepare(body)
+    assert prepared is not None
+    return prepared
+
+
 def forwarded(body: bytes) -> Json:
     forwarded_body = prepare(body)
     assert forwarded_body is not None
@@ -165,7 +171,7 @@ def test_an_exception_keeps_its_type_and_frames_only() -> None:
     }
     status = {"code": 2, "message": SENTINEL}
     body = export(span(events=[event], status=status))
-    assert SENTINEL not in prepare(body).decode()
+    assert SENTINEL not in _prepared(body).decode()
     result = only_span(body)
     assert result["status"] == {"code": 2, "message": "TypeError"}
     (scrubbed,) = result["events"]
@@ -216,11 +222,11 @@ def test_a_lone_surrogate_is_forwarded_escaped() -> None:
     body = (
         '{"resourceSpans":[{"scopeSpans":[{"spans":[{' + ids + ',"name":"\\ud800"}]}]}]}'
     ).encode()
-    assert b"\\ud800" in prepare(body)
+    assert b"\\ud800" in _prepared(body)
 
 
 def _flat(body: bytes) -> str:
-    text = prepare(body).decode()
+    text = _prepared(body).decode()
     json.loads(text)
     assert SENTINEL not in text
     assert "NaN" not in text
@@ -386,7 +392,7 @@ def test_more_than_16_resource_spans_are_refused() -> None:
 
 
 def test_more_than_64_scope_spans_in_total_are_refused() -> None:
-    scopes = [{} for _ in range(33)]
+    scopes: list[Json] = [{} for _ in range(33)]
     body = json.dumps({"resourceSpans": [{"scopeSpans": scopes}, {"scopeSpans": scopes}]}).encode()
     with pytest.raises(PayloadError):
         prepare(body)
@@ -413,7 +419,7 @@ def test_a_scope_or_resource_with_no_surviving_span_is_dropped() -> None:
 
 
 def test_the_output_of_a_largest_legal_body_stays_proportional() -> None:
-    scopes = [{} for _ in range(4)]
+    scopes: list[Json] = [{} for _ in range(4)]
     body = json.dumps({"resourceSpans": [{"scopeSpans": scopes} for _ in range(16)]}).encode()
     assert prepare(body) is None
     spans = [span() for _ in range(100)]

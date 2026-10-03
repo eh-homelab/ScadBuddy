@@ -28,6 +28,7 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.telemetry import forwarder as forwarder_module
+from scadbuddy.telemetry import payload
 from scadbuddy.telemetry.admission import RelayLimits
 from scadbuddy.telemetry.component import TRACE_RELAY, TraceRelay
 from scadbuddy.telemetry.forwarder import TraceForwarder
@@ -274,7 +275,7 @@ def test_the_payload_is_prepared_off_the_event_loop(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     on_loop: list[bool] = []
-    real = telemetry.prepare
+    real = payload.prepare
 
     def spy(body: bytes) -> bytes | None:
         try:
