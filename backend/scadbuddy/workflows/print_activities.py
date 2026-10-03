@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
+    PrintRunResult,
     QueuedPlate,
     chosen_project,
     finish_run,
@@ -62,6 +63,7 @@ from scadbuddy.workflows.print_models import (
     RecordInput,
     SliceStartInput,
     SourceSpec,
+    SucceedInput,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,19 +264,24 @@ class PrintActivities:
             raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_finish")
-    async def finish(self, input: FinishInput) -> PrintRun:
-        """The result recorded, then the print followed (an output's)."""
+    async def finish(self, input: FinishInput) -> PrintRunResult:
+        """What the run queued, for ``print_succeed`` to record: the part that reads
+        Bambuddy and the data volume, and may give up."""
         settings = self._settings()
-        spec = input.input.source
         try:
             async with client_for(settings) as client:
-                source = await self._source(client, spec, settings)
-                result = await finish_run(
-                    client, source, input.planned, input.outcomes, input.queued
-                )
+                source = await self._source(client, input.input.source, settings)
+                return await finish_run(client, source, input.planned, input.outcomes, input.queued)
         except ApiError as error:
             raise raised_as(error, FAILED) from None
-        run = await self.d.store.succeed(input.run_id, input.input.slug, result)
+
+    @activity.defn(name="print_succeed")
+    async def succeed(self, input: SucceedInput) -> PrintRun:
+        """The result recorded (retried without limit: every plate is queued, so a
+        Postgres blip must not turn the run into a failure, review #1061), then the
+        print followed (an output's)."""
+        spec = input.input.source
+        run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An
             # output deleted while it printed has nothing left to follow.
@@ -301,5 +308,6 @@ class PrintActivities:
             self.enqueue,
             self.record,
             self.finish,
+            self.succeed,
             self.fail,
         ]

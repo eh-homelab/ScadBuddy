@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
+from temporalio.client import Client
 
 import scadbuddy.api
 from scadbuddy import __version__
@@ -22,6 +23,7 @@ from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, R
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.operations import bambuddy_kinds
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -44,7 +46,7 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import bambuddy_worker, connect
+from scadbuddy.workflows.client import bambuddy_worker, connect, reconcile_lost_runs
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -377,6 +379,8 @@ async def _stop_worker(state: AppState, worker: asyncio.Task[None], deps: Worker
 
 #: How long the print worker waits before connecting again to a Temporal that is down.
 PRINT_WORKER_RECONNECT = 5.0
+#: How often the print worker task looks for runs whose execution is gone.
+LOST_RUN_INTERVAL = 300.0
 
 
 async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
@@ -415,11 +419,25 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # print run waits on a queue nothing polls.
         try:
             async with bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities):
-                await stop.wait()
+                await _end_lost_runs_until(client, state.print_runs.store, stop)
         except Exception:
             logger.exception("the print worker failed; starting it again")
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+
+
+async def _end_lost_runs_until(client: Client, store: PrintRunStore, stop: asyncio.Event) -> None:
+    """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs whose execution
+    closed without ending them (review #1061): one terminated in the Temporal UI."""
+    while not stop.is_set():
+        try:
+            ended = await reconcile_lost_runs(client, store)
+            if ended:
+                logger.warning("ended print runs whose execution was gone", extra={"count": ended})
+        except Exception:
+            logger.exception("could not check print runs for lost executions")
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), LOST_RUN_INTERVAL)
 
 
 async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:

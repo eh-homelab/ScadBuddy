@@ -12,7 +12,8 @@
 ``print_slice_start`` and ``print_enqueue`` each start something Bambuddy does not
 dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
 without limit; ``print_record`` and ``print_finish`` also touch the data volume and
-Bambuddy, so they give up and the run is recorded as failed.
+Bambuddy, so they give up and the run is recorded as failed. ``print_succeed`` is the
+record alone, so once every plate is queued the run never ends ``failed``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
-    from scadbuddy.bambuddy.print_run import PlannedRun, QueuedPlate
+    from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.workflows.print_models import (
@@ -45,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
         PrintRunInput,
         RecordInput,
         SliceStartInput,
+        SucceedInput,
     )
     from scadbuddy.workflows.problems import problem_of
 
@@ -221,7 +223,7 @@ class PrintRunWorkflow:
                 start_to_close_timeout=SHORT,
                 retry_policy=BOUNDED_RETRY,
             )
-        finished: PrintRun = await workflow.execute_activity(
+        result = await workflow.execute_activity(
             "print_finish",
             FinishInput(
                 input=input,
@@ -230,9 +232,18 @@ class PrintRunWorkflow:
                 outcomes=outcomes,
                 queued=queued,
             ),
-            result_type=PrintRun,
+            result_type=PrintRunResult,
             start_to_close_timeout=SHORT,
             retry_policy=BOUNDED_RETRY,
+        )
+        # Every plate is queued: from here only the record is left, and it does not
+        # give up (review #1061).
+        finished: PrintRun = await workflow.execute_activity(
+            "print_succeed",
+            SucceedInput(input=input, run_id=accepted.run.id, result=result),
+            result_type=PrintRun,
+            start_to_close_timeout=SHORT,
+            retry_policy=RECORD_RETRY,
         )
         return finished
 
