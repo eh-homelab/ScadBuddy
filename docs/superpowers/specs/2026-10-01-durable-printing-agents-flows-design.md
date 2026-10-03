@@ -720,10 +720,11 @@ the most constrained runtime in the system.
 
   It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
   `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`), `ai_pending_input`,
-  `ai_input_responses` and `ai_audit` rows of kind `approval` (§6.6), and the session
-  counters. It can do
-  nothing else.
+  `ai_durable_entries` (or `ai_session_entries`) and the session counters. For §6.6 it
+  has exactly `SELECT, INSERT, UPDATE, DELETE` on `ai_pending_input` (the upsert and
+  the guarded `DELETE … RETURNING` need all four), `SELECT, INSERT` on
+  `ai_input_responses`, and `INSERT` on `ai_audit`, with a row-level security policy
+  that admits only `kind = 'approval'` for it. It can do nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
   DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
   blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
@@ -886,7 +887,10 @@ happens, and there is no separate request system.
     parked call never spans a continue-as-new, which happens only between tool calls
     (§3.2). The activity on `agent-tools` derives the same id from its activity info
     (`tool-<tool_use_id>`, and the run id). A flow run's is
-    `flow:<run id>:<call id>`, where `<call id>` is the harness's id for the host call;
+    `flow:<run id>:<workflow run id>:<call id>`, where `<run id>` is the `workflow_runs`
+    id, which a Reset keeps (§7.4), and `<call id>` is the harness's id for the host
+    call, which a replay repeats. The Temporal `workflow_run_id`, which a Reset changes,
+    is what keeps a replayed park from answering to a pre-Reset card;
   - `kind` and `responders` come from the tool's HITL policy;
   - for an `approval`, the entry carries the scrubbed `summary` and the `input_hash`
     and **never the call's raw input**, as the approval reads already do
@@ -936,8 +940,16 @@ happens, and there is no separate request system.
   - **Ending without a decision**, as classic `cancelPending` does
     (`approvals/service.ts:87-95`). An interrupt, a handoff and a new turn that
     supersedes the call each first send `DurableSession` a `cancel_input(reason)`
-    Update, from the agent service's interrupt, handoff and send paths, and proceed only
-    once it returns. It resolves the parked entry as `cancelled` through
+    Update, from the agent service's interrupt, handoff and send paths, and proceed
+    once it returns. The Update needs the `agent-durable` worker, so each caller waits
+    at most 10 s, then:
+    - **interrupt** proceeds anyway, cancelling the turn when the worker returns, and
+      leaves the entry to its timer and the sweep. Stop is what a person presses when
+      a session is stuck, so it must not hang;
+    - **handoff** is refused with a retryable error ("the session's worker is not
+      answering; try again"), so a new owner never inherits a parked approval;
+    - **a superseding send** is refused the same way, so the send can be retried once
+      the worker answers. It resolves the parked entry as `cancelled` through
     `resolve_input`, then lets the call end: an `approval` with `agent.decide(…,
     False, "system:cancel")`, so it never runs, and an `answer` let through with the
     `cancelled` outcome. So an interrupted turn leaves no entry, and a new owner after a
@@ -1040,7 +1052,7 @@ happens, and there is no separate request system.
   - `answer`: the handler is async. It marks the entry *resolving*, runs
     `resolve_input` with the response (the same activity as for an approval, so the
     response, the projection delete, the event and the outcome are one transaction),
-    then calls `agent.decide(tool_use_id, True, approver)`. The tool's activity on `agent-tools`
+    then calls `agent.decide(tool_use_id, True, responder)`. The tool's activity on `agent-tools`
     reads that row by `request_id` and returns it as the result. The plugin's gate
     carries only a yes or no, so this is how an answer becomes the result with only its
     documented API. The table is the durable store for every `answer` kind (questions
@@ -1339,7 +1351,12 @@ happens, and there is no separate request system.
     leaves one whose worker was down past `expires_at` + 10 minutes. When the worker
     returns, that entry gets exactly one `input.resolved`;
   - a Reset to before a resolution parks again under a new `request_id` and resolves
-    without a key collision;
+    without a key collision, for a durable session and for a flow run, and a `respond`
+    carrying the pre-Reset id is refused as stale;
+  - `cancel_input` with the `agent-durable` worker down: an interrupt still stops the
+    turn, and a handoff is refused with a retryable error;
+  - `open_input` and `resolve_input` run as the `agent-durable` role itself, not as the
+    migration owner;
   - one durable approval yields exactly one `approval.required`;
   - `forgetSubject` removes the subject's `ai_pending_input` and `ai_input_responses`
     rows;
