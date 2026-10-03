@@ -175,8 +175,8 @@
     {
       "id": 7,
       "type": "table",
-      "title": "Slowest renders",
-      "description": "The 20 most recent render.render spans on the worker, sorted by duration (Tempo search returns recent traces, not the slowest). Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "title": "Recent renders (by duration)",
+      "description": "The 20 most recent render.render spans on the worker, sorted by duration. Tempo search returns recent traces, so this is the slowest of those 20, not of the time range. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 16, "y": 9, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
@@ -195,8 +195,8 @@
     {
       "id": 8,
       "type": "table",
-      "title": "Failed renders",
-      "description": "Worker spans, any render stage, that ended in ERROR (the job settled failed), with scadbuddy.failure_class naming the cause. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "title": "Render attempts that errored",
+      "description": "Worker spans, any render stage, that ended in ERROR, with scadbuddy.failure_class naming the cause. Attempts that Temporal retried and that later succeeded are included (activities retry up to 3 times), so a row here is not necessarily a failed job. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
       "targets": [
@@ -254,8 +254,8 @@
     {
       "id": 12,
       "type": "table",
-      "title": "Slowest API traces",
-      "description": "The 20 most recent server spans on the API, sorted by duration (Tempo search returns recent traces, not the slowest). Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "title": "Recent API traces (by duration)",
+      "description": "The 20 most recent server spans on the API, sorted by duration. Tempo search returns recent traces, so this is the slowest of those 20, not of the time range. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 16, "y": 26, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
