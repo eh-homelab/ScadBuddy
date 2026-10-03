@@ -215,16 +215,24 @@ function parsedProblem(body: unknown, status: number, statusText: string): Probl
   }
 }
 
+/**
+ * A 429's or 503's `Retry-After`, in seconds, as `problem.retry_after` (the agent's
+ * connection test, #1000). Only the delay form; an HTTP date is left out.
+ */
+function withRetryAfter(problem: Problem, header: string | null): Problem {
+  if (problem.status !== 429 && problem.status !== 503) return problem
+  const seconds = Number(header)
+  return header && seconds > 0 ? { ...problem, retry_after: seconds } : problem
+}
+
 async function readProblem(response: Response): Promise<Problem> {
-  let problem: Problem
+  let body: unknown
   try {
-    problem = parsedProblem(await response.json(), response.status, response.statusText)
+    body = await response.json()
   } catch {
-    problem = unansweredProblem(response.status, response.statusText)
+    return withRetryAfter(unansweredProblem(response.status, response.statusText), response.headers.get('Retry-After'))
   }
-  // A 429's wait in seconds (the agent's connection test, #1000).
-  const retryAfter = Number(response.headers.get('Retry-After'))
-  return retryAfter > 0 ? { ...problem, retry_after: retryAfter } : problem
+  return withRetryAfter(parsedProblem(body, response.status, response.statusText), response.headers.get('Retry-After'))
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
@@ -233,9 +241,9 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
   try {
     body = JSON.parse(xhr.responseText)
   } catch {
-    return unansweredProblem(xhr.status, xhr.statusText)
+    return withRetryAfter(unansweredProblem(xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
   }
-  return parsedProblem(body, xhr.status, xhr.statusText)
+  return withRetryAfter(parsedProblem(body, xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
 }
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */

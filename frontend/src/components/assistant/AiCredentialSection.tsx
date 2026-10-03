@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from 'react'
-import { recheckAiAvailability } from '../../agent/chat/availability'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { recheckAiAvailability, useAiAvailability } from '../../agent/chat/availability'
 import { USER_ONLY } from '../../agent/dom'
 import type { AiConnectionTest, AiCredentialKind, AiCredentialView } from '../../api/aiCredential'
 import { api, ApiError } from '../../api/client'
@@ -23,6 +23,16 @@ function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
 
+/**
+ * The agent is not deployed here: the ingress has no `/api/v1/ai` (404), or the agent
+ * runs without its database (`routes/credentials.ts` NO_DATABASE). Anything else, such
+ * as the database still applying migrations, is shown with a Retry.
+ */
+function notDeployed(cause: Error | undefined): boolean {
+  if (!(cause instanceof ApiError)) return false
+  return cause.status === 404 || (cause.status === 503 && cause.detail.startsWith('AI features need the database'))
+}
+
 /** The wait a 429 asked for, in seconds, when it gave one. */
 function retryAfter(cause: unknown): number | undefined {
   if (!(cause instanceof ApiError) || cause.status !== 429) return undefined
@@ -44,6 +54,7 @@ function retryAfter(cause: unknown): number | undefined {
  */
 export function AiCredentialSection() {
   const credential = useAsync(() => api.getAiCredential(), [])
+  const ai = useAiAvailability()
   const [kind, setKind] = useState<AiCredentialKind | null>(null)
   const [baseUrl, setBaseUrl] = useState<string | null>(null)
   const [secret, setSecret] = useState('')
@@ -55,8 +66,37 @@ export function AiCredentialSection() {
   const [notice, setNotice] = useState<string | null>(null)
   const [test, setTest] = useState<AiConnectionTest | null>(null)
 
-  if (credential.error || !credential.data) return null
+  // A read that failed is tried again when the agent's state changes (it may have just come up).
+  const { error: loadError, reload } = credential
+  const seenState = useRef(ai.state)
+  useEffect(() => {
+    const before = seenState.current
+    if (before === ai.state) return
+    seenState.current = ai.state
+    // Leaving `checking` is the first answer for this tab, not a change in the agent.
+    if (loadError && before !== 'checking') reload()
+  }, [ai.state, loadError, reload])
+
+  if (notDeployed(credential.error)) return null
   const current = credential.data
+  if (!current) {
+    return (
+      <Frame>
+        {credential.error ? (
+          <div role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn">
+            {describeError(credential.error, credential.error.message)}
+            <Button size="sm" onClick={credential.reload}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <p className="flex items-center gap-2 text-[13px] text-muted">
+            <Spinner /> Loading
+          </p>
+        )}
+      </Frame>
+    )
+  }
   const kindValue = kind ?? current.kind ?? 'anthropic_api_key'
   const baseUrlValue = baseUrl ?? current.base_url ?? ''
   // Always with the secret: the agent keeps the stored one only for an unchanged kind and URL,
@@ -71,7 +111,7 @@ export function AiCredentialSection() {
     setSecret('')
     setTest(null)
     setNotice(message)
-    void recheckAiAvailability()
+    void recheckAiAvailability({ force: true })
   }
 
   async function save(event: FormEvent) {
@@ -128,15 +168,7 @@ export function AiCredentialSection() {
   }
 
   return (
-    <section
-      className="mt-4 rounded-[6px] border border-line bg-surface"
-      aria-labelledby="ai-credential-heading"
-      {...USER_ONLY}
-    >
-      <h2 id="ai-credential-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        Claude credential
-      </h2>
-      <div className="flex flex-col gap-3 p-4 text-[13px]">
+    <Frame>
         <div data-testid="ai-credential-current">
           {current.configured && current.kind ? (
             <p>
@@ -208,7 +240,7 @@ export function AiCredentialSection() {
               onChange={(event) => setSecret(event.target.value)}
               placeholder={kindValue === 'gateway' ? 'token' : 'sk-ant-…'}
               className="sb-field max-w-md"
-              autoComplete="off"
+              autoComplete="new-password"
               spellCheck={false}
               aria-describedby="ai-credential-help"
             />
@@ -265,8 +297,6 @@ export function AiCredentialSection() {
             {error}
           </p>
         )}
-      </div>
-
       <Dialog
         open={confirmDelete}
         title="Delete the Claude credential?"
@@ -284,6 +314,21 @@ export function AiCredentialSection() {
       >
         <p className="text-[13px] text-muted">The assistant stops working until a new credential is saved.</p>
       </Dialog>
+    </Frame>
+  )
+}
+
+function Frame({ children }: { children: ReactNode }) {
+  return (
+    <section
+      className="mt-4 rounded-[6px] border border-line bg-surface"
+      aria-labelledby="ai-credential-heading"
+      {...USER_ONLY}
+    >
+      <h2 id="ai-credential-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+        Claude credential
+      </h2>
+      <div className="flex flex-col gap-3 p-4 text-[13px]">{children}</div>
     </section>
   )
 }

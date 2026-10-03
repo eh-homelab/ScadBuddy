@@ -1,11 +1,24 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { recheckAiAvailability } from '../../agent/chat/availability'
+import { api } from '../../api/client'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AiCredentialSection } from './AiCredentialSection'
 
 const base = '/api/v1/ai/credentials'
+
+/** Resolves once msw has answered the credential read. */
+function credentialRead(): Promise<void> {
+  return new Promise((resolve) => {
+    server.events.on('response:mocked', ({ request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === base) resolve()
+    })
+  })
+}
+
+afterEach(() => server.events.removeAllListeners())
 
 describe('AiCredentialSection (#1000)', () => {
   it('shows the stored kind and last four, never the secret', async () => {
@@ -40,7 +53,6 @@ describe('AiCredentialSection (#1000)', () => {
     expect(puts).toEqual([
       { kind: 'gateway', base_url: 'https://gateway.example/anthropic/', secret: 'gw-token-ZZ12' },
     ])
-    server.events.removeAllListeners()
   })
 
   it('tests the credential, and shows the wait when rate-limited', async () => {
@@ -50,7 +62,7 @@ describe('AiCredentialSection (#1000)', () => {
     expect(await screen.findByTestId('ai-credential-test')).toHaveTextContent('Works (claude-sonnet-5-5)')
 
     await user.click(test)
-    expect(await screen.findByRole('alert')).toHaveTextContent(/try again shortly \(wait \d+ s\)\./)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/try again shortly \(wait (9|10) s\)\./)
   })
 
   it('shows a failed test with its reason', async () => {
@@ -112,10 +124,67 @@ describe('AiCredentialSection (#1000)', () => {
     expect(save.closest('[data-agent-user-only]')).not.toBeNull()
   })
 
-  it('is hidden when the agent service or its database is not there', async () => {
-    server.use(http.get(base, () => HttpResponse.json({ detail: 'AI features need the database' }, { status: 503 })))
+  it('shows a loading row until the read answers', async () => {
     renderPage(<AiCredentialSection />)
-    await new Promise((r) => setTimeout(r, 50))
-    await waitFor(() => expect(screen.queryByText('Claude credential')).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Claude credential' })).toBeInTheDocument()
+    expect(screen.getByText('Loading')).toBeInTheDocument()
+    expect(await screen.findByTestId('ai-credential-current')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['no /api/v1/ai route', 404, 'Not Found'],
+    ['no agent database', 503, 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'],
+  ])('is hidden when the agent is not deployed (%s)', async (_, status, message) => {
+    server.use(http.get(base, () => HttpResponse.json({ detail: message }, { status })))
+    const answered = credentialRead()
+    renderPage(<AiCredentialSection />)
+    await answered
+    await waitFor(() => expect(screen.queryByText('Loading')).not.toBeInTheDocument())
+    expect(screen.queryByRole('heading', { name: 'Claude credential' })).not.toBeInTheDocument()
+  })
+
+  it('shows any other failed read with a Retry', async () => {
+    let calls = 0
+    server.use(
+      http.get(base, () => {
+        calls += 1
+        return calls === 1
+          ? HttpResponse.json(
+              { detail: 'the AI database is unreachable or its migrations have not applied; see /healthz' },
+              { status: 503 },
+            )
+          : undefined
+      }),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('migrations have not applied')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
+  })
+
+  it('reads again when the agent changes state after a failed read', async () => {
+    server.use(
+      http.get(base, () => HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }), {
+        once: true,
+      }),
+    )
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    server.use(
+      http.get('/api/v1/ai/status', () =>
+        HttpResponse.json({ available: false, state: 'disabled', ai: 'disabled', reason: 'no credential' }),
+      ),
+    )
+    await act(() => recheckAiAvailability({ force: true }))
+    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
+  })
+
+  it('says a test is already running', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    const test = await screen.findByRole('button', { name: 'Test' })
+    const first = api.testAiCredential()
+    await user.click(test)
+    expect(await screen.findByRole('alert')).toHaveTextContent('a connection test is already running (wait 10 s).')
+    await first
   })
 })

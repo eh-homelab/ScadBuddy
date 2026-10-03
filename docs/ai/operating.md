@@ -249,8 +249,12 @@ quoted in spec §3.1).
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`. There is no Settings UI for them on `main` yet, so
-these are the interface.
+bodies are `{ "detail": "…" }`. The normal way to use them is Settings → Assistant →
+**Claude credential** (`AiCredentialSection`,
+[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx), #1000),
+which shows the stored kind, base URL and last four, replaces the credential, runs the
+test (showing `Retry-After` on a `429`) and deletes it after a confirmation. The
+`curl` below is the fallback when there is no UI.
 
 | Route | Guarded | What it does |
 |---|---|---|

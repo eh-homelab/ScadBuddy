@@ -538,8 +538,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   edited, already-applied migration stops the service at start with a message
   naming it (each file's sha256 is recorded).
 - The Claude credential (an Anthropic API key, or a gateway base URL plus
-  token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
-  tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
+  token) is set in Settings → Assistant → **Claude credential**, which views,
+  replaces, tests and deletes it (#1000). Underneath, and from a loopback
+  shell when there is no UI (`docs/ai/operating.md`), it is
+  `GET/PUT/DELETE /api/v1/ai/credentials`, tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
   one per 10 s; otherwise `429` with `Retry-After`). No route returns the
   secret. The sealed value is bound to its `kind` and `base_url`, so editing
   either in the database makes it fail to decrypt rather than send the token
