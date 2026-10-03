@@ -252,7 +252,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
             variant="ghost"
             size="sm"
             aria-expanded={touchedOpen}
-            aria-controls={touchedId}
+            aria-controls={touchedOpen ? touchedId : undefined}
             title="What this session's tool calls created, changed or deleted"
             onClick={() => setTouchedOpen((o) => !o)}
           >

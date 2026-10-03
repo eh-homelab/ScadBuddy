@@ -179,6 +179,19 @@ describe('SessionTouched', () => {
     expect(within(group('Presets')).getByRole('link', { name: /p-new/ })).toHaveAttribute('href', '/m/bin')
   })
 
+  it('shortens only a revision id; an output keeps its whole id', async () => {
+    const outputId = '0f1e2d3c4b5a69788796a5b4c3d2e1f0'
+    setSessionResources('sess-1', [
+      row({ type: 'revision', id: '0123456789abcdef', model: 'bin' }),
+      row({ type: 'output', id: outputId, model: 'bin', tool: 'save_output' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-1" />)
+
+    const outputs = await screen.findByRole('group', { name: 'Outputs' })
+    expect(within(outputs).getByRole('link', { name: new RegExp(outputId) })).toHaveAttribute('href', `/edit/${outputId}`)
+    expect(within(group('Revisions')).getByRole('link')).toHaveTextContent(/^0123456 · bin$/)
+  })
+
   it('does not link a revision whose model is unknown', async () => {
     setSessionResources('sess-1', [row({ type: 'revision', id: 'abcdef0123456', model: null })])
     renderPage(<SessionTouched sessionId="sess-1" />)

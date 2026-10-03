@@ -58,7 +58,8 @@ function entries(rows: readonly SessionResource[]): Entry[] {
   return out
 }
 
-const short = (id: string) => (/^[0-9a-f]{12,}$/.test(id) ? id.slice(0, 7) : id)
+/** A commit, shown the way git shortens one; other ids are uuids or numbers and stay whole. */
+const shortCommit = (id: string) => (/^[0-9a-f]{12,}$/.test(id) ? id.slice(0, 7) : id)
 
 /**
  * Where each model's last `deleted` row sits. Anything of that model last touched
@@ -84,17 +85,17 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
       return { name: id, to: page(modelPath(id)) }
     case 'revision':
       return {
-        name: `${short(id)}${on}`,
+        name: `${shortCommit(id)}${on}`,
         to: e.model ? page(`${modelPath(e.model)}?version=${encodeURIComponent(id)}`) : null,
       }
     case 'preset':
     case 'asset':
     case 'render_job':
-      return { name: `${short(id)}${on}`, to: e.model ? page(modelPath(e.model)) : null }
+      return { name: `${id}${on}`, to: e.model ? page(modelPath(e.model)) : null }
     case 'output':
-      return { name: `${short(id)}${on}`, to: page(editPath(id)) }
+      return { name: `${id}${on}`, to: page(editPath(id)) }
     case 'print_run':
-      return { name: short(id), to: page('/prints') }
+      return { name: id, to: page('/prints') }
     case 'print':
       return { name: `queue item ${id}`, to: page('/prints') }
     case 'unclassified':
@@ -152,11 +153,13 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
                 return (
                   <li key={e.id ?? `${e.tools.join()}-${i}`} className="flex items-baseline gap-1.5" title={e.tools.join(', ')}>
                     {to ? (
-                      <Link to={to} className="min-w-0 truncate font-mono text-accent underline">
+                      <Link to={to} title={e.id ?? undefined} className="min-w-0 truncate font-mono text-accent underline">
                         {name}
                       </Link>
                     ) : (
-                      <span className="min-w-0 truncate font-mono">{name}</span>
+                      <span title={e.id ?? undefined} className="min-w-0 truncate font-mono">
+                        {name}
+                      </span>
                     )}
                     <span className="shrink-0 text-faint">{e.actions.map((a) => ACTION_LABEL[a]).join(', ')}</span>
                   </li>
