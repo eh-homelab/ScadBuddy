@@ -34,17 +34,24 @@ const OptionSchema = z.object({
   preview: z.string().max(PREVIEW_MAX).optional(),
 })
 
-export const QuestionSchema = z.object({
-  question: z.string().min(1).max(QUESTION_TEXT_MAX),
-  header: z.string().max(200),
-  multiSelect: z.boolean(),
-  options: z
-    .array(OptionSchema)
-    .min(OPTIONS_MIN)
-    .max(OPTIONS_MAX)
-    // The panel tells options apart by label, and the answer names one.
-    .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
-})
+export const QuestionSchema = z
+  .object({
+    question: z.string().min(1).max(QUESTION_TEXT_MAX),
+    header: z.string().max(200),
+    multiSelect: z.boolean(),
+    options: z
+      .array(OptionSchema)
+      .min(OPTIONS_MIN)
+      .max(OPTIONS_MAX)
+      // The panel tells options apart by label, and the answer names one.
+      .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
+  })
+  // A multi-select answer is its labels joined by ", " (plus "Other: <the user's words>"),
+  // so a label with a comma could not be told apart.
+  .refine((q) => !q.multiSelect || q.options.every((o) => !o.label.includes(',')), {
+    message: 'an option label of a multiSelect question must not contain a comma',
+  })
+
 export type UserQuestion = z.infer<typeof QuestionSchema>
 
 const InputSchema = z.object({

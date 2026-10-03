@@ -364,18 +364,24 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
       }
       const message = errorMessage(event.code, event.message)
-      // #940: an answer the agent refused (or never parsed) resolves nothing, and a
-      // question has no expiry, so a card left `sent` would wait forever. An error for
-      // its session (or, without one, for the open session) makes it answerable again.
-      const retry = (s: SessionState): SessionState =>
-        mapItems(s, (i) => (i.kind === 'question' && i.state === 'sent' ? { ...i, state: 'pending' } : i))
+      // #940: an answer the agent refused resolves nothing, and a question has no
+      // expiry, so its card must be answerable again. The agent names the question on
+      // every error that refused an answer (`questionId`); a frame it could not parse
+      // has neither session nor question, and re-opens the open session's latest sent card.
+      const reopen = (s: SessionState, id: string | undefined): SessionState => {
+        const target =
+          id ?? [...s.items].reverse().find((i) => i.kind === 'question' && i.state === 'sent')?.id
+        return target === undefined
+          ? s
+          : mapItems(s, (i) => (i.kind === 'question' && i.id === target && i.state === 'sent' ? { ...i, state: 'pending' } : i))
+      }
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(retry(s), { kind: 'error', id: `error-${s.items.length}`, message }),
+          push(event.questionId ? reopen(s, event.questionId) : s, { kind: 'error', id: `error-${s.items.length}`, message }),
         )
       }
       const next = { ...state, notice: message, awaitingStart: false }
-      return state.activeId ? patchSession(next, state.activeId, retry) : next
+      return state.activeId && event.code === 'invalid' ? patchSession(next, state.activeId, (s) => reopen(s, undefined)) : next
     }
   }
 }

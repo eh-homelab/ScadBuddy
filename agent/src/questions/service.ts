@@ -194,14 +194,16 @@ export class QuestionService {
   async cancelPending(
     sessionId: string,
     reason: string,
-    options: { refresh?: boolean; turnId?: string } = {},
+    options: { refresh?: boolean; turnId?: string; questionId?: string } = {},
   ): Promise<number> {
     const turnId = options.turnId ?? null
+    const questionId = options.questionId ?? null
     const rows = await this.atomically(sessionId, async (tx) => {
       const cancelled = await tx<{ id: string }[]>`
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
+          AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
         RETURNING id`
       return {
         value: cancelled,
@@ -280,7 +282,13 @@ export class QuestionService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const resolved = await this.waitFor(id, AbortSignal.any([context.signal, request.signal]))
-      if (!resolved) return { answered: false, message: 'The user did not answer: the turn stopped first.' }
+      if (!resolved) {
+        // The SDK dropped this one call while the turn goes on: its card must not stay
+        // answerable for an answer nobody would read, nor the session say it waits.
+        // (A turn that stopped cancels its questions as it finishes.)
+        if (!context.signal.aborted) await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
+        return { answered: false, message: 'The user did not answer: the turn stopped first.' }
+      }
       if (resolved.outcome !== 'answered' || !resolved.answers) {
         return { answered: false, message: `The user did not answer: ${resolved.reason ?? 'the question was cancelled'}.` }
       }

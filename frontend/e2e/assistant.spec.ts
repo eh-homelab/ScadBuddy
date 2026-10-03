@@ -69,6 +69,25 @@ test.describe('assistant panel (#256)', () => {
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
   })
 
+  test('a draft to approve: Cancel declines it, the draft hides, and the turn ends', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Draft an issue about the thin name text')
+    await composer.press('Enter')
+
+    const card = panel.getByRole('region', { name: 'A question for you' })
+    await expect(card.getByTestId('agent-question-preview')).toBeVisible()
+    await card.getByRole('radio', { name: /Cancel/ }).check()
+    await expect(card.getByTestId('agent-question-preview')).toHaveCount(0)
+    await card.getByRole('button', { name: 'Send answer' }).click()
+
+    await expect(panel.getByRole('log', { name: 'Conversation' }).getByText("OK, I won't file it.")).toBeVisible()
+    await expect(card.getByRole('status')).toHaveText('Answered by You: Cancel')
+    await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+  })
+
   // Spec §8.2: an outward step waits for a human. Deny must send nothing and say so;
   // the card keeps the decision, and its buttons do not come back (#259).
   test('Deny on the confirmation sends nothing and the turn ends', async ({ page }) => {

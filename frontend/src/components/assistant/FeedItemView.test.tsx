@@ -190,6 +190,16 @@ describe('the question card (#940)', () => {
     expect(onAnswer).toHaveBeenCalledWith('q1', ['Blue', 'Magnets, Hook'])
   })
 
+  it('marks the user’s own words in a multi-select answer, after the picked labels', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([extras])
+    await user.click(screen.getByRole('checkbox', { name: /Hook/ }))
+    await user.click(screen.getByRole('checkbox', { name: 'Other…' }))
+    await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'a lanyard, too')
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenCalledWith('q1', ['Hook, Other: a lanyard, too'])
+  })
+
   it('takes the user’s own words instead of an option', async () => {
     const user = userEvent.setup()
     const { onAnswer } = ask([colour])
@@ -235,15 +245,15 @@ describe('the question card (#940)', () => {
     await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
     await user.click(screen.getByRole('checkbox', { name: 'Other…' }))
     const box = screen.getByRole('textbox', { name: 'Your answer' })
-    // Exactly the cap typed, then ", Magnets" goes over it.
+    // "Other: " plus this is exactly the cap; with "Magnets, " in front it goes over.
     await user.click(box)
-    await user.paste('x'.repeat(20_000))
+    await user.paste('x'.repeat(20_000 - 'Other: '.length))
     expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled()
     expect(screen.getByRole('alert')).toHaveTextContent(/longer than the assistant takes/)
     await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
     expect(screen.queryByRole('alert')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Send answer' }))
-    expect(onAnswer).toHaveBeenCalledWith('q1', ['x'.repeat(20_000)])
+    expect(onAnswer).toHaveBeenCalledWith('q1', [`Other: ${'x'.repeat(20_000 - 'Other: '.length)}`])
   })
 
   it('offers its controls only to the user, never to the browser bridge', () => {

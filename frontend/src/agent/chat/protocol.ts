@@ -125,6 +125,8 @@ export const QuestionSchema = z.object({
     // The card tells options apart by label.
     .refine((options) => new Set(options.map((o) => o.label)).size === options.length, 'each option needs its own label'),
 })
+  // A multi-select answer joins labels with ", " (agent questions.ts): no comma in one.
+  .refine((q) => !q.multiSelect || q.options.every((o) => !o.label.includes(',')), 'no comma in a multi-select label')
 export type Question = z.infer<typeof QuestionSchema>
 
 export const SessionSummarySchema = z.object({
@@ -288,6 +290,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     code: z.string().optional(),
     message: z.string().min(1),
+    /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
+    questionId: z.string().min(1).optional(),
   }),
   /**
    * An automatic Hindsight recall or retain (#818): memory the agent read or wrote

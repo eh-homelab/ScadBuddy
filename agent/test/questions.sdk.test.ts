@@ -47,6 +47,10 @@ describe('parseQuestions', () => {
     expect(parseQuestions({ questions: [q(['Yes', 'No'])] }).ok).toBe(true)
     expect(parseQuestions({ questions: [q(['Yes', 'Yes'])] })).toMatchObject({ ok: false, error: expect.stringMatching(/own label/) })
     expect(parseQuestions({ questions: [q(['Yes', 'No']), q(['A', 'B'])] }).ok).toBe(false)
+    // A multi-select answer joins labels with ", ", so none may hold a comma; a single choice may.
+    const multi = { ...q(['Red, matte', 'Blue']), multiSelect: true }
+    expect(parseQuestions({ questions: [multi] })).toMatchObject({ ok: false, error: expect.stringMatching(/comma/) })
+    expect(parseQuestions({ questions: [q(['Red, matte', 'Blue'])] }).ok).toBe(true)
   })
 })
 

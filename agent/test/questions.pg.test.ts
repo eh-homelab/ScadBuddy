@@ -4,6 +4,7 @@ import type { Database } from '../src/db.js'
 import type { QuestionVerdict, UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { QuestionError, QuestionService } from '../src/questions/service.js'
+import { ChatConnection } from '../src/routes/chat.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
@@ -322,6 +323,53 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       { tool_use_id: 'toolu_q1', outcome: 'cancelled' },
     ])
     expect((await m.get(session.id, agentA)).status).toBe('idle')
+  })
+
+  it('a call the SDK withdraws while the turn goes on is cancelled, and the session goes back to running', async () => {
+    const withdraw = new AbortController()
+    let carryOn!: () => void
+    const goOn = new Promise<void>((r) => {
+      carryOn = r
+    })
+    const dropped = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: withdraw.signal }))
+        await goOn
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: dropped, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+
+    withdraw.abort()
+    await expect.poll(() => verdicts.length).toBe(1)
+    expect(verdicts[0]).toMatchObject({ answered: false })
+    expect((await db.sql`SELECT outcome, reason FROM ai_questions WHERE id = ${id}`)[0]).toEqual({
+      outcome: 'cancelled',
+      reason: 'the call was withdrawn',
+    })
+    // The turn is still live, and no longer says it waits for the user.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'running', turnActive: true })
+    expect((await events(m, session.id)).find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false })
+    carryOn()
+    await turn!.done
+  })
+
+  it('the chat socket names the question on an error that refused its answer', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const out: ServerEvent[] = []
+    const chat = new ChatConnection(m, (e) => out.push(e), { snapshotMs: 60_000 })
+    try {
+      await chat.receive(JSON.stringify(answer(session.id, id, ['Red'])))
+      await expect.poll(() => out.find((e) => e.type === 'error')).toMatchObject({ sessionId: session.id, code: 'invalid', questionId: id })
+    } finally {
+      chat.close()
+    }
+    await m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))
+    await turn!.done
   })
 
   it('a row and the event that reports it commit together: a failed append resolves nothing', async () => {

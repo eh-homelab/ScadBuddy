@@ -186,7 +186,8 @@ function rawAnswerOf(q: AskedQuestion, c: Choice): string | undefined {
   if (c.other && !own) return undefined
   if (!q.multiSelect) return c.other ? own : c.picked[0]
   const parts = q.options.map((o) => o.label).filter((l) => c.picked.includes(l))
-  if (own) parts.push(own)
+  // Marked, so the agent can tell the user's words from the picked labels (no label has a comma).
+  if (own) parts.push(`Other: ${own}`)
   return parts.length ? parts.join(', ') : undefined
 }
 

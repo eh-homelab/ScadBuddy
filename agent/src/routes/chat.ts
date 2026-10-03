@@ -121,8 +121,14 @@ export type ChatRouteDeps = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
-function errorEvent(err: unknown, sessionId: string | undefined, log: (m: string) => void): ServerEvent {
-  const where = sessionId ? { sessionId } : {}
+function errorEvent(
+  err: unknown,
+  sessionId: string | undefined,
+  log: (m: string) => void,
+  questionId?: string,
+): ServerEvent {
+  // A failed answer names its question (#940), so the panel re-opens that card only.
+  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}) }
   if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
@@ -367,7 +373,7 @@ export class ChatConnection {
       if (sessionId && err instanceof SessionError && err.budget) {
         this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
       }
-      this.emit(errorEvent(err, sessionId, this.log))
+      this.emit(errorEvent(err, sessionId, this.log, message.type === 'question.answer' ? message.id : undefined))
     }
   }
 

@@ -85,7 +85,8 @@ export type ServerEvent = V &
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
-    | { type: 'error'; sessionId?: string; code?: string; message: string }
+    /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
+    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
     /**
      * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A
      * retain finishes after its turn, so this can follow the turn's last
