@@ -96,7 +96,8 @@ SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
 must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only once
 `frontend/dist` is built (`pnpm build` in `frontend/`); otherwise it serves only the API.
 `SCADBUDDY_TEMPORAL_NAMESPACE` defaults to `scadbuddy` (hence `--namespace` above)
-and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
+and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`
+(`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`, the API's own housekeeping queue, to `library`).
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
 
@@ -168,7 +169,10 @@ on shutdown.
     nothing has uploaded or used it for this long. The same grace applies to the
     blob store's pieces and snapshots (see "Blob store and render workers").
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off. The same interval drives the blob
+    after the one at startup; 0 turns it off. It is the interval of the Temporal
+    Schedule `scadbuddy-housekeeping-library`, which also prunes settled render jobs and
+    runs on the API's own `library` queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0
+    deletes the Schedule. The same interval drives the blob
     store's sweep, which 0 also turns off, and a render worker's piece-cache
     eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
