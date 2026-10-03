@@ -166,9 +166,16 @@ def test_the_guard_expects_postgres_failures_only_from_the_usage_read() -> None:
 
     usage = [
         record(RACK_USAGE_FALLBACK, name)
-        for name in ("QueryCanceled", "OperationalError", "PoolTimeout", "TypeError")
+        for name in (
+            "QueryCanceled",
+            "OperationalError",
+            "PoolTimeout",
+            "TypeError",
+            "UndefinedColumn",
+            "DataError",
+        )
     ]
-    assert foreign_rack_errors(usage) == ["TypeError"]
+    assert foreign_rack_errors(usage) == ["TypeError", "UndefinedColumn", "DataError"]
     assert foreign_rack_errors([record(RACK_PICK_FALLBACK, "QueryCanceled")]) == ["QueryCanceled"]
 
 

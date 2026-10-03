@@ -8,7 +8,6 @@ from collections.abc import Iterable
 import httpx
 import psycopg
 import psycopg.errors  # the SQLSTATE subclasses counted below
-import psycopg_pool
 
 from scadbuddy.bambuddy.print_run import RACK_FALLBACKS, RACK_USAGE_FALLBACK
 from scadbuddy.core.problems import ApiError
@@ -33,11 +32,12 @@ def _subclass_names(root: type[Exception]) -> set[str]:
 
 
 #: The usage read is a Postgres read (#1086 review): an outage, a pool wait or the
-#: store's statement timeout is infrastructure there, not a bug.
+#: store's statement timeout is infrastructure there, not a bug. Only those branches:
+#: a ``ProgrammingError`` (a renamed column, a typo) or ``DataError`` is a bug.
 _EXPECTED_BY_MESSAGE = {
     RACK_USAGE_FALLBACK: _EXPECTED
-    | _subclass_names(psycopg.Error)
-    | _subclass_names(psycopg_pool.PoolTimeout)
+    | _subclass_names(psycopg.OperationalError)  # QueryCanceled and PoolTimeout too
+    | _subclass_names(psycopg.InterfaceError)
 }
 
 #: Every rack fallback that swallows an exception and logs its type (#1081): the pick,

@@ -2096,6 +2096,73 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
   })
 
+  /** Holds each algorithm PUT until the test answers it, in any order. */
+  function heldSaves() {
+    const answers: ((status: number) => void)[] = []
+    server.use(
+      http.put('/api/v1/print/printers/:id/rack-algorithm', async () => {
+        const status = await new Promise<number>((resolve) => answers.push(resolve))
+        return status === 200
+          ? HttpResponse.json({})
+          : HttpResponse.json({ title: 'Service Unavailable', status }, { status })
+      }),
+    )
+    const saves: Promise<unknown>[] = []
+    const put = api.putPrinterRackAlgorithm.bind(api)
+    vi.spyOn(api, 'putPrinterRackAlgorithm').mockImplementation((...args) => {
+      const save = put(...args)
+      saves.push(save)
+      return save
+    })
+    /** Answer the `index`th save with `status`. */
+    const answer = (index: number, status: number) => answers[index]?.(status)
+    return { answers, answer, saves }
+  }
+
+  it('lets only the latest of two saves say it was not remembered', async () => {
+    // #1086 review: an earlier save failing after a later one succeeded said the later
+    // choice was not remembered.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves } = heldSaves()
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    const select = await screen.findByLabelText('Rack algorithm')
+    fireEvent.change(select, { target: { value: 'oldest_first' } })
+    fireEvent.change(select, { target: { value: 'least_used' } })
+    await waitFor(() => expect(answers.length).toBe(2))
+
+    answer(1, 200)
+    answer(0, 503)
+    await act(() => Promise.allSettled(saves))
+    expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
+  })
+
+  it('shows the latest of two saves that land after a close and reopen', async () => {
+    // #1086 review: the first to arrive was adopted, and the later choice then ignored.
+    const checks = watch('POST', '/check')
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves } = heldSaves()
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    const first = await screen.findByLabelText('Rack algorithm')
+    fireEvent.change(first, { target: { value: 'oldest_first' } })
+    fireEvent.change(first, { target: { value: 'bambuddy' } })
+    await waitFor(() => expect(answers.length).toBe(2))
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await loaded()
+    await showAdvanced()
+    const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
+    answer(0, 200)
+    answer(1, 200)
+    await act(() => Promise.allSettled(saves))
+
+    await waitFor(() => expect(select.value).toBe('bambuddy'))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'bambuddy' }))
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')
