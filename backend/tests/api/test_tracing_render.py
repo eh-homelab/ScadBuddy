@@ -24,7 +24,15 @@ def test_a_render_is_one_trace_from_request_to_activities(
             and str((s.attributes or {}).get("http.route", "")).endswith("/render")
         ),
     )
-    wait_for_span(spans, lambda s: s.name == "RunWorkflow:TemplatePipeline")
+    # By trace id: a worker left over from an earlier test can end its own workflow
+    # span after this test began.
+    wait_for_span(
+        spans,
+        lambda s: (
+            s.name == "RunWorkflow:TemplatePipeline"
+            and s.context.trace_id == request.context.trace_id
+        ),
+    )
     in_trace = [
         s.name for s in spans.get_finished_spans() if s.context.trace_id == request.context.trace_id
     ]

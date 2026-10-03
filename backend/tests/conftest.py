@@ -56,11 +56,17 @@ _provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(_SPANS)))
 trace.set_tracer_provider(_provider)
 
 
+@pytest.fixture(autouse=True)
+def _clear_spans() -> Iterator[None]:
+    """Every test's spans go after it, whether it read them or not: the exporter lives
+    for the whole session and would otherwise hold every span every test made."""
+    yield
+    _SPANS.clear()
+
+
 @pytest.fixture
-def spans() -> Iterator[InMemorySpanExporter]:
-    _SPANS.clear()
-    yield _SPANS
-    _SPANS.clear()
+def spans() -> InMemorySpanExporter:
+    return _SPANS
 
 
 def wait_for_span(
