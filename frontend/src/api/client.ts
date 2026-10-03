@@ -86,6 +86,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -215,13 +216,15 @@ function parsedProblem(body: unknown, status: number, statusText: string): Probl
 }
 
 async function readProblem(response: Response): Promise<Problem> {
-  let body: unknown
+  let problem: Problem
   try {
-    body = await response.json()
+    problem = parsedProblem(await response.json(), response.status, response.statusText)
   } catch {
-    return unansweredProblem(response.status, response.statusText)
+    problem = unansweredProblem(response.status, response.statusText)
   }
-  return parsedProblem(body, response.status, response.statusText)
+  // A 429's wait in seconds (the agent's connection test, #1000).
+  const retryAfter = Number(response.headers.get('Retry-After'))
+  return retryAfter > 0 ? { ...problem, retry_after: retryAfter } : problem
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
@@ -1184,4 +1187,15 @@ export const api = {
 
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
+
+  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
+  getAiCredential: () => request<AiCredentialView>('/ai/credentials'),
+
+  putAiCredential: (body: AiCredentialUpdate) =>
+    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+
+  /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
+  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
 }
