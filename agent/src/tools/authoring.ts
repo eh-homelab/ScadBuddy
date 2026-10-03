@@ -12,7 +12,7 @@ import { defineTool, json, ToolError, type Tool } from './registry.js'
 const COMMIT_ID = /^[0-9a-f]{7,64}$/
 
 /** A backend 409's `current` (RFC 9457 extension member), when it is a commit id. */
-function currentOf(error: unknown): string | null {
+export function currentOf(error: unknown): string | null {
   const current = (error as { current?: unknown } | undefined)?.current
   return typeof current === 'string' && COMMIT_ID.test(current) ? current : null
 }
