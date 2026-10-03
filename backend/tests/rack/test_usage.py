@@ -159,9 +159,8 @@ async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> Non
 
 async def test_a_lower_statement_timeout_in_the_conninfo_is_kept(pg_conninfo: str) -> None:
     """#1086 review: the store lowers an operator's timeout, never raises it."""
-    parts = conninfo_to_dict(pg_conninfo)
-    parts["options"] = f"{parts.get('options') or ''} -c statement_timeout=5s".strip()
-    lower = RackUsageStore(make_conninfo(**parts))
+    options = f"{conninfo_to_dict(pg_conninfo).get('options') or ''} -c statement_timeout=5s"
+    lower = RackUsageStore(make_conninfo(pg_conninfo, options=options.strip()))
     try:
         await lower.seen(1, [A])
         pool = lower._ready()
