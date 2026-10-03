@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { recheckAiAvailability, useAiAvailability } from '../../agent/chat/availability'
 import { USER_ONLY } from '../../agent/dom'
 import type { AiConnectionTest, AiCredentialKind, AiCredentialView } from '../../api/aiCredential'
-import { api, ApiError } from '../../api/client'
+import { AI_NOT_ROUTED, api, ApiError } from '../../api/client'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
@@ -25,16 +25,16 @@ function describeError(cause: unknown, fallback: string): string {
 
 /**
  * The agent is not deployed here, so the section hides:
- * - nothing routes `/api/v1/ai/*` to it, and the backend's SPA fallback answers the read
- *   with `200 index.html`, which fails to parse as JSON (`availability.ts` NOT_ROUTED), or
- *   a proxy answers 404;
+ * - nothing routes `/api/v1/ai/*` to it: the backend's SPA fallback answers the read with
+ *   `index.html` (`AI_NOT_ROUTED`, as `availability.ts` NOT_ROUTED), or a proxy answers 404;
  * - it runs without its database (agent `routes/credentials.ts` NO_DATABASE_CODE).
- * Anything else, such as the database still applying migrations, is shown with a Retry.
+ * Anything else, a malformed JSON body or the database still applying migrations, is shown
+ * with a Retry.
  */
 function notDeployed(cause: Error | undefined): boolean {
-  if (cause instanceof SyntaxError) return true
   if (!(cause instanceof ApiError)) return false
-  return cause.status === 404 || (cause.status === 503 && cause.problem.code === 'no_database')
+  if (cause.problem.type === AI_NOT_ROUTED || cause.status === 404) return true
+  return cause.status === 503 && cause.problem.code === 'no_database'
 }
 
 /** The wait a 429 asked for, in seconds, when it gave one. */

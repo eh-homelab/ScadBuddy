@@ -6,7 +6,7 @@ import type { AiCredentialUpdate, AiCredentialView } from '../../api/aiCredentia
  * for vitest and the mocked e2e run: the same shapes, the same save rules (`planPut`), and the
  * connection test's limits as the route has them: one test at a time, and 10 s from the end of
  * one to the start of the next, refused with 429 and a `Retry-After` of at least 1 s. Like the
- * service, it keeps only the last four characters of a secret. A secret containing `bad` fails
+ * service, it keeps only the last four characters of a secret, and none of a short one. A secret containing `bad` fails
  * its connection test.
  */
 
@@ -80,7 +80,8 @@ export const handlers = [
       configured: true,
       kind: body.kind,
       base_url: baseUrl,
-      last4: secret.slice(-4),
+      // agent secrets.ts `last4()`: nothing for a secret shorter than 12 characters.
+      last4: secret.length >= 12 ? secret.slice(-4) : null,
       updated_at: new Date().toISOString(),
       usable: true,
     }

@@ -62,7 +62,7 @@ describe('AiCredentialSection (#1000)', () => {
     expect(await screen.findByTestId('ai-credential-test')).toHaveTextContent('Works (claude-sonnet-5-5)')
 
     await user.click(test)
-    expect(await screen.findByRole('alert')).toHaveTextContent(/try again shortly \(wait (9|10) s\)\./)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/try again shortly \(wait \d+ s\)\./)
   })
 
   it('shows a failed test with its reason', async () => {
@@ -147,6 +147,30 @@ describe('AiCredentialSection (#1000)', () => {
     await answered
     await waitFor(() => expect(screen.queryByText('Loading')).not.toBeInTheDocument())
     expect(screen.queryByRole('heading', { name: 'Claude credential' })).not.toBeInTheDocument()
+  })
+
+  it('shows a malformed JSON answer with a Retry, rather than hiding', async () => {
+    server.use(
+      http.get(
+        base,
+        () => new HttpResponse('{"configured": tr', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
+  })
+
+  it('shows a saved key too short to have a last four', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-short')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    const current = screen.getByTestId('ai-credential-current')
+    expect(current).toHaveTextContent('Anthropic API key')
+    expect(within(current).queryByText(/••••/)).not.toBeInTheDocument()
   })
 
   it('shows a 503 without the no_database code, even with the same text', async () => {

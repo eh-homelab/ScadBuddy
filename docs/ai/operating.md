@@ -249,7 +249,7 @@ quoted in spec §3.1).
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`. The normal way to use them is Settings → Assistant →
+bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way to use them is Settings → Assistant →
 **Claude credential** (`AiCredentialSection`,
 [`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx), #1000),
 which shows the stored kind, base URL and last four, replaces the credential, runs the
@@ -266,7 +266,9 @@ test (showing `Retry-After` on a `429`) and deletes it after a confirmation. The
 "Guarded" means the request must pass `uiRequestProblem()` in
 [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts) or it gets `403` (§6).
 Every route answers `503` while there is no database, or while migrations have not
-applied (`store()` in `routes/credentials.ts`).
+applied (`store()` in `routes/credentials.ts`). The no-database `503` also carries
+`"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
+the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
 Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
 
