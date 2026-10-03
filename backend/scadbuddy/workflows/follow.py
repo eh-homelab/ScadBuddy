@@ -4,8 +4,9 @@ It replaces the API process's watcher tasks (#268): Temporal keeps the follow ac
 restart, so nothing records prints to resume or locks one per replica. The reads are
 one heartbeating activity (`bambuddy/follow.py`), on the ``bambuddy`` queue.
 
-The ``poke`` signal is a new print of the output, or someone reading its progress: the
-running attempt is cancelled and a fresh one reads at once, with its age from now.
+The ``poke`` signal is a new print of the output (`PrintRun`): the running attempt is
+cancelled and a fresh one reads at once, with its age from now. A progress read only
+makes sure a follow is running (`follow`).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from psycopg_pool import ConnectionPool
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, WorkflowAlreadyStartedError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, MAX_AGE, FollowInput
@@ -81,8 +82,10 @@ class FollowPrint:
 
 
 async def follow(client: Client, task_queue: str, output_id: str) -> None:
-    """Follow ``output_id``'s print: start its `FollowPrint`, or poke the running one.
-    Best effort: the caller's read has answered either way."""
+    """Make sure ``output_id``'s print is followed: start its `FollowPrint` unless one
+    is running. It never pokes: only a new print does (`PrintRun`), and a poke on every
+    read would restart the attempt each time. Best effort: the caller's read has
+    answered either way."""
     try:
         # The outer bound is for a lazy client's first connect, which retries for minutes.
         async with asyncio.timeout(RPC_TIMEOUT.total_seconds() + 2):
@@ -92,9 +95,10 @@ async def follow(client: Client, task_queue: str, output_id: str) -> None:
                 id=follow_id(output_id),
                 task_queue=task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-                start_signal=POKE_SIGNAL,
                 rpc_timeout=RPC_TIMEOUT,
             )
+    except WorkflowAlreadyStartedError:
+        pass
     except Exception:
         logger.warning("could not follow a print", extra={"output_id": output_id}, exc_info=True)
 

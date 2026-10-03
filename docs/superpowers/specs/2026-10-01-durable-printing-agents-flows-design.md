@@ -1030,9 +1030,10 @@ Each phase is its own implementation plan and ships alone.
      (`follow-print-<output id>`, `bambuddy` queue) runs one heartbeating activity,
      `follow_print`, with the watcher's loop. The heartbeat carries when the print last
      moved, so a retried attempt keeps its age. `PrintRun` starts it as an abandoned
-     child after `print_finish`, or pokes the one already running. The progress route
-     signals-with-start it in the background. A poke cancels the attempt (`TRY_CANCEL`)
-     and starts a fresh one that reads at once. `bambuddy/watcher.py` and its lock and
+     child after `print_finish`, or pokes the one already running (starting it again if
+     it closed in between). The progress route only starts it when none is running,
+     never pokes. A poke cancels the attempt (`TRY_CANCEL`) and starts a fresh one that
+     reads at once, then backs off as usual. A worker shutdown ends an attempt at once. `bambuddy/watcher.py` and its lock and
      rescan are gone; a boot pass hands the prints in `print_watches` to `FollowPrint`
      and empties it (the table is dropped later).
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`

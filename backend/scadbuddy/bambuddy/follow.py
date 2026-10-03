@@ -40,6 +40,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
 from scadbuddy.core.events import EventBus, PrintEvent, emit
@@ -108,12 +109,15 @@ class Follower:
         read_now: bool = False,
     ) -> Ended:
         """Read ``output_id``'s print until it ends; ``active`` is when it last moved.
-        It waits first, unless ``read_now``: the run that started the print answered
-        with its own state, and the UI reads once when it subscribes."""
-        interval = 0.0 if read_now else self.min_interval
+        It waits first, unless ``read_now`` (a poke: a new print, read at once); either
+        way the waits after that back off from `min_interval`."""
+        interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         while True:
-            await self._wait(interval, active, heartbeat)
+            if read_now:
+                read_now = False
+            else:
+                await self._wait(interval, active, heartbeat)
             if self.now() - active > self.max_age:
                 return "quiet"
             try:
@@ -172,14 +176,27 @@ class FollowActivities:
 
     @activity.defn(name=FOLLOW_ACTIVITY)
     async def follow_print(self, input: FollowInput) -> str:
-        """Follow the print; a retried attempt resumes the age its heartbeat carried."""
+        """Follow the print; a retried attempt resumes the age its heartbeat carried, and
+        only a poke's first attempt reads at once. A worker shutting down ends the
+        attempt rather than holding the shutdown up: another worker retries it."""
+        info = activity.info()
         active = self.follower.now()
-        details = activity.info().heartbeat_details
-        if details and not input.fresh:
-            active = datetime.fromisoformat(str(details[0]))
-        return await self.follower.follow(
-            input.output_id,
-            active,
-            lambda at: activity.heartbeat(at.isoformat()),
-            read_now=input.fresh,
+        if info.heartbeat_details:
+            active = datetime.fromisoformat(str(info.heartbeat_details[0]))
+        following = asyncio.ensure_future(
+            self.follower.follow(
+                input.output_id,
+                active,
+                lambda at: activity.heartbeat(at.isoformat()),
+                read_now=input.fresh and info.attempt == 1,
+            )
         )
+        shutdown = asyncio.ensure_future(activity.wait_for_worker_shutdown())
+        try:
+            await asyncio.wait({following, shutdown}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            following.cancel()
+            shutdown.cancel()
+        if following.done() and not following.cancelled():
+            return following.result()
+        raise ApplicationError("the worker is shutting down; another attempt follows on")

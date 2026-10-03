@@ -15,7 +15,15 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
-from temporalio.worker import Worker
+from temporalio.worker import (
+    Interceptor,
+    SignalExternalWorkflowInput,
+    UnsandboxedWorkflowRunner,
+    Worker,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
+)
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, SliceStarted
 from scadbuddy.bambuddy.filaments import FilamentPlan
@@ -441,5 +449,62 @@ async def test_a_second_run_pokes_the_follow_already_running(
         assert [e.workflow_execution_signaled_event_attributes.signal_name for e in signals] == [
             "poke"
         ]
+    finally:
+        await handle.terminate()
+
+
+class _LoseFirstPoke(WorkflowOutboundInterceptor):
+    """The follow closed between the child start and the poke: the signal fails."""
+
+    lost = False
+
+    async def signal_external_workflow(self, input: SignalExternalWorkflowInput) -> None:
+        if not self.lost:
+            self.lost = True
+            raise ApplicationError("workflow execution already completed")
+        await super().signal_external_workflow(input)
+
+
+class _LosingPokes(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_LoseFirstPoke(outbound))
+
+
+class LosePokes(Interceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> type[WorkflowInboundInterceptor]:
+        return _LosingPokes
+
+
+async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
+    client: Client, fake: Fake
+) -> None:
+    """Review I5: a new print is never left unfollowed because the follow of the last one
+    closed between the child start and the poke."""
+    output = uuid.uuid4().hex
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    try:
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[PrintRunWorkflow, FollowPrint],
+            activities=[*fake.all(), fake.follow_print],
+            interceptors=[LosePokes()],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            arg = run_input(output_id=output)
+            await start(client, queue, arg)
+            assert (await ended(client, arg)).status == "succeeded"
+        signals = [
+            e
+            async for e in handle.fetch_history_events()
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED
+        ]
+        assert len(signals) == 1
     finally:
         await handle.terminate()
