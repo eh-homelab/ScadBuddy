@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.render import solids as solids_module
@@ -318,6 +319,29 @@ async def test_a_colour_waiting_for_a_slot_is_not_charged_against_its_timeout(
 
     assert result.warnings == []
     assert list(result.meshes) == colours
+
+
+async def test_each_colour_is_a_solid_span_with_its_export_beneath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    monkeypatch.setattr(solids_module, "split_by_material", lambda p: _box(_solid_index(p)))
+    model, work = _model(tmp_path)
+    config = Config(openscad=_fake_openscad(tmp_path, "exit 0"), data_dir=tmp_path / "data")
+
+    await render_solids(model, CustomizerSchema(), {}, MANY_COLOURS[:2], work, config=config)
+
+    finished = spans.get_finished_spans()
+    solid_spans = [s for s in finished if s.name == "render.solid"]
+    assert sorted((s.attributes or {})["scadbuddy.colour_index"] for s in solid_spans) == [1, 2]
+    exports = [s for s in finished if s.name == "openscad.export"]
+    assert len(exports) == 2
+    for solid_span in solid_spans:
+        assert solid_span.context is not None
+        assert [
+            e
+            for e in exports
+            if e.parent is not None and e.parent.span_id == solid_span.context.span_id
+        ]
 
 
 async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(

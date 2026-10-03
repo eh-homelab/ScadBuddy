@@ -50,3 +50,18 @@ async def test_an_openscad_call_is_an_export_span(
     assert attributes["scadbuddy.openscad.backend"] == "Manifold"
     assert attributes["scadbuddy.openscad.exit_code"] == 0
     assert "cube" not in repr(attributes)
+
+
+async def test_a_failed_export_records_its_exit_code(
+    spans: InMemorySpanExporter, tmp_path: Path
+) -> None:
+    binary = tmp_path / "failing-openscad"
+    binary.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+    with pytest.raises(OpenSCADError):
+        await run_openscad(["-o", str(tmp_path / "out.3mf")], cwd=tmp_path, config=config)
+    (export,) = [s for s in spans.get_finished_spans() if s.name == "openscad.export"]
+    attributes = export.attributes or {}
+    assert attributes["scadbuddy.openscad.exit_code"] == 1
+    assert attributes["scadbuddy.failure_class"] == "OpenSCADError"
