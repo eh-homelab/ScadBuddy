@@ -962,11 +962,11 @@ happens, and there is no separate request system.
       is still an upsert on `request_id`, so a retried activity adds no second row.
   - `ai_pending_input(request_id primary key, session_id, workflow_id, workflow_run_id,
     kind, tool, summary, input_hash, prompt, requested_by, responders, created_at,
-    expires_at)`, where the workflow pair is what `workflow_runs` records too, and the
-    sweep reads it; nothing parses `request_id`, and
-    `ai_input_responses(request_id primary key, session_id, kind, outcome, response
-    jsonb, responder, created_at)` are one new agent migration in phase 5. The `agent-durable`
-    role writes both (§6.3a).
+    expires_at)` and `ai_input_responses(request_id primary key, session_id, kind,
+    outcome, response jsonb, responder, created_at)` are one new agent migration in
+    phase 5, and the `agent-durable` role writes both (§6.3a). The workflow pair is the
+    one `workflow_runs` records too. The sweep reads it, and nothing parses
+    `request_id`.
 - **Two reads, two sources.**
   - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
     one it sends the Query, which is the source of truth. It writes nothing. The
