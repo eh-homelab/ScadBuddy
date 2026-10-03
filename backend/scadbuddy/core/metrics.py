@@ -23,7 +23,14 @@ from prometheus_client import (
 )
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-__all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "RenderStage"]
+__all__ = [
+    "CONTENT_TYPE_LATEST",
+    "HttpMetrics",
+    "Metrics",
+    "RenderOutcome",
+    "RenderStage",
+    "TraceRelayOutcome",
+]
 
 #: How a job settled; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "superseded"]
@@ -34,6 +41,10 @@ StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]
+#: What became of a browser trace batch the relay accepted (spec 2026-10-01 §5.2): posted
+#: to the collector, refused or unreachable there, dropped because the queue was full,
+#: or still queued when the process stopped.
+TraceRelayOutcome = Literal["forwarded", "failed", "queue_full", "shutdown"]
 
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
@@ -274,6 +285,15 @@ class Metrics:
             registry=r,
         )
 
+        # The browser trace relay (spec 2026-10-01 §5.2): it watches the tracing path
+        # itself, and is the one metric the tracing design adds.
+        self.trace_relay_batches = Counter(
+            "scadbuddy_trace_relay_batches_total",
+            "Browser trace batches the relay accepted, by what became of them.",
+            ["outcome"],
+            registry=r,
+        )
+
         self.http_requests = Counter(
             "scadbuddy_http_requests",
             "HTTP requests served, by method, route template and status.",
@@ -301,6 +321,8 @@ class Metrics:
             self.store_errors.labels(operation)
         for reason in get_args(EventDropReason):
             self.events_dropped.labels(reason)
+        for outcome in get_args(TraceRelayOutcome):
+            self.trace_relay_batches.labels(outcome)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:
