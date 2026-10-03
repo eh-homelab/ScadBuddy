@@ -2,224 +2,191 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
 import { recheckAiAvailability } from '../../agent/chat/availability'
-import { api } from '../../api/client'
+import { credentialEntry, setCredentials } from '../../mocks/features/aiCredential'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AiCredentialSection } from './AiCredentialSection'
 
 const base = '/api/v1/ai/credentials'
+const entries = `${base}/entries`
+const KEY = 'Anthropic API key ••••Q7xA'
+const GATEWAY = 'Gateway ••••GW99'
 
-/** Resolves once msw has answered the credential read. */
-function credentialRead(): Promise<void> {
+/** Resolves once msw has answered the credential list read. */
+function listRead(): Promise<void> {
   return new Promise((resolve) => {
     server.events.on('response:mocked', ({ request }) => {
-      if (request.method === 'GET' && new URL(request.url).pathname === base) resolve()
+      if (request.method === 'GET' && new URL(request.url).pathname === entries) resolve()
     })
   })
 }
 
+/** The JSON bodies of the requests matching method and path, as they are sent. */
+function bodiesOf(method: string, path: string): unknown[] {
+  const bodies: unknown[] = []
+  server.events.on('request:start', ({ request }) => {
+    if (request.method === method && new URL(request.url).pathname === path) {
+      void request.clone().json().then((body) => bodies.push(body))
+    }
+  })
+  return bodies
+}
+
+const rows = () => screen.getAllByTestId('ai-credential')
+
 afterEach(() => server.events.removeAllListeners())
 
-describe('AiCredentialSection (#1000)', () => {
-  it('shows the stored kind and last four, never the secret', async () => {
+describe('AiCredentialSection (#1000, #1093)', () => {
+  it('lists the credentials in the order they are tried, with their status, never a secret', async () => {
     renderPage(<AiCredentialSection />)
-    const current = await screen.findByTestId('ai-credential-current')
-    expect(current).toHaveTextContent('Anthropic API key')
-    expect(within(current).getByLabelText('ending in Q7xA')).toBeInTheDocument()
+    await screen.findAllByTestId('ai-credential')
+    const [first, second] = rows()
+    expect(first).toHaveTextContent('1.Anthropic API key')
+    expect(within(first!).getByLabelText('ending in Q7xA')).toBeInTheDocument()
+    expect(first).toHaveTextContent('Active')
+    expect(second).toHaveTextContent('2.Gateway')
+    expect(second).toHaveTextContent('at https://gateway.example/anthropic')
+    expect(second).toHaveTextContent(/Rate limited until/)
+    expect(second).toHaveTextContent('rate_limit_error: 429')
     expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
     expect(screen.getByLabelText('Anthropic API key')).toHaveAttribute('type', 'password')
   })
 
-  it('replaces the key with a gateway, sending base URL and token once', async () => {
-    const puts: unknown[] = []
-    server.events.on('request:start', ({ request }) => {
-      if (request.method === 'PUT' && new URL(request.url).pathname === base) {
-        void request.clone().json().then((body) => puts.push(body))
-      }
-    })
+  it('moves a credential up, sending the whole order', async () => {
+    const orders = bodiesOf('PUT', `${base}/order`)
     const { user } = renderPage(<AiCredentialSection />)
-    await user.click(await screen.findByRole('radio', { name: 'Gateway (base URL and token)' }))
-    const save = screen.getByRole('button', { name: 'Save' })
-    await user.type(screen.getByLabelText('Gateway token'), 'gw-token-ZZ12')
-    expect(save).toBeDisabled()
-    await user.type(screen.getByLabelText('Base URL'), 'https://gateway.example/anthropic/')
-    await user.click(save)
-
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
-    const current = screen.getByTestId('ai-credential-current')
-    expect(current).toHaveTextContent('Gateway at https://gateway.example/anthropic')
-    expect(within(current).getByLabelText('ending in ZZ12')).toBeInTheDocument()
-    expect(screen.getByLabelText('Gateway token')).toHaveValue('')
-    expect(puts).toEqual([
-      { kind: 'gateway', base_url: 'https://gateway.example/anthropic/', secret: 'gw-token-ZZ12' },
-    ])
+    expect(await screen.findByRole('button', { name: `Move ${KEY} up` })).toBeDisabled()
+    expect(screen.getByRole('button', { name: `Move ${GATEWAY} down` })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: `Move ${GATEWAY} up` }))
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('1.Gateway'))
+    expect(orders).toEqual([{ ids: ['c2', 'default'] }])
   })
 
-  it('tests the credential, and shows the wait when rate-limited', async () => {
+  it('shows a stale order refused and reads the list again', async () => {
+    server.use(
+      http.put(`${base}/order`, () => HttpResponse.json({ detail: 'the list changed, read it again' }, { status: 409 }), {
+        once: true,
+      }),
+    )
     const { user } = renderPage(<AiCredentialSection />)
-    const test = await screen.findByRole('button', { name: 'Test' })
-    await user.click(test)
-    expect(await screen.findByTestId('ai-credential-test')).toHaveTextContent('Works (claude-sonnet-5-5)')
+    await user.click(await screen.findByRole('button', { name: `Move ${GATEWAY} up` }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('the list changed, read it again')
+    expect(rows()[0]).toHaveTextContent('1.Anthropic API key')
+  })
 
-    await user.click(test)
+  it('resets a rate-limited or disabled credential, and only those', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
+    expect(await screen.findByRole('status')).toHaveTextContent(`${GATEWAY} is active again.`)
+    await waitFor(() => expect(rows()[1]).toHaveTextContent('Active'))
+    expect(rows()[1]).not.toHaveTextContent('rate_limit_error')
+  })
+
+  it('shows a disabled credential with why, and says when none is usable', async () => {
+    setCredentials([
+      credentialEntry({
+        id: 'default',
+        last4: 'Q7xA',
+        status: 'disabled',
+        last_error: 'authentication_error: invalid x-api-key',
+      }),
+    ])
+    renderPage(<AiCredentialSection />)
+    const row = (await screen.findAllByTestId('ai-credential'))[0]!
+    expect(row).toHaveTextContent('Disabled')
+    expect(row).toHaveTextContent('authentication_error: invalid x-api-key')
+    expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
+  })
+
+  it('says when the first rate-limited one is usable again', async () => {
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-01T12:30:00Z' }),
+    ])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credentials-none-usable')).toHaveTextContent(
+      /The first rate-limited one is usable again at/,
+    )
+  })
+
+  it('replaces one credential’s key, keeping its kind and base URL', async () => {
+    const saves = bodiesOf('PUT', `${entries}/c2`)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Replace the key of ${GATEWAY}` }))
+    const field = screen.getByLabelText('New gateway token')
+    expect(field).toHaveAttribute('type', 'password')
+    await user.type(field, 'gw-token-new-NEW1')
+    await user.click(screen.getByRole('button', { name: 'Save key' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for Gateway.')
+    await waitFor(() => expect(within(rows()[1]!).getByLabelText('ending in NEW1')).toBeInTheDocument())
+    expect(rows()[1]).toHaveTextContent('Active')
+    expect(screen.queryByLabelText('New gateway token')).not.toBeInTheDocument()
+    expect(saves).toEqual([{ kind: 'gateway', base_url: 'https://gateway.example/anthropic', secret: 'gw-token-new-NEW1' }])
+  })
+
+  it('keeps the replace form open when the agent refuses the key', async () => {
+    server.use(
+      http.put(`${entries}/default`, () =>
+        HttpResponse.json({ detail: 'secret must not contain whitespace' }, { status: 400 }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Replace the key of ${KEY}` }))
+    await user.type(screen.getByLabelText('New API key'), 'sk-ant-new')
+    await user.click(screen.getByRole('button', { name: 'Save key' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('secret must not contain whitespace')
+    expect(screen.getByLabelText('New API key')).toBeInTheDocument()
+  })
+
+  it('adds a gateway last, sending base URL and token once', async () => {
+    const creates = bodiesOf('POST', entries)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Gateway (base URL and token)' }))
+    const add = screen.getByRole('button', { name: 'Add' })
+    await user.type(screen.getByLabelText('Gateway token'), 'gw-token-ZZ12')
+    expect(add).toBeDisabled()
+    await user.type(screen.getByLabelText('Base URL'), 'https://other.example/anthropic/')
+    await user.click(add)
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added last')
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    expect(rows()[2]).toHaveTextContent('3.Gateway')
+    expect(rows()[2]).toHaveTextContent('at https://other.example/anthropic')
+    expect(screen.getByLabelText('Gateway token')).toHaveValue('')
+    expect(creates).toEqual([{ kind: 'gateway', base_url: 'https://other.example/anthropic/', secret: 'gw-token-ZZ12' }])
+  })
+
+  it('saves the first credential when there is none, and shows a short key without a last four', async () => {
+    setCredentials([])
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByText(/No credential saved/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-short')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved. Use Test to check it works.')
+    const row = (await screen.findAllByTestId('ai-credential'))[0]!
+    expect(row).toHaveTextContent('Anthropic API key')
+    expect(within(row).queryByText(/••••/)).not.toBeInTheDocument()
+  })
+
+  it('tests one credential, and shows the wait when rate-limited', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Test ${KEY}` }))
+    expect(await within(rows()[0]!).findByTestId('ai-credential-test')).toHaveTextContent('Works (claude-sonnet-5-5)')
+
+    await user.click(screen.getByRole('button', { name: `Test ${GATEWAY}` }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/try again shortly \(wait \d+ s\)\./)
   })
 
-  it('shows a failed test with its reason', async () => {
+  it('shows a failed test with its reason, on that credential', async () => {
     server.use(
-      http.post(`${base}/test`, () =>
+      http.post(`${entries}/c2/test`, () =>
         HttpResponse.json({ ok: false, detail: 'authentication_error', duration_ms: 500, model: null }),
       ),
     )
     const { user } = renderPage(<AiCredentialSection />)
-    await user.click(await screen.findByRole('button', { name: 'Test' }))
-    expect(await screen.findByTestId('ai-credential-test')).toHaveTextContent('Failed: authentication_error')
-  })
-
-  it('deletes only after a confirmation', async () => {
-    const { user } = renderPage(<AiCredentialSection />)
-    await user.click(await screen.findByRole('button', { name: 'Delete' }))
-    const dialog = await screen.findByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.getByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
-
-    await user.click(screen.getByRole('button', { name: 'Delete' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' }))
-    expect(await screen.findByText(/No credential saved/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Test' })).not.toBeInTheDocument()
-  })
-
-  it('says why it cannot save, and disables Save', async () => {
-    server.use(
-      http.get(base, () =>
-        HttpResponse.json({
-          configured: false,
-          kind: null,
-          base_url: null,
-          last4: null,
-          updated_at: null,
-          usable: false,
-          can_save: false,
-          cannot_save_reason: 'no key-encryption key: SCADBUDDY_SECRET_KEY_FILE is not set',
-        }),
-      ),
-    )
-    const { user } = renderPage(<AiCredentialSection />)
-    expect(await screen.findByText(/Saving is not possible: no key-encryption key/)).toBeInTheDocument()
-    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-abcd')
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
-  })
-
-  it('shows the agent refusing a save', async () => {
-    server.use(http.put(base, () => HttpResponse.json({ detail: 'secret must not contain whitespace' }, { status: 400 })))
-    const { user } = renderPage(<AiCredentialSection />)
-    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-ant-abcd')
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('secret must not contain whitespace')
-  })
-
-  it('is for the user only', async () => {
-    renderPage(<AiCredentialSection />)
-    const save = await screen.findByRole('button', { name: 'Save' })
-    expect(save.closest('[data-agent-user-only]')).not.toBeNull()
-  })
-
-  it('shows a loading row until the read answers', async () => {
-    renderPage(<AiCredentialSection />)
-    expect(screen.getByRole('heading', { name: 'Claude credential' })).toBeInTheDocument()
-    expect(screen.getByText('Loading')).toBeInTheDocument()
-    expect(await screen.findByTestId('ai-credential-current')).toBeInTheDocument()
-  })
-
-  it.each([
-    ['nothing routes /api/v1/ai: the SPA fallback answers', () =>
-      new HttpResponse('<!doctype html><html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })],
-    ['a proxy answers 404', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })],
-    ['no agent database', () =>
-      HttpResponse.json(
-        { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)', code: 'no_database' },
-        { status: 503 },
-      )],
-  ])('is hidden when the agent is not deployed (%s)', async (_, answer) => {
-    server.use(http.get(base, answer))
-    const answered = credentialRead()
-    renderPage(<AiCredentialSection />)
-    await answered
-    await waitFor(() => expect(screen.queryByText('Loading')).not.toBeInTheDocument())
-    expect(screen.queryByRole('heading', { name: 'Claude credential' })).not.toBeInTheDocument()
-  })
-
-  it('shows a malformed JSON answer with a Retry, rather than hiding', async () => {
-    server.use(
-      http.get(
-        base,
-        () => new HttpResponse('{"configured": tr', { status: 200, headers: { 'Content-Type': 'application/json' } }),
-        { once: true },
-      ),
-    )
-    const { user } = renderPage(<AiCredentialSection />)
-    expect(await screen.findByRole('alert')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
-  })
-
-  it('shows a saved key too short to have a last four', async () => {
-    const { user } = renderPage(<AiCredentialSection />)
-    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-short')
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
-    const current = screen.getByTestId('ai-credential-current')
-    expect(current).toHaveTextContent('Anthropic API key')
-    expect(within(current).queryByText(/••••/)).not.toBeInTheDocument()
-  })
-
-  it('shows a 503 without the no_database code, even with the same text', async () => {
-    server.use(
-      http.get(base, () =>
-        HttpResponse.json(
-          { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)' },
-          { status: 503 },
-        ),
-      ),
-    )
-    renderPage(<AiCredentialSection />)
-    expect(await screen.findByRole('alert')).toHaveTextContent('AI features need the database')
-  })
-
-  it('shows any other failed read with a Retry', async () => {
-    let calls = 0
-    server.use(
-      http.get(base, () => {
-        calls += 1
-        return calls === 1
-          ? HttpResponse.json(
-              { detail: 'the AI database is unreachable or its migrations have not applied; see /healthz' },
-              { status: 503 },
-            )
-          : undefined
-      }),
-    )
-    const { user } = renderPage(<AiCredentialSection />)
-    expect(await screen.findByRole('alert')).toHaveTextContent('migrations have not applied')
-    await user.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
-  })
-
-  it('reads again when the agent changes state after a failed read', async () => {
-    server.use(
-      http.get(base, () => HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }), {
-        once: true,
-      }),
-    )
-    renderPage(<AiCredentialSection />)
-    expect(await screen.findByRole('alert')).toHaveTextContent('the AI database is unreachable')
-    server.use(
-      http.get('/api/v1/ai/status', () =>
-        HttpResponse.json({ available: false, state: 'disabled', ai: 'disabled', reason: 'no credential' }),
-      ),
-    )
-    await act(() => recheckAiAvailability({ force: true }))
-    expect(await screen.findByTestId('ai-credential-current')).toHaveTextContent('Anthropic API key')
+    await user.click(await screen.findByRole('button', { name: `Test ${GATEWAY}` }))
+    expect(await within(rows()[1]!).findByTestId('ai-credential-test')).toHaveTextContent('Failed: authentication_error')
   })
 
   it('says a test is already running', async () => {
@@ -230,7 +197,7 @@ describe('AiCredentialSection (#1000)', () => {
     })
     let running = false
     server.use(
-      http.post(`${base}/test`, async () => {
+      http.post(`${entries}/:id/test`, async () => {
         if (running) {
           return HttpResponse.json(
             { detail: 'a connection test is already running' },
@@ -243,12 +210,140 @@ describe('AiCredentialSection (#1000)', () => {
       }),
     )
     const { user } = renderPage(<AiCredentialSection />)
-    const test = await screen.findByRole('button', { name: 'Test' })
-    const first = api.testAiCredential()
+    const test = await screen.findByRole('button', { name: `Test ${KEY}` })
+    const first = fetch(`${entries}/c2/test`, { method: 'POST' })
     await waitFor(() => expect(running).toBe(true))
     await user.click(test)
     expect(await screen.findByRole('alert')).toHaveTextContent('a connection test is already running (wait 10 s).')
     finish()
     await first
+  })
+
+  it('deletes one credential only after a confirmation, and the next moves up', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
+    const dialog = await screen.findByRole('dialog', { name: `Delete ${KEY}?` })
+    expect(dialog).toHaveTextContent('falls back to the next credential')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(rows()).toHaveLength(2)
+
+    await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' }))
+    expect(await screen.findByText(`Deleted ${KEY}.`)).toBeInTheDocument()
+    expect(screen.getByTestId('ai-credentials-none-usable')).toBeInTheDocument()
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(rows()[0]).toHaveTextContent('1.Gateway')
+  })
+
+  it('says why it cannot save, and disables Add and Replace', async () => {
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })], false)
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByText(/Saving is not possible: no key-encryption key/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-abcd')
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: `Replace the key of ${KEY}` })).toBeDisabled()
+  })
+
+  it('warns about a key the agent cannot decrypt', async () => {
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', usable: false })])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByText(/cannot decrypt this key/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `Test ${KEY}` })).toBeDisabled()
+  })
+
+  it('is for the user only, the dialog’s confirm button too', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    const add = await screen.findByRole('button', { name: 'Add' })
+    expect(add.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
+    const confirm = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' })
+    expect(confirm.closest('[data-agent-user-only]')).not.toBeNull()
+  })
+
+  it('shows a loading row until the read answers', async () => {
+    renderPage(<AiCredentialSection />)
+    expect(screen.getByRole('heading', { name: 'Claude credentials' })).toBeInTheDocument()
+    expect(screen.getByText('Loading')).toBeInTheDocument()
+    expect(await screen.findAllByTestId('ai-credential')).toHaveLength(2)
+  })
+
+  it.each([
+    ['nothing routes /api/v1/ai: the SPA fallback answers', () =>
+      new HttpResponse('<!doctype html><html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })],
+    ['a proxy answers 404', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })],
+    ['no agent database', () =>
+      HttpResponse.json(
+        { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)', code: 'no_database' },
+        { status: 503 },
+      )],
+  ])('is hidden when the agent is not deployed (%s)', async (_, answer) => {
+    server.use(http.get(entries, answer))
+    const answered = listRead()
+    renderPage(<AiCredentialSection />)
+    await answered
+    await waitFor(() => expect(screen.queryByText('Loading')).not.toBeInTheDocument())
+    expect(screen.queryByRole('heading', { name: 'Claude credentials' })).not.toBeInTheDocument()
+  })
+
+  it('shows a malformed JSON answer with a Retry, rather than hiding', async () => {
+    server.use(
+      http.get(
+        entries,
+        () => new HttpResponse('{"credentials": [', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findAllByTestId('ai-credential')).toHaveLength(2)
+  })
+
+  it('shows a 503 without the no_database code, even with the same text', async () => {
+    server.use(
+      http.get(entries, () =>
+        HttpResponse.json(
+          { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)' },
+          { status: 503 },
+        ),
+      ),
+    )
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('AI features need the database')
+  })
+
+  it('shows any other failed read with a Retry', async () => {
+    server.use(
+      http.get(
+        entries,
+        () =>
+          HttpResponse.json(
+            { detail: 'the AI database is unreachable or its migrations have not applied; see /healthz' },
+            { status: 503 },
+          ),
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('migrations have not applied')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findAllByTestId('ai-credential')).toHaveLength(2)
+  })
+
+  it('reads again when the agent changes state after a failed read', async () => {
+    server.use(
+      http.get(entries, () => HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }), {
+        once: true,
+      }),
+    )
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    server.use(
+      http.get('/api/v1/ai/status', () =>
+        HttpResponse.json({ available: false, state: 'disabled', ai: 'disabled', reason: 'no credential' }),
+      ),
+    )
+    await act(() => recheckAiAvailability({ force: true }))
+    expect(await screen.findAllByTestId('ai-credential')).toHaveLength(2)
   })
 })
