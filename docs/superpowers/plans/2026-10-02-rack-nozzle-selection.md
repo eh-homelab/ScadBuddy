@@ -180,7 +180,8 @@ This task writes no code. It decides whether the feature exists at all.
   > stainless, tungsten carbide...).
 
 - [ ] **Step 2: Read the rack without printing a serial.** On a machine with the `primary`
-  kube context (CLAUDE.md, "Kube contexts"):
+  kube context (eh-homelab/clusters CLAUDE.md, "Kube contexts"; the same `kubectl exec`
+  pattern as `backend/tests/bambuddy/recordings/README.md`):
 
 ```bash
 kubectl config current-context   # must be primary
@@ -226,9 +227,19 @@ bb -X POST http://localhost:8000/api/v1/queue/ -H 'Content-Type: application/jso
 ```
 
   Expected: a queue item with `status` `"pending"` or `"queued"`. If the loopback answers
-  401, ask the owner for the Bambuddy API key and add `-H "X-API-Key: $KEY"`, with the
-  key read from the owner's paste into a variable (never echoed). Tell the owner the item
-  id and ask them to press Start.
+  401, ask the owner for the Bambuddy API key, read it with `read -rs KEY` (no echo, no
+  shell history), and send the header on stdin so it never appears in a command line on
+  either side of `kubectl exec` (`ps`, `/proc/<pid>/cmdline`):
+
+```bash
+printf 'X-API-Key: %s\n' "$KEY" | kubectl -n bambuddy exec -i "$POD" -- curl -s -H @- \
+  -X POST http://localhost:8000/api/v1/queue/ -H 'Content-Type: application/json' \
+  -d "{\"printer_id\":1,\"library_file_id\":$SLICED,\"plate_id\":1,\"manual_start\":true,\"nozzle_rack_choice\":{\"$GROUP\":$P}}" \
+  | jq '{id, status, error_message}'
+unset KEY
+```
+
+  Tell the owner the item id and ask them to press Start.
 
 - [ ] **Step 6: Compare the mounted hotend with P's, by hash only.** Once the owner reports
   the hotend swap is done, run this. Carriage id 0 is the rack side
@@ -517,7 +528,7 @@ In `FilamentRequirement`, after `used_in_plate`, add:
     group: FilamentGroup | None = None
 ```
 
-Replace the two lines above `nozzle_rack_choice` in `QueueItemCreate` with:
+Replace the `#:` comment line above `nozzle_rack_choice` in `QueueItemCreate` with:
 
 ```python
     #: Rack position (1-6) per **filament group id**, the stringified ``group_id`` of
@@ -1991,7 +2002,7 @@ git commit -m "feat(rack): the rack_nozzle_* tables and their store" -m "Refs #8
 ### Task 6: `printer_rack_algorithms`, the remembered algorithm
 
 **Files:**
-- Modify: `backend/scadbuddy/library/settings_store.py` (`REMEMBERED_ROWS` ~87, `StoredSettings` ~144, a setter after `set_printer_bed_type` ~468)
+- Modify: `backend/scadbuddy/library/settings_store.py` (`REMEMBERED_ROWS` ~87, `StoredSettings` ~144, a setter after `set_printer_bed_type` ~556)
 - Modify: `backend/scadbuddy/core/events.py` (`SettingsSection` ~193)
 - Modify: `backend/scadbuddy/api/settings.py` (`RememberedChoices` ~191, `_remembered` ~311, `get_remembered`'s docstring)
 - Modify: `backend/scadbuddy/api/printing.py` (a route after `put_printer_bed_type` ~122)
@@ -4179,7 +4190,7 @@ git commit -m "test(rack): no hotend serial reaches a log record or the check bo
 - Modify: `frontend/src/api/types.ts`, `frontend/src/api/client.ts` (after `putPrinterBedType` ~801)
 - Modify: `frontend/src/lib/useRunPrint.ts`, `frontend/src/components/PrintPicker.tsx`
 - Modify: `frontend/src/pages/settings/RememberedChoicesPanel.tsx`
-- Modify (typed mock literals): `frontend/src/mocks/choices.ts:10`, `src/mocks/handlers.ts:2625` and `:2794`, `src/mocks/features/library.ts:145` and `:170`, `src/pages/CustomizePage.test.tsx:685`, `src/lib/usePrintChoices.test.ts:13`
+- Modify (typed mock literals): `frontend/src/mocks/choices.ts:10`, `src/mocks/handlers.ts:2741` (`ChoicesView`) and `:2910` (`PrintCheck`), `src/mocks/features/library.ts:145` and `:170`, `src/pages/CustomizePage.test.tsx:685`, `src/lib/usePrintChoices.test.ts:13`
 - Test: `frontend/src/components/PrintPicker.test.tsx`, `frontend/src/pages/settings/RememberedChoicesPanel.rack.test.tsx` (new)
 
 **Interfaces:**
