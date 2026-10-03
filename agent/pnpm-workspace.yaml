@@ -1,5 +1,8 @@
 # msw's install script only copies its browser service worker into a web app's
 # public directory (package.json "msw.workerDirectory"). The agent uses msw from
 # node, in vitest (msw/node), and has no such directory, so the script is not run.
+# protobufjs (via @opentelemetry/sdk-node's gRPC exporters, #988) runs a CLI
+# version check on install; the agent never constructs a gRPC exporter.
 allowBuilds:
   msw: false
+  protobufjs: false
