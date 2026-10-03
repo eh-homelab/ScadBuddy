@@ -1,4 +1,5 @@
 import type { AppDeps } from './app.js'
+import { opensWith, soonestRecovery } from './credentials.js'
 
 /** Upper bound on each database step of the status (migrations, credential read). */
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -20,6 +21,8 @@ export type AiStatus =
   | 'disabled (no Claude credential)'
   | 'unavailable (stored credential was sealed with a different key-encryption key)'
   | 'unavailable (stored credential is in an outdated format; save it again)'
+  | 'unavailable (every Claude credential is rate limited)'
+  | 'unavailable (every Claude credential is disabled)'
 
 export type CredentialState = 'configured' | 'not configured' | 'unknown'
 
@@ -47,7 +50,7 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TI
 export async function aiStatus(
   deps: Pick<AppDeps, 'database' | 'credentials' | 'kek' | 'healthTimeoutMs'>,
   dbOk: boolean | undefined,
-): Promise<{ ai: AiStatus; credential: CredentialState }> {
+): Promise<{ ai: AiStatus; credential: CredentialState; recoversAt?: string }> {
   if (dbOk === undefined || !deps.database || !deps.credentials) {
     return { ai: 'disabled (no database)', credential: 'unknown' }
   }
@@ -59,21 +62,27 @@ export async function aiStatus(
   const ready = await within(deps.database.ready(), timeoutMs)
   if (ready === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
   if (!ready) return { ai: 'unavailable (database migrations failed)', credential: 'unknown' }
-  let stored
+  let list
   try {
-    stored = await within(deps.credentials.get(), timeoutMs)
+    list = await within(deps.credentials.list(), timeoutMs)
   } catch {
     return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
   }
-  if (stored === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
-  const credential = stored ? 'configured' : 'not configured'
+  if (list === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
+  const credential = list.length ? 'configured' : 'not configured'
   if (!deps.kek.ok) return { ai: `disabled (no key-encryption key: ${deps.kek.reason})`, credential }
-  if (!stored) return { ai: 'disabled (no Claude credential)', credential }
-  if (stored.kekId !== deps.kek.kek.id) {
-    return { ai: 'unavailable (stored credential was sealed with a different key-encryption key)', credential }
+  const kekId = deps.kek.kek.id
+  if (!list.length) return { ai: 'disabled (no Claude credential)', credential }
+  const opening = list.filter((c) => opensWith(c, deps.kek))
+  if (!opening.length) {
+    return list.some((c) => c.kekId !== kekId)
+      ? { ai: 'unavailable (stored credential was sealed with a different key-encryption key)', credential }
+      : { ai: 'unavailable (stored credential is in an outdated format; save it again)', credential }
   }
-  if (stored.legacyFormat) {
-    return { ai: 'unavailable (stored credential is in an outdated format; save it again)', credential }
-  }
-  return { ai: 'enabled', credential }
+  // #1093: usable now, or when the first one will be again.
+  if (opening.some((c) => c.status === 'active')) return { ai: 'enabled', credential }
+  const soonest = soonestRecovery(list, deps.kek)
+  return soonest
+    ? { ai: 'unavailable (every Claude credential is rate limited)', credential, recoversAt: soonest.toISOString() }
+    : { ai: 'unavailable (every Claude credential is disabled)', credential }
 }

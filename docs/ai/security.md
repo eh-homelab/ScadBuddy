@@ -389,11 +389,13 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
   `secrets.ts` header. `seal()` writes version `0x02`, whose AAD is `v2|` + context, so
   the version byte is authenticated too. Version `0x01` (#354) is opened only by the
   generic `open()`, and is never written.
-- **AAD binding.** `credentialAad(kind, baseUrl)` is
-  `ai_credentials:default:` + `JSON.stringify({kind, base_url})`, and the data key's
-  AAD is `dek:` + that. Someone with write access to the table but without the KEK
-  therefore cannot re-point `base_url` to their own host, or change `kind`: the edited
-  row fails GCM authentication instead of sending the token elsewhere. The comment on
+- **AAD binding.** `credentialAad(id, kind, baseUrl)` is
+  `ai_credentials:<row id>:` + `JSON.stringify({kind, base_url})`, and the data key's
+  AAD is `dek:` + that. The credential saved before #1093 keeps the row id `default`,
+  so its AAD did not change. Someone with write access to the table but without the KEK
+  therefore cannot re-point `base_url` to their own host, change `kind`, or copy a
+  sealed secret onto another row (say, a higher-priority one): the edited row fails GCM
+  authentication instead of sending the token elsewhere. The comment on
   `credentialAad()` explains, and the PR #379 findings table (row 2) lists the tests.
 - **No legacy fallback.** A v1 row (#354, whose AAD did not bind `kind` and `base_url`)
   is refused (`openCredential()`). `/healthz` reports it as "outdated format". A

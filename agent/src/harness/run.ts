@@ -71,6 +71,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     were refused that way, read tools included (measured on Claude Code
 //     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
 //     through the permission seam below, and an outward one parks at the gate.
+//   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
+//     Claude Code's retries on one credential when there is another to fall
+//     back to (#1093);
 //   - limits: `maxTurns`, `maxBudgetUsd` ("The query will stop if this budget is
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
@@ -112,6 +115,12 @@ export type HarnessRun = {
   model?: string
   maxTurns?: number
   maxBudgetUsd?: number
+  /**
+   * How many times Claude Code retries a failed model request on this
+   * credential (CLAUDE_CODE_MAX_RETRIES); its own default when omitted. Set
+   * when there is another credential to fall back to (fallback.ts, #1093).
+   */
+  maxRetries?: number
   /** Aborting stops the query and its Claude Code process. */
   signal?: AbortSignal
   /**
@@ -400,6 +409,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
     },
     mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
