@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Final
+from typing import Any, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status
-from opentelemetry.util.types import AttributeValue
 
 _FRAME: Final = re.compile(r'^ {2}(?:\| +)*(File "[^"\n]*", line \d+, in [\w.<>]+)$')
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
@@ -53,8 +52,8 @@ def _exception_type(events: Sequence[Event]) -> str | None:
     return None
 
 
-def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
-    kept: dict[str, AttributeValue] = {}
+def _scrub_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
+    kept: dict[str, Any] = {}
     for key, value in (attributes or {}).items():
         if key in _DROPPED:
             continue

@@ -776,8 +776,9 @@ The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
 `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the cluster, the `alloy-receiver`; see
 eh-homelab/clusters#1596). Without it nothing is exported. Only standard `OTEL_*`
 variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
-`OTEL_TRACES_SAMPLER` (replaces the default, which keeps every trace but drops
-parentless database spans), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
+database queries and Bambuddy calls from background loops; it keeps everything that
+starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
 
 ## Development

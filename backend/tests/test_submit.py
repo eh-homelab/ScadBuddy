@@ -17,6 +17,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -929,3 +930,32 @@ async def test_with_no_valid_span_rows_carry_no_traceparent(
         job = await service.submit(SLUG, {"width": 11})
         await service.aclose()
     assert (await asyncio.to_thread(projection.read, job.id)).traceparent is None
+
+
+async def test_the_reconciler_roots_a_row_with_no_traceparent_in_a_span_of_its_own(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    old = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 10},
+        inputs={"params": {"width": 10}},
+        created_at=now(),
+        traceparent=None,
+    )
+    await asyncio.to_thread(projection.submit, old, render_key(SLUG, {"width": 10}, None))
+    async with temporal_client() as plain:
+        # The production client's interceptor, which makes the StartWorkflow span.
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (root,) = [s for s in finished if s.name == "render.reconcile"]
+    assert root.parent is None
+    assert (root.attributes or {})["scadbuddy.job_id"] == old.id
+    (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
+    assert start.parent is not None
+    assert start.parent.span_id == root.context.span_id

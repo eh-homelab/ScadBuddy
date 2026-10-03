@@ -232,8 +232,17 @@ class RenderService:
         started: list[str] = []
         for job in stale:
             try:
-                with use_traceparent(job.traceparent):
-                    await self._start(job, WorkflowIDConflictPolicy.FAIL)
+                if job.traceparent is None:
+                    # No trace to rejoin: a root span, or the default sampler drops the
+                    # parentless StartWorkflow CLIENT span and the workflow with it.
+                    with span(
+                        "render.reconcile",
+                        attributes={"scadbuddy.slug": job.slug, "scadbuddy.job_id": job.id},
+                    ):
+                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
+                else:
+                    with use_traceparent(job.traceparent):
+                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
             except WorkflowAlreadyStartedError:
                 continue
             except Exception as error:
