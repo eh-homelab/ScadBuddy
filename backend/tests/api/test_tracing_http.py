@@ -13,7 +13,8 @@ from tests.conftest import wait_for_span
 #: semconv). The scrub (`core/trace_scrub.py`) is a denylist of exact names, so a
 #: release that renames one (the query string moving to a new key) would export it
 #: unscrubbed: this set makes that rename fail here instead, and the bump that
-#: changes it is reviewed alongside `_DROPPED`/`_CUT_AT_QUERY` (review 2 of #1064).
+#: changes it is reviewed alongside `_DROPPED`, `_PATH_ONLY` and `_WITH_ORIGIN`
+#: (review 2 of #1064).
 KNOWN_SERVER_ATTRIBUTES = frozenset(
     {
         "http.flavor",

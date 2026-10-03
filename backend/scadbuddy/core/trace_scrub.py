@@ -39,7 +39,13 @@ _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
 #: string can carry anything a user typed, a user agent is a header value.
 _DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
-_CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
+#: Attributes that hold the request's path, which is data too: a file path a user
+#: chose, a photo filename Bambuddy returned, whatever the SPA fallback was asked for.
+#: The route's template stands in for it; with no route, the attribute is dropped.
+_PATH_ONLY: Final = frozenset({"http.target", "url.path"})
+_WITH_ORIGIN: Final = frozenset({"http.url", "url.full"})
+#: An absolute URL's ``scheme://host[:port]``, kept in front of the route.
+_ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 #: Headers the instrumentation captures when a deployment sets
 #: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything.
 _HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
@@ -136,12 +142,21 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 
 
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
+    attributes = attributes or {}
+    route = attributes.get("http.route")
     kept: dict[str, AttributeValue] = {}
-    for key, value in (attributes or {}).items():
+    for key, value in attributes.items():
         if key in _DROPPED or key.startswith(_HEADER_PREFIXES):
             continue
-        if key in _CUT_AT_QUERY and isinstance(value, str):
-            value = value.split("?", 1)[0]
+        if key in _PATH_ONLY or key in _WITH_ORIGIN:
+            if not isinstance(route, str) or not isinstance(value, str):
+                continue
+            if key in _PATH_ONLY:
+                value = route
+            elif origin := _ORIGIN.match(value):
+                value = origin.group(0) + route
+            else:
+                continue
         kept[key] = value
     return kept
 
