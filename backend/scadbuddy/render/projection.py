@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
+LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
 
 PROJECTION_COLUMNS = (
     "id",
@@ -60,6 +61,7 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "workflow_run_id",
 )
 
 
@@ -181,6 +183,82 @@ class JobProjection:
             if row["inserted"]:
                 self._announce(conn, row["id"], row["slug"], "job.pending")
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
+
+    def accept(
+        self, job: Job, key: str, *, workflow_id: str, run_id: str, max_pending: int = 0
+    ) -> Job:
+        """The first activity of `render-<render_key>` (#1053): the execution's row, or
+        `QueueFullError` with nothing written. A retried activity finds its row."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE workflow_id = %s AND workflow_run_id = %s",
+                (workflow_id, run_id),
+            ).fetchone()
+            if row is not None:
+                return _job(row)
+            if max_pending:
+                counted = conn.execute(
+                    "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
+                ).fetchone()
+                assert counted is not None
+                if counted["pending"] >= max_pending:
+                    raise QueueFullError(counted["pending"])
+            row = conn.execute(
+                "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
+                " created_at, render_key, workflow_id, workflow_run_id, kind)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)"
+                " ON CONFLICT (workflow_id, workflow_run_id)"
+                " DO UPDATE SET claims = render_jobs.claims"
+                " RETURNING *, (xmax = 0) AS inserted",
+                (
+                    job.id,
+                    job.slug,
+                    Jsonb(job.params),
+                    Jsonb(job.inputs or legacy_inputs(job.params)),
+                    job.model_version,
+                    job.created_at,
+                    key,
+                    workflow_id,
+                    run_id,
+                    job.kind,
+                ),
+            ).fetchone()
+            assert row is not None
+            if row["inserted"]:
+                self._announce(conn, row["id"], row["slug"], "job.pending")
+        return _job(row)
+
+    def set_claims(self, job_id: str, claims: int) -> None:
+        """The workflow's claim count, projected (#1053)."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE render_jobs SET claims = %s"
+                " WHERE id = %s AND state IN ('pending', 'running')",
+                (claims, job_id),
+            )
+
+    def legacy_pending(self) -> list[Job]:
+        """Pending rows inserted before renders moved to update-with-start: no
+        execution of `render-<render_key>` owns them."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state = 'pending' AND workflow_run_id IS NULL"
+                " ORDER BY created_at, id"
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def fail_legacy(self, job_ids: list[str], error: str) -> list[Job]:
+        """Fail legacy pending rows nothing will run; any other row is left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE id = ANY(%s) AND state = 'pending' AND workflow_run_id IS NULL"
+                " RETURNING *",
+                (error, job_ids),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
 
     def _release(self, conn: Connection[Any], row: DictRow, *, error: str) -> Job | None:
         """Take one claim off an unfinished row; the last one cancels it. Returns the

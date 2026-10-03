@@ -24,6 +24,7 @@ from scadbuddy.render.job_models import (
 from scadbuddy.render.projection import (
     CANCELLED_ERROR,
     LEGACY_RUNNING_ERROR,
+    LEGACY_UNSTARTED_ERROR,
     JobProjection,
     workflow_id_for,
 )
@@ -96,7 +97,9 @@ def test_the_migrations_add_the_projection_and_drop_the_queues_lease(
     assert {"workflow_id", "kind", "inputs", "pipeline_version", "steps"} <= columns
     assert "heartbeat_at" not in columns
     assert "render_jobs_running" not in indexes
-    assert "render_jobs_pending_key" in indexes
+    # Coalescing is the workflow's (#1053): rows are unique per execution instead.
+    assert "render_jobs_execution" in indexes
+    assert "workflow_run_id" in columns
     assert MIGRATION_ID in applied
 
 
@@ -434,3 +437,59 @@ def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjec
             )
         )
     assert "render_jobs_settled_at" in plan
+
+
+def _accept(
+    store: JobProjection, run_id: str, *, max_pending: int = 0, **params: ParamValue
+) -> Job:
+    job = _job(**params)
+    key = render_key("demo", job.params, None)
+    return store.accept(
+        job, key, workflow_id=f"render-{key}", run_id=run_id, max_pending=max_pending
+    )
+
+
+def test_accept_inserts_once_per_execution(pg_conninfo: str, announcing: JobProjection) -> None:
+    first = _accept(announcing, "run-1", width=40)
+    again = _accept(announcing, "run-1", width=40)
+    assert again.id == first.id
+    stored = announcing.read(first.id)
+    assert stored.state == "pending" and stored.claims == 1
+    assert stored.workflow_id == f"render-{render_key('demo', {'width': 40}, None)}"
+    assert stored.workflow_run_id == "run-1"
+    assert _kinds(pg_conninfo) == ["job.pending"]
+
+
+def test_accept_counts_the_queue(projection: JobProjection) -> None:
+    held = _accept(projection, "run-a", width=41)
+    with pytest.raises(QueueFullError) as refused:
+        _accept(projection, "run-b", max_pending=1, width=42)
+    assert refused.value.depth == 1
+    # A retried accept of an execution already in finds its row, full queue or not.
+    assert _accept(projection, "run-a", max_pending=1, width=41).id == held.id
+
+
+def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> None:
+    job = _accept(projection, "run-1", width=44)
+    projection.set_claims(job.id, 3)
+    assert projection.read(job.id).claims == 3
+    job.state = "done"
+    assert projection.finish(job)
+    projection.set_claims(job.id, 5)
+    assert projection.read(job.id).claims == 3
+
+
+def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProjection) -> None:
+    legacy = _job(width=45)
+    announcing.submit(legacy, render_key("demo", {"width": 45}, None))
+    ours = _accept(announcing, "run-1", width=46)
+    assert [job.id for job in announcing.legacy_pending()] == [legacy.id]
+
+    failed = announcing.fail_legacy([legacy.id, ours.id], LEGACY_UNSTARTED_ERROR)
+
+    assert [job.id for job in failed] == [legacy.id]
+    assert announcing.read(legacy.id).state == "failed"
+    assert announcing.read(legacy.id).error == LEGACY_UNSTARTED_ERROR
+    assert announcing.read(ours.id).state == "pending"
+    assert announcing.legacy_pending() == []
+    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.failed"]
