@@ -627,6 +627,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             worker = (task, deps)
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
+        # After the projection has opened: the jobs in it are references too. Before the
+        # first request, as the boot passes are; the converging sweep is the Schedule's.
+        if state.config.asset_sweep_interval > 0:
+            await _sweep_assets_logged(state, converge=False)
         # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
         # run once at once (the boot's converging sweep), then every interval.
         library = asyncio.create_task(_run_library_worker(state, stop_library))
