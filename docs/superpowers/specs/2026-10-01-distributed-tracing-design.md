@@ -212,8 +212,9 @@ path except `/api/v1/ai/*` to the backend.
   `POST /telemetry/v1/traces` beside the media upload's in `main.py`, so an
   oversized body is refused on its headers, or as it streams when it has no
   `Content-Length`, before the handler runs. Without one the
-  `application/json` default (8 MiB) would apply. The 512-span cap is checked
-  after parsing; over it is also 413.
+  `application/json` default (8 MiB) would apply. The 512-span cap, and the
+  caps of 16 `resourceSpans` and 64 `scopeSpans`, are checked after parsing;
+  over any of them is also 413, its detail naming the cap.
 - **Rate limits**, in memory with `RateLimit` (`api/realtime.py`'s token
   bucket). Over a limit is 429; the client drops the batch and does not retry.
   - A **per-process** bucket caps the relay's total rate whatever the
@@ -303,9 +304,10 @@ path except `/api/v1/ai/*` to the backend.
   else's render or turn in Tempo. This is accepted:
   - the harm is to what the trace view shows, never to data;
   - the relay never reads anything back;
-  - the forged spans are always `service.name=scadbuddy-web` and carry the
-    relay's client address, so they can be told apart from the backend's
-    own;
+  - the forged spans are always `service.name=scadbuddy-web`, so they can be
+    told apart from the backend's own, and the relay's per-client rate limit
+    bounds how many one client can post. They do not carry the client's
+    address: an IP in traces is personal data;
   - an attacker who can already run script on the origin can call the API
     directly, which is far worse.
 

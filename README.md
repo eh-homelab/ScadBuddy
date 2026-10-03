@@ -784,10 +784,12 @@ problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.m
 **Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
 `POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
 (`backend/scadbuddy/telemetry/`) forwards it in the background to
-`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`. It accepts only the UI's own origins (the
+`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`. It reads only `OTEL_EXPORTER_OTLP_ENDPOINT`
+and sends no extra headers: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_HEADERS` apply to the backend's own spans, not the browser's. It accepts only the UI's own origins (the
 public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
 `same-origin`, so a page on another allowed origin is refused), at
-most 256 KiB and 512 spans a batch, and rewrites every batch's resource to
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. Without an endpoint, or with `OTEL_SDK_DISABLED=true`, it
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
