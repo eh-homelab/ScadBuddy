@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
+import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -256,6 +256,15 @@ export class QuestionService {
       if (context.signal.aborted) return { answered: false, message: 'The turn is stopping; the question was not asked.' }
       const id = randomUUID()
       const questions = redactQuestions(request.questions, context.secrets())
+      // Redaction can merge two labels or lengthen a string past its bound; the
+      // panel would drop that frame and the turn would wait for nobody.
+      const shown = parseQuestions({ questions })
+      if (!shown.ok) {
+        return {
+          answered: false,
+          message: `The question could not be shown: with secrets redacted it is not a valid question (${shown.error}). Ask it without the secret.`,
+        }
+      }
       const { sessionId, turnId } = context
       const asked = await this.atomically(sessionId, async (tx) => {
         // Still this turn's, and still the user's: after a handoff mid-turn

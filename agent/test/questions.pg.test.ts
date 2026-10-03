@@ -372,6 +372,52 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await turn!.done
   })
 
+  it('a question that redaction makes invalid is refused, not parked where the panel cannot show it', async () => {
+    // A label holding the turn's secret collides, once redacted, with one that reads like it.
+    const colliding: UserQuestion[] = [
+      {
+        question: 'Which key?',
+        header: 'Key',
+        multiSelect: false,
+        options: [
+          { label: 'Use sk-ant-test', description: '' },
+          { label: 'Use [redacted]', description: '' },
+        ],
+      },
+    ]
+    const askingColliding = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await run.questionGate!({ questions: colliding, toolUseId: 'toolu_c', signal: new AbortController().signal }))
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingColliding, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/could not be shown/) }])
+    expect(await db.sql`SELECT id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    expect((await events(m, session.id)).map((e) => e.type)).not.toContain('question.asked')
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+  })
+
+  it('the chat socket names the question on a malformed answer, and nothing on another malformed frame', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const out: ServerEvent[] = []
+    const chat = new ChatConnection(m, (e) => out.push(e), { snapshotMs: 60_000 })
+    try {
+      await chat.receive(JSON.stringify({ v: PROTOCOL_VERSION, type: 'question.answer', sessionId: 's1', id: 'q1', answers: 'Red' }))
+      await chat.receive(JSON.stringify({ v: PROTOCOL_VERSION, type: 'session.send', sessionId: 's1', id: 'q1' }))
+      await expect.poll(() => out.filter((e) => e.type === 'error').length).toBe(2)
+      const [first, second] = out.filter((e) => e.type === 'error')
+      expect(first).toMatchObject({ code: 'invalid', sessionId: 's1', questionId: 'q1' })
+      expect(second).toMatchObject({ code: 'invalid' })
+      expect(second).not.toHaveProperty('questionId')
+      expect(second).not.toHaveProperty('sessionId')
+    } finally {
+      chat.close()
+    }
+  })
+
   it('a row and the event that reports it commit together: a failed append resolves nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })

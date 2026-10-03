@@ -151,9 +151,10 @@ describe('chatReducer', () => {
     // An unrelated error in the session leaves a sent answer alone.
     const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
     expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
-    // A frame the agent could not parse has no session: the open one's card is answerable again.
+    // Another malformed frame (a session.send, say) refused while the answer is in
+    // flight names no question: the answer may already be accepted, so the card stays sent.
     const unparsed = run([server({ type: 'error', code: 'invalid', message: 'ignored a malformed message' })], sent)
-    expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {

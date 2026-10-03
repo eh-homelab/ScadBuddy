@@ -121,6 +121,23 @@ export type ChatRouteDeps = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
+/**
+ * The session and question a malformed `question.answer` frame names, when it
+ * names both readably (#940): the panel re-opens that card only, and no other
+ * malformed frame touches a sent answer.
+ */
+function refusedAnswer(raw: string): { sessionId: string; questionId: string } | Record<string, never> {
+  try {
+    const frame: unknown = JSON.parse(raw)
+    if (typeof frame !== 'object' || frame === null) return {}
+    const { type, sessionId, id } = frame as Record<string, unknown>
+    const named = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100
+    return type === 'question.answer' && named(sessionId) && named(id) ? { sessionId, questionId: id } : {}
+  } catch {
+    return {}
+  }
+}
+
 function errorEvent(
   err: unknown,
   sessionId: string | undefined,
@@ -276,8 +293,9 @@ export class ChatConnection {
     if (!parsed.ok) {
       // Answered through the queue, so it counts against the cap like any other frame.
       const error = parsed.error
+      const where = refusedAnswer(raw)
       return this.enqueue(async () => {
-        this.emit(event({ type: 'error', code: 'invalid', message: `ignored a malformed message: ${error}` }))
+        this.emit(event({ type: 'error', ...where, code: 'invalid', message: `ignored a malformed message: ${error}` }))
       })
     }
     const message = parsed.value
