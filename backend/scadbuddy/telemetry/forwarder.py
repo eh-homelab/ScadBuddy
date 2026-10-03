@@ -4,7 +4,8 @@
 An accepted batch goes on a bounded in-memory queue and the browser is answered at
 once; one task posts the queue to the collector, so the browser never waits on it.
 
-- **No retries.** A failed post (unreachable, a timeout, any non-2xx) drops its batch.
+- **No retries.** A failed post (unreachable, a timeout, any non-2xx, any error the
+  transport raises) drops its batch.
   Retrying and buffering are alloy's job, and the browser has already gone.
 - **A full queue** drops the new batch at once; the browser still gets its 204.
 - **Shutdown** (`running` exiting, in the app's lifespan): new batches are refused
@@ -179,7 +180,9 @@ class TraceForwarder:
         except asyncio.CancelledError:
             self._count("shutdown")
             raise
-        except (TimeoutError, httpx.HTTPError, httpx.InvalidURL) as error:
+        except Exception as error:
+            # Anything else a transport raises too: one bad post must not end the task,
+            # or every later batch would wait in the queue until it is full.
             self._failed(type(error).__name__)
             return False
         if not response.is_success:
