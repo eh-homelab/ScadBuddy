@@ -857,15 +857,15 @@ happens, and there is no separate request system.
 
 | Wait | Tool call? | Kind | Who may answer | Response | Timer | Today |
 |---|---|---|---|---|---|---|
-| Outward tool call (`harness/permissions.ts:7-20`, `approvals/service.ts:1037` `gate()`) | yes | `approval` | the browser user, or a principal with the approval grant, never on its own call (`approvals/service.ts:73-85`) | `{decision: approve\|deny, input_hash?}` | deny at `approval_expiry_seconds`, default 600 s (`approvals/service.ts:96-101,115`) | classic: `ai_approvals`; durable: §6.4 |
+| Outward tool call (`harness/permissions.ts:7-20`, `ApprovalService.gate`) | yes | `approval` | the browser user, or a principal with the approval grant, never on its own call (`approvals/service.ts:73-85`) | `{decision: approve\|deny, input_hash?}` | deny at `approval_expiry_seconds`, default 600 s (`approvals/service.ts:96-101,115`) | classic: `ai_approvals`; durable: §6.4 |
 | Off-origin browser navigation (`harness/browserOrigins.ts:21-27`) | yes | `approval` (the input guard makes the call outward) | as above | as above | as above | classic only |
 | Headless-browser request grant, `authorize_request` (`harness/headlessGrants.ts:12-31`) | yes | `approval` (an outward tool) | as above | as above | as above; the grant it writes then lasts `GRANT_TTL_SECONDS` = 120 s | classic only |
 | MCP prepare/confirm (`approvals/mcp.ts`, `tools/approvals.ts`) | yes, with no session | `approval` | as above; never the MCP principal that prepared it | as above | as above | classic only, and it stays there (no session) |
-| Structured question, `AskUserQuestion` (PR #998, `ai_questions`, #940) | yes | `answer` | the browser user, owner of the session (#998) | `{answers: {<question>: string \| string[]}}`, the built-in tool's `answers` | **cancel** at `question_expiry_seconds`; #998 adds no expiry and cancels only with the turn | classic only (PR #998, open) |
+| Structured question, `AskUserQuestion` (PR #998, `ai_questions`, #940) | yes | `answer` | the browser user, owner of the session (#998) | `{answers: {<question>: string \| string[]}}`, the built-in tool's `answers` | **cancel** at `question_expiry_seconds`; #998 adds no expiry and cancels only with the turn (`questions/service.ts:27-33`) | classic only (`ai_questions`, merged in #998) |
 | Attention request, `request_user_attention` / `wait_for_user` (#815) | yes | `answer` | the browser user, owner; for `tab_disconnected`, also the system on re-pair | `{choice?: <one of options>, text?}`, or `reconnected` | the call's own `timeout_s` (default 300 s), then `on_timeout`: see "Timeouts" | not built (#993 built only the badge) |
 | Flow `wait_for_human(question, timeout=…)` (§7.1) | yes, a Code Mode host call | `answer` | the browser user, on the Workflows page (§7.3) | `{answer: string}` | the script's `timeout`, then the host call raises; it never returns an answer | spec only |
-| Budget exhausted, `raiseBudget` (`sessions/manager.ts:1560`, #790, #823) | **no** | (none) | the browser user, owner | `{add_usd}` | none | both modes, unchanged |
-| Handoff offer (`sessions/manager.ts:1366`, TTL `HANDOFF_OFFER_TTL_MS` 1 h, line 170) | **no** | (none) | the principal it is offered to | accept or decline | the offer lapses | classic; durable unchanged |
+| Budget exhausted, `raiseBudget` (`SessionManager.raiseBudget`, #790, #823) | **no** | (none) | the browser user, owner | `{add_usd}` | none | both modes, unchanged |
+| Handoff offer (`SessionManager.handoff`, TTL `HANDOFF_OFFER_TTL_MS` 1 h) | **no** | (none) | the principal it is offered to | accept or decline | the offer lapses | classic; durable unchanged |
 
 - **What is not a session wait.** Approving a plugin package (`routes/pluginPackages.ts:19`,
   `plugins/packages/store.ts:238`) is an admin's review in Settings. No tool installs
@@ -898,8 +898,11 @@ happens, and there is no separate request system.
   - for an `approval`, the entry carries the scrubbed `summary` and the `input_hash`
     and **never the call's raw input**, as the approval reads already do
     (`routes/approvals.ts:20-22`); `prompt` is empty;
-  - for an `answer`, `prompt` is what the person must read: the question and its
-    options, or the attention message. It is the model's own text, not a tool's input.
+  - for an `answer`, `prompt` is taken from the tool's input **on purpose**: the
+    question and its options, or the attention message, are what the person must read.
+    It is scrubbed of secrets as `QuestionService` does for a classic question, and
+    capped at 16 KiB, the same as a response; a longer one is refused to the model
+    as malformed, without parking.
 - In a durable session it is built from the plugin's `pending_approvals()` (`id`,
   `name`, `input`), joined with the entry's policy and times, which the workflow keeps
   in its own state when the call parks. The plugin runs one durable call at a time
@@ -955,9 +958,13 @@ happens, and there is no separate request system.
     attention `stop` path (Timeouts) is an interrupt and goes through it too.
     The Update needs the `agent-durable` worker, so each caller waits at most 10 s,
     then:
-    - **interrupt** proceeds anyway, cancelling the turn when the worker returns, and
-      leaves the entry to its timer and the sweep. Stop is what a person presses when
-      a session is stuck, so it must not hang;
+    - **interrupt** proceeds anyway, and the turn is cancelled when the worker
+      returns. Stop is what a person presses when a session is stuck, so it must not
+      hang. The entry is not left to its timer: whenever the turn's `agent.run` is
+      cancelled, for any cause (an interrupt after this timeout, the attention `stop`),
+      `DurableSession` first resolves any parked entry as `cancelled` through
+      `resolve_input`. So a cancelled turn never leaves an entry listed, and no
+      `respond` reaches a call the plugin no longer holds;
     - **handoff** is refused with a retryable error ("the session's worker is not
       answering; try again"), so a new owner never inherits a parked approval;
     - **a superseding send** is refused the same way, so the send can be retried once
@@ -1009,7 +1016,11 @@ happens, and there is no separate request system.
     lists today, so the badge keeps counting them.
   - Both are reads (§4.1). Each gets a `read`-tier tool. `agent/test/coverage.test.ts`
     checks only `backend/openapi.json`'s operations, not the agent's own
-    `/api/v1/ai/*` routes, so §8 adds a check for these three routes.
+    `/api/v1/ai/*` routes, so §8 adds a check for these three routes. The `POST`
+    route has no tool of its own, and the check accepts it only through an entry in
+    the same exemption list `src/tools/coverage.ts` keeps, with its reason recorded:
+    "browser-only for `answer` kinds; `approval` through `sessions_approve` /
+    `sessions_deny`".
   - `respond` gets **no tool** for the `answer` kinds: only the browser user answers
     them. For `approval`, the existing `outward` tools `sessions_approve` /
     `sessions_deny` (`tools/sessions.ts:30`) stay its tool, for a principal holding
@@ -1040,8 +1051,9 @@ happens, and there is no separate request system.
   - an entry that is already resolved (decided, answered, timed out or cancelled);
   - a responder the policy does not allow. For an `approval` that includes a principal
     deciding its own call (`approvals/service.ts:74-81`). That rule is the `approval`
-    kind's only: an `answer` is asked of the session's owner, who is the one allowed
-    responder even though the call was made in their own session;
+    kind's only. An `answer` is answered by the browser user alone, who is the
+    session's owner whenever one parks (below), even though the call was made in their
+    own session;
   - a response that does not match the kind's shape, and any response over 16 KiB.
   For an `approval` it also runs the plugin's `validate_decision`, and it checks
   `input_hash` when one is sent, as `approvals/service.ts:737` does.
@@ -1049,9 +1061,12 @@ happens, and there is no separate request system.
   Update validator must be deterministic and can read neither Postgres nor a grant
   that changes. So the split is:
   - the **route** decides who may answer, exactly as `authorize` does today
-    (`approvals/service.ts:705`): the session's current owner from `ai_sessions`, and
+    (`ApprovalService.authorize`): the session's current owner from `ai_sessions`, and
     whether the principal holds the approval grant (`grants(principal)`). It passes
-    the result to the Update as `responder` plus `role` (`owner`, `grant`);
+    the result to the Update as `responder` plus `role`, the outcome of `authorize`:
+    `browser` (the browser user, who may decide an `approval` whoever owns the session,
+    and answers every `answer`), `grant` (a non-browser principal holding the grant),
+    or `owner` (a non-browser owner, which no kind accepts on its own);
   - the **validator** checks only what the workflow holds: staleness, *resolving*,
     the kind's allowed roles, self-decision against the `requested_by` and session
     starter it recorded at `open_input`, and the shape.
@@ -1119,7 +1134,7 @@ happens, and there is no separate request system.
 | `approval` | **Deny.** The call does not run. A classic session tells the model nobody decided (`approvals/service.ts:341`). A durable one calls `agent.decide(tool_use_id, False, "system:timeout")`. The plugin's `decide` takes no message, so the model reads its fixed rejection ("A human reviewer rejected this action. Do not retry it.", `_workflow.py:718-723`), not the classic *expired* wording. This is a known difference, listed in §9. It fails closed, since the call never runs, and the panel and audit still record `expired`. Letting the call through instead, as an `answer` does, is not possible: an approved `approval` runs the real tool. |
 | `answer`, a question | **Cancel.** The tool returns an error result, "nobody answered", which is never an answer. The window is a new `ai_settings` key, `question_expiry_seconds` (default 3600, bounded like `approval_expiry_seconds`, 10 to 86 400). |
 | `answer`, an attention request | **#815's rule, as written:** `on_timeout` is `proceed` (the default), `wait` or `stop`. `proceed` returns `timed_out` and the agent carries on with non-outward work only. Any outward call it then makes parks for its own approval, so `proceed` never lets anything outward run. `stop` ends the turn: in a classic session as `interrupt` does; in a durable one by cancelling the turn's `agent.run` task, which the plugin turns into "This tool call was interrupted" for the open call (`_workflow.py:634-651`). Phase 5 verifies that the plugin ends the turn cleanly under that cancellation. Until it does, a durable `wait_for_user`'s input schema offers only `proceed`, so `stop` fails closed by not being offered. `wait` keeps it parked to the 86 400 s ceiling, then does what `stop` does. |
-| `answer`, flow `wait_for_human` | The host call raises in the script, which decides what to do. It never returns an answer. `timeout` defaults to 3600 s and is bounded to 10–86 400 s like `question_expiry_seconds`; a script asking for more is refused at type-check time (§7.2). |
+| `answer`, flow `wait_for_human` | The host call raises in the script, which decides what to do. It never returns an answer. `timeout` defaults to 3600 s and is bounded to 10–86 400 s like `question_expiry_seconds`. A literal out of bounds is refused at type check (§7.2); since only a literal can be checked statically, the host call also enforces the bound at run time and raises `ValueError` in the script for a value outside it, never clamping. |
 
 - `proceed` exists only for attention requests. An approval or a question can never
   proceed. #815's `approval_pending` reason is refused as malformed: the approval is
@@ -1189,8 +1204,13 @@ happens, and there is no separate request system.
 - The session's status projection is the same in both modes: `waiting_approval` while an
   `approval` entry is parked, `waiting_input` while an `answer` entry is parked. The
   status bus already maps both to `session.waiting` (`sessions/busEvents.ts:73`).
-  `waiting_input` is in the schema (`sessions/protocol.ts:16`), but nothing on main
-  writes it yet; PR #998 is its first writer.
+  `waiting_input` is in the schema (`sessions/protocol.ts:16`), and its only writer is
+  the classic question gate (`QuestionService`, from #998).
+- **An `answer` tool parks only while the session's owner is the browser user**, in
+  both modes. Otherwise it returns an error result at once and parks nothing, as the
+  classic gate already does (`questions/service.ts:271-274`), so no entry ever waits
+  for a responder who is not allowed. A handoff to another principal mid-wait cancels
+  the entry (`cancel_input`). A shared vector covers it.
 - `AskUserQuestion` is Claude Code's built-in in a classic session (PR #998). A durable
   session has no built-in tools but `Skill` (§6.3b), so there it is a ScadBuddy tool,
   `ask_user`, with the same input and the same answer.
@@ -1203,7 +1223,7 @@ happens, and there is no separate request system.
   ends the same way, and `raiseBudget` writes the row in both modes. It is not an entry,
   because no call is waiting, so there is nothing for a timer to time out or for
   `respond` to resume. #823's fix belongs in `sessions_fork`, not here.
-- **Handoff offer** (`sessions/manager.ts:1366`). Kept separate. Only another principal
+- **Handoff offer** (`SessionManager.handoff`). Kept separate. Only another principal
   is offered a session; a handoff to the browser user is immediate. So it is never a
   wait on a person, and its 1 h TTL lapses the offer rather than answering anything.
 
@@ -1389,7 +1409,13 @@ happens, and there is no separate request system.
   - after a Reset the aggregate read shows exactly one entry for the call, and a
     terminated run's entry leaves it within one sweep;
   - a classic id with an unknown prefix, or with no row, is refused as stale;
-  - flow `wait_for_human` `timeout` outside 10–86 400 s is refused at type check;
+  - flow `wait_for_human` `timeout` outside 10–86 400 s is refused at type check for a
+    literal, and raises at run time for a computed value;
+  - an interrupt with the `agent-durable` worker down: when the worker returns, the
+    entry is gone with exactly one `input.resolved`;
+  - an `answer` tool in a session owned by a non-browser principal returns an error at
+    once and parks nothing; the browser user decides an `approval` in a session owned
+    by another principal (role `browser`), in both modes;
   - one durable approval yields exactly one `approval.required`;
   - `forgetSubject` removes the subject's `ai_pending_input` and `ai_input_responses`
     rows;
@@ -1478,7 +1504,7 @@ Each phase is its own implementation plan and ships alone.
    - clusters: the Temporal frontend's ingress `CiliumNetworkPolicy`;
    - classic: the `pending-input` and `respond` routes over `ai_approvals` and
      `ai_questions`, the approval routes and `sessions_approve` / `sessions_deny` as
-     aliases, the `question_expiry_seconds` setting and its sweep (after PR #998
+     aliases, the `question_expiry_seconds` setting and its sweep (over #998's
      merges), and #815's attention tools;
    - frontend: `fetchPendingApprovals()` on the new route and the badge's new wording.
 6. **Flows** (§7): the harness verification, `ProjectWorkflow`, host functions, records,
