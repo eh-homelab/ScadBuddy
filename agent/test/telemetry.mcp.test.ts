@@ -97,10 +97,12 @@ describe('/mcp spans', () => {
     await client.callTool({ name: 'list_models', arguments: {} })
     await client.close()
     await flushTracing()
-    const [call] = named('agent.mcp/tools/call')
-    const [tool] = named('agent.tool/list_models')
-    const ms = (s: { endTime: [number, number] }) => s.endTime[0] * 1e3 + s.endTime[1] / 1e6
-    expect(ms(call!)).toBeGreaterThanOrEqual(ms(tool!))
+    // End order, not end times: each span's clock is anchored at its own start, so
+    // two spans' end times can disagree by a fraction of a millisecond (seen in CI).
+    // SimpleSpanProcessor hands spans to the exporter in the order they end.
+    const ended = spans.getFinishedSpans().map((s) => s.name)
+    expect(ended).toContain('agent.tool/list_models')
+    expect(ended.indexOf('agent.mcp/tools/call')).toBeGreaterThan(ended.indexOf('agent.tool/list_models'))
   })
 
   it('a tool error outcome carries a failure class, never a message', async () => {
