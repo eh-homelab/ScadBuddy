@@ -1026,6 +1026,15 @@ Each phase is its own implementation plan and ships alone.
      `render_claims`, so neither waits behind openscad for an activity slot. A full queue
      stays today's 503. A supersede starts the new render first, then sends `release`.
      A boot pass fails legacy pending rows that no workflow will run.
+   - As built (2c, #1053, plan `2026-10-03-durable-phase-2c-follow-print.md`): `FollowPrint`
+     (`follow-print-<output id>`, `bambuddy` queue) runs one heartbeating activity,
+     `follow_print`, with the watcher's loop. The heartbeat carries when the print last
+     moved, so a retried attempt keeps its age. `PrintRun` starts it as an abandoned
+     child after `print_finish`, or pokes the one already running. The progress route
+     signals-with-start it in the background. A poke cancels the attempt (`TRY_CANCEL`)
+     and starts a fresh one that reads at once. `bambuddy/watcher.py` and its lock and
+     rescan are gone; a boot pass hands the prints in `print_watches` to `FollowPrint`
+     and empties it (the table is dropped later).
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.
