@@ -253,6 +253,42 @@ def test_a_body_that_is_not_an_export_is_400(client: TestClient) -> None:
     assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
 
 
+def test_empty_resource_spans_are_400(client: TestClient) -> None:
+    body = json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode()
+    response = client.post(PATH, content=body, headers=UI)
+    assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
+
+
+def test_a_batch_with_no_valid_span_is_204_and_queues_nothing(
+    client: TestClient, relay: TraceRelay, collector: Collector
+) -> None:
+    response = client.post(PATH, content=export(span(spanId="nope")), headers=UI)
+    assert response.status_code == 204
+    assert not relay.forwarder._pending
+    assert collector.bodies == []
+    for name in ("forwarded", "failed", "queue_full", "shutdown"):
+        assert outcome(relay, name) == 0
+
+
+def test_the_payload_is_prepared_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on_loop: list[bool] = []
+    real = telemetry.prepare
+
+    def spy(body: bytes) -> bytes | None:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(body)
+
+    monkeypatch.setattr(telemetry, "prepare", spy)
+    assert client.post(PATH, content=export(span()), headers=UI).status_code == 204
+    assert on_loop == [False]
+
+
 def test_the_per_client_limit_is_429_with_retry_after() -> None:
     relay = make_relay(limits=RelayLimits(client_burst=1, client_per_second=0.5))
     with TestClient(relay_app(relay)) as client:

@@ -24,6 +24,10 @@ from typing import Any, Final
 from scadbuddy.core.trace_scrub import CUT_AT_QUERY, DROPPED_ATTRIBUTES
 
 MAX_SPANS: Final = 512
+#: Bound what an empty ``{}`` entry can be rewritten into: each resource and scope is
+#: rebuilt with a resource and a scope object, so unbounded they amplify a body ~36x.
+MAX_RESOURCES: Final = 16
+MAX_SCOPES: Final = 64
 MAX_NAME_CHARS: Final = 128
 MAX_ATTRIBUTES: Final = 64
 MAX_STRING_CHARS: Final = 1024
@@ -121,10 +125,18 @@ def parse(body: bytes) -> Json:
     if not isinstance(payload, dict):
         raise PayloadError
     count = 0
-    for resource_spans in _list(payload.get("resourceSpans")):
+    scopes = 0
+    resources = _list(payload.get("resourceSpans"))
+    if len(resources) > MAX_RESOURCES:
+        raise PayloadError
+    for resource_spans in resources:
         if not isinstance(resource_spans, dict):
             raise PayloadError
-        for scope_spans in _list(resource_spans.get("scopeSpans", [])):
+        scope_list = _list(resource_spans.get("scopeSpans", []))
+        scopes += len(scope_list)
+        if scopes > MAX_SCOPES:
+            raise PayloadError
+        for scope_spans in scope_list:
             if not isinstance(scope_spans, dict):
                 raise PayloadError
             spans = _list(scope_spans.get("spans", []))
@@ -209,19 +221,33 @@ def _attributes(raw: object, limit: int) -> tuple[list[Json], int]:
     return kept, dropped
 
 
+def _string_attribute(attributes: list[Any], name: str) -> str | None:
+    for item in attributes:
+        if isinstance(item, dict) and item.get("key") == name:
+            value = item.get("value")
+            inner = value.get("stringValue") if isinstance(value, dict) else None
+            if isinstance(inner, str):
+                return inner
+    return None
+
+
 def _scrub_exception(raw: object) -> list[Any]:
     """An ``exception`` event's attributes without the message, and with only the frame
     lines of the stack (spec §6)."""
     scrubbed: list[Any] = []
-    for item in raw if isinstance(raw, list) else []:
+    attributes = raw if isinstance(raw, list) else []
+    message = _string_attribute(attributes, "exception.message")
+    for item in attributes:
         key = item.get("key") if isinstance(item, dict) else None
         if key == "exception.message":
             continue
         if key == "exception.stacktrace":
-            value = item.get("value")
-            stack = value.get("stringValue") if isinstance(value, dict) else None
-            if not isinstance(stack, str):
+            stack = _string_attribute([item], key)
+            if stack is None:
                 continue
+            if message:
+                # A multi-line message can carry a line that looks like a frame.
+                stack = stack.replace(message, "")
             item = {"key": key, "value": {"stringValue": browser_frames_only(stack)}}
         scrubbed.append(item)
     return scrubbed
@@ -351,33 +377,36 @@ def _scope(raw: object) -> Json:
     }
 
 
-def rewrite(payload: Json) -> Json:
-    """The export rebuilt from what `parse` accepted: only the fields listed here survive."""
-    return {
-        "resourceSpans": [
-            {
-                "resource": _resource(resource_spans.get("resource")),
-                "scopeSpans": [
-                    {
-                        "scope": _scope(scope_spans.get("scope")),
-                        "spans": [
-                            span
-                            for span in map(_span, scope_spans.get("spans", []))
-                            if span is not None
-                        ],
-                    }
-                    for scope_spans in resource_spans.get("scopeSpans", [])
-                ],
-            }
-            for resource_spans in payload["resourceSpans"]
+def _scope_spans(raw: Json) -> Json | None:
+    spans = [span for span in map(_span, raw.get("spans", [])) if span is not None]
+    return {"scope": _scope(raw.get("scope")), "spans": spans} if spans else None
+
+
+def rewrite(payload: Json) -> Json | None:
+    """The export rebuilt from what `parse` accepted: only the fields listed here
+    survive. A scope with no surviving span is dropped, and a resource with no surviving
+    scope; None when no span is left."""
+    resources: list[Json] = []
+    for resource_spans in payload["resourceSpans"]:
+        scopes = [
+            scope
+            for scope in map(_scope_spans, resource_spans.get("scopeSpans", []))
+            if scope is not None
         ]
-    }
+        if scopes:
+            resources.append(
+                {"resource": _resource(resource_spans.get("resource")), "scopeSpans": scopes}
+            )
+    return {"resourceSpans": resources} if resources else None
 
 
-def prepare(body: bytes) -> bytes:
-    """The body as the relay forwards it. ASCII JSON, so a lone surrogate the page
-    escaped stays an escape rather than failing to encode."""
-    return json.dumps(rewrite(parse(body)), separators=(",", ":")).encode("ascii")
+def prepare(body: bytes) -> bytes | None:
+    """The body as the relay forwards it, or None when no span survives. ASCII JSON, so
+    a lone surrogate the page escaped stays an escape rather than failing to encode."""
+    rewritten = rewrite(parse(body))
+    if rewritten is None:
+        return None
+    return json.dumps(rewritten, separators=(",", ":")).encode("ascii")
 
 
 __all__ = [
@@ -389,6 +418,8 @@ __all__ = [
     "MAX_LINKS",
     "MAX_LINK_ATTRIBUTES",
     "MAX_NAME_CHARS",
+    "MAX_RESOURCES",
+    "MAX_SCOPES",
     "MAX_SPANS",
     "MAX_STRING_CHARS",
     "WEB_SERVICE_NAME",
