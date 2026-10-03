@@ -4,7 +4,7 @@ import { BrowserRouter } from 'react-router'
 import { z } from 'zod'
 import { installAgentBridge } from './agent'
 import { App } from './App'
-import { installStaleChunkReload } from './lib/staleChunks'
+import { installStaleChunkReload, loadOptionalChunk } from './lib/staleChunks'
 import './index.css'
 
 // The page CSP has no 'unsafe-eval'. zod's JIT probes `new Function` on its first parse
@@ -40,15 +40,15 @@ async function start() {
 /**
  * Tracing spec 2026-10-01 §5.3: the SDK is its own chunk, fetched after the first
  * paint (the frame after the next one), so it never delays the page or the 3D viewer.
- * Until it loads, `lib/traceAction.ts` makes no-op spans. A chunk that fails to load
- * fires `vite:preloadError` like any other, so `installStaleChunkReload` reloads the
- * page once per build (right for a stale deploy); the `catch` only keeps the rejection
+ * Until it loads, `lib/traceAction.ts` makes no-op spans. The chunk is optional: it
+ * loads through `loadOptionalChunk`, so a failure (often a blocker, not a stale deploy)
+ * does not trigger `installStaleChunkReload`'s reload; the `catch` keeps the rejection
  * from surfacing, and a page that stays untraced is the fallback.
  */
 function loadTracingAfterFirstPaint() {
   requestAnimationFrame(() => {
     setTimeout(() => {
-      import('./lib/tracing').then(({ startTracing }) => startTracing()).catch(() => undefined)
+      loadOptionalChunk(() => import('./lib/tracing')).then(({ startTracing }) => startTracing()).catch(() => undefined)
     }, 0)
   })
 }
