@@ -56,7 +56,7 @@ type Json = dict[str, Any]
 
 def _id(value: object, pattern: re.Pattern[str]) -> str | None:
     """A trace or span id: hex of the right length, not all zeros (OTLP's invalid id)."""
-    if isinstance(value, str) and pattern.match(value) and value.strip("0"):
+    if isinstance(value, str) and pattern.fullmatch(value) and value.strip("0"):
         return value
     return None
 
@@ -67,9 +67,28 @@ def _uint(value: object, limit: int) -> int | str | None:
         return None
     if isinstance(value, int):
         return value if 0 <= value <= limit else None
-    if isinstance(value, str) and _INT_STRING.match(value) and not value.startswith("-"):
+    if isinstance(value, str) and _INT_STRING.fullmatch(value) and not value.startswith("-"):
         return value if int(value) <= limit else None
     return None
+
+
+def _is_int64(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return -(2**63) <= value <= _MAX_INT64
+    if isinstance(value, str) and _INT_STRING.fullmatch(value):
+        return -(2**63) <= int(value) <= _MAX_INT64
+    return False
+
+
+def _is_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _set_valid(target: Json, key: str, value: object) -> None:
@@ -119,7 +138,7 @@ def parse(body: bytes) -> Json:
 
 def browser_frames_only(stack: str) -> str:
     """The frame lines of a browser stack, and nothing else: the message is the rest."""
-    return "\n".join(line.strip() for line in stack.splitlines() if _BROWSER_FRAME.match(line))
+    return "\n".join(line.strip() for line in stack.splitlines() if _BROWSER_FRAME.fullmatch(line))
 
 
 def _count(value: object) -> int:
@@ -140,17 +159,9 @@ def _scalar(value: object) -> Json | None:
         return {kind: inner[:MAX_STRING_CHARS]}
     if kind == "boolValue" and isinstance(inner, bool):
         return {kind: inner}
-    if kind == "intValue" and (
-        (isinstance(inner, int) and not isinstance(inner, bool))
-        or (isinstance(inner, str) and _INT_STRING.match(inner))
-    ):
+    if kind == "intValue" and _is_int64(inner):
         return {kind: inner}
-    if (
-        kind == "doubleValue"
-        and isinstance(inner, int | float)
-        and not isinstance(inner, bool)
-        and math.isfinite(inner)
-    ):
+    if kind == "doubleValue" and _is_finite_number(inner):
         return {kind: inner}
     return None
 

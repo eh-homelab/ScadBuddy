@@ -305,3 +305,82 @@ def test_valid_values_pass_unchanged() -> None:
     assert result["kind"] == 5
     assert result["endTimeUnixNano"] == 1700000000100000000
     assert result["status"] == {"code": 1}
+
+
+@pytest.mark.parametrize("field", ["parentSpanId"])
+def test_a_trailing_newline_is_not_a_valid_id(field: str) -> None:
+    result = only_span(export(span(**{field: "c" * 16 + "\n"})))
+    assert field not in result
+
+
+def test_a_trailing_newline_is_not_a_valid_id_or_time() -> None:
+    assert (
+        []
+        == forwarded(export(span(spanId="c" * 16 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
+            "spans"
+        ]
+    )
+    assert (
+        []
+        == forwarded(export(span(traceId="c" * 32 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
+            "spans"
+        ]
+    )
+    result = only_span(export(span(startTimeUnixNano="12\n")))
+    assert "startTimeUnixNano" not in result
+    link = {"traceId": TRACE_ID, "spanId": "c" * 16 + "\n"}
+    assert only_span(export(span(links=[link])))["links"] == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"intValue": "12\n"},
+        {"intValue": 2**63},
+        {"intValue": "9223372036854775808"},
+        {"intValue": -(2**63) - 1},
+        {"intValue": 10**400},
+        {"doubleValue": 10**400},
+        {"doubleValue": -(10**400)},
+    ],
+)
+def test_an_unrepresentable_number_is_dropped_and_counted(value: Json) -> None:
+    result = only_span(export(span(attributes=[{"key": "n", "value": value}])))
+    assert result["attributes"] == []
+    assert result["droppedAttributesCount"] == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"intValue": 2**63 - 1}, {"intValue": "-9223372036854775808"}, {"doubleValue": 10**300}],
+)
+def test_representable_numbers_pass(value: Json) -> None:
+    attribute = {"key": "n", "value": value}
+    assert only_span(export(span(attributes=[attribute])))["attributes"] == [attribute]
+
+
+HOSTILE = [
+    b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"%s","spanId":"%s","attributes":'
+    b'[{"key":"a","value":{"doubleValue":1'
+    % (TRACE_ID.encode(), SPAN_ID.encode())
+    + b"0" * 400
+    + b"}}]}]}]}]}",
+    b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"kind":1e999,"status":{"code":1e999}}]}]}]}',
+    b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"droppedAttributesCount":1'
+    + b"0" * 5000
+    + b"}]}]}]}",
+    b'{"resourceSpans":[{"resource":{"attributes":[{"key":"service.version","value":null}]},'
+    b'"scopeSpans":[{"scope":[],"spans":[{"events":[1,null,{"attributes":"x"}],"links":{}}]}]}]}',
+    b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"attributes":[{"key":"k","value":{"arrayValue":'
+    b'{"values":[{"doubleValue":1e999},{"intValue":1e999}]}}}]}]}]}]}',
+    b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"status":{"code":2,"message":1}}]}]}]}',
+]
+
+
+@pytest.mark.parametrize("body", HOSTILE)
+def test_prepare_raises_only_its_own_errors(body: bytes) -> None:
+    try:
+        out = prepare(body)
+    except (PayloadError, TooManySpansError):
+        return
+    json.loads(out)
