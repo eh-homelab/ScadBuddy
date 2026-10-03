@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace import ReadableSpan
@@ -119,4 +120,25 @@ def test_a_query_string_never_appears(client: TestClient, spans: InMemorySpanExp
         ),
     )
     assert server is not None
+    assert SENTINEL not in _everything(spans)
+
+
+def test_a_captured_header_never_appears(
+    settings: Settings, spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ASGI instrumentation turns header capture on from the environment; the
+    # scrub must hold whatever a deployment sets (review of #1064).
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST", ".*")
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE", ".*")
+    with TestClient(create_app(settings)) as client:
+        client.get("/api/v1/models", headers={"Cookie": f"session={SENTINEL}"})
+    server = wait_for_span(spans, lambda s: s.kind == SpanKind.SERVER)
+    assert (server.attributes or {}).get("http.route") == "/api/v1/models"
+    headers = [
+        key
+        for finished in spans.get_finished_spans()
+        for key in (finished.attributes or {})
+        if key.startswith(("http.request.header.", "http.response.header."))
+    ]
+    assert headers == []
     assert SENTINEL not in _everything(spans)

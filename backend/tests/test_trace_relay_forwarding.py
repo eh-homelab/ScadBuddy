@@ -341,9 +341,21 @@ async def test_a_forward_task_that_dies_still_closes_the_client_and_surfaces_the
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def collector(request: httpx.Request) -> httpx.Response:
-        raise ZeroDivisionError
+        return httpx.Response(200)
 
     forwarder, _ = make(collector)
+    real_pop = forwarder._pop
+    pops = 0
+
+    def pop() -> bytes:
+        # A failed post no longer ends the task (it is counted); a fault outside it does.
+        nonlocal pops
+        pops += 1
+        if pops == 1:
+            raise ZeroDivisionError
+        return real_pop()
+
+    monkeypatch.setattr(forwarder, "_pop", pop)
     closed: list[bool] = []
     real_aclose = httpx.AsyncClient.aclose
 
@@ -358,3 +370,26 @@ async def test_a_forward_task_that_dies_still_closes_the_client_and_surfaces_the
             await asyncio.sleep(0.1)
     assert closed == [True]
     assert forwarder._client is None
+
+
+async def test_a_batch_after_an_unexpected_transport_error_is_still_forwarded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ZeroDivisionError
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector)
+    with caplog.at_level(logging.WARNING, logger=forwarder_module.__name__):
+        async with forwarder.running():
+            forwarder.offer(BATCH)
+            await until(lambda: outcome(metrics, "failed") == 1)
+            forwarder.offer(BATCH)
+            await until(lambda: outcome(metrics, "forwarded") == 1)
+    (record,) = caplog.records
+    assert record.__dict__["reason"] == "ZeroDivisionError"

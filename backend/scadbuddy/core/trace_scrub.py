@@ -8,9 +8,13 @@ rule is enforced here, once, rather than at each call site."""
 
 from __future__ import annotations
 
+import importlib.util
+import linecache
 import os
 import re
+import sys
 from collections.abc import Iterator, Mapping, Sequence
+from functools import lru_cache
 from typing import TYPE_CHECKING, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
@@ -24,13 +28,58 @@ if TYPE_CHECKING:
 #: An exception group's margin (``  | ``, ``  + ``) in front of each of its lines.
 _MARGIN: Final = re.compile(r"^ *[|+] ?")
 _TRACEBACK: Final = re.compile(r"^(?:Exception Group )?Traceback \(most recent call last\):$")
-_FRAME: Final = re.compile(r'^ {2}File "(?P<path>[^"\n]*)", line \d+, in [\w.<>]+$')
-_PSEUDO_FILE: Final = re.compile(r"^<(?:frozen [\w.]+|string|stdin)>$")
+_FRAME: Final = re.compile(r'^ {2}File "(?P<path>[^"\n]*)", line (?P<line>\d+), in (?P<name>.*)$')
+_PSEUDO_FILE: Final = re.compile(r"^<(?:frozen (?P<frozen>[\w.]+)|string|stdin)>$")
+_NAME: Final = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
+#: Code objects that are not named by a ``def`` or ``class``.
+_ANONYMOUS: Final = frozenset(
+    {"<module>", "<lambda>", "<genexpr>", "<listcomp>", "<dictcomp>", "<setcomp>"}
+)
+_DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
 #: string can carry anything a user typed, a user agent is a header value. The browser
 #: relay applies the same two sets to the page's spans (`telemetry/payload.py`).
 DROPPED_ATTRIBUTES: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
 CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
+#: Headers the instrumentation captures when a deployment sets
+#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything. The
+#: relay drops them from the page's spans too.
+HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
+
+
+@lru_cache(maxsize=256)
+def _defined_names(path: str) -> frozenset[str]:
+    """Every name a ``def``, ``async def`` or ``class`` in ``path`` binds."""
+    return frozenset(
+        match.group(1) for line in linecache.getlines(path) for match in _DEFINITION.finditer(line)
+    )
+
+
+@lru_cache(maxsize=256)
+def _is_stdlib_module(name: str) -> bool:
+    """``<frozen X>`` names a standard-library module, never anything else."""
+    if not _NAME.match(name) or name.split(".", 1)[0] not in sys.stdlib_module_names:
+        return False
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _frame(path: str, line: str, name: str) -> str | None:
+    if pseudo := _PSEUDO_FILE.match(path):
+        frozen = pseudo.group("frozen")
+        if frozen is not None and not _is_stdlib_module(frozen):
+            return None
+        # No source to check the name against: keep where, never what.
+        return f'File "{path}", line {line}'
+    if not os.path.isfile(path) or not linecache.getline(path, int(line)):
+        return None
+    if name in _ANONYMOUS or (
+        _NAME.match(name) and _defined_names(path).issuperset(name.split("."))
+    ):
+        return f'File "{path}", line {line}, in {name}'
+    return None
 
 
 def _frames(stacktrace: str) -> Iterator[str]:
@@ -44,9 +93,9 @@ def _frames(stacktrace: str) -> Iterator[str]:
             # next traceback header: message text, whatever it looks like.
             in_traceback = False
         elif in_traceback and (frame := _FRAME.match(inner)):
-            path = frame.group("path")
-            if _PSEUDO_FILE.match(path) or os.path.isfile(path):
-                yield inner.strip()
+            kept = _frame(frame.group("path"), frame.group("line"), frame.group("name"))
+            if kept is not None:
+                yield kept
 
 
 def frames_only(stacktrace: str) -> str:
@@ -54,8 +103,14 @@ def frames_only(stacktrace: str) -> str:
     a traceback ends with, and for a chained exception repeats, the messages, and its
     code lines are source text. A message can hold newlines (Bambuddy's ``detail``
     does), so a line counts as a frame only inside a traceback block, before that
-    block's exception line, and only when it names a file that exists: text shaped
-    like a frame inside a message is dropped with the message."""
+    block's exception line, and only when it names a file that exists. A message can
+    also hold a traceback header of its own, so the frame's text is checked too: its
+    function name must be ``<module>``, a lambda or comprehension, or a name the file
+    itself defines with ``def``/``class`` (a dotted name, every segment). So
+    every exported frame is a real path, one of its line numbers, and an identifier
+    taken from that file's own source, never message text. A pseudo-file
+    (``<frozen …>`` naming a standard-library module, ``<string>``, ``<stdin>``) has no
+    source to check against and keeps only its path and line."""
     return "\n".join(_frames(stacktrace))
 
 
@@ -83,7 +138,7 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
     kept: dict[str, AttributeValue] = {}
     for key, value in (attributes or {}).items():
-        if key in DROPPED_ATTRIBUTES:
+        if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue
         if key in CUT_AT_QUERY and isinstance(value, str):
             value = value.split("?", 1)[0]
@@ -129,6 +184,7 @@ class ScrubbingSpanExporter(SpanExporter):
 __all__ = [
     "CUT_AT_QUERY",
     "DROPPED_ATTRIBUTES",
+    "HEADER_PREFIXES",
     "ScrubbingSpanExporter",
     "frames_only",
     "scrub",

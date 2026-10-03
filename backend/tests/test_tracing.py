@@ -154,3 +154,14 @@ def test_detached_span_is_never_current_and_records_the_failure(
     failing = finished["failing"]
     assert (failing.attributes or {})["scadbuddy.failure_class"] == "ValueError"
     assert failing.status.status_code is trace.StatusCode.ERROR
+
+
+def test_a_span_made_without_the_spans_fixture() -> None:
+    with tracing.span("leftover"):
+        pass
+
+
+def test_is_gone_by_the_next_test(spans: InMemorySpanExporter) -> None:
+    # Review of #1064: the session exporter is cleared after every test, not only
+    # after tests that ask for `spans`, so it never grows across the session.
+    assert [s.name for s in spans.get_finished_spans()] == []

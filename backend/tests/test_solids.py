@@ -137,7 +137,9 @@ class FakeRenders:
         *,
         config: Config,
         extra_defines: Sequence[str] = (),
+        failure_is_fallback: bool = False,
     ) -> ProcessOutput:
+        assert failure_is_fallback
         colour = _colour_of(extra_defines)
         assert scad_path.name.startswith(WRAPPER_PREFIX)
         assert scad_path.is_file()
