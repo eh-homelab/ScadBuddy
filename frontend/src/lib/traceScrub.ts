@@ -13,16 +13,18 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 export const SPAN_NAME_MAX = 128
 export const ARRAY_ITEMS_MAX = 32
 
-const URL_ATTRIBUTES = ['url.full', 'http.url']
+const URL_ATTRIBUTES = ['url.full', 'http.url', 'http.target']
+const DROPPED_ATTRIBUTES = ['url.query', 'http.user_agent', 'user_agent.original']
 /** Chromium's `    at f (url:1:2)`, and Firefox's and Safari's `f@url:1:2`. */
-const FRAME_LINE = [/^\s*at .+:\d+:\d+\)?$/, /^[^\s@]*@.+:\d+:\d+$/]
+const CHROME_FRAME = /^\s+at \S.*:\d+:\d+\)?$/
+const GECKO_FRAME = /^[^\s@]*@\S+:\d+:\d+$/
 
 /** A stack reduced to its frame lines: the message, and a cause's, are dropped. */
 export function frameLines(stack: string): string {
   return stack
     .split('\n')
-    .filter((line) => FRAME_LINE.some((frame) => frame.test(line)))
-    .map((line) => line.trim())
+    .filter((line) => CHROME_FRAME.test(line) || GECKO_FRAME.test(line))
+    .map((line) => (CHROME_FRAME.test(line) ? `    ${line.trim()}` : line))
     .join('\n')
 }
 
@@ -35,6 +37,7 @@ function scrubAttributes(attributes: Attributes): { attributes: Attributes; drop
   const out: Attributes = {}
   let dropped = 0
   for (const [key, value] of Object.entries(attributes)) {
+    if (DROPPED_ATTRIBUTES.includes(key)) continue
     let next: AttributeValue | undefined = value
     if (URL_ATTRIBUTES.includes(key) && typeof value === 'string') next = withoutQuery(value)
     if (Array.isArray(value) && value.length > ARRAY_ITEMS_MAX) {
@@ -50,8 +53,12 @@ function scrubEvent(event: TimedEvent): TimedEvent {
   if (event.name !== 'exception' || !event.attributes) return event
   const attributes: Attributes = { ...event.attributes }
   delete attributes['exception.message']
+  const message = event.attributes['exception.message']
   const stack = attributes['exception.stacktrace']
-  if (typeof stack === 'string') attributes['exception.stacktrace'] = frameLines(stack)
+  if (typeof stack === 'string') {
+    const bare = typeof message === 'string' && message !== '' ? stack.split(message).join('') : stack
+    attributes['exception.stacktrace'] = frameLines(bare)
+  }
   return { ...event, attributes }
 }
 

@@ -10,6 +10,10 @@ import {
 import { describe, expect, it } from 'vitest'
 import { ARRAY_ITEMS_MAX, frameLines, ScrubbingSpanExporter, scrubSpan, SPAN_NAME_MAX } from './traceScrub'
 
+// Copied from backend/scadbuddy/telemetry/payload.py `_BROWSER_FRAME`: what the relay keeps.
+const RELAY_CHROME = /^\s+at \S.*:\d+:\d+\)?$/
+const RELAY_GECKO = /^[^\s@]*@\S+:\d+:\d+$/
+
 const SENTINEL = 'SENTINEL-4f1c'
 
 /** Spans made by a real (unregistered) provider, so they are the SDK's own objects. */
@@ -36,7 +40,7 @@ const FIREFOX_STACK = [
 describe('frameLines', () => {
   it('keeps only Chromium frame lines', () => {
     expect(frameLines(CHROME_STACK)).toBe(
-      'at send (http://localhost:5173/src/api/client.ts:244:18)\nat http://localhost:5173/assets/index-abc.js:1:2345',
+      '    at send (http://localhost:5173/src/api/client.ts:244:18)\n    at http://localhost:5173/assets/index-abc.js:1:2345',
     )
   })
 
@@ -47,7 +51,49 @@ describe('frameLines', () => {
   })
 })
 
+describe('frameLines against the relay', () => {
+  it.each([CHROME_STACK, FIREFOX_STACK])('keeps only lines the relay also keeps', (stack) => {
+    const lines = frameLines(stack).split('\n')
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) expect(RELAY_CHROME.test(line) || RELAY_GECKO.test(line)).toBe(true)
+  })
+})
+
 describe('scrubSpan', () => {
+  it('drops message text that imitates a frame', () => {
+    const [span] = record((tracer) => {
+      const s = tracer.startSpan('x')
+      s.recordException({
+        name: 'Error',
+        message: 'a\n    at SECRET:1:2',
+        stack: 'Error: a\n    at SECRET:1:2\n    at real (http://h/a.js:1:2)',
+      })
+      s.end()
+    })
+    const scrubbed = scrubSpan(span!)
+    expect(scrubbed.events[0]!.attributes?.['exception.stacktrace']).toBe('    at real (http://h/a.js:1:2)')
+    expect(JSON.stringify(scrubbed.events)).not.toContain('SECRET')
+  })
+
+  it('cuts http.target and drops query and user-agent attributes', () => {
+    const [span] = record((tracer) => {
+      tracer
+        .startSpan('x', {
+          attributes: {
+            'http.target': `/m/box?v=${SENTINEL}`,
+            'url.query': SENTINEL,
+            'http.user_agent': SENTINEL,
+            'user_agent.original': SENTINEL,
+          },
+        })
+        .end()
+    })
+    const scrubbed = scrubSpan(span!)
+    expect(scrubbed.attributes['http.target']).toBe('/m/box')
+    expect(JSON.stringify(scrubbed.attributes)).not.toContain(SENTINEL)
+    expect(Object.keys(scrubbed.attributes)).toEqual(['http.target'])
+  })
+
   it('drops the exception message, keeps the type and the frames, and replaces the status description', () => {
     const [span] = record((tracer) => {
       const s = tracer.startSpan('generate')
@@ -59,7 +105,7 @@ describe('scrubSpan', () => {
     expect(JSON.stringify({ a: scrubbed.attributes, e: scrubbed.events, s: scrubbed.status })).not.toContain(SENTINEL)
     const event = scrubbed.events[0]!
     expect(event.attributes?.['exception.type']).toBe('TypeError')
-    expect(event.attributes?.['exception.stacktrace']).toContain('at send (')
+    expect(event.attributes?.['exception.stacktrace']).toContain('    at send (')
     expect(scrubbed.status).toEqual({ code: SpanStatusCode.ERROR, message: 'TypeError' })
   })
 
