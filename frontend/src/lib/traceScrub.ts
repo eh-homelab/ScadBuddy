@@ -33,20 +33,18 @@ export function withoutQuery(url: string): string {
   return url.split(/[?#]/, 1)[0] ?? ''
 }
 
-function scrubAttributes(attributes: Attributes): { attributes: Attributes; dropped: number } {
+function scrubAttributes(attributes: Attributes): Attributes {
   const out: Attributes = {}
-  let dropped = 0
   for (const [key, value] of Object.entries(attributes)) {
     if (DROPPED_ATTRIBUTES.includes(key)) continue
     let next: AttributeValue | undefined = value
     if (URL_ATTRIBUTES.includes(key) && typeof value === 'string') next = withoutQuery(value)
     if (Array.isArray(value) && value.length > ARRAY_ITEMS_MAX) {
       next = value.slice(0, ARRAY_ITEMS_MAX) as AttributeValue
-      dropped += 1
     }
     out[key] = next
   }
-  return { attributes: out, dropped }
+  return out
 }
 
 function scrubEvent(event: TimedEvent): TimedEvent {
@@ -64,7 +62,7 @@ function scrubEvent(event: TimedEvent): TimedEvent {
 
 /** `span` with nothing §6 forbids, as a new `ReadableSpan` (the SDK's own is not rewritten). */
 export function scrubSpan(span: ReadableSpan): ReadableSpan {
-  const { attributes, dropped } = scrubAttributes(span.attributes)
+  const attributes = scrubAttributes(span.attributes)
   const events = span.events.map(scrubEvent)
   const exceptionType = events
     .map((event) => event.attributes?.['exception.type'])
@@ -87,7 +85,7 @@ export function scrubSpan(span: ReadableSpan): ReadableSpan {
     ended: span.ended,
     resource: span.resource,
     instrumentationScope: span.instrumentationScope,
-    droppedAttributesCount: span.droppedAttributesCount + dropped,
+    droppedAttributesCount: span.droppedAttributesCount,
     droppedEventsCount: span.droppedEventsCount,
     droppedLinksCount: span.droppedLinksCount,
   }

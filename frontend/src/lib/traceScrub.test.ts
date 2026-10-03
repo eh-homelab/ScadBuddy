@@ -134,7 +134,7 @@ describe('scrubSpan', () => {
     expect(scrubbed.attributes['http.url']).toBe('http://localhost:5173/m/box')
   })
 
-  it('caps the name and arrays the SDK limits cannot, and counts each capped array', () => {
+  it('caps the name and arrays the SDK limits cannot, without counting a shortened array as dropped', () => {
     const [span] = record((tracer) => {
       tracer
         .startSpan('x'.repeat(SPAN_NAME_MAX + 1), {
@@ -146,7 +146,7 @@ describe('scrubSpan', () => {
     expect(scrubbed.name).toHaveLength(SPAN_NAME_MAX)
     expect(scrubbed.attributes['many']).toHaveLength(ARRAY_ITEMS_MAX)
     expect(scrubbed.attributes['few']).toEqual([1, 2])
-    expect(scrubbed.droppedAttributesCount).toBe(span!.droppedAttributesCount + 1)
+    expect(scrubbed.droppedAttributesCount).toBe(span!.droppedAttributesCount)
   })
 
   it('keeps the span context, so the exported span is still the one that was made', () => {
