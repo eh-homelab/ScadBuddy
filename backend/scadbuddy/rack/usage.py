@@ -281,6 +281,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+#: An archive's ``status`` once its print has ended, however it ended (spec §10).
+SETTLED_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 async def record_settled(
     output_id: str,
     *,
@@ -290,10 +294,11 @@ async def record_settled(
     now: Callable[[], datetime] = _now,
 ) -> int:
     """One ``rack_nozzle_prints`` row per linked archive and picked group (spec §4); the
-    rows written. Every archive counts, whatever the print's outcome: the hotend wore
-    either way (spec §10). An archive linked by hash has no queue item and is not
-    counted. Idempotent, so a settle seen twice writes nothing the second time. Each
-    failure is logged by type and ids and skipped; nothing is retried."""
+    rows written. Every ended archive counts, whatever the print's outcome: the hotend
+    wore either way (spec §10). One still running is left for its own settle. An
+    archive linked by hash has no queue item and is not counted. Idempotent, so a
+    settle seen twice writes nothing the second time. Each failure is logged by type
+    and ids and skipped; nothing is retried."""
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -313,6 +318,10 @@ async def record_settled(
             continue
         try:
             archive = await client.archive(archive_id)
+            if archive.status not in SETTLED_STATUSES:
+                # Another print of this output, still running: its own settle counts it,
+                # with its real time, which DO NOTHING would never let in after this.
+                continue
             seconds = (
                 archive.actual_time_seconds
                 if archive.actual_time_seconds is not None

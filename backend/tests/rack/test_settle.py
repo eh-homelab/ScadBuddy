@@ -77,10 +77,18 @@ async def test_each_linked_archive_of_a_picked_item_is_one_print(store: RackUsag
     """A ``quantity`` 2 item: two archives, two prints."""
     archives = Archives(
         ArchiveDetail(
-            id=101, actual_time_seconds=600, print_time_seconds=900, filament_used_grams=5.0
+            status="completed",
+            id=101,
+            actual_time_seconds=600,
+            print_time_seconds=900,
+            filament_used_grams=5.0,
         ),
         ArchiveDetail(
-            id=102, actual_time_seconds=None, print_time_seconds=900, filament_used_grams=None
+            status="completed",
+            id=102,
+            actual_time_seconds=None,
+            print_time_seconds=900,
+            filament_used_grams=None,
         ),
     )
     assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 2
@@ -99,7 +107,7 @@ async def test_a_failed_or_cancelled_print_with_an_archive_still_counts(
 
 
 async def test_a_second_settle_of_the_same_print_changes_nothing(store: RackUsageStore) -> None:
-    archives = Archives(ArchiveDetail(id=101, actual_time_seconds=600))
+    archives = Archives(ArchiveDetail(id=101, status="completed", actual_time_seconds=600))
     await settle(store, Links(link(101, 51)), archives)
     assert await settle(store, Links(link(101, 51)), archives) == 0
     assert (await store.usage([A]))[A].prints == 1
@@ -117,22 +125,44 @@ async def test_a_second_print_of_one_output_counts_only_its_own_archives(
 ) -> None:
     """Review Focus 5: the second settle walks the first print's archive too."""
     await settle(
-        store, Links(link(101, 51)), Archives(ArchiveDetail(id=101, actual_time_seconds=60))
+        store,
+        Links(link(101, 51)),
+        Archives(ArchiveDetail(id=101, status="completed", actual_time_seconds=60)),
     )
     await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
     archives = Archives(
-        ArchiveDetail(id=101, actual_time_seconds=9999),
-        ArchiveDetail(id=102, actual_time_seconds=40),
+        ArchiveDetail(id=101, status="completed", actual_time_seconds=9999),
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40),
     )
     assert await settle(store, Links(link(101, 51), link(102, 52)), archives) == 1
     usage = (await store.usage([A]))[A]
     assert (usage.prints, usage.print_seconds) == (2, 100)
 
 
+@pytest.mark.parametrize("status", ["printing", "paused", None])
+async def test_another_print_still_running_is_left_for_its_own_settle(
+    store: RackUsageStore, status: str | None
+) -> None:
+    """claude-review on #1043, finding 1: the output's other print, still running, is not
+    credited with its estimate (``DO NOTHING`` would freeze it); its own settle counts it."""
+    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    running = ArchiveDetail(id=101, status=status, print_time_seconds=9999, filament_used_grams=9.0)
+    done = ArchiveDetail(id=102, status="completed", actual_time_seconds=40)
+    links = Links(link(101, 51), link(102, 52))
+    assert await settle(store, links, Archives(running, done)) == 1
+    assert (await store.usage([A]))[A].print_seconds == 40
+
+    finished = ArchiveDetail(id=101, status="completed", actual_time_seconds=600)
+    assert await settle(store, links, Archives(finished, done)) == 1
+    assert (await store.usage([A]))[A].print_seconds == 640
+
+
 async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    archives = Archives(ArchiveDetail(id=102, actual_time_seconds=40), failing={101})
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), failing={101}
+    )
     with caplog.at_level(logging.DEBUG):
         assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 1
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
@@ -206,7 +236,13 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     )
     respx.get(f"{API}/archives/101").mock(
         return_value=httpx.Response(
-            200, json={"id": 101, "actual_time_seconds": 75, "filament_used_grams": 1.5}
+            200,
+            json={
+                "id": 101,
+                "status": "completed",
+                "actual_time_seconds": 75,
+                "filament_used_grams": 1.5,
+            },
         )
     )
 

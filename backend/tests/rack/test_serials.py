@@ -65,7 +65,7 @@ class Archives:
     async def archive(self, archive_id: int) -> ArchiveDetail:
         if archive_id == 101:
             raise ApiError(503, f"archive read failed for hotend {INVENTED_SERIALS[3]}")
-        return ArchiveDetail(id=archive_id, actual_time_seconds=60)
+        return ArchiveDetail(id=archive_id, status="completed", actual_time_seconds=60)
 
 
 class Links:
