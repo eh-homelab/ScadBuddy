@@ -2021,6 +2021,34 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(runs.bodies[0]).toMatchObject({ rack_algorithm: null })
   })
 
+  it('ignores a save that fails after the dialog was closed', async () => {
+    // #1086 review: a PUT still in flight at close() would land its failure on the next
+    // session and say an algorithm nobody chose there was not remembered.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', async () => {
+        await held
+        return HttpResponse.json({ title: 'Service Unavailable', status: 503 }, { status: 503 })
+      }),
+    )
+    const puts = watch('PUT', '/rack-algorithm')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(puts.bodies.length).toBe(1))
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await loaded()
+    if (!screen.queryByLabelText('Rack algorithm')) await showAdvanced()
+    await screen.findByLabelText('Rack algorithm')
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')

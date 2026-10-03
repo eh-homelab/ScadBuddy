@@ -140,8 +140,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const [rackPosition, setRackPosition] = useState<number | null>(null)
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
+  /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
+   *  report its failure on the next one (#1086 review). */
+  const algorithmSession = useRef(0)
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
+    algorithmSession.current += 1
     setChosenAlgorithm(null)
     setRackPosition(null)
     setAlgorithmUnsaved(false)
@@ -158,8 +162,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   function changeRackAlgorithm(next: RackAlgorithm) {
     setChosenAlgorithm(next)
     setAlgorithmUnsaved(false)
+    const session = algorithmSession.current
     if (printerId !== null)
-      void api.putPrinterRackAlgorithm(printerId, next).catch(() => setAlgorithmUnsaved(true))
+      void api.putPrinterRackAlgorithm(printerId, next).catch(() => {
+        if (algorithmSession.current === session) setAlgorithmUnsaved(true)
+      })
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
@@ -347,6 +354,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setOptions({})
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
+    algorithmSession.current += 1
     setChosenAlgorithm(null)
     setAlgorithmUnsaved(false)
     runPrint.reset()
