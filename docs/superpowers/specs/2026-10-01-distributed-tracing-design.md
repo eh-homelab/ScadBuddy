@@ -472,6 +472,11 @@ not copied from that module, which has no such list:
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
   is configured; URLs are recorded without the query);
+- the request path: a segment is data (a file path a user chose, a photo
+  filename Bambuddy returned, whatever the SPA fallback was asked for), so the
+  route's template stands in for it (`http.target`, `url.path`, and after the
+  `scheme://host` of `http.url`, `url.full`), and a request with no route
+  records no path at all;
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
@@ -530,8 +535,13 @@ before it leaves the process. It:
 - replaces `exception.stacktrace` with its frame lines only (Python: the
   `File "…", line N, in f` lines; Node: the `at …` lines). A formatted
   traceback otherwise ends with, and for chained exceptions repeats, the
-  messages;
+  messages. A message can hold frame-shaped text, so a Python frame is kept only
+  when its file exists, its line is in that file, and its function name is
+  `<module>`, a lambda or comprehension, or a `def`/`class` name in that file's
+  source (a `<frozen …>`, `<string>` or `<stdin>` frame keeps only path and line);
 - keeps `exception.type`;
+- drops every captured header (`http.request.header.*`,
+  `http.response.header.*`), whatever the instrumentation's capture variables say;
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 

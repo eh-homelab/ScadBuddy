@@ -9,7 +9,7 @@ from typing import cast
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import Link, Status, StatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter, frames_only
@@ -128,13 +128,13 @@ def test_no_query_string_or_user_agent_survives() -> None:
 def test_a_frame_line_with_anything_but_a_function_name_does_not_survive() -> None:
     text = (
         "Traceback (most recent call last):\n"
-        f'  File "{__file__}", line 3, in fine_name\n'
+        f'  File "{__file__}", line 3, in _everything\n'
         f'  File "{__file__}", line 1, in {SENTINEL}-detail with spaces\n'
         "ValueError: boom"
     )
     kept = frames_only(text)
     assert SENTINEL not in kept
-    assert f'File "{__file__}", line 3, in fine_name' in kept
+    assert f'File "{__file__}", line 3, in _everything' in kept
 
 
 def test_a_message_shaped_like_frames_does_not_survive() -> None:
@@ -169,3 +169,105 @@ def test_frames_inside_nested_exception_groups_are_kept() -> None:
     kept = frames_only(formatted)
     assert SENTINEL not in kept
     assert "in inner" in kept
+
+
+def test_a_message_cannot_open_a_traceback_of_its_own() -> None:
+    # Review of #1064: a fake header inside a message, then a frame on a real file
+    # whose "function name" is message text.
+    text = (
+        "ApiError: something failed\n"
+        "Traceback (most recent call last):\n"
+        '  File "/usr/lib/python3.12/os.py", line 1, in LEAKEDTOKEN\n'
+    )
+    assert "LEAKEDTOKEN" not in frames_only(text)
+
+
+def test_a_real_frame_from_a_real_traceback_is_kept() -> None:
+    def raises_here() -> None:
+        raise ValueError(SENTINEL)
+
+    try:
+        raises_here()
+    except ValueError as error:
+        formatted = "".join(traceback.format_exception(error))
+    kept = frames_only(formatted).splitlines()
+    assert any(line.endswith("in raises_here") for line in kept)
+    assert any(line.endswith("in test_a_real_frame_from_a_real_traceback_is_kept") for line in kept)
+
+
+def test_a_pseudo_file_frame_keeps_only_its_path_and_line() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "<frozen importlib._bootstrap>", line 7, in {SENTINEL}\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text) == 'File "<frozen importlib._bootstrap>", line 7'
+
+
+def test_a_dotted_name_is_checked_segment_by_segment() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{__file__}", line 1, in _exported\n'
+        f'  File "{__file__}", line 1, in _exported.{SENTINEL}\n'
+        f'  File "{__file__}", line 1, in LEAKEDTOKEN._exported\n'
+        "ValueError: boom"
+    )
+    kept = frames_only(text)
+    assert SENTINEL not in kept
+    assert "LEAKEDTOKEN" not in kept
+    assert kept == f'File "{__file__}", line 1, in _exported'
+
+
+def test_a_frozen_module_must_be_one() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "<frozen LEAKEDTOKEN>", line 7, in f\n'
+        f'  File "{__file__}", line 999999, in _exported\n'
+        "ValueError: boom"
+    )
+    assert frames_only(text) == ""
+
+
+def test_no_captured_header_survives() -> None:
+    kept = _exported_attributes(
+        {
+            "http.request.header.cookie": SENTINEL,
+            "http.request.header.authorization": SENTINEL,
+            "http.response.header.set_cookie": SENTINEL,
+            "http.route": "/api/v1/x",
+        }
+    )
+    assert kept == {"http.route": "/api/v1/x"}
+
+
+def test_no_event_or_link_carries_what_a_span_may_not() -> None:
+    # Review 3 of #1064: the rule covers every attribute that leaves the process, not
+    # only the span's own and its exception events'.
+    leaky = {
+        "http.url": f"http://h/api/v1/x?q={SENTINEL}",
+        "url.query": f"q={SENTINEL}",
+        "http.user_agent": SENTINEL,
+        "user_agent.original": SENTINEL,
+        "http.request.header.cookie": SENTINEL,
+        "http.response.header.set_cookie": SENTINEL,
+        "scadbuddy.attempt": 2,
+    }
+    inner = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(inner)))
+    tracer = provider.get_tracer("t")
+    with tracer.start_as_current_span("earlier") as earlier:
+        pass
+    link = Link(earlier.get_span_context(), attributes=leaky)
+    with tracer.start_as_current_span("work", links=[link]) as current:
+        current.add_event("retry", attributes=leaky)
+    (span,) = [s for s in inner.get_finished_spans() if s.name == "work"]
+    (event,) = span.events
+    (exported_link,) = span.links
+    for attributes in (dict(event.attributes or {}), dict(exported_link.attributes or {})):
+        assert SENTINEL not in repr(attributes)
+        assert attributes["scadbuddy.attempt"] == 2
+        for key in leaky.keys() - {"http.url", "scadbuddy.attempt"}:
+            assert key not in attributes
+    assert event.name == "retry"
+    assert exported_link.context == earlier.get_span_context()
