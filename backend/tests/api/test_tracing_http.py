@@ -88,8 +88,8 @@ def test_a_server_span_carries_only_known_attributes(
 
 @pytest.mark.parametrize(
     ("path", "status"),
-    # The relay route (spec §5.2) does not exist yet: its 404 is still not traced.
-    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 404)],
+    # The relay route (spec §5.2) takes only POST: a GET's 405 is not traced either.
+    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 405)],
 )
 def test_the_infrastructure_paths_are_not_traced(
     client: TestClient, spans: InMemorySpanExporter, path: str, status: int
