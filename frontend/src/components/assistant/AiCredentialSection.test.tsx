@@ -363,6 +363,86 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(rows()).toHaveLength(2)
   })
 
+  it('clears what was typed when the kind changes, so a secret is never sent as another kind', async () => {
+    const creates = bodiesOf('POST', entries)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Gateway (base URL and token)' }))
+    await user.type(screen.getByLabelText('Base URL'), 'https://other.example/anthropic')
+    await user.type(screen.getByLabelText('Gateway token'), 'gw-token-SECRET')
+    await user.click(screen.getByRole('radio', { name: 'Anthropic API' }))
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    await user.click(screen.getByRole('radio', { name: 'Gateway (base URL and token)' }))
+    expect(screen.getByLabelText('Base URL')).toHaveValue('')
+    expect(screen.getByLabelText('Gateway token')).toHaveValue('')
+    expect(creates).toEqual([])
+  })
+
+  it('re-reads the list when Test finds the credential deleted elsewhere', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
+    await user.click(screen.getByRole('button', { name: `Test ${GATEWAY}` }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no such credential')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+  })
+
+  it('closes the delete dialog when the credential was already deleted elsewhere', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Delete ${GATEWAY}` }))
+    const dialog = await screen.findByRole('dialog')
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
+    await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('alert')).toHaveTextContent('no such credential')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+  })
+
+  it('keeps the delete dialog open on Escape while the delete runs', async () => {
+    let finish: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    server.use(
+      http.delete(`${entries}/default`, async () => {
+        await held
+        return HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 })
+      }),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    finish()
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+  })
+
+  it('offers no Reset on a key the agent cannot decrypt', async () => {
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', usable: false, status: 'disabled' })])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByText(/cannot decrypt this key/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
+  })
+
+  it('tries again when the read after a cooldown fails', async () => {
+    const until = new Date(Date.now() + 500).toISOString()
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: until })])
+    let reads = 0
+    server.use(
+      http.get(entries, () => {
+        reads += 1
+        // The first timed read (the second read in all) fails, as if the agent were restarting.
+        return reads === 2 ? HttpResponse.json({ detail: 'Bad Gateway' }, { status: 502 }) : undefined
+      }),
+    )
+    renderPage(<AiCredentialSection />)
+    expect((await screen.findAllByTestId('ai-credential'))[0]).toHaveTextContent(/Rate limited until/)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 6000 })
+    expect(reads).toBeGreaterThanOrEqual(3)
+  }, 10_000)
+
   it('says why it cannot save, and disables Add and Replace', async () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })], false)
     const { user } = renderPage(<AiCredentialSection />)

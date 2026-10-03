@@ -125,8 +125,10 @@ export function AiCredentialSection() {
   // The agent works a cooldown out at read time, so read again just after the earliest one ends.
   // This browser's clock may run ahead of the database's, which decides: a cooldown that has
   // passed here but still comes back is read again after 1 s, 2 s, 4 s… up to 30 s.
-  const { data: listed, refresh } = list
+  const { data: listed, setData } = list
   const overdue = useRef({ until: Number.NaN, tries: 0 })
+  // Bumped when a timed re-read fails, so the effect schedules the next one.
+  const [missed, setMissed] = useState(0)
   useEffect(() => {
     const ends = (listed?.credentials ?? [])
       .filter((c) => c.status === 'cooling_down' && c.cooldown_until)
@@ -134,9 +136,10 @@ export function AiCredentialSection() {
       .filter((t) => Number.isFinite(t))
     if (ends.length === 0) return
     const earliest = Math.min(...ends)
+    // `missed` counts as overdue: the read failed, so back off whatever the clock says.
     const left = earliest - Date.now()
     let wait: number
-    if (left > 0) {
+    if (left > 0 && missed === 0) {
       overdue.current = { until: Number.NaN, tries: 0 }
       wait = Math.min(left + REFRESH_SLACK_MS, MAX_TIMER_MS)
     } else {
@@ -144,9 +147,17 @@ export function AiCredentialSection() {
       overdue.current = { until: earliest, tries }
       wait = Math.min(OVERDUE_FIRST_MS * 2 ** tries, OVERDUE_MAX_MS)
     }
-    const timer = setTimeout(() => refresh(), wait)
+    const timer = setTimeout(() => {
+      api.listAiCredentials().then(
+        (next) => {
+          setMissed(0)
+          setData(next)
+        },
+        () => setMissed((n) => n + 1),
+      )
+    }, wait)
     return () => clearTimeout(timer)
-  }, [listed, refresh])
+  }, [listed, setData, missed])
 
   if (notDeployed(list.error)) return null
   const current = list.data
@@ -179,7 +190,7 @@ export function AiCredentialSection() {
     run: () => Promise<T>,
     done: string | null | ((answer: T) => string),
     fallback: string,
-  ): Promise<boolean> {
+  ): Promise<{ ok: true } | { ok: false; error: unknown }> {
     setBusy(next)
     setError(null)
     setNotice(null)
@@ -190,15 +201,19 @@ export function AiCredentialSection() {
       if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
       if (done) setNotice(typeof done === 'function' ? done(answer) : done)
       void recheckAiAvailability({ force: true })
-      return true
+      return { ok: true }
     } catch (caught) {
       setError(describeError(caught, fallback))
-      // A stale order or a credential deleted elsewhere: show what the agent has now.
-      if (caught instanceof ApiError && (caught.status === 409 || caught.status === 404)) list.refresh()
-      return false
+      refreshIfStale(caught)
+      return { ok: false, error: caught }
     } finally {
       setBusy(null)
     }
+  }
+
+  /** A stale order, a credential deleted elsewhere, or a full list: show what the agent has now. */
+  function refreshIfStale(caught: unknown) {
+    if (caught instanceof ApiError && (caught.status === 409 || caught.status === 404)) list.refresh()
   }
 
   function forgetTest(id: string) {
@@ -225,6 +240,7 @@ export function AiCredentialSection() {
       void recheckAiAvailability({ force: true })
     } catch (caught) {
       setError(describeError(caught, 'Could not save the credential'))
+      refreshIfStale(caught)
     } finally {
       setBusy(null)
     }
@@ -257,6 +273,7 @@ export function AiCredentialSection() {
           ? describeError(caught, 'Could not test the credential')
           : `${describeError(caught, 'A test ran moments ago')} (wait ${wait} s).`,
       )
+      refreshIfStale(caught)
     } finally {
       setBusy(null)
     }
@@ -271,7 +288,7 @@ export function AiCredentialSection() {
       (answer) => `Saved a new key for credential ${position} (${nameOf(answer)}).`,
       'Could not save the key',
     )
-    if (saved) {
+    if (saved.ok) {
       setReplacing(null)
       setReplacement('')
     }
@@ -286,7 +303,9 @@ export function AiCredentialSection() {
         : `Deleted ${nameOf(entry)}.`,
       'Could not delete the credential',
     )
-    if (deleted) setConfirmDelete(null)
+    // Gone already (deleted elsewhere): what the user asked for has happened, and the list is re-read.
+    const gone = !deleted.ok && deleted.error instanceof ApiError && deleted.error.status === 404
+    if (deleted.ok || gone) setConfirmDelete(null)
   }
 
   const isBusy = (id: string, action?: NonNullable<Busy>['action']) =>
@@ -362,7 +381,7 @@ export function AiCredentialSection() {
                     {isBusy(entry.id, 'test') && <Spinner />}
                     Test
                   </Button>
-                  {entry.status !== 'active' && (
+                  {entry.status !== 'active' && entry.usable && (
                     <Button
                       size="sm"
                       onClick={() =>
@@ -466,7 +485,12 @@ export function AiCredentialSection() {
                 name="ai-credential-kind"
                 value={option}
                 checked={kind === option}
-                onChange={() => setKind(option)}
+                onChange={() => {
+                  // A secret typed for one kind must not be sent as another.
+                  setKind(option)
+                  setSecret('')
+                  setBaseUrl('')
+                }}
               />
               {KIND_OPTION[option]}
             </label>
@@ -526,6 +550,7 @@ export function AiCredentialSection() {
         open={confirmDelete !== null}
         title={`Delete ${confirmDelete ? nameOf(confirmDelete) : 'the credential'}?`}
         onClose={() => {
+          if (busy?.action === 'delete') return
           setConfirmDelete(null)
           setError(null)
         }}

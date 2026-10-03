@@ -301,11 +301,8 @@ fallback when there is no UI.
 
 The routes without `/entries` are the single-credential routes from #1000: they act on
 the first credential by priority, for scripts written against them. The UI no longer
-uses them.
+uses them; the `/entries` and `/order` routes manage every credential (#1093).
 
-The routes without `/entries` are the single-credential routes that section uses: they
-act on the first credential by priority. The `/entries` and `/order` routes manage every
-credential (#1093).
 
 | Route | Guarded | What it does |
 |---|---|---|
