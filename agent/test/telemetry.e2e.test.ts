@@ -156,6 +156,9 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
     expect(hits.find((h) => h.path === '/api/v1/models')?.traceparent).toBe(
       `00-${seg0.spanContext().traceId}-${request!.spanContext().spanId}-01`,
     )
+    // Kept as a check, not as the guard: the CLI is a separate process with an
+    // explicit env, so this cannot fail. The guard is that env's exact keys,
+    // with no OTEL_* among them (test/run.test.ts, "puts the credential in env only").
     expect(fake.requests.every((r) => r.headers.traceparent === undefined)).toBe(true)
     expect(exportedText(spans)).not.toContain(SENTINEL)
   }, 60_000)
