@@ -22,7 +22,7 @@ import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
 import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
-import { withSpan } from '../telemetry/trace.js'
+import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
@@ -135,13 +135,35 @@ function jsonRpcError(status: number, code: number, message: string): Response {
   return Response.json({ jsonrpc: '2.0', error: { code, message }, id: null }, { status })
 }
 
-/** The JSON-RPC method of a POST, for its span name; `unknown` for anything else. Reads a clone. */
+// What a client may send an MCP server (the SDK's types.ts). A span name is
+// only ever one of these or `unknown`, never caller-chosen text.
+const MCP_METHODS: ReadonlySet<string> = new Set([
+  'initialize',
+  'ping',
+  'tools/list',
+  'tools/call',
+  'resources/list',
+  'resources/read',
+  'resources/templates/list',
+  'resources/subscribe',
+  'resources/unsubscribe',
+  'prompts/list',
+  'prompts/get',
+  'completion/complete',
+  'logging/setLevel',
+  'notifications/initialized',
+  'notifications/cancelled',
+  'notifications/progress',
+  'notifications/roots/list_changed',
+])
+
+/** The JSON-RPC method of a POST, for its span name; `unknown` unless it is a known MCP method. Reads a clone. A batch is named after its first method. */
 export async function mcpMethodOf(request: Request): Promise<string> {
   try {
     const body: unknown = await request.clone().json()
     const first: unknown = Array.isArray(body) ? body[0] : body
     const method = (first as { method?: unknown } | undefined)?.method
-    return typeof method === 'string' && /^[A-Za-z0-9_./-]{1,64}$/.test(method) ? method : 'unknown'
+    return typeof method === 'string' && MCP_METHODS.has(method) ? method : 'unknown'
   } catch {
     return 'unknown'
   }
@@ -163,11 +185,43 @@ async function traced(request: Request, handle: () => Promise<Response>): Promis
         keys: (headers) => [...headers.keys()],
         get: (headers, key) => headers.get(key) ?? undefined,
       })
-  return withSpan(`agent.mcp/${method}`, { parent, attributes: { 'rpc.method': method } }, async (span) => {
-    const response = await handle()
+  const span = tracer().startSpan(`agent.mcp/${method}`, { attributes: { 'rpc.method': method } }, parent)
+  try {
+    const response = await context.with(trace.setSpan(parent, span), handle)
     span.setAttribute('http.response.status_code', response.status)
+    // An SSE answer is returned before the tool has finished: the span ends
+    // when its body does (or is cancelled), so it outlives its children. The
+    // body is passed through chunk by chunk, never buffered.
+    if (response.body && response.headers.get('content-type')?.includes('text/event-stream')) {
+      const reader = response.body.getReader()
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read()
+            if (done) {
+              span.end()
+              controller.close()
+            } else controller.enqueue(value)
+          } catch (err) {
+            recordFailure(span, err)
+            span.end()
+            controller.error(err)
+          }
+        },
+        async cancel(reason) {
+          span.end()
+          await reader.cancel(reason)
+        },
+      })
+      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
+    }
+    span.end()
     return response
-  })
+  } catch (err) {
+    recordFailure(span, err)
+    span.end()
+    throw err
+  }
 }
 
 /** What /mcp shares with the rest of the app: the origin allowlist and how to read the peer. */

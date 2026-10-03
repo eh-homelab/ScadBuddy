@@ -180,7 +180,11 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
               lookup,
             })
             span.setAttribute('scadbuddy.outcome', done.outcome)
-            if (done.outcome === 'error') span.setStatus({ code: SpanStatusCode.ERROR })
+            // A ToolRun carries no error class, only a message (never recorded, §6).
+            if (done.outcome === 'error') {
+              span.setStatus({ code: SpanStatusCode.ERROR })
+              span.setAttribute('scadbuddy.failure_class', 'ToolError')
+            }
             return done
           },
         )

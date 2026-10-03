@@ -66,6 +66,36 @@ describe('/mcp spans', () => {
     expect(await mcpMethodOf(post('[{"jsonrpc":"2.0","method":"notifications/initialized"}]'))).toBe('notifications/initialized')
     expect(await mcpMethodOf(post('{"method":"x y <script>"}'))).toBe('unknown')
     expect(await mcpMethodOf(post('not json'))).toBe('unknown')
+    for (const method of ['a1', 'tools/call2', 'x'.repeat(64), 'notifications/made_up']) {
+      expect(await mcpMethodOf(post(JSON.stringify({ jsonrpc: '2.0', id: 1, method })))).toBe('unknown')
+    }
+  })
+
+  it('the mcp span outlives its tool span, whatever the response framing', async () => {
+    const t = testApp()
+    const { token } = await t.tokens.mint({ name: 'test', tier: 'read' })
+    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}` } })
+    clients.push(client)
+    await client.callTool({ name: 'list_models', arguments: {} })
+    await client.close()
+    await flushTracing()
+    const [call] = named('agent.mcp/tools/call')
+    const [tool] = named('agent.tool/list_models')
+    const ms = (s: { endTime: [number, number] }) => s.endTime[0] * 1e3 + s.endTime[1] / 1e6
+    expect(ms(call!)).toBeGreaterThanOrEqual(ms(tool!))
+  })
+
+  it('a tool error outcome carries a failure class, never a message', async () => {
+    server.use(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json({ detail: 'SECRET-DETAIL' }, { status: 500 })))
+    const t = testApp()
+    const { token } = await t.tokens.mint({ name: 'test', tier: 'read' })
+    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}` } })
+    clients.push(client)
+    expect((await client.callTool({ name: 'list_models', arguments: {} })).isError).toBe(true)
+    await flushTracing()
+    const [tool] = named('agent.tool/list_models')
+    expect(tool!.attributes).toMatchObject({ 'scadbuddy.outcome': 'error', 'scadbuddy.failure_class': 'ToolError' })
+    expect(JSON.stringify(tool)).not.toContain('SECRET-DETAIL')
   })
 })
 
