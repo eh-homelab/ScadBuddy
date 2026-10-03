@@ -27,7 +27,7 @@ import os
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import Final
 
 import httpx
@@ -129,14 +129,18 @@ class TraceForwarder:
         finally:
             self.closing = True
             task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
             try:
+                # Not `await task`: that would swallow a cancellation of the lifespan.
+                await asyncio.wait({task})
                 await self._drain()
             finally:
                 await self._client.aclose()
                 self._client = None
                 self._wake = None
+            failure = None if task.cancelled() else task.exception()
+            if failure is not None:
+                logger.error("the browser trace forwarder died", exc_info=failure)
+                raise failure
 
     def _pop(self) -> bytes:
         batch = self._pending.popleft()

@@ -25,6 +25,8 @@ type Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 TRUSTED_PROXIES_VAR: Final = "SCADBUDDY_TRUSTED_PROXIES"
 _MAPPED: Final = re.compile(r"^::ffff:(\d+\.\d+\.\d+\.\d+)$", re.IGNORECASE)
+#: ``::ffff:0:0/96``, the IPv4-mapped range: an entry inside it names an IPv4 network.
+_MAPPED_PREFIX: Final = 96
 _PREFIX: Final = re.compile(r"^[0-9]+$")
 
 
@@ -41,7 +43,17 @@ def _network(entry: str) -> Network | None:
     prefix = prefixes[0] if prefixes else str(parsed.max_prefixlen)
     if len(prefixes) > 1 or not _PREFIX.match(prefix) or int(prefix) > parsed.max_prefixlen:
         return None
-    return ipaddress.ip_network(f"{parsed}/{prefix}", strict=False)
+    network = ipaddress.ip_network(f"{parsed}/{prefix}", strict=False)
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        # Peers are unwrapped from ``::ffff:a.b.c.d`` before matching (`plain_address`),
+        # so a mapped entry is an IPv4 network. Wider than the mapped range (/96) it
+        # would name IPv6 space the entry's author did not mean: refused.
+        if int(prefix) < _MAPPED_PREFIX:
+            return None
+        return ipaddress.ip_network(
+            f"{parsed.ipv4_mapped}/{int(prefix) - _MAPPED_PREFIX}", strict=False
+        )
+    return network
 
 
 def parse_cidr_list(raw: str | None, name: str = TRUSTED_PROXIES_VAR) -> tuple[Network, ...]:

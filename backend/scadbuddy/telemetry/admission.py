@@ -125,10 +125,14 @@ class RelayLimits:
         """One batch from ``client``, or a 429 whose ``Retry-After`` is the seconds until
         the bucket that refused it holds one again."""
         limit = self._client(client)
-        if not limit.take():
+        # Check both, then take from both: a refusal by the process bucket must not
+        # spend the client's own token. ``retry_after() > 0`` is "no token now".
+        if limit.retry_after() > 0:
             raise _too_many("this client is over the relay's rate limit", limit)
-        if not self._process.take():
+        if self._process.retry_after() > 0:
             raise _too_many("the relay is over its overall rate limit", self._process)
+        limit.take()
+        self._process.take()
 
 
 __all__ = [

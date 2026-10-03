@@ -15,6 +15,7 @@ through to the mount and be served ``index.html``.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Final
 
@@ -62,12 +63,13 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
     peer = request.client.host if request.client is not None else None
     relay.limits.take(relay_client(request.headers, peer, settings))
     try:
-        batch = prepare(await request.body())
+        batch = await asyncio.to_thread(prepare, await request.body())
     except TooManySpansError as error:
         raise ApiError(413, f"a trace batch holds at most {MAX_SPANS} spans") from error
     except PayloadError as error:
         raise ApiError(400, "the body is not an OTLP/JSON trace export") from error
-    relay.forwarder.offer(batch)
+    if batch is not None:
+        relay.forwarder.offer(batch)
     return Response(status_code=204)
 
 

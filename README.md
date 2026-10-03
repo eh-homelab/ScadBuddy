@@ -785,10 +785,12 @@ problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.m
 `POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
 (`backend/scadbuddy/telemetry/`) forwards it in the background to
 `$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`. It accepts only the UI's own origins (the
-public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does), at
+public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
+`same-origin`, so a page on another allowed origin is refused), at
 most 256 KiB and 512 spans a batch, and rewrites every batch's resource to
 `service.name=scadbuddy-web`. Without an endpoint, or with `OTEL_SDK_DISABLED=true`, it
-answers `204` with `X-ScadBuddy-Tracing: off` and the page stops exporting. Its rate
+answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
+export, arrives with row 4 of #988). Its rate
 limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
 client), so with more than one API replica the overall ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers

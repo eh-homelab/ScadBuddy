@@ -11,8 +11,16 @@ from scadbuddy.telemetry.payload import PayloadError, TooManySpansError, prepare
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
 
 
+def _prepared(body: bytes) -> bytes:
+    prepared = prepare(body)
+    assert prepared is not None
+    return prepared
+
+
 def forwarded(body: bytes) -> Json:
-    result: Json = json.loads(prepare(body))
+    forwarded_body = prepare(body)
+    assert forwarded_body is not None
+    result: Json = json.loads(forwarded_body)
     return result
 
 
@@ -163,7 +171,7 @@ def test_an_exception_keeps_its_type_and_frames_only() -> None:
     }
     status = {"code": 2, "message": SENTINEL}
     body = export(span(events=[event], status=status))
-    assert SENTINEL not in prepare(body).decode()
+    assert SENTINEL not in _prepared(body).decode()
     result = only_span(body)
     assert result["status"] == {"code": 2, "message": "TypeError"}
     (scrubbed,) = result["events"]
@@ -214,11 +222,11 @@ def test_a_lone_surrogate_is_forwarded_escaped() -> None:
     body = (
         '{"resourceSpans":[{"scopeSpans":[{"spans":[{' + ids + ',"name":"\\ud800"}]}]}]}'
     ).encode()
-    assert b"\\ud800" in prepare(body)
+    assert b"\\ud800" in _prepared(body)
 
 
 def _flat(body: bytes) -> str:
-    text = prepare(body).decode()
+    text = _prepared(body).decode()
     json.loads(text)
     assert SENTINEL not in text
     assert "NaN" not in text
@@ -314,18 +322,8 @@ def test_a_trailing_newline_is_not_a_valid_id(field: str) -> None:
 
 
 def test_a_trailing_newline_is_not_a_valid_id_or_time() -> None:
-    assert (
-        forwarded(export(span(spanId="c" * 16 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
-            "spans"
-        ]
-        == []
-    )
-    assert (
-        forwarded(export(span(traceId="c" * 32 + "\n")))["resourceSpans"][0]["scopeSpans"][0][
-            "spans"
-        ]
-        == []
-    )
+    assert prepare(export(span(spanId="c" * 16 + "\n"))) is None
+    assert prepare(export(span(traceId="c" * 32 + "\n"))) is None
     result = only_span(export(span(startTimeUnixNano="12\n")))
     assert "startTimeUnixNano" not in result
     link = {"traceId": TRACE_ID, "spanId": "c" * 16 + "\n"}
@@ -383,4 +381,65 @@ def test_prepare_raises_only_its_own_errors(body: bytes) -> None:
         out = prepare(body)
     except (PayloadError, TooManySpansError):
         return
-    json.loads(out)
+    if out is not None:
+        json.loads(out)
+
+
+def test_more_than_16_resource_spans_are_refused() -> None:
+    body = json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode()
+    with pytest.raises(PayloadError):
+        prepare(body)
+
+
+def test_more_than_64_scope_spans_in_total_are_refused() -> None:
+    scopes: list[Json] = [{} for _ in range(33)]
+    body = json.dumps({"resourceSpans": [{"scopeSpans": scopes}, {"scopeSpans": scopes}]}).encode()
+    with pytest.raises(PayloadError):
+        prepare(body)
+
+
+def test_a_body_whose_spans_are_all_invalid_forwards_nothing() -> None:
+    assert prepare(export(span(traceId="0" * 32), span(spanId="nope"))) is None
+    assert prepare(json.dumps({"resourceSpans": [{}, {"scopeSpans": [{}]}]}).encode()) is None
+
+
+def test_a_scope_or_resource_with_no_surviving_span_is_dropped() -> None:
+    body = json.dumps(
+        {
+            "resourceSpans": [
+                {"scopeSpans": [{"spans": [span(traceId="0" * 32)]}, {"spans": [span()]}]},
+                {"scopeSpans": [{"spans": [span(traceId="0" * 32)]}]},
+            ]
+        }
+    ).encode()
+    result = forwarded(body)
+    (resource,) = result["resourceSpans"]
+    (scope,) = resource["scopeSpans"]
+    assert len(scope["spans"]) == 1
+
+
+def test_the_output_of_a_largest_legal_body_stays_proportional() -> None:
+    scopes: list[Json] = [{} for _ in range(4)]
+    body = json.dumps({"resourceSpans": [{"scopeSpans": scopes} for _ in range(16)]}).encode()
+    assert prepare(body) is None
+    spans = [span() for _ in range(100)]
+    body = json.dumps(
+        {"resourceSpans": [{"scopeSpans": [{"spans": spans}]} for _ in range(5)]}
+    ).encode()
+    out = prepare(body)
+    assert out is not None
+    assert len(out) < 2 * len(body)
+
+
+def test_a_message_smuggled_into_the_stack_is_removed_before_frames_are_kept() -> None:
+    message = "a\n    at SECRET:1:2"
+    stack = "Error: a\n    at SECRET:1:2\n    at real (http://h/a.js:1:2)"
+    event = {
+        "name": "exception",
+        "attributes": [
+            string("exception.message", message),
+            string("exception.stacktrace", stack),
+        ],
+    }
+    (scrubbed,) = only_span(export(span(events=[event])))["events"]
+    assert scrubbed["attributes"] == [string("exception.stacktrace", "at real (http://h/a.js:1:2)")]
