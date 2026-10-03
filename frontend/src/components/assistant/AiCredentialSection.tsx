@@ -24,13 +24,17 @@ function describeError(cause: unknown, fallback: string): string {
 }
 
 /**
- * The agent is not deployed here: the ingress has no `/api/v1/ai` (404), or the agent
- * runs without its database (`routes/credentials.ts` NO_DATABASE). Anything else, such
- * as the database still applying migrations, is shown with a Retry.
+ * The agent is not deployed here, so the section hides:
+ * - nothing routes `/api/v1/ai/*` to it, and the backend's SPA fallback answers the read
+ *   with `200 index.html`, which fails to parse as JSON (`availability.ts` NOT_ROUTED), or
+ *   a proxy answers 404;
+ * - it runs without its database (agent `routes/credentials.ts` NO_DATABASE_CODE).
+ * Anything else, such as the database still applying migrations, is shown with a Retry.
  */
 function notDeployed(cause: Error | undefined): boolean {
+  if (cause instanceof SyntaxError) return true
   if (!(cause instanceof ApiError)) return false
-  return cause.status === 404 || (cause.status === 503 && cause.detail.startsWith('AI features need the database'))
+  return cause.status === 404 || (cause.status === 503 && cause.problem.code === 'no_database')
 }
 
 /** The wait a 429 asked for, in seconds, when it gave one. */
@@ -169,134 +173,134 @@ export function AiCredentialSection() {
 
   return (
     <Frame>
-        <div data-testid="ai-credential-current">
-          {current.configured && current.kind ? (
-            <p>
-              {KIND_LABEL[current.kind]}
-              {current.base_url && <span className="text-muted"> at {current.base_url}</span>}
-              {current.last4 && (
-                <span className="ml-2 font-mono text-muted" aria-label={`ending in ${current.last4}`}>
-                  ••••{current.last4}
-                </span>
-              )}
-              {current.updated_at && (
-                <span className="ml-2 text-[12px] text-muted" title={current.updated_at}>
-                  saved {timeAgo(current.updated_at)}
-                </span>
-              )}
-            </p>
-          ) : (
-            <p className="text-warn">No credential saved. The assistant stays off until one is.</p>
-          )}
-          {current.configured && !current.usable && (
-            <p className="mt-1 text-[12px] text-warn">
-              The agent cannot decrypt the saved secret (it was saved under another key, or in an old format).
-              Save it again.
-            </p>
-          )}
-          {!current.can_save && (
-            <p className="mt-1 text-[12px] text-warn">
-              Saving is not possible: {current.cannot_save_reason ?? 'the agent cannot store secrets'}.
-            </p>
-          )}
-        </div>
+      <div data-testid="ai-credential-current">
+        {current.configured && current.kind ? (
+          <p>
+            {KIND_LABEL[current.kind]}
+            {current.base_url && <span className="text-muted"> at {current.base_url}</span>}
+            {current.last4 && (
+              <span className="ml-2 font-mono text-muted" aria-label={`ending in ${current.last4}`}>
+                ••••{current.last4}
+              </span>
+            )}
+            {current.updated_at && (
+              <span className="ml-2 text-[12px] text-muted" title={current.updated_at}>
+                saved {timeAgo(current.updated_at)}
+              </span>
+            )}
+          </p>
+        ) : (
+          <p className="text-warn">No credential saved. The assistant stays off until one is.</p>
+        )}
+        {current.configured && !current.usable && (
+          <p className="mt-1 text-[12px] text-warn">
+            The agent cannot decrypt the saved secret (it was saved under another key, or in an old format).
+            Save it again.
+          </p>
+        )}
+        {!current.can_save && (
+          <p className="mt-1 text-[12px] text-warn">
+            Saving is not possible: {current.cannot_save_reason ?? 'the agent cannot store secrets'}.
+          </p>
+        )}
+      </div>
 
-        <form className="flex flex-col gap-3" onSubmit={(event) => void save(event)}>
-          <fieldset className="flex flex-wrap gap-4">
-            <legend className="mb-1 text-[12px] text-muted">{current.configured ? 'Replace with' : 'Save'}</legend>
-            {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
-              <label key={option} className="flex items-center gap-1.5">
-                <input
-                  type="radio"
-                  name="ai-credential-kind"
-                  value={option}
-                  checked={kindValue === option}
-                  onChange={() => setKind(option)}
-                />
-                {KIND_OPTION[option]}
-              </label>
-            ))}
-          </fieldset>
-          {kindValue === 'gateway' && (
-            <label className="flex flex-col gap-1">
-              Base URL
+      <form className="flex flex-col gap-3" onSubmit={(event) => void save(event)}>
+        <fieldset className="flex flex-wrap gap-4">
+          <legend className="mb-1 text-[12px] text-muted">{current.configured ? 'Replace with' : 'Save'}</legend>
+          {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
+            <label key={option} className="flex items-center gap-1.5">
               <input
-                type="url"
-                required
-                placeholder="https://gateway.example/anthropic"
-                value={baseUrlValue}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                className="sb-field max-w-md"
-                autoComplete="off"
+                type="radio"
+                name="ai-credential-kind"
+                value={option}
+                checked={kindValue === option}
+                onChange={() => setKind(option)}
               />
+              {KIND_OPTION[option]}
             </label>
-          )}
+          ))}
+        </fieldset>
+        {kindValue === 'gateway' && (
           <label className="flex flex-col gap-1">
-            {kindValue === 'gateway' ? 'Gateway token' : 'Anthropic API key'}
+            Base URL
             <input
-              type="password"
+              type="url"
               required
-              value={secret}
-              onChange={(event) => setSecret(event.target.value)}
-              placeholder={kindValue === 'gateway' ? 'token' : 'sk-ant-…'}
+              placeholder="https://gateway.example/anthropic"
+              value={baseUrlValue}
+              onChange={(event) => setBaseUrl(event.target.value)}
               className="sb-field max-w-md"
-              autoComplete="new-password"
-              spellCheck={false}
-              aria-describedby="ai-credential-help"
+              autoComplete="off"
             />
           </label>
-          <p id="ai-credential-help" className="text-[12px] text-muted">
-            Sent once to ScadBuddy&rsquo;s agent service, which stores it encrypted. It is never shown again; only
-            its last four characters are.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" size="sm" disabled={!canSubmit} aria-busy={saving}>
-              {saving && <Spinner />}
-              Save
-            </Button>
-            {current.configured && (
-              <>
-                <Button
-                  size="sm"
-                  onClick={() => void runTest()}
-                  disabled={testing || !current.usable}
-                  aria-busy={testing}
-                  aria-describedby="ai-credential-test-help"
-                >
-                  {testing && <Spinner />}
-                  Test
-                </Button>
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)} disabled={deleting}>
-                  Delete
-                </Button>
-              </>
-            )}
-          </div>
+        )}
+        <label className="flex flex-col gap-1">
+          {kindValue === 'gateway' ? 'Gateway token' : 'Anthropic API key'}
+          <input
+            type="password"
+            required
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
+            placeholder={kindValue === 'gateway' ? 'token' : 'sk-ant-…'}
+            className="sb-field max-w-md"
+            autoComplete="new-password"
+            spellCheck={false}
+            aria-describedby="ai-credential-help"
+          />
+        </label>
+        <p id="ai-credential-help" className="text-[12px] text-muted">
+          Sent once to ScadBuddy&rsquo;s agent service, which stores it encrypted. It is never shown again; only
+          its last four characters are.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="submit" variant="primary" size="sm" disabled={!canSubmit} aria-busy={saving}>
+            {saving && <Spinner />}
+            Save
+          </Button>
           {current.configured && (
-            <p id="ai-credential-test-help" className="text-[12px] text-muted">
-              Test sends one short prompt with the saved credential, so it spends a few tokens. One test per 10
-              seconds.
-            </p>
+            <>
+              <Button
+                size="sm"
+                onClick={() => void runTest()}
+                disabled={testing || !current.usable}
+                aria-busy={testing}
+                aria-describedby="ai-credential-test-help"
+              >
+                {testing && <Spinner />}
+                Test
+              </Button>
+              <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)} disabled={deleting}>
+                Delete
+              </Button>
+            </>
           )}
-        </form>
+        </div>
+        {current.configured && (
+          <p id="ai-credential-test-help" className="text-[12px] text-muted">
+            Test sends one short prompt with the saved credential, so it spends a few tokens. One test per 10
+            seconds.
+          </p>
+        )}
+      </form>
 
-        {notice && (
-          <p role="status" className="text-[12px] text-ok">
-            {notice}
-          </p>
-        )}
-        {test && (
-          <p role="status" data-testid="ai-credential-test" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
-            {test.ok
-              ? `Works${test.model ? ` (${test.model})` : ''}, ${(test.duration_ms / 1000).toFixed(1)} s.`
-              : `Failed: ${test.detail}`}
-          </p>
-        )}
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
-          </p>
-        )}
+      {notice && (
+        <p role="status" className="text-[12px] text-ok">
+          {notice}
+        </p>
+      )}
+      {test && (
+        <p role="status" data-testid="ai-credential-test" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
+          {test.ok
+            ? `Works${test.model ? ` (${test.model})` : ''}, ${(test.duration_ms / 1000).toFixed(1)} s.`
+            : `Failed: ${test.detail}`}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-[12px] text-warn">
+          {error}
+        </p>
+      )}
       <Dialog
         open={confirmDelete}
         title="Delete the Claude credential?"

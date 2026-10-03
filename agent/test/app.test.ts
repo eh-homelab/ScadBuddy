@@ -195,7 +195,10 @@ describe('/api/v1/ai/credentials', () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
     const res = await app.request('/api/v1/ai/credentials')
     expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect(await res.json()).toEqual({
+      detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
+      code: 'no_database',
+    })
   })
 
   describe('writes only through the UI ingress path (interim, until #258)', () => {

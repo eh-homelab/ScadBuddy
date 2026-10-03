@@ -132,15 +132,34 @@ describe('AiCredentialSection (#1000)', () => {
   })
 
   it.each([
-    ['no /api/v1/ai route', 404, 'Not Found'],
-    ['no agent database', 503, 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'],
-  ])('is hidden when the agent is not deployed (%s)', async (_, status, message) => {
-    server.use(http.get(base, () => HttpResponse.json({ detail: message }, { status })))
+    ['nothing routes /api/v1/ai: the SPA fallback answers', () =>
+      new HttpResponse('<!doctype html><html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })],
+    ['a proxy answers 404', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })],
+    ['no agent database', () =>
+      HttpResponse.json(
+        { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)', code: 'no_database' },
+        { status: 503 },
+      )],
+  ])('is hidden when the agent is not deployed (%s)', async (_, answer) => {
+    server.use(http.get(base, answer))
     const answered = credentialRead()
     renderPage(<AiCredentialSection />)
     await answered
     await waitFor(() => expect(screen.queryByText('Loading')).not.toBeInTheDocument())
     expect(screen.queryByRole('heading', { name: 'Claude credential' })).not.toBeInTheDocument()
+  })
+
+  it('shows a 503 without the no_database code, even with the same text', async () => {
+    server.use(
+      http.get(base, () =>
+        HttpResponse.json(
+          { detail: 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)' },
+          { status: 503 },
+        ),
+      ),
+    )
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('AI features need the database')
   })
 
   it('shows any other failed read with a Retry', async () => {
@@ -180,11 +199,32 @@ describe('AiCredentialSection (#1000)', () => {
   })
 
   it('says a test is already running', async () => {
+    // The first test stays in flight until the assertion is done, whatever the load.
+    let finish: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    let running = false
+    server.use(
+      http.post(`${base}/test`, async () => {
+        if (running) {
+          return HttpResponse.json(
+            { detail: 'a connection test is already running' },
+            { status: 429, headers: { 'Retry-After': '10' } },
+          )
+        }
+        running = true
+        await held
+        return HttpResponse.json({ ok: true, detail: 'ok', duration_ms: 1, model: null })
+      }),
+    )
     const { user } = renderPage(<AiCredentialSection />)
     const test = await screen.findByRole('button', { name: 'Test' })
     const first = api.testAiCredential()
+    await waitFor(() => expect(running).toBe(true))
     await user.click(test)
     expect(await screen.findByRole('alert')).toHaveTextContent('a connection test is already running (wait 10 s).')
+    finish()
     await first
   })
 })
