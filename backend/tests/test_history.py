@@ -466,8 +466,10 @@ def test_read_blob_reports_a_failed_tree_read_as_a_git_error(
 
     def broken(*args: str, **kwargs: object) -> object:
         if args[0] == "ls-tree":
-            # A tree git cannot read, as a corrupt object or an I/O error leaves it.
-            args = ("ls-tree", "-l", "0" * 40, *args[3:])
+            # The real invocation, with the revision it names swapped for an object git
+            # cannot read, as a corrupt object or an I/O error leaves it.
+            assert commit in args
+            args = tuple("0" * 40 if arg == commit else arg for arg in args)
         return run(*args, **kwargs)  # type: ignore[arg-type]
 
     with patch.object(history, "_run", broken), pytest.raises(GitError):
