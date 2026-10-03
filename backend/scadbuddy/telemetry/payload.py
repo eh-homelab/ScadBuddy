@@ -17,6 +17,7 @@ not counted, as the SDK does not count one.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Final
 
@@ -38,19 +39,12 @@ WEB_SERVICE_NAME: Final = "scadbuddy-web"
 #: Every other resource attribute the page sends is dropped.
 KEPT_RESOURCE_ATTRIBUTES: Final = ("service.version", "user_agent.original")
 
-#: Span and link fields forwarded as they came: ids, times, kind and flags. A wrong
-#: value makes the collector refuse the batch, which the relay counts as ``failed``.
-_SPAN_FIELDS: Final = (
-    "traceId",
-    "spanId",
-    "parentSpanId",
-    "traceState",
-    "flags",
-    "kind",
-    "startTimeUnixNano",
-    "endTimeUnixNano",
-)
-_LINK_FIELDS: Final = ("traceId", "spanId", "traceState", "flags")
+_MAX_UINT32: Final = 2**32 - 1
+_MAX_INT64: Final = 2**63 - 1
+_MAX_TRACE_STATE_CHARS: Final = 512
+_TRACE_ID: Final = re.compile(r"^[0-9a-fA-F]{32}$")
+_SPAN_ID: Final = re.compile(r"^[0-9a-fA-F]{16}$")
+_STATUS_CODES: Final = {"STATUS_CODE_UNSET": 0, "STATUS_CODE_OK": 1, "STATUS_CODE_ERROR": 2}
 #: OTLP/JSON writes a 64-bit integer as a decimal string.
 _INT_STRING: Final = re.compile(r"^-?[0-9]{1,19}$")
 #: A browser stack frame: V8's ``    at f (https://…/x.js:1:2)``, or Firefox and
@@ -58,6 +52,29 @@ _INT_STRING: Final = re.compile(r"^-?[0-9]{1,19}$")
 _BROWSER_FRAME: Final = re.compile(r"^(?:\s+at \S.*:\d+:\d+\)?|[^\s@]*@\S+:\d+:\d+)$")
 
 type Json = dict[str, Any]
+
+
+def _id(value: object, pattern: re.Pattern[str]) -> str | None:
+    """A trace or span id: hex of the right length, not all zeros (OTLP's invalid id)."""
+    if isinstance(value, str) and pattern.match(value) and value.strip("0"):
+        return value
+    return None
+
+
+def _uint(value: object, limit: int) -> int | str | None:
+    """An integer in ``0..limit``, as a number or as OTLP/JSON's decimal string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= limit else None
+    if isinstance(value, str) and _INT_STRING.match(value) and not value.startswith("-"):
+        return value if int(value) <= limit else None
+    return None
+
+
+def _set_valid(target: Json, key: str, value: object) -> None:
+    if value is not None:
+        target[key] = value
 
 
 class PayloadError(ValueError):
@@ -107,8 +124,12 @@ def browser_frames_only(stack: str) -> str:
 
 def _count(value: object) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
+        return min(value, _MAX_UINT32)
     return 0
+
+
+def _total(raw: object, local: int) -> int:
+    return min(_count(raw) + local, _MAX_UINT32)
 
 
 def _scalar(value: object) -> Json | None:
@@ -124,7 +145,12 @@ def _scalar(value: object) -> Json | None:
         or (isinstance(inner, str) and _INT_STRING.match(inner))
     ):
         return {kind: inner}
-    if kind == "doubleValue" and isinstance(inner, int | float) and not isinstance(inner, bool):
+    if (
+        kind == "doubleValue"
+        and isinstance(inner, int | float)
+        and not isinstance(inner, bool)
+        and math.isfinite(inner)
+    ):
         return {kind: inner}
     return None
 
@@ -201,17 +227,26 @@ def _event(raw: Json) -> Json:
         attributes = _scrub_exception(attributes)
     kept, dropped = _attributes(attributes, MAX_EVENT_ATTRIBUTES)
     event: Json = {"name": name, "attributes": kept}
-    if "timeUnixNano" in raw:
-        event["timeUnixNano"] = raw["timeUnixNano"]
-    event["droppedAttributesCount"] = _count(raw.get("droppedAttributesCount")) + dropped
+    _set_valid(event, "timeUnixNano", _uint(raw.get("timeUnixNano"), _MAX_INT64))
+    event["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
     return event
 
 
-def _link(raw: Json) -> Json:
+def _trace_state(value: object) -> str | None:
+    return value[:_MAX_TRACE_STATE_CHARS] if isinstance(value, str) else None
+
+
+def _link(raw: Json) -> Json | None:
+    trace_id = _id(raw.get("traceId"), _TRACE_ID)
+    span_id = _id(raw.get("spanId"), _SPAN_ID)
+    if trace_id is None or span_id is None:
+        return None
     kept, dropped = _attributes(raw.get("attributes"), MAX_LINK_ATTRIBUTES)
-    link: Json = {field: raw[field] for field in _LINK_FIELDS if field in raw}
+    link: Json = {"traceId": trace_id, "spanId": span_id}
+    _set_valid(link, "traceState", _trace_state(raw.get("traceState")))
+    _set_valid(link, "flags", _uint(raw.get("flags"), _MAX_UINT32))
     link["attributes"] = kept
-    link["droppedAttributesCount"] = _count(raw.get("droppedAttributesCount")) + dropped
+    link["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
     return link
 
 
@@ -239,7 +274,9 @@ def _status(raw: object, events: list[Json]) -> Json:
         return {}
     status: Json = {}
     code = raw.get("code")
-    if isinstance(code, int | str) and not isinstance(code, bool):
+    if isinstance(code, str):
+        code = _STATUS_CODES.get(code)
+    if isinstance(code, int) and not isinstance(code, bool) and 0 <= code <= 2:
         status["code"] = code
     message = raw.get("message")
     if isinstance(message, str) and message:
@@ -247,18 +284,33 @@ def _status(raw: object, events: list[Json]) -> Json:
     return status
 
 
-def _span(raw: Json) -> Json:
-    span: Json = {field: raw[field] for field in _SPAN_FIELDS if field in raw}
+def _span(raw: Json) -> Json | None:
+    trace_id = _id(raw.get("traceId"), _TRACE_ID)
+    span_id = _id(raw.get("spanId"), _SPAN_ID)
+    if trace_id is None or span_id is None:
+        return None
+    span: Json = {"traceId": trace_id, "spanId": span_id}
+    _set_valid(span, "parentSpanId", _id(raw.get("parentSpanId"), _SPAN_ID))
+    _set_valid(span, "traceState", _trace_state(raw.get("traceState")))
+    _set_valid(span, "flags", _uint(raw.get("flags"), _MAX_UINT32))
+    kind = raw.get("kind")
+    if isinstance(kind, int) and not isinstance(kind, bool) and 0 <= kind <= 5:
+        span["kind"] = kind
+    for field in ("startTimeUnixNano", "endTimeUnixNano"):
+        _set_valid(span, field, _uint(raw.get(field), _MAX_INT64))
     span["name"] = _name(raw.get("name"))
     attributes, dropped = _attributes(raw.get("attributes"), MAX_ATTRIBUTES)
     span["attributes"] = attributes
-    span["droppedAttributesCount"] = _count(raw.get("droppedAttributesCount")) + dropped
+    span["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
     events, dropped_events = _capped(raw.get("events"), MAX_EVENTS)
     span["events"] = [_event(event) for event in events]
-    span["droppedEventsCount"] = _count(raw.get("droppedEventsCount")) + dropped_events
+    span["droppedEventsCount"] = _total(raw.get("droppedEventsCount"), dropped_events)
     links, dropped_links = _capped(raw.get("links"), MAX_LINKS)
-    span["links"] = [_link(link) for link in links]
-    span["droppedLinksCount"] = _count(raw.get("droppedLinksCount")) + dropped_links
+    valid_links = [link for link in map(_link, links) if link is not None]
+    span["links"] = valid_links
+    span["droppedLinksCount"] = _total(
+        raw.get("droppedLinksCount"), dropped_links + len(links) - len(valid_links)
+    )
     span["status"] = _status(raw.get("status"), span["events"])
     return span
 
@@ -297,7 +349,11 @@ def rewrite(payload: Json) -> Json:
                 "scopeSpans": [
                     {
                         "scope": _scope(scope_spans.get("scope")),
-                        "spans": [_span(span) for span in scope_spans.get("spans", [])],
+                        "spans": [
+                            span
+                            for span in map(_span, scope_spans.get("spans", []))
+                            if span is not None
+                        ],
                     }
                     for scope_spans in resource_spans.get("scopeSpans", [])
                 ],

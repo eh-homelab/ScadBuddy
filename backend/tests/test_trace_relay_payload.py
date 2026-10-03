@@ -210,5 +210,98 @@ def test_a_body_that_is_not_an_export_is_refused(body: bytes) -> None:
 
 
 def test_a_lone_surrogate_is_forwarded_escaped() -> None:
-    body = b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"\\ud800"}]}]}]}'
+    ids = f'"traceId":"{TRACE_ID}","spanId":"{SPAN_ID}"'
+    body = (
+        '{"resourceSpans":[{"scopeSpans":[{"spans":[{' + ids + ',"name":"\\ud800"}]}]}]}'
+    ).encode()
     assert b"\\ud800" in prepare(body)
+
+
+def _flat(body: bytes) -> str:
+    text = prepare(body).decode()
+    json.loads(text)
+    assert SENTINEL not in text
+    assert "NaN" not in text
+    assert "Infinity" not in text
+    return text
+
+
+def test_invalid_passthrough_fields_never_reach_the_collector() -> None:
+    link = {"traceId": {"x": SENTINEL}, "spanId": SPAN_ID}
+    bad = span(
+        parentSpanId=SENTINEL,
+        kind=SENTINEL,
+        traceState={"x": SENTINEL},
+        flags=SENTINEL,
+        startTimeUnixNano={"x": SENTINEL},
+        endTimeUnixNano="9" * 19,
+        events=[{"name": "e", "timeUnixNano": {"x": SENTINEL}}],
+        links=[link],
+        status={"code": SENTINEL},
+    )
+    _flat(export(bad))
+    result = only_span(export(bad))
+    for field in ("parentSpanId", "kind", "traceState", "flags", "startTimeUnixNano"):
+        assert field not in result
+    assert "endTimeUnixNano" not in result
+    assert result["links"] == []
+    assert result["droppedLinksCount"] == 1
+    assert "timeUnixNano" not in result["events"][0]
+    assert result["status"] == {}
+
+
+@pytest.mark.parametrize("field", ["traceId", "spanId"])
+@pytest.mark.parametrize("value", [{"a": SENTINEL}, SENTINEL, "0" * 32, "0" * 16, "ab"])
+def test_a_span_without_valid_ids_is_dropped(field: str, value: object) -> None:
+    body = export(span(**{field: value}), span(name="kept"))
+    assert [s["name"] for s in forwarded(body)["resourceSpans"][0]["scopeSpans"][0]["spans"]] == [
+        "kept"
+    ]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_double_is_dropped_and_counted(value: float) -> None:
+    attribute = {"key": "d", "value": {"doubleValue": value}}
+    body = export(span(attributes=[attribute, {"key": "e", "value": {"doubleValue": 1.5}}]))
+    _flat(body)
+    result = only_span(body)
+    assert result["attributes"] == [{"key": "e", "value": {"doubleValue": 1.5}}]
+    assert result["droppedAttributesCount"] == 1
+
+
+def test_dropped_counts_are_clamped() -> None:
+    attributes = [string(f"a{i}", "v") for i in range(70)]
+    result = only_span(
+        export(
+            span(
+                attributes=attributes,
+                droppedAttributesCount=10**30,
+                droppedEventsCount=2**32 - 1,
+                events=[{"name": f"e{i}"} for i in range(20)],
+            )
+        )
+    )
+    assert result["droppedAttributesCount"] == 2**32 - 1
+    assert result["droppedEventsCount"] == 2**32 - 1
+
+
+def test_valid_values_pass_unchanged() -> None:
+    result = only_span(
+        export(
+            span(
+                traceId=TRACE_ID.upper(),
+                parentSpanId="00f067aa0ba902b7",
+                traceState="a=b",
+                flags=1,
+                kind=5,
+                endTimeUnixNano=1700000000100000000,
+                status={"code": "STATUS_CODE_OK"},
+            )
+        )
+    )
+    assert result["traceId"] == TRACE_ID.upper()
+    assert result["traceState"] == "a=b"
+    assert result["flags"] == 1
+    assert result["kind"] == 5
+    assert result["endTimeUnixNano"] == 1700000000100000000
+    assert result["status"] == {"code": 1}
