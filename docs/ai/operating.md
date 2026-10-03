@@ -233,10 +233,15 @@ If the previous file cannot be loaded, the log says so and nothing is re-wrapped
 ## 4. Setting up the Claude credential
 
 There can be several credentials, one row each in `ai_credentials`, in priority order
-(#1093). Each is of one of two kinds (`CREDENTIAL_KINDS`,
+(#1093). Each is of one of three kinds (`CREDENTIAL_KINDS`,
 [`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
 
-- `anthropic_api_key`: passed to Claude Code as `ANTHROPIC_API_KEY`.
+- `anthropic_api_key`: a Console key (`sk-ant-api03-…`), passed to Claude Code as
+  `ANTHROPIC_API_KEY`.
+- `claude_oauth_token`: the token `claude setup-token` prints (`sk-ant-oat01-…`),
+  passed as `CLAUDE_CODE_OAUTH_TOKEN`. Saved as an API key instead, it goes in
+  `x-api-key` and Anthropic answers 401. Spec D2 records this kind as a reversal;
+  read Anthropic's terms for subscription credentials before using it.
 - `gateway`: a `base_url` plus a token, passed as `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_AUTH_TOKEN`.
 

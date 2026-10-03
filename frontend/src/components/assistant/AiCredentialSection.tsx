@@ -11,12 +11,22 @@ import { Spinner } from '../ui/Spinner'
 
 const KIND_LABEL: Record<AiCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API key',
+  claude_oauth_token: 'Claude Code OAuth token',
   gateway: 'Gateway',
 }
 
 const KIND_OPTION: Record<AiCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API',
+  claude_oauth_token: 'Claude Code OAuth token',
   gateway: 'Gateway (base URL and token)',
+}
+
+/** The secret field's label and placeholder for each kind. */
+const SECRET_FIELD: Record<AiCredentialKind, { label: string; placeholder: string }> = {
+  anthropic_api_key: { label: 'Anthropic API key', placeholder: 'sk-ant-api03-…' },
+  // What `claude setup-token` prints.
+  claude_oauth_token: { label: 'OAuth token', placeholder: 'sk-ant-oat01-…' },
+  gateway: { label: 'Gateway token', placeholder: 'token' },
 }
 
 function describeError(cause: unknown, fallback: string): string {
@@ -241,13 +251,13 @@ export function AiCredentialSection() {
           </label>
         )}
         <label className="flex flex-col gap-1">
-          {kindValue === 'gateway' ? 'Gateway token' : 'Anthropic API key'}
+          {SECRET_FIELD[kindValue].label}
           <input
             type="password"
             required
             value={secret}
             onChange={(event) => setSecret(event.target.value)}
-            placeholder={kindValue === 'gateway' ? 'token' : 'sk-ant-…'}
+            placeholder={SECRET_FIELD[kindValue].placeholder}
             className="sb-field max-w-md"
             autoComplete="new-password"
             spellCheck={false}

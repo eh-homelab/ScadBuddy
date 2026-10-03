@@ -55,6 +55,23 @@ describe('AiCredentialSection (#1000)', () => {
     ])
   })
 
+  it('saves a Claude Code OAuth token with no base URL', async () => {
+    const puts: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PUT' && new URL(request.url).pathname === base) {
+        void request.clone().json().then((body) => puts.push(body))
+      }
+    })
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-oat01-ZZ34')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    expect(puts).toEqual([{ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-ZZ34' }])
+  })
+
   it('tests the credential, and shows the wait when rate-limited', async () => {
     const { user } = renderPage(<AiCredentialSection />)
     const test = await screen.findByRole('button', { name: 'Test' })
