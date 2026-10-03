@@ -19,12 +19,17 @@ _EXPECTED = {ApiError.__name__} | {
 }
 
 MESSAGE = "rack pick left to Bambuddy"
+#: Every rack fallback that swallows an exception and logs its type (#1081): the pick,
+#: the /check preview, and a usage read ranked without.
+MESSAGES = frozenset(
+    {MESSAGE, "the rack preview could not be built", "rack usage unreadable; ranked without it"}
+)
 
 
 def foreign_rack_errors(records: Iterable[logging.LogRecord]) -> list[str]:
-    """The logged error type of every rack-pick fallback that is not an expected one."""
+    """The logged error type of every rack fallback that is not an expected one."""
     return [
         str(getattr(record, "error", None))
         for record in records
-        if record.getMessage() == MESSAGE and getattr(record, "error", None) not in _EXPECTED
+        if record.getMessage() in MESSAGES and getattr(record, "error", None) not in _EXPECTED
     ]

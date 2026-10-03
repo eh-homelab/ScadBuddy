@@ -392,7 +392,8 @@ def rack_chooser(
                 return None
             stage = "status unreadable"
             status_read = await client.printer_status(printer_id)
-            # Read before this read is recorded as seen (#1015).
+            # The order no longer decides a hotend's age: prepare_run and choices_for
+            # record the rack as seen earlier in the same request (#1081).
             usage = (
                 await _usage_or_empty(rack, status_read, printer_id)
                 if algorithm != "bambuddy"

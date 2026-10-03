@@ -263,6 +263,7 @@ class UnreadableUsage(Usages):
         raise RuntimeError(f"pool timeout near {serial(21)}")
 
 
+@pytest.mark.rack_injects_errors
 @pytest.mark.parametrize(("manual", "sent"), [(2, {"0": 2}), (None, {"0": 4})])
 async def test_an_unreadable_usage_ranks_without_it_and_keeps_a_hand_pick(
     caplog: pytest.LogCaptureFixture, manual: int | None, sent: dict[str, int]

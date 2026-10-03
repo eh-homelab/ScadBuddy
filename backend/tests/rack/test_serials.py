@@ -142,6 +142,21 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
     assert not [s for s in INVENTED_SERIALS if s in repr(warnings)]
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "rack pick left to Bambuddy",
+        "the rack preview could not be built",
+        "rack usage unreadable; ranked without it",
+    ],
+)
+def test_the_guard_covers_every_rack_fallback(message: str) -> None:
+    """#1081: the preview and the usage read swallow exceptions too."""
+    made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+    made.error = "KeyError"
+    assert foreign_rack_errors([made]) == ["KeyError"]
+
+
 def test_the_guard_flags_a_programming_error_but_not_an_api_one() -> None:
     def record(error: str) -> logging.LogRecord:
         made = logging.LogRecord(

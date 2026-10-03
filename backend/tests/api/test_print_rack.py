@@ -413,6 +413,7 @@ class LeakyUsage(BrokenUsage):
         raise RuntimeError(f"duplicate key value: (serial)=({INVENTED_SERIALS[2]})")
 
 
+@pytest.mark.rack_injects_errors
 @respx.mock
 def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
     client: TestClient, model: str, caplog: pytest.LogCaptureFixture
