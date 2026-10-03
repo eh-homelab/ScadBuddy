@@ -34,6 +34,23 @@ describe('telemetry setup', () => {
     await batched[0]!.shutdown()
   })
 
+  it('exports for the traces-specific endpoint alone, unless OTEL_TRACES_EXPORTER=none', async () => {
+    const traces = { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'http://alloy:4318/custom/path' }
+    const batched = spanProcessors(traces, new InMemorySpanExporter())
+    expect(batched[0]).toBeInstanceOf(BatchSpanProcessor)
+    await batched[0]!.shutdown()
+    expect(spanProcessors({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ' ' })[0]).toBeInstanceOf(NoopSpanProcessor)
+    for (const value of ['none', 'NONE', ' None ']) {
+      expect(spanProcessors({ ...traces, OTEL_TRACES_EXPORTER: value })[0]).toBeInstanceOf(NoopSpanProcessor)
+      expect(
+        spanProcessors({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://alloy:4318', OTEL_TRACES_EXPORTER: value })[0],
+      ).toBeInstanceOf(NoopSpanProcessor)
+    }
+    const otlp = spanProcessors({ ...traces, OTEL_TRACES_EXPORTER: 'otlp' }, new InMemorySpanExporter())
+    expect(otlp[0]).toBeInstanceOf(BatchSpanProcessor)
+    await otlp[0]!.shutdown()
+  })
+
   it('is disabled only by OTEL_SDK_DISABLED=true', () => {
     expect(tracingDisabled({ OTEL_SDK_DISABLED: 'true' })).toBe(true)
     expect(tracingDisabled({ OTEL_SDK_DISABLED: 'TRUE' })).toBe(true)

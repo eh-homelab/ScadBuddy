@@ -173,8 +173,10 @@ says `env` "REPLACES the subprocess environment entirely" (quoted in that file).
 Tracing (#988) is configured by the standard OpenTelemetry variables only, read by
 [`agent/src/telemetry/setup.ts`](../../agent/src/telemetry/setup.ts) when the process
 starts under `node --import ./dist/telemetry.js` (the image's `CMD`):
-`OTEL_EXPORTER_OTLP_ENDPOINT` (unset: spans are created, so context propagates, and
-dropped), `OTEL_SDK_DISABLED=true` (the kill switch: no spans at all),
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the latter used
+verbatim, the former with `/v1/traces` appended; `OTEL_EXPORTER_OTLP_HEADERS` and
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` add collector headers; neither endpoint set, or
+`OTEL_TRACES_EXPORTER=none`: spans are created, so context propagates, and dropped), `OTEL_SDK_DISABLED=true` (the kill switch: no spans at all),
 `OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans) and
 `OTEL_RESOURCE_ATTRIBUTES`. `SCADBUDDY_VERSION` and `SCADBUDDY_REVISION` are stamped
 into the image by `build-image.yml` and become `service.version` and

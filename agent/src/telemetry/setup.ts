@@ -12,8 +12,11 @@ import { ScrubbingSpanExporter } from './scrub.js'
 // The agent's OpenTelemetry SDK (spec 2026-10-01 §3, §5.4), started by
 // src/telemetry.ts before the app loads. Configured by the standard OTEL_*
 // variables only:
-//   OTEL_EXPORTER_OTLP_ENDPOINT  unset: a provider with no exporter, so spans are
-//                                created (context propagates) and dropped (§3)
+//   OTEL_EXPORTER_OTLP_ENDPOINT, or the traces-specific
+//   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  neither set (or OTEL_TRACES_EXPORTER=none): a
+//                                provider with no exporter, so spans are created
+//                                (context propagates) and dropped (§3). The exporter
+//                                itself resolves the URL and the (TRACES_)HEADERS.
 //   OTEL_SDK_DISABLED=true       no SDK at all: the API's no-op provider
 //   OTEL_TRACES_SAMPLER          replaces DEFAULT_SAMPLER (§6)
 //   OTEL_RESOURCE_ATTRIBUTES     merged into the resource (envDetector)
@@ -53,7 +56,8 @@ export function tracingDisabled(env: Env = process.env): boolean {
  * propagation; §3 wants spans created and dropped.
  */
 export function spanProcessors(env: Env = process.env, exporter?: SpanExporter): SpanProcessor[] {
-  if (!present(env.OTEL_EXPORTER_OTLP_ENDPOINT)) return [new NoopSpanProcessor()]
+  if (env.OTEL_TRACES_EXPORTER?.trim().toLowerCase() === 'none') return [new NoopSpanProcessor()]
+  if (!present(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) && !present(env.OTEL_EXPORTER_OTLP_ENDPOINT)) return [new NoopSpanProcessor()]
   return [new BatchSpanProcessor({ exporter: new ScrubbingSpanExporter(exporter ?? new OTLPTraceExporter()) })]
 }
 
