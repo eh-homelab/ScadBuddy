@@ -379,6 +379,23 @@ def test_a_symlink_out_of_a_library_reads_as_missing(
     assert response.status_code == 404
 
 
+def test_a_symlink_onto_a_hidden_path_reads_as_missing_in_a_model_and_a_library(
+    client: TestClient, model: str, library: Path, paths: DataPaths
+) -> None:
+    """#951: a link inside the root may not reach what no plain path may name."""
+    for root in (paths.model_dir(model), library):
+        (root / ".hidden").mkdir()
+        (root / ".hidden" / "x.scad").write_text("TOP SECRET\n", encoding="utf-8")
+        (root / "peek.scad").symlink_to(".hidden/x.scad")
+        (root / "door").symlink_to(".hidden")
+
+    for base in (f"/api/v1/models/{model}/files", f"/api/v1/models/{model}/libraries/BOSL2/files"):
+        for path in ("peek.scad", "door/x.scad"):
+            response = client.get(f"{base}/{path}")
+            assert response.status_code == 404, (base, path, response.text)
+            assert "TOP SECRET" not in response.text
+
+
 def test_a_library_name_that_is_not_a_directory_name_is_a_422(
     client: TestClient, model: str
 ) -> None:
