@@ -118,7 +118,10 @@ class RackUsageStore:
             conn.execute(
                 "INSERT INTO rack_nozzle_seen (serial, printer_id)"
                 " SELECT serial, %s FROM unnest(%s::text[]) AS serial"
-                " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id",
+                " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id"
+                # Rewrite only a hotend that moved: /check re-records the rack on every
+                # debounced re-check (#1082).
+                " WHERE rack_nozzle_seen.printer_id IS DISTINCT FROM excluded.printer_id",
                 (printer_id, unique),
             )
 

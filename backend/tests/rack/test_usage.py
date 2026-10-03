@@ -54,6 +54,28 @@ async def test_a_hotend_moved_to_another_printer_keeps_its_age_and_history(
     )
 
 
+def _row_version(conninfo: str, serial: str) -> str:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT xmin::text FROM rack_nozzle_seen WHERE serial = %s", (serial,)
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def test_seeing_a_hotend_again_on_the_same_printer_writes_nothing(
+    store: RackUsageStore, pg_conninfo: str
+) -> None:
+    """#1082: /check records the rack on every debounced re-check, so an unchanged row
+    must not be rewritten; a move to another printer still is."""
+    await store.seen(1, [A])
+    before = _row_version(pg_conninfo, A)
+    await store.seen(1, [A])
+    assert _row_version(pg_conninfo, A) == before
+    await store.seen(2, [A])
+    assert _row_version(pg_conninfo, A) != before
+
+
 async def test_seen_skips_empty_and_repeated_serials(
     store: RackUsageStore, pg_conninfo: str
 ) -> None:
