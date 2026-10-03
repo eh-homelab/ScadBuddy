@@ -88,6 +88,19 @@ async def test_ensure_schedule_creates_then_updates_the_interval(client: Client)
     assert second.schedule.policy.overlap == ScheduleOverlapPolicy.SKIP
 
 
+async def test_an_interval_under_temporals_minimum_is_the_minimum(client: Client) -> None:
+    """Temporal refuses a Schedule interval under a second; a smaller setting is not
+    a Schedule that never gets made."""
+    schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    try:
+        await ensure_schedule(client, queue, 0.05, schedule_id=schedule_id)
+        described = await client.get_schedule_handle(schedule_id).describe()
+    finally:
+        await client.get_schedule_handle(schedule_id).delete()
+    assert described.schedule.spec.intervals[0].every == timedelta(seconds=1)
+
+
 async def test_an_interval_of_zero_deletes_the_schedule(client: Client) -> None:
     schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
     queue = f"library-{uuid.uuid4().hex[:8]}"
