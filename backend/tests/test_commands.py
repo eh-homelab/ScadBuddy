@@ -222,3 +222,15 @@ async def test_temporal_lost_after_connecting_is_unavailable_not_still_accepting
         await proxy.cut()
         with pytest.raises(TemporalUnavailableError):
             await echo(via, queue, f"echo-{uuid.uuid4().hex}", deadline=timedelta(seconds=4))
+
+
+async def test_an_update_slower_than_the_default_deadline_is_still_accepting(
+    client: Client, queue: str
+) -> None:
+    """At the default deadline the Update's RPC may outlive `rpc_timeout`, so the outer
+    bound fires first: an execution that exists is still accepting, not Temporal down."""
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        with pytest.raises(CommandStillAcceptingError):
+            await echo(client, queue, workflow_id, EchoInput(delay_s=20))
+        await client.get_workflow_handle(workflow_id).terminate()

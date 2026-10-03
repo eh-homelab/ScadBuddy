@@ -35,7 +35,7 @@ with workflow.unsafe.imports_passed_through():
         run_activity,
     )
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
-    from scadbuddy.workflows.problems import problem_of
+    from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL, problem_of
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
@@ -90,7 +90,7 @@ class OperationWorkflow:
             )
         except ActivityError as error:
             # Nothing was written: the execution fails, and a retry may start again.
-            self.refusal = problem_of(error)
+            self.refusal = problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
             self._upsert(STATUS.value_set("refused"))
             await workflow.wait_condition(workflow.all_handlers_finished)
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
@@ -117,7 +117,9 @@ class OperationWorkflow:
             finish = FinishOp(operation_id=op.id, result=result)
         except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
             # The record exists: whatever happened is recorded, and the execution completes.
-            finish = FinishOp(operation_id=op.id, error=problem_of(error))
+            finish = FinishOp(
+                operation_id=op.id, error=problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
+            )
         self.done = await workflow.execute_activity(
             FINISH_ACTIVITY,
             finish,

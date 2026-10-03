@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -20,6 +21,9 @@ from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.client import connect_lazily
+
+#: Unique per run: the session's Temporal outlives each test's database schema.
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5 = (uuid.uuid4().hex for _ in range(5))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -93,8 +97,8 @@ def test_a_done_operation_answers_its_result(client: TestClient) -> None:
 def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
     client: TestClient, counts: Counts
 ) -> None:
-    first = post(client, {"a": 1}, key="press-1")
-    again = post(client, {"a": 1}, key="press-1")
+    first = post(client, {"a": 1}, key=PRESS_1)
+    again = post(client, {"a": 1}, key=PRESS_1)
     assert first.json() == again.json() == {"done": True, "n": 1}
     assert counts.runs == 1
 
@@ -110,7 +114,7 @@ def test_without_a_key_each_request_is_its_own_operation(
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
     client: TestClient, pg_conninfo: str
 ) -> None:
-    response = post(client, {"refuse": True}, key="press-2")
+    response = post(client, {"refuse": True}, key=PRESS_2)
     assert response.status_code == 409
     assert response.json()["detail"] == "refused, as the route would"
     with psycopg.connect(pg_conninfo) as conn:
@@ -120,15 +124,15 @@ def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
 def test_a_retry_after_a_recorded_failure_answers_it_and_runs_nothing(
     client: TestClient, counts: Counts
 ) -> None:
-    first = post(client, {"fail": True}, key="press-3")
-    again = post(client, {"fail": True}, key="press-3")
+    first = post(client, {"fail": True}, key=PRESS_3)
+    again = post(client, {"fail": True}, key=PRESS_3)
     assert first.status_code == again.status_code == 502
     assert again.json()["detail"] == "Bambuddy said no"
     assert counts.runs == 1
 
 
 def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> None:
-    started = post(client, {"delay": 12}, key="press-4")
+    started = post(client, {"delay": 12}, key=PRESS_4)
     assert started.status_code == 202, started.text
     op = follow(client, started.json()["id"])
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
@@ -145,7 +149,7 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     ops = state.operations
     state.operations = dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
     try:
-        response = post(client, {"a": 1}, key="press-5")
+        response = post(client, {"a": 1}, key=PRESS_5)
     finally:
         state.operations = ops
     assert response.status_code == 503

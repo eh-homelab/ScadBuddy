@@ -27,6 +27,7 @@ from temporalio.common import (
     WorkflowIDReusePolicy,
 )
 from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
 #: Below Envoy's 15 s route timeout (§1), so no command holds a request open past it.
 COMMAND_ANSWER_DEADLINE = timedelta(seconds=10)
@@ -50,6 +51,23 @@ class TemporalUnavailableError(Exception):
 class AlreadyClosedError(Exception):
     """The ID's last execution closed and the reuse policy refuses another: the route
     answers from our record."""
+
+
+#: How long the route asks Temporal whether an execution exists, once the bound passed.
+DESCRIBE_SECONDS = 2.0
+
+
+async def _late(client: Client, id: str) -> Exception:
+    """What a call that outlived its bound means: the execution exists, so it is still
+    accepting (a slow Update, a busy loop); or Temporal cannot say, so it is down."""
+    try:
+        async with asyncio.timeout(DESCRIBE_SECONDS):
+            await client.get_workflow_handle(id).describe(
+                rpc_timeout=timedelta(seconds=DESCRIBE_SECONDS)
+            )
+    except Exception:
+        return TemporalUnavailableError(id)
+    return CommandStillAcceptingError(id)
 
 
 async def start_command[T](
@@ -88,7 +106,12 @@ async def start_command[T](
                 rpc_timeout=deadline,
             )
     except TimeoutError as error:
-        raise TemporalUnavailableError(id) from error
+        raise await _late(client, id) from error
+    except RPCError as error:
+        # The frontend refused the connection outright.
+        if error.status == RPCStatusCode.UNAVAILABLE:
+            raise TemporalUnavailableError(id) from error
+        raise
     except RuntimeError as error:
         # How a lazy client's first connect fails (temporalio 1.33).
         if str(error).startswith("Failed client connect"):
@@ -97,7 +120,7 @@ async def start_command[T](
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
         # The SDK reports the outer bound's cancellation as this error too.
         if bound.expired():
-            raise TemporalUnavailableError(id) from error
+            raise await _late(client, id) from error
         raise CommandStillAcceptingError(id) from error
     except WorkflowAlreadyStartedError as error:
         raise AlreadyClosedError(id) from error

@@ -7,13 +7,16 @@ problem the route answers with, ``REFUSED`` from the check and ``FAILED`` from t
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
+from fastapi import status
 from temporalio import activity
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -29,6 +32,9 @@ from scadbuddy.workflows.operation_models import (
 )
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import FAILED, REFUSED
+
+#: Below the check activity's 8 s start-to-close (`workflows/operation.py` CHECK_TIMEOUT).
+CHECK_BUDGET_SECONDS = 6.0
 
 
 def operation_activities(
@@ -65,7 +71,17 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=check_activity(kind.name))
     async def check(request: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await kind.check(request)
+            # Inside the activity's own timeout, so a slow Bambuddy is its problem, as
+            # the route answered it before #1053, not an unexpected failure.
+            async with asyncio.timeout(CHECK_BUDGET_SECONDS):
+                return await kind.check(request)
+        except TimeoutError:
+            slow = ApiError(
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; nothing was done",
+                type_=UNAVAILABLE_PROBLEM,
+            )
+            raise raised_as(slow, REFUSED) from None
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
 

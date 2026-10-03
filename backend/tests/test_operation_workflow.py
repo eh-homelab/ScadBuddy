@@ -29,6 +29,7 @@ from scadbuddy.workflows.operation_models import (
     RunOp,
 )
 from scadbuddy.workflows.print_models import FAILED, REFUSED
+from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -180,7 +181,7 @@ async def test_an_unexpected_effect_error_is_recorded_as_unexpected(
     answer = await start(client, worker, arg)
     assert answer.operation is not None and answer.operation.error is not None
     assert answer.operation.error.status == 500
-    assert "boom" not in answer.operation.error.detail
+    assert answer.operation.error.detail == OPERATION_UNEXPECTED_DETAIL
 
 
 async def test_the_run_activity_takes_the_kinds_attempts(
