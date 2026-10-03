@@ -2033,19 +2033,26 @@ describe('PrintPicker · rack nozzle (#836)', () => {
         return HttpResponse.json({ title: 'Service Unavailable', status: 503 }, { status: 503 })
       }),
     )
-    const puts = watch('PUT', '/rack-algorithm')
+    const saves: Promise<unknown>[] = []
+    const put = api.putPrinterRackAlgorithm.bind(api)
+    vi.spyOn(api, 'putPrinterRackAlgorithm').mockImplementation((...args) => {
+      const save = put(...args)
+      saves.push(save)
+      return save
+    })
     const { user } = renderPicker()
     await loaded()
     await showAdvanced()
     fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
-    await waitFor(() => expect(puts.bodies.length).toBe(1))
+    await waitFor(() => expect(saves.length).toBe(1))
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await loaded()
     if (!screen.queryByLabelText('Rack algorithm')) await showAdvanced()
     await screen.findByLabelText('Rack algorithm')
     release()
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // The picker's own .catch was chained first, so it has run once this settles.
+    await act(() => Promise.allSettled(saves))
     expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
 

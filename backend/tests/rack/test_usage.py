@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from scadbuddy.rack.rank import Usage, rank_rack
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import STATEMENT_TIMEOUT_MS, PickedHotend, RackUsageStore
 from tests.rack.helpers import group, serial, slot
 
 pytestmark = pytest.mark.requires_postgres
@@ -146,4 +146,4 @@ async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> Non
     await store.seen(1, [A])  # opens the pool
     with store._ready().connection() as conn:
         row = conn.execute("SHOW statement_timeout").fetchone()
-    assert row is not None and row["statement_timeout"] == "15s"
+    assert row is not None and row["statement_timeout"] == f"{STATEMENT_TIMEOUT_MS // 1000}s"

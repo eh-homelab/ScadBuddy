@@ -86,7 +86,9 @@ RESCAN_INTERVAL = 300.0
 #: How long one settled-print hook may run (#1083). Hooks are awaited inside the
 #: watch loop, so one that never returns would hold the watch open. A hook cut off here
 #: is not retried: the rack's settle loses the usage of any archive it had not yet
-#: recorded, and the warning names the output so that loss can be traced.
+#: recorded, and the warning names the output so that loss can be traced. Cutting a
+#: hook off stops the wait, not the work: a database read it started in a thread runs
+#: on until Postgres answers.
 SETTLE_TIMEOUT = 60.0
 
 #: The first key of the two-key advisory lock: "SBPW", so it can't collide with the

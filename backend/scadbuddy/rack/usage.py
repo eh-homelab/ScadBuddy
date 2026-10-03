@@ -392,8 +392,9 @@ def settle_hook(
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the watcher stops
-        # waiting on it at its timeout (#1083). The thread itself runs on; the store's
-        # statement timeout is what bounds a stuck query.
+        # waiting on it at its timeout (#1083). The thread itself runs on: the settings
+        # pool has no statement timeout (only this store's queries do), so a stuck
+        # settings read holds its thread and connection until Postgres answers.
         settings = await asyncio.to_thread(load)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
