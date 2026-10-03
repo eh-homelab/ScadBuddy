@@ -18,7 +18,6 @@ Bambuddy, so they give up and the run is recorded as failed.
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -243,21 +242,26 @@ class PrintRunWorkflow:
     async def _follow(self, output_id: str) -> None:
         """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
         this run, or a poke to the one already following the output (a child start has
-        no id-conflict policy)."""
-        try:
-            await workflow.start_child_workflow(
-                FOLLOW_WORKFLOW,
-                output_id,
-                id=follow_id(output_id),
-                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
-                cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
-            )
-        except WorkflowAlreadyStartedError:
-            # It may have closed in between: the print it followed has ended.
-            with suppress(FailureError):
+        no id-conflict policy). A poke that finds it closed in between starts it once more."""
+        for _ in range(2):
+            try:
+                await workflow.start_child_workflow(
+                    FOLLOW_WORKFLOW,
+                    output_id,
+                    id=follow_id(output_id),
+                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                    cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+                )
+                return
+            except WorkflowAlreadyStartedError:
+                pass
+            try:
                 await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
                     POKE_SIGNAL
                 )
+                return
+            except FailureError:
+                continue
 
     def _upsert(
         self,

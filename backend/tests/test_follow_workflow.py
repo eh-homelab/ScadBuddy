@@ -84,23 +84,6 @@ async def test_a_poke_restarts_the_follow_fresh(client: Client) -> None:
     assert [a.fresh for a in fake.attempts] == [False, True]
 
 
-async def test_follow_starts_or_pokes_one_execution(client: Client) -> None:
-    queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
-    fake = FakeFollow()
-    async with Worker(
-        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-    ):
-        await follow(client, queue, output)
-        await _until(lambda: len(fake.attempts) == 1)
-        first = (await client.get_workflow_handle(follow_id(output)).describe()).run_id
-        await follow(client, queue, output)
-        await _until(lambda: len(fake.attempts) == 2)
-        second = (await client.get_workflow_handle(follow_id(output)).describe()).run_id
-        fake.end.set()
-        await client.get_workflow_handle(follow_id(output)).result()
-    assert first == second
-
-
 async def test_a_finished_follow_can_start_again(client: Client) -> None:
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
@@ -152,3 +135,24 @@ async def test_resume_followed_starts_recent_prints_and_clears_the_old_log(
     assert resumed == [recent]
     assert left is not None and left["n"] == 0
     assert [a.output_id for a in fake.attempts] == [recent]
+
+
+async def test_follow_starts_one_execution_and_leaves_it_running(client: Client) -> None:
+    """A progress read only makes sure the print is followed: restarting the attempt on
+    every read would grow its history and overlap its reads. A new print pokes, from
+    `PrintRun`."""
+    queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
+    fake = FakeFollow()
+    async with Worker(
+        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
+    ):
+        await follow(client, queue, output)
+        await _until(lambda: len(fake.attempts) == 1)
+        first = (await client.get_workflow_handle(follow_id(output)).describe()).run_id
+        await follow(client, queue, output)
+        await asyncio.sleep(0.5)
+        second = (await client.get_workflow_handle(follow_id(output)).describe()).run_id
+        fake.end.set()
+        await client.get_workflow_handle(follow_id(output)).result()
+    assert first == second
+    assert len(fake.attempts) == 1

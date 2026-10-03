@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -287,8 +288,52 @@ def test_a_fresh_attempt_counts_its_age_from_now(paths: DataPaths) -> None:
 
     follower, _ = follower_for(paths, reading, max_age=timedelta(hours=24), now=lambda: clock[0])
     follower.observer.observe(meta, progress("running"))
+    # A poke schedules a new activity: its first attempt has no heartbeat to resume.
+    reason = asyncio.run(
+        asyncio.wait_for(
+            ActivityEnvironment().run(
+                FollowActivities(follower).follow_print,
+                FollowInput(output_id=OUTPUT, fresh=True),
+            ),
+            5,
+        )
+    )
+    assert reason == "quiet"
+    assert read.reads == 3
+
+
+def test_a_fresh_read_that_finds_no_change_still_waits_between_reads(paths: DataPaths) -> None:
+    """Review C1: a poked attempt reads at once, then backs off as any other."""
+    meta = write_output(paths)
+    read = Script(progress("running"))
+    follower, _ = follower_for(paths, read, min_interval=0.05, max_interval=0.2)
+    follower.observer.observe(meta, progress("running"))
+
+    async def scenario() -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(follower.follow(OUTPUT, NOW, read_now=True), 0.5)
+
+    asyncio.run(scenario())
+    # Reads at 0, 0.05, 0.15, 0.35: four or so, never hundreds.
+    assert 2 <= read.reads <= 6
+
+
+def test_a_retried_fresh_attempt_resumes_the_age_and_waits(paths: DataPaths) -> None:
+    """Review I3: `fresh` is the first attempt's; a retry keeps its heartbeat."""
+    meta = write_output(paths)
+    clock = [NOW]
+    read = Script(progress("running"))
+
+    async def reading(meta: OutputMeta) -> PrintProgress | None:
+        clock[0] += timedelta(hours=10)
+        return await read(meta)
+
+    follower, _ = follower_for(paths, reading, max_age=timedelta(hours=24), now=lambda: clock[0])
+    follower.observer.observe(meta, progress("running"))
     env = ActivityEnvironment()
-    env.info = replace(env.info, heartbeat_details=[(NOW - timedelta(hours=20)).isoformat()])
+    env.info = replace(
+        env.info, attempt=2, heartbeat_details=[(NOW - timedelta(hours=20)).isoformat()]
+    )
     reason = asyncio.run(
         asyncio.wait_for(
             env.run(
@@ -299,4 +344,27 @@ def test_a_fresh_attempt_counts_its_age_from_now(paths: DataPaths) -> None:
         )
     )
     assert reason == "quiet"
-    assert read.reads == 3
+    assert read.reads == 1
+
+
+def test_a_worker_shutdown_ends_the_attempt_at_once(paths: DataPaths) -> None:
+    """Review I4: the attempt never runs out the worker's graceful shutdown; it is
+    retried on another worker with its heartbeated age."""
+    write_output(paths)
+    follower, _ = follower_for(paths, Script(progress("running")), min_interval=60, max_interval=60)
+    env = ActivityEnvironment()
+
+    async def scenario() -> BaseException | None:
+        attempt = asyncio.ensure_future(
+            env.run(FollowActivities(follower).follow_print, FollowInput(output_id=OUTPUT))
+        )
+        await asyncio.sleep(0.05)
+        env.worker_shutdown()
+        try:
+            await asyncio.wait_for(attempt, 2)
+        except BaseException as error:
+            return error
+        return None
+
+    error = asyncio.run(scenario())
+    assert isinstance(error, ApplicationError) and not error.non_retryable
