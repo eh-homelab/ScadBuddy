@@ -36,6 +36,7 @@ import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
+import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
@@ -173,6 +174,12 @@ const toolServices: ToolServices = {
 // one through `ai_browser_pairings` (spec §8.5).
 const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined })
 toolServices.browser = tabs
+// What each session touched (#931, sessions/touched.ts), from its tool calls.
+if (database) {
+  toolServices.touched = new SessionResources(database.sql, (err) =>
+    console.error('session resources: could not record a call:', (err as Error).message),
+  )
+}
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).

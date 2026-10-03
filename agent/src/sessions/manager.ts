@@ -69,6 +69,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
+import { SessionResources, type TouchedRecord } from './touched.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -545,10 +546,13 @@ export class SessionManager {
   private readonly active = new Map<string, LocalTurn>()
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
   private draining = false
+  /** What sessions touched (#931), read by `resources`. */
+  private readonly touched: SessionResources
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
+    this.touched = new SessionResources(deps.sql)
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -583,6 +587,12 @@ export class SessionManager {
     const session = await this.row(id)
     if (!session || !canSee(principal, session)) throw new SessionError('not_found', `no session ${id}`)
     return session
+  }
+
+  /** What the session's tool calls touched, oldest first (#931, touched.ts); a session the principal may not see is not found. */
+  async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
+    await this.get(id, principal)
+    return this.touched.list(id)
   }
 
   /** Newest first. */
