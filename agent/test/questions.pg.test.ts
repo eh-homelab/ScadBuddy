@@ -1,5 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
 import type { QuestionVerdict, UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
@@ -116,6 +117,41 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
 
     const [row] = await db.sql`SELECT outcome, answers, answered_by_kind FROM ai_questions WHERE id = ${id}`
     expect(row).toEqual({ outcome: 'answered', answers: ['Blue', 'Approve'], answered_by_kind: 'browser' })
+  })
+
+  // #1075: the answer is in the AI audit log, tied to the tool call, as a
+  // hash: an answer can be free text the user typed.
+  it("records the answer in the audit log: who answered, which call, and a hash, never the answer's text", async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Make it teal, like my car', 'Approve']))
+    await turn!.done
+
+    const rows = await db.sql`
+      SELECT action, surface, principal_kind, principal_id, session_id, turn_id, tool_use_id, tier,
+             input_hash, input_summary, outcome, detail
+      FROM ai_audit WHERE kind = 'question'`
+    expect(rows).toEqual([
+      {
+        action: 'answered',
+        surface: 'harness',
+        principal_kind: 'browser',
+        principal_id: browser.id,
+        session_id: session.id,
+        turn_id: expect.any(String),
+        tool_use_id: 'toolu_q1',
+        tier: 'read',
+        input_hash: audit.hash('AskUserQuestion', { answers: ['Make it teal, like my car', 'Approve'] }),
+        input_summary: null,
+        outcome: 'ok',
+        detail: `question ${id}: 2 answers`,
+      },
+    ])
+    const [q] = await db.sql<{ turn_id: string }[]>`SELECT turn_id FROM ai_questions WHERE id = ${id}`
+    expect(rows[0]?.turn_id).toBe(q?.turn_id)
+    expect(JSON.stringify(rows)).not.toContain('teal')
   })
 
   it('only the user in the panel answers, once, with one answer per question', async () => {

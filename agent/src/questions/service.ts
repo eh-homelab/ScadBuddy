@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import type { AuditLog } from '../audit/log.js'
+import { ASK_USER_QUESTION, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -56,6 +57,8 @@ export type QuestionServiceDeps = {
   /** The session event log the question events go to. */
   events: EventLog
   pollMs?: number
+  /** The AI audit log (#1075): one `question` row per answer. */
+  audit?: Pick<AuditLog, 'record' | 'hash'>
 }
 
 /** What `gate()` needs to know about the turn it parks. */
@@ -170,18 +173,34 @@ export class QuestionService {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
     }
     const answered = await this.atomically(sessionId, async (tx) => {
-      const [row] = await tx<{ id: string }[]>`
+      const [row] = await tx<{ turn_id: string; tool_use_id: string; created_at: Date }[]>`
         UPDATE ai_questions
         SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
             answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
         WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
-        RETURNING id`
+        RETURNING turn_id, tool_use_id, created_at`
       return row
-        ? { value: true, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
-        : { value: false, events: [] }
+        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
+        : { value: undefined, events: [] }
     })
     if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     this.wake(id)
+    // Hashed, never stored as text: an answer may be anything the user typed.
+    await this.deps.audit?.record({
+      kind: 'question',
+      action: 'answered',
+      surface: 'harness',
+      actor: principal,
+      sessionId,
+      turnId: answered.turn_id,
+      toolUseId: answered.tool_use_id,
+      tier: 'read',
+      inputHash: this.deps.audit.hash(ASK_USER_QUESTION, { answers }),
+      outcome: 'ok',
+      detail: `question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+      startedAt: answered.created_at,
+      finishedAt: new Date(),
+    })
     await this.refreshStatus(sessionId)
   }
 
