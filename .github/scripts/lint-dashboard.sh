@@ -29,7 +29,7 @@
 #     passed to `span(`/`detached_span(` in backend/scadbuddy; for
 #     scadbuddy-agent and scadbuddy-web, a literal passed to a tracer call
 #     (`startSpan(`, `startActiveSpan(`, `withSpan(`, `traceAction(`) or
-#     assigned to a `*SPAN*` constant (the agent's `TURN_SPAN = 'agent.turn'`)
+#     assigned to a `*_SPAN` constant (the agent's `TURN_SPAN = 'agent.turn'`)
 #     in a non-test source file under agent/src or frontend/src: files named
 #     `*.test.*` and the `test`, `mocks` and `e2e` directories are excluded,
 #     so a name that only a fixture or log line quotes does not count. That
@@ -160,7 +160,7 @@ ts_names() { # source dir
   find "$1" \( -name test -o -name mocks -o -name e2e \) -prune -o \
     -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.*' -print0 \
     | xargs -0 cat | tr '\n' ' ' \
-    | grep -oE "((startSpan|startActiveSpan|withSpan|traceAction)\(\s*|[A-Z_]*SPAN[A-Z_]*\s*(:\s*[A-Za-z]+\s*)?=\s*)['\"\`][^'\"\`]+['\"\`]" \
+    | grep -oE "((startSpan|startActiveSpan|withSpan|traceAction)\(\s*|\b[A-Z][A-Z0-9_]*_SPAN\s*(:\s*[A-Za-z]+\s*)?=\s*)['\"\`][^'\"\`]+['\"\`]" \
     | grep -oE "['\"\`][^'\"\`]+['\"\`]\$" | tr -d "'\"\`" | sort -u
 }
 unchecked=""

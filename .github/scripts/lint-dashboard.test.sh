@@ -35,6 +35,14 @@ check() {
 mkdir -p "$tmp/pristine/deploy" "$tmp/pristine/backend"
 cp -R "$repo/deploy/grafana" "$tmp/pristine/deploy/"
 cp -R "$repo/backend/scadbuddy" "$tmp/pristine/backend/"
+# The agent's and browser's sources too, so this case checks what CI checks
+# once their tracing modules land.
+for d in agent frontend; do
+  if [ -d "$repo/$d/src" ]; then
+    mkdir -p "$tmp/pristine/$d"
+    cp -R "$repo/$d/src" "$tmp/pristine/$d/"
+  fi
+done
 r="$tmp/repo"
 good() {
   rm -rf "$r"
@@ -200,6 +208,15 @@ mkdir -p "$r/agent/src"
 : > "$r/agent/src/telemetry.ts"
 printf 'export const TURN_SPAN = "agent.turn"\nexport const APPROVAL_SPAN = "agent.approval"\n' > "$r/agent/src/spans.ts"
 check 'agent span-name constants pass' '0:' "$(run)"
+
+# Only a constant named *_SPAN is a span name; other SPAN-ish constants are not.
+good
+mkdir -p "$r/agent/src"
+: > "$r/agent/src/telemetry.ts"
+printf 'export const SPAN_ATTR_TURN = "agent.turn"\nexport const SPAN_NAME_APPROVAL = "agent.approval"\n' > "$r/agent/src/spans.ts"
+check 'SPAN_ATTR_* and SPAN_NAME_* constants are not span names' \
+  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
+  "$(run)"
 
 # A name that is only quoted somewhere else is not a span the agent emits.
 good
