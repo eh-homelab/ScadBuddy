@@ -10,7 +10,8 @@ once; one task posts the queue to the collector, so the browser never waits on i
 - **A full queue** drops the new batch at once; the browser still gets its 204.
 - **Shutdown** (`running` exiting, in the app's lifespan): new batches are refused
   (`closing`, a 503), then the queue is drained for at most :data:`DRAIN_SECONDS` in
-  all. Each post's timeout is whatever remains of that budget, the first post that
+  all. A post already in flight is left to finish within that budget and cancelled
+  only past it. Each later post's timeout is whatever remains of that budget, the first post that
   fails ends the drain (an unreachable collector would fail every later post the same
   way), and the rest is dropped as ``shutdown``.
 - **Visibility:** every outcome is counted in ``scadbuddy_trace_relay_batches_total``,
@@ -129,11 +130,16 @@ class TraceForwarder:
             yield
         finally:
             self.closing = True
-            task.cancel()
+            deadline = self._clock() + self._drain_seconds
+            self._wake.set()
             try:
+                # The post in flight finishes within the budget; cut off only past it.
                 # Not `await task`: that would swallow a cancellation of the lifespan.
-                await asyncio.wait({task})
-                await self._drain()
+                await asyncio.wait({task}, timeout=max(deadline - self._clock(), 0))
+                if not task.done():
+                    task.cancel()
+                    await asyncio.wait({task})
+                await self._drain(deadline)
             finally:
                 await self._client.aclose()
                 self._client = None
@@ -150,14 +156,16 @@ class TraceForwarder:
 
     async def _forward(self, wake: asyncio.Event) -> None:
         while True:
-            # What was queued before the run started goes first.
-            while self._pending:
+            # What was queued before the run started goes first. Once closing, the
+            # drain posts what is left, within its budget.
+            while self._pending and not self.closing:
                 await self._post(self._pop(), self._forward_timeout)
+            if self.closing:
+                return
             wake.clear()
             await wake.wait()
 
-    async def _drain(self) -> None:
-        deadline = self._clock() + self._drain_seconds
+    async def _drain(self, deadline: float) -> None:
         while self._pending:
             remaining = deadline - self._clock()
             if remaining <= 0 or not await self._post(self._pop(), remaining):
