@@ -588,9 +588,9 @@ has to handle:
 
 - **Not configured:** the anchored pattern matches 0 lines and the file
   does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
-  unanchored, fixed-string, case-insensitive `grep -iF`, so a near-miss in
-  casing still counts as a mention, and so does the `.git` form of the URL,
-  `eh-homelab/ScadBuddy.git//deploy/grafana`, or extra slashes). Post a `::notice::` that clusters has
+  unanchored, case-insensitive `grep -iE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana'`,
+  so a near-miss in casing still counts as a mention, and so does the `.git`
+  form of the URL, `eh-homelab/ScadBuddy.git//deploy/grafana`, or extra slashes). Post a `::notice::` that clusters has
   no dashboard pin yet, and pin the images only. This keeps deploys working
   until clusters#1596 Phase 5 adds the line.
 - **Malformed:** the anchored pattern matches 0 lines but the path does
@@ -598,7 +598,9 @@ has to handle:
   different spacing or casing). `::error::` and stop. A near miss must never
   be read as "not configured", or a stale dashboard would stay pinned
   silently.
-- **1 match:** rewrite it with the same anchored `sed`, then `expect_one` the
+- **1 match:** the case-insensitive mention count must also be 1; a second
+  mention (a `.git` form, a commented-out line) is an `::error::` too, since it
+  would leave an unpinned copy of the resource. Then rewrite it with the same anchored `sed`, then `expect_one` the
   rewritten line (`ref=` followed by exactly `REVISION`), as the image line is
   round-tripped.
 - **More than 1:** `::error::` and stop, as for any other pinned line.

@@ -243,6 +243,11 @@ dashboard_fails "lower case" "$near_miss" "  - https://github.com/eh-homelab/sca
 dashboard_fails "commented out" "$near_miss" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
 dashboard_fails "extra space" "$near_miss" "  -  $DASHBOARD_RESOURCE?ref=${old_ref}"
 dashboard_fails ".git form" "$near_miss" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=${old_ref}"
+# ...and beside an exact line they are errors too: a second, unpinned copy.
+dashboard_fails "exact line plus .git near miss" "times but only 1 line is exactly" \
+  "${dashboard_line}${old_ref}" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=main"
+dashboard_fails "exact line plus commented-out line" "times but only 1 line is exactly" \
+  "${dashboard_line}${old_ref}" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
 
 # 18. Two exact lines: an error, as for any other pinned line.
 dashboard_fails "two dashboard lines" "expected at most one dashboard line, found 2" \
