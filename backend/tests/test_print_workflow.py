@@ -27,6 +27,7 @@ from scadbuddy.bambuddy.print_run import (
     PreparedPlates,
     PrintRunRequest,
     PrintRunResult,
+    QueuedPlate,
 )
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
@@ -135,11 +136,11 @@ class Fake:
         self.enqueue_attempted = True
 
     @activity.defn(name="print_enqueue")
-    async def enqueue(self, input: EnqueueInput) -> int:
+    async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
         self.calls.append(f"enqueue:{input.plate_id}")
         if self.enqueue_error is not None:
             raise self.enqueue_error
-        return 50 + input.plate_id
+        return QueuedPlate(item_id=50 + input.plate_id)
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:

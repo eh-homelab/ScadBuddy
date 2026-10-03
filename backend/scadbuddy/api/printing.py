@@ -35,6 +35,7 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
+from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -55,6 +56,7 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
@@ -90,6 +92,19 @@ class PrinterBedType(BaseModel):
 
     printer_id: int
     bed_type: str | None = None
+
+
+class PrinterRackAlgorithmPut(BaseModel):
+    """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
+
+    algorithm: RackAlgorithm | None = None
+
+
+class PrinterRackAlgorithm(BaseModel):
+    """The rack algorithm in force on one printer (#836)."""
+
+    printer_id: int
+    algorithm: RackAlgorithm
 
 
 class ProjectAttach(BaseModel):
@@ -138,6 +153,22 @@ def put_printer_bed_type(
     settings = store.set_printer_bed_type(printer_id, body.bed_type)
     return PrinterBedType(
         printer_id=printer_id, bed_type=settings.printer_bed_types.get(str(printer_id))
+    )
+
+
+@router.put(
+    "/printers/{printer_id}/rack-algorithm",
+    response_model=PrinterRackAlgorithm,
+    summary="Remember how this printer's rack nozzle is picked",
+)
+def put_printer_rack_algorithm(
+    printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
+) -> PrinterRackAlgorithm:
+    """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
+    Bambuddy, like the printer's remembered plate."""
+    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    return PrinterRackAlgorithm(
+        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
     )
 
 
@@ -362,6 +393,7 @@ async def post_check(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
+    rack: RackUsageDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -373,7 +405,7 @@ async def post_check(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_output(client, outputs, uploads, meta, settings, body)
+        return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
 
 
 @router.get(
@@ -430,6 +462,7 @@ async def get_choices(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
+    rack: RackUsageDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
@@ -438,7 +471,7 @@ async def get_choices(
     settings = store.load()
     async with client_for(settings) as client:
         return await choices_for_output(
-            client, outputs, uploads, meta, settings, printer_id=printer_id
+            client, outputs, uploads, meta, settings, printer_id=printer_id, rack=rack
         )
 
 

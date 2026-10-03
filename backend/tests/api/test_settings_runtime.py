@@ -245,6 +245,7 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
         "print_options": {},
         "printer_print_options": {},
         "model_print_options": {},
+        "printer_rack_algorithms": {},
         "project_print_targets": {},
     }
     assert client.get("/api/v1/settings").json()["printer_id"] == 4

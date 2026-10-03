@@ -27,7 +27,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
-    from scadbuddy.bambuddy.print_run import PlannedRun
+    from scadbuddy.bambuddy.print_run import PlannedRun, QueuedPlate
     from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.workflows.print_models import (
@@ -164,6 +164,7 @@ class PrintRunWorkflow:
             retry_policy=READ_RETRY,
         )
         outcomes: list[QueueOutcome] = []
+        queued: list[QueuedPlate] = []
         sent: list[PlateSend] = []
         enqueue_attempted = False
         for plate in planned.plates:
@@ -195,18 +196,15 @@ class PrintRunWorkflow:
                     start_to_close_timeout=SHORT,
                     retry_policy=RECORD_RETRY,
                 )
-            item = await workflow.execute_activity(
+            queued_plate = await workflow.execute_activity(
                 "print_enqueue",
                 EnqueueInput(
+                    planned=planned,
+                    plate=plate,
                     sliced=sliced,
-                    printer_id=planned.printer_id,
-                    plate_id=plate.plate_id,
-                    copies=planned.copies,
-                    project_id=planned.project_id,
-                    options=planned.options,
-                    filaments=plate.filaments,
+                    credit=accepted.source.kind == "output",
                 ),
-                result_type=int,
+                result_type=QueuedPlate,
                 start_to_close_timeout=SHORT,
                 retry_policy=ONCE,
             )
@@ -214,10 +212,11 @@ class PrintRunWorkflow:
                 slice_job_id=started.job_id,
                 sliced_library_file_id=sliced,
                 preset_key=started.preset_key,
-                queue_item_ids=[item],
+                queue_item_ids=[queued_plate.item_id],
                 printer_id=planned.printer_id,
             )
             outcomes.append(outcome)
+            queued.append(queued_plate)
             sent = await workflow.execute_activity(
                 "print_record",
                 RecordInput(
@@ -234,7 +233,13 @@ class PrintRunWorkflow:
             )
         finished: PrintRun = await workflow.execute_activity(
             "print_finish",
-            FinishInput(input=input, run_id=accepted.run.id, planned=planned, outcomes=outcomes),
+            FinishInput(
+                input=input,
+                run_id=accepted.run.id,
+                planned=planned,
+                outcomes=outcomes,
+                queued=queued,
+            ),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
             retry_policy=BOUNDED_RETRY,

@@ -43,7 +43,7 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice, Tier
+from scadbuddy.bambuddy.models import NozzleChoice, RackAlgorithm, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
@@ -90,6 +90,7 @@ REMEMBERED_ROWS = (
     "print_options",
     "printer_print_options",
     "model_print_options",
+    "printer_rack_algorithms",
 )
 
 
@@ -200,6 +201,26 @@ class StoredSettings(BambuddyIds):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+    #: Stringified Bambuddy printer id -> how ScadBuddy picks that printer's rack nozzle
+    #: (#836). Stored like ``printer_print_options``, one key at a time in the jsonb
+    #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
+    printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
+
+    @field_validator("printer_rack_algorithms", mode="before")
+    @classmethod
+    def _known_rack_algorithms(cls, value: Any) -> Any:
+        """A value this version does not know (a newer one wrote it) is dropped, so it
+        cannot stop the settings loading."""
+        if not isinstance(value, dict):
+            return {}
+        known = get_args(RackAlgorithm)
+        return {key: algorithm for key, algorithm in value.items() if algorithm in known}
+
+    def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
+        """The printer's remembered rack algorithm, else Least used (spec §4)."""
+        if printer_id is None:
+            return "least_used"
+        return self.printer_rack_algorithms.get(str(printer_id), "least_used")
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -570,6 +591,14 @@ class SettingsStore:
                     (printer_id, bed_type),
                 )
         return self._written("printer_bed_type")
+
+    def set_printer_rack_algorithm(
+        self, printer_id: int, algorithm: RackAlgorithm | None
+    ) -> StoredSettings:
+        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it."""
+        with self._pool.connection() as conn:
+            _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
+        return self._written("printer_rack_algorithm")
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing

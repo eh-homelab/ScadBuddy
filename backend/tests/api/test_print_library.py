@@ -304,7 +304,7 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
     check = client.post("/api/v1/print/library/89/check", json=request)
 
     assert check.status_code == 200, check.text
-    assert check.json() == {"errors": [], "warnings": []}
+    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
     assert not sliced.called
 
 

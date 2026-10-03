@@ -11,6 +11,7 @@ export const choicesView: ChoicesView = {
   printer_id: 1,
   printers: targets.printers ?? [],
   nozzle_sizes: ['0.2', '0.4', '0.6', '0.8'],
+  rack_algorithm: 'least_used',
   installed: [
     { size: '0.2', flow: 'standard', count: 1 },
     { size: '0.4', flow: 'high_flow', count: 2 },

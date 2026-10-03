@@ -529,7 +529,9 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
     assert len({run_key("a" * 32, r) for r in (plain, one, two)}) == 3
     # An older client that sends none keeps the key it had before the field existed.
     before = json.dumps(
-        plain.model_dump(mode="json", exclude={"request_id", "print_sequence"}),
+        plain.model_dump(
+            mode="json", exclude={"request_id", "print_sequence", "rack_position", "rack_algorithm"}
+        ),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -544,6 +546,19 @@ def test_the_print_sequence_is_part_of_the_key_only_when_chosen() -> None:
     by_layer = PrintRunRequest.model_validate({**body(), "print_sequence": "by layer"})
     assert len({run_key("a" * 32, r) for r in (plain, by_object, by_layer)}) == 3
     assert "print_sequence" not in json.dumps(plain.model_dump(mode="json", exclude_none=True))
+
+
+def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:
+    """#836: a request with no rack position or algorithm keeps the key it had before
+    the fields existed, and each choice is a print of its own."""
+    plain = PrintRunRequest.model_validate(body())
+    by_hand = PrintRunRequest.model_validate({**body(), "rack_position": 3})
+    other_hand = PrintRunRequest.model_validate({**body(), "rack_position": 4})
+    oldest = PrintRunRequest.model_validate({**body(), "rack_algorithm": "oldest_first"})
+    keys = {run_key("a" * 32, r) for r in (plain, by_hand, other_hand, oldest)}
+    assert len(keys) == 4
+    dumped = json.dumps(plain.model_dump(mode="json", exclude_none=True))
+    assert "rack_position" not in dumped and "rack_algorithm" not in dumped
 
 
 def test_an_unknown_run_is_a_404(client: TestClient) -> None:
