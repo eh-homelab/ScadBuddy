@@ -27,8 +27,11 @@ const IMAGE_ROUTES = new RegExp(
     `|models/${SEG}/thumbnail)$`,
 )
 // A model's own image (#951), any path under its folder with an image extension in
-// any case, as `GET /models/{slug}/images/{path}` serves.
-const MODEL_IMAGE_ROUTE = new RegExp(`^/api/v1/models/${SEG}/images/(?:${SEG}/)*${SEG}$`)
+// any case, as `GET /models/{slug}/images/{path}` serves. A file name may hold any
+// character the URL parser leaves in a path (`a+b (1).png`), so that what a relative
+// path resolves to is accepted when written out too; `plainSegments` is what refuses
+// a dot segment or an encoded slash.
+const MODEL_IMAGE_ROUTE = new RegExp(`^/api/v1/models/${SEG}/images/[^/]+(?:/[^/]+)*$`)
 
 /** The model a Markdown text belongs to, which its relative images resolve against (#951). */
 export interface ImageBase {

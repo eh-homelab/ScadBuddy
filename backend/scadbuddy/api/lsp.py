@@ -257,6 +257,7 @@ def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) ->
             "content": {media_type: {} for media_type in sorted(set(IMAGE_MEDIA_TYPES.values()))}
         },
         304: {"description": "The copy named by `If-None-Match` is still current"},
+        503: {"description": "`commit` was given but model history is unavailable"},
     },
     summary="An image file in a model's directory",
     description=(
@@ -266,9 +267,9 @@ def _revision_image(history: ModelHistory, slug: str, path: str, commit: str) ->
         "resolves outside the directory a 404. Only "
         f"{', '.join(IMAGE_MEDIA_TYPES)} are served, each with its image type (else a "
         f"415), and none over {MAX_MODEL_IMAGE_BYTES:,} bytes (a 413). With `commit`, "
-        "the file as it was at that revision (404 when it did not exist then), cached "
-        "as immutable; without, the working tree's, with a strong `ETag` and "
-        "`Cache-Control: no-cache`."
+        "the file as it was at that revision (404 when it did not exist then, 503 when "
+        "there is no model history), cached as immutable; without, the working tree's, "
+        "with a strong `ETag` and `Cache-Control: no-cache`."
     ),
 )
 def get_model_image(

@@ -72,6 +72,10 @@ describe('safeImageSrc (#820)', () => {
       expect(safeImageSrc(src), src).toBeNull()
     }
     expect(safeImageSrc('/api/v1/models/m/images/my%20pic.png')).toBe('/api/v1/models/m/images/my%20pic.png')
+    // Whatever a relative path resolves to, the same URL written out is allowed too.
+    const resolved = safeImageSrc('a+b (1).png', { slug: 'm' })
+    expect(resolved).toBe('/api/v1/models/m/images/a+b%20(1).png')
+    expect(safeImageSrc(resolved)).toBe(resolved)
   })
 
   it('refuses other hosts and schemes, and origin-confusion tricks', () => {

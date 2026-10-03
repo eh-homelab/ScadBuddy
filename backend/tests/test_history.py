@@ -341,6 +341,16 @@ def test_read_blob_refuses_a_directory_a_missing_file_and_an_unknown_revision(
             history.read_blob(revision, path, limit=100)
 
 
+def test_read_blob_refuses_a_committed_symlink(models: Path, history: ModelHistory) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    (models / "keychain" / "link.png").symlink_to("/etc/passwd")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/link.png", limit=100)
+
+
 def test_diff_defaults_to_the_parent_and_handles_the_root_commit(
     models: Path, history: ModelHistory
 ) -> None:

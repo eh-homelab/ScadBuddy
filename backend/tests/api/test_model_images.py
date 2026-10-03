@@ -222,3 +222,19 @@ def test_a_directory_named_like_an_image_at_a_revision_is_a_404(
     response = client.get(f"/api/v1/models/{SLUG}/images/dir.png", params={"commit": commit})
 
     assert response.status_code == 404
+
+
+@pytest.mark.requires_git
+def test_a_committed_symlink_at_a_revision_is_a_404_not_its_target_path(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _upload(client)
+    (paths.model_dir(SLUG) / "link.png").symlink_to("/etc/passwd")
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    commit = state.history.commit("Add a symlink", f"{model_path(SLUG)}/link.png")
+    assert commit is not None
+
+    response = client.get(f"/api/v1/models/{SLUG}/images/link.png", params={"commit": commit})
+
+    assert response.status_code == 404
+    assert b"/etc/passwd" not in response.content

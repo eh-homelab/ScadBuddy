@@ -668,13 +668,21 @@ class ModelHistory:
         The revision is resolved once; the tree entry gives the blob's id and size, so
         one over ``limit`` is refused (:class:`BlobTooLargeError`) without reading it,
         and the bytes read are that blob's by id, the one that was sized.
-        :class:`RevisionNotFoundError` when no file is there (a directory included).
+        :class:`RevisionNotFoundError` when no regular file is there (a directory or a
+        symlink included).
         """
         resolved = self.resolve(commit)
         listing = self._out("ls-tree", "-l", resolved, "--", path, check=False)
         # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory.
         fields = listing.partition("\t")[0].split()
-        if len(fields) != 4 or fields[1] != "blob" or not fields[3].isdigit():
+        # A symlink is a blob too (mode 120000) whose bytes are its target's path: it is
+        # no file of the model's, as the working tree's reader refuses one out of it.
+        if (
+            len(fields) != 4
+            or fields[0] not in ("100644", "100755")
+            or fields[1] != "blob"
+            or not fields[3].isdigit()
+        ):
             raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
         if int(fields[3]) > limit:
             raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
