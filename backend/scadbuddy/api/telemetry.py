@@ -29,8 +29,8 @@ from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError, RouteM
 from scadbuddy.telemetry.routes import route_matcher
 
 RELAY_PATH: Final = "/telemetry/v1/traces"
-#: On the 204 when tracing is off (no endpoint, or ``OTEL_SDK_DISABLED``): the page's
-#: exporter stops for the rest of its life (spec §5.3).
+#: On the 204 when tracing is off (no endpoint, ``OTEL_TRACES_EXPORTER=none``, or
+#: ``OTEL_SDK_DISABLED``): the page's exporter stops for the rest of its life (spec §5.3).
 TRACING_HEADER: Final = "X-ScadBuddy-Tracing"
 #: The browser never comes near it (it sends at most 48 KiB a request, spec §5.3); it
 #: bounds other callers. Without it the ``application/json`` default, 8 MiB, would apply.

@@ -69,7 +69,7 @@ def relay_settings(trusted_proxies: str = "") -> Settings:
 def make_relay(
     collector: Handler | None = None,
     *,
-    endpoint: str | None = "http://collector.test:4318",
+    target: tuple[str, dict[str, str]] | None = ("http://collector.test:4318/v1/traces", {}),
     limits: RelayLimits | None = None,
     trusted_proxies: str = "",
     drain_seconds: float = 5.0,
@@ -78,7 +78,7 @@ def make_relay(
     return TraceRelay(
         forwarder=TraceForwarder(
             metrics=Metrics(),
-            endpoint=endpoint,
+            target=target,
             transport=httpx.MockTransport(collector or Collector()),
             drain_seconds=drain_seconds,
         ),
@@ -181,7 +181,7 @@ def test_a_browser_exception_reaches_the_collector_without_its_message(
 
 
 def test_tracing_off_answers_off_and_forwards_nothing(collector: Collector) -> None:
-    relay = make_relay(collector, endpoint=None)
+    relay = make_relay(collector, target=None)
     with TestClient(relay_app(relay)) as client:
         response = client.post(PATH, content=export(span()), headers=UI)
     assert response.status_code == 204

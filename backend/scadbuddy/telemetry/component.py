@@ -14,8 +14,9 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import otlp_traces_target
 from scadbuddy.telemetry.admission import RelayLimits
-from scadbuddy.telemetry.forwarder import TraceForwarder, relay_endpoint
+from scadbuddy.telemetry.forwarder import TraceForwarder
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ TRACE_RELAY: Key[TraceRelay] = Key("trace_relay")
 
 def _build(core: Core, components: Components) -> TraceRelay:
     return TraceRelay(
-        forwarder=TraceForwarder(metrics=core.metrics, endpoint=relay_endpoint()),
+        forwarder=TraceForwarder(metrics=core.metrics, target=otlp_traces_target()),
         limits=RelayLimits(),
         settings=lambda: core.settings,
     )

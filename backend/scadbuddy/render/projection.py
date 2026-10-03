@@ -164,7 +164,8 @@ class JobProjection:
                 " created_at, render_key, workflow_id, kind, traceparent)"
                 " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)"
                 " ON CONFLICT (render_key) WHERE state = 'pending'"
-                " DO UPDATE SET claims = render_jobs.claims + 1"
+                " DO UPDATE SET claims = render_jobs.claims + 1,"
+                " traceparent = COALESCE(render_jobs.traceparent, EXCLUDED.traceparent)"
                 " RETURNING *, (xmax = 0) AS inserted",
                 (
                     job.id,

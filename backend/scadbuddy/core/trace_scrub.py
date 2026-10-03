@@ -9,10 +9,11 @@ rule is enforced here, once, rather than at each call site."""
 from __future__ import annotations
 
 import importlib.util
-import linecache
 import os
 import re
+import site
 import sys
+import sysconfig
 from collections.abc import Iterator, Mapping, Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING, Final
@@ -56,12 +57,50 @@ _ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
 
 
+#: A source file larger than this is not read: its frames are dropped.
+_MAX_SOURCE_BYTES: Final = 2 * 1024 * 1024
+
+
+def _code_roots() -> tuple[str, ...]:
+    """The directories the interpreter's own code lives in: this package, the standard
+    library and site-packages, each resolved and ending in a separator."""
+    paths = sysconfig.get_paths()
+    candidates = [
+        os.path.dirname(os.path.dirname(__file__)),
+        *(paths[key] for key in ("stdlib", "platstdlib", "purelib", "platlib") if key in paths),
+        *site.getsitepackages(),
+    ]
+    return tuple(sorted({os.path.join(os.path.realpath(path), "") for path in candidates}))
+
+
+#: A frame is checked against its file only under these, so a path in a message (a
+#: data file, a blob) is never opened by the exporter.
+_CODE_ROOTS: tuple[str, ...] = _code_roots()
+
+
 @lru_cache(maxsize=256)
-def _defined_names(path: str) -> frozenset[str]:
-    """Every name a ``def``, ``async def`` or ``class`` in ``path`` binds."""
-    return frozenset(
-        match.group(1) for line in linecache.getlines(path) for match in _DEFINITION.finditer(line)
-    )
+def _source(path: str) -> tuple[int, frozenset[str]] | None:
+    """``path``'s line count and every name a ``def``, ``async def`` or ``class`` in it
+    binds; ``None`` when it cannot be read or is larger than ``_MAX_SOURCE_BYTES``.
+    Only these are kept, never the text, and never in ``linecache``."""
+    try:
+        with open(path, "rb") as file:
+            data = file.read(_MAX_SOURCE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > _MAX_SOURCE_BYTES:
+        return None
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    names = frozenset(match.group(1) for line in lines for match in _DEFINITION.finditer(line))
+    return len(lines), names
+
+
+def _code_file(path: str) -> str | None:
+    """``path`` resolved, when it is a regular file under one of ``_CODE_ROOTS``."""
+    resolved = os.path.realpath(path)
+    if not resolved.startswith(_CODE_ROOTS) or not os.path.isfile(resolved):
+        return None
+    return resolved
 
 
 @lru_cache(maxsize=256)
@@ -82,11 +121,14 @@ def _frame(path: str, line: str, name: str) -> str | None:
             return None
         # No source to check the name against: keep where, never what.
         return f'File "{path}", line {line}'
-    if not os.path.isfile(path) or not linecache.getline(path, int(line)):
+    resolved = _code_file(path)
+    source = _source(resolved) if resolved is not None else None
+    if source is None:
         return None
-    if name in _ANONYMOUS or (
-        _NAME.match(name) and _defined_names(path).issuperset(name.split("."))
-    ):
+    count, names = source
+    if not 1 <= int(line) <= count:
+        return None
+    if name in _ANONYMOUS or (_NAME.match(name) and names.issuperset(name.split("."))):
         return f'File "{path}", line {line}, in {name}'
     return None
 
@@ -112,7 +154,9 @@ def frames_only(stacktrace: str) -> str:
     a traceback ends with, and for a chained exception repeats, the messages, and its
     code lines are source text. A message can hold newlines (Bambuddy's ``detail``
     does), so a line counts as a frame only inside a traceback block, before that
-    block's exception line, and only when it names a file that exists. A message can
+    block's exception line, and only when it names a file that exists under the
+    interpreter's own code (this package, the standard library, site-packages): a path
+    anywhere else is never opened. A message can
     also hold a traceback header of its own, so the frame's text is checked too: its
     function name must be ``<module>``, a lambda or comprehension, or a name the file
     itself defines with ``def``/``class`` (a dotted name, every segment). So
