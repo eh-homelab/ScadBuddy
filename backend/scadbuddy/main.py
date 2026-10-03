@@ -21,6 +21,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.operations import bambuddy_kinds
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -42,7 +43,8 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import connect, print_worker
+from scadbuddy.workflows.client import bambuddy_worker, connect
+from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
@@ -409,12 +411,16 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         watcher=state.print_watcher,
     )
-    activities = PrintActivities(deps).all()
+    ops = state.operations
+    activities = [
+        *PrintActivities(deps).all(),
+        *operation_activities(ops.store, state.settings_store, ops.kinds),
+    ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
         try:
-            async with print_worker(client, settings.temporal_task_queue_bambuddy, activities):
+            async with bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities):
                 await stop.wait()
         except Exception:
             logger.exception("the print worker failed; starting it again")
@@ -595,6 +601,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     state = build_state(app_settings)
+    # The Bambuddy writes run as operations (#1053) on this process's `bambuddy` worker.
+    state.operations.kinds.update(bambuddy_kinds(state))
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)

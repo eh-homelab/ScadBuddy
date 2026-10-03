@@ -1175,6 +1175,77 @@ describe('print_again and pull_print_timelapse (#311)', () => {
   })
 })
 
+describe('Bambuddy writes as operations (#1053)', () => {
+  const OUT = 'd'.repeat(32)
+  const op = { id: 'op-1', kind: 'reprint', subject: 'archive:35', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const again = { queue_item_id: 51, printer_id: 1, bambuddy_url: 'https://b/queue' }
+
+  it('print_again sends an Idempotency-Key and re-sends the same one after a dropped answer', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2 ? HttpResponse.error() : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('follows a 202 to the operation result', async () => {
+    let reads = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => {
+        reads += 1
+        return HttpResponse.json(reads < 2 ? op : { ...op, status: 'succeeded', result: again })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('a failed operation is the tool error, in the backend words', async () => {
+    const error = { type: 'about:blank', status: 502, title: 'Bad Gateway', detail: 'Bambuddy said no', extensions: {} }
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json({ ...op, status: 'failed', error })),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('Bambuddy said no')
+  })
+
+  it.each([
+    ['send_to_bambuddy', { output_id: OUT }, `/api/v1/outputs/${OUT}/send`],
+    ['create_print_project', { name: 'P' }, '/api/v1/print/projects'],
+    ['pull_print_timelapse', { archive_id: 35, filename: 'a.mp4' }, '/api/v1/prints/35/timelapse/pull'],
+  ])('%s sends an Idempotency-Key', async (name, args, path) => {
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({}, { status: 200 })
+      }),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('get_operation reads an operation', async () => {
+    server.use(http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json({ ...op, status: 'succeeded', result: again })))
+    const result = await tool('get_operation').execute({ operation_id: 'op-1' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('succeeded')
+    expect(tool('get_operation').risk).toBe('read')
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)

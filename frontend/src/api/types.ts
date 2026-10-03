@@ -114,6 +114,8 @@ export type PrintRunResult = Schemas['PrintRunResult']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
+/** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
+export type Operation = Schemas['Operation']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']

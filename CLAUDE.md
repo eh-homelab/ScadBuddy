@@ -154,6 +154,16 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
+  Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
+  finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+- `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
+  `operations`) and `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts). `api/operations.py` `run_operation` is how a route runs a kind
+  (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
+  `GET /operations/{id}`. The Bambuddy kinds are `bambuddy/operations.py`
+  (`bambuddy_kinds`), registered in `create_app`. The browser's `command()`
+  (`frontend/src/api/client.ts`) and the agent's (`agent/src/api/command.ts`) send the
+  key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`

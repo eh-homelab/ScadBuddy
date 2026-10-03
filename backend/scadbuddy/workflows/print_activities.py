@@ -89,7 +89,7 @@ def problem(error: ApiError) -> PrintRunError:
     )
 
 
-def _raised(error: ApiError, kind: str) -> ApplicationError:
+def raised_as(error: ApiError, kind: str) -> ApplicationError:
     return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
 
 
@@ -156,11 +156,11 @@ class PrintActivities:
                 source = await self._source(client, spec, settings)
                 prepared = await prepare_run(client, source, settings, input.request)
         except ApiError as error:
-            raise _raised(error, REFUSED) from None
+            raise raised_as(error, REFUSED) from None
         except InvalidModelMetaError as error:
             # As every route that reads a broken model.json answers it (`api/models.py`).
             invalid = ApiError(status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata")
-            raise _raised(invalid, REFUSED) from None
+            raise raised_as(invalid, REFUSED) from None
         return Checked(source=spec, prepared=PreparedPlates.of(prepared))
 
     @activity.defn(name="print_insert")
@@ -190,7 +190,7 @@ class PrintActivities:
                     plan_run(client, source, settings, input.input.request, input.accepted.prepared)
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_slice_start")
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:
@@ -203,7 +203,7 @@ class PrintActivities:
                     plate_id=input.plate_id,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
@@ -212,7 +212,7 @@ class PrintActivities:
             async with client_for(self._settings()) as client:
                 return await _heartbeating(wait_slice(client, job_id))
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_start_enqueue")
     async def start_enqueue(self, run_id: str) -> None:
@@ -233,7 +233,7 @@ class PrintActivities:
                     filaments=input.filaments,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -253,7 +253,7 @@ class PrintActivities:
                     input.sent,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRun:
@@ -265,7 +265,7 @@ class PrintActivities:
                 source = await self._source(client, spec, settings)
                 result = await finish_run(client, source, input.planned, input.outcomes)
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
         run = await self.d.store.succeed(input.run_id, input.input.slug, result)
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An

@@ -2,17 +2,24 @@ from __future__ import annotations
 
 from typing import Any, Literal, Self
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
+from fastapi.responses import JSONResponse
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
+from scadbuddy.api.deps import AppState, OperationsDep, SettingsStoreDep, StateDep, UploadsDep
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
-from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
+from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.problems import ApiError
@@ -80,6 +87,8 @@ class SettingsView(BaseModel):
     display_unit: DisplayUnit = "mm"
     #: How long a finished print run is kept, in seconds; ``None`` keeps every one.
     print_run_retention_seconds: float | None = None
+    #: How long a finished operation is kept, in seconds; ``None`` keeps every one.
+    operation_retention_seconds: float | None = None
     last_project_id: int | None = None
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
@@ -279,6 +288,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         default_plate=stored.default_plate,
         display_unit=stored.display_unit,
         print_run_retention_seconds=stored.print_run_retention_seconds,
+        operation_retention_seconds=stored.operation_retention_seconds,
         last_project_id=stored.last_project_id,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
@@ -498,14 +508,24 @@ async def get_targets(store: SettingsStoreDep) -> BambuddyTargets:
     "/settings/register-sidebar",
     response_model=SidebarLink,
     status_code=status.HTTP_200_OK,
+    responses=OPERATION_RESPONSES,
     summary="Add ScadBuddy to Bambuddy's sidebar",
 )
-async def post_register_sidebar(store: SettingsStoreDep) -> SidebarLink:
+async def post_register_sidebar(
+    response: Response, ops: OperationsDep, idempotency_key: IdempotencyKey = None
+) -> SidebarLink | JSONResponse:
     """Upsert the ``ScadBuddy`` External Link by name.
 
     Bambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a
     sandboxed iframe at ``/external/{id}`` — so ScadBuddy appears as a sidebar page
     rather than a tab.
     """
-    async with client_for(store.load()) as client:
-        return await register_sidebar(client, store.load())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["register_sidebar"],
+        subject="sidebar",
+        request={},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, SidebarLink)

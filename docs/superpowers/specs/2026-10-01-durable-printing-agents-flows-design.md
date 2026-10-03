@@ -1011,6 +1011,13 @@ Each phase is its own implementation plan and ships alone.
 2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
    join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
    sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
+   - As built so far (2a, #1053, plan `2026-10-03-durable-phase-2a-operations-bambuddy.md`):
+     `operations`, `GET /operations/{id}`, the `Operation` workflow, and send, project
+     file, create project, attach project, reprint, timelapse pull and sidebar
+     registration as its kinds. Every kind answers `done` (today's body inside the
+     deadline, 202 past it); the client's key is the `Idempotency-Key` header; analyzer
+     fix apply stays a request (Postgres only, §4.1); output delete's Bambuddy part goes
+     with the library commands (phase 3). Renders (2b) and `FollowPrint` (2c) follow.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.

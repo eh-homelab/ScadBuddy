@@ -15,6 +15,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
 from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 from scadbuddy.workflows.printing import PrintRunWorkflow
 
@@ -71,20 +72,20 @@ def render_worker(
     )
 
 
-def print_worker(
+def bambuddy_worker(
     client: Client,
     task_queue: str,
     activities: Sequence[Callable[..., Any]],
     *,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
-    """The ``bambuddy`` worker (#1052, spec 2026-10-01 §5.5). Unversioned: a change to
-    ``PrintRun`` that alters its commands is made with ``workflow.patched``, so a run
-    started on the old code finishes on the new."""
+    """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun`` and
+    ``Operation``. Unversioned: a change to either that alters its commands is made with
+    ``workflow.patched``, so a run started on the old code finishes on the new."""
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[PrintRunWorkflow],
+        workflows=[PrintRunWorkflow, OperationWorkflow],
         activities=activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
@@ -136,11 +137,11 @@ async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
 __all__ = [
     "DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
+    "bambuddy_worker",
     "connect",
     "drained",
     "is_current",
     "make_current",
-    "print_worker",
     "pydantic_data_converter",
     "render_worker",
 ]

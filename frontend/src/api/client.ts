@@ -54,6 +54,7 @@ import type {
   PrintProgress,
   PrintCheck,
   PrintRun,
+  Operation,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -130,6 +131,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).body
+}
+
+/** `request`, keeping the status: a 202 from an operation's route is not its body. */
+async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -145,9 +151,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await readProblem(response))
   }
   if (response.status === 204) {
-    return undefined as T
+    return { status: 204, body: undefined as T }
   }
-  return (await response.json()) as T
+  return { status: response.status, body: (await response.json()) as T }
 }
 
 /**
@@ -362,6 +368,37 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
       await wait(printRunPoll.intervalMs, signal)
     }
   }
+}
+
+/**
+ * A Bambuddy write as an operation (#1053, spec 2026-10-01 §4.2): one `Idempotency-Key`
+ * per call, which a re-send after an answer that never arrived keeps, so the server
+ * answers it with the first outcome and does nothing twice. The route answers its own
+ * body, or 202 with an operation still running, followed here through
+ * `GET /operations/{id}` to that body, or to the problem the route would have answered.
+ */
+async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const signal = init.signal ?? undefined
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
+  if (first.status !== 202) return first.body as T
+  let op = first.body as Operation
+  while (op.status === 'running') {
+    await wait(printRunPoll.intervalMs, signal)
+    const id = op.id
+    op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
+  }
+  if (op.status === 'failed') {
+    const error = op.error
+    throw new ApiError({
+      ...error?.extensions,
+      type: error?.type,
+      title: error?.title ?? 'Failed',
+      status: error?.status ?? 500,
+      detail: error?.detail ?? 'The operation ended without a result.',
+    })
+  }
+  return (op.result ?? undefined) as T
 }
 
 /**
@@ -777,11 +814,11 @@ export const api = {
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
-  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+  reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
   /** #311 — attaches a timelapse still on the printer to the print. */
   pullTimelapse: (archiveId: number, filename: string) =>
-    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+    command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
     }),
@@ -795,7 +832,7 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   sendOutput: (id: string, body: SendRequest) =>
-    request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
+    command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
   /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
   putThumbnail: (outputId: string, png: Blob) => {
@@ -913,7 +950,7 @@ export const api = {
    * row — that makes Bambuddy's project page list the files.
    */
   createProject: (body: ProjectRequest) =>
-    request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+    command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #317 — the project both pickers open on; `null` is "No project". */
   rememberProject: (projectId: number | null) =>
@@ -927,7 +964,7 @@ export const api = {
    * Idempotent: the same project again answers with the file already there.
    */
   fileIntoProject: (outputId: string, projectId: number) =>
-    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+    command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId }),
     }),
@@ -936,7 +973,7 @@ export const api = {
    * sliced, and an archive only once a print has finished, so the ids come from the
    * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
-    request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
+    command<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1133,7 +1170,7 @@ export const api = {
     request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
 
   registerSidebar: () =>
-    request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+    command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
    * The AI agent's headless browser (#349), served by the agent service under

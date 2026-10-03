@@ -43,7 +43,7 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
         built.append(StubWorker(fail=not built, entered=entered))
         return built[-1]
 
-    monkeypatch.setattr(main, "print_worker", build)
+    monkeypatch.setattr(main, "bambuddy_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
@@ -53,6 +53,7 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
         uploads=None,
         catalogue=None,
         print_runs=SimpleNamespace(store=None),
+        operations=SimpleNamespace(store=None, kinds={}),
         print_progress=None,
         print_watcher=None,
     )

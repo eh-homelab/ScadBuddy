@@ -61,7 +61,7 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
-  printing: ['printer_id', 'print_run_retention_seconds'],
+  printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #426 — the blob store beside the inbox folder it needs.
   projects: ['library_folder_id', 'last_project_id', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
@@ -102,13 +102,15 @@ function fieldsOf(section: SectionId, settings: Settings | undefined): FieldName
   ]
 }
 
-/** A day, in the seconds `print_run_retention_seconds` is stored in (#1052). */
+/** A day, in the seconds the retentions are stored in (#1052, #1053). */
 const DAY_SECONDS = 86400
+/** The settings shown in days and stored in seconds; empty keeps every row. */
+const RETENTIONS: FieldName[] = ['print_run_retention_seconds', 'operation_retention_seconds']
 
 function baseline(settings: Settings, name: FieldName): string {
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
-  if (name === 'print_run_retention_seconds') {
-    const seconds = settings.print_run_retention_seconds
+  if (RETENTIONS.includes(name)) {
+    const seconds = settings[name as 'print_run_retention_seconds' | 'operation_retention_seconds']
     return seconds == null ? '' : String(seconds / DAY_SECONDS)
   }
   return serverValue(settings, name)
@@ -120,11 +122,11 @@ type Problem = { problem: string }
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
   if (name === 'display_unit') return raw
-  if (name === 'print_run_retention_seconds') {
-    // Empty keeps every run; a number of days prunes the older ones.
+  if (RETENTIONS.includes(name)) {
+    // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
     const days = Number(raw)
-    if (!Number.isFinite(days) || days <= 0) return { problem: 'Enter a number of days above 0, or leave it empty to keep every run.' } satisfies Problem
+    if (!Number.isFinite(days) || days <= 0) return { problem: 'Enter a number of days above 0, or leave it empty to keep every one.' } satisfies Problem
     return days * DAY_SECONDS
   }
   const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind
@@ -923,6 +925,24 @@ export function SettingsPage() {
                   placeholder="Forever"
                   value={value('print_run_retention_seconds')}
                   onChange={(event) => setField('print_run_retention_seconds', event.target.value)}
+                  className="sb-field"
+                />
+              </FieldRow>
+              <FieldRow
+                id="operation-retention"
+                label="Keep finished Bambuddy operations for (days)"
+                help="Sends, reprints, project filing and the like (#1053). Empty keeps every record; a number deletes those that finished longer ago."
+                error={errors.operation_retention_seconds}
+              >
+                <input
+                  id="operation-retention"
+                  type="number"
+                  min="1"
+                  step="any"
+                  inputMode="decimal"
+                  placeholder="Forever"
+                  value={value('operation_retention_seconds')}
+                  onChange={(event) => setField('operation_retention_seconds', event.target.value)}
                   className="sb-field"
                 />
               </FieldRow>
