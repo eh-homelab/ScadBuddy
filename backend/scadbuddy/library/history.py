@@ -140,6 +140,7 @@ class GitTimeoutError(GitError):
 #: Git's modes for a regular file and for a symlink in a tree entry.
 FILE_MODES = ("100644", "100755")
 SYMLINK_MODE = "120000"
+TREE_MODE = "040000"
 #: As the kernel's own limit on symlinks followed in one lookup (`ELOOP`).
 MAX_SYMLINK_HOPS = 40
 #: The longest symlink target read: Linux's PATH_MAX.
@@ -679,45 +680,70 @@ class ModelHistory:
         one over ``limit`` is refused (:class:`BlobTooLargeError`) without reading it,
         and the bytes read are that blob's by id, the one that was sized.
 
-        A symlink (mode 120000, a blob holding its target's path) is followed only with
-        a ``root``, and only while each target, relative and resolved against the link's
-        directory, stays under it -- as the working tree's reader follows a link inside
-        a model's directory and refuses one out of it. Without a root it is no file.
+        A symlink (mode 120000, a blob holding its target's path), at the end of the
+        path or as a directory along it, is followed only with a ``root``, and only
+        while each target, relative and resolved against the link's directory, stays
+        under it -- as the working tree's reader follows a link inside a model's
+        directory and refuses one out of it. Without a root it is no file.
         :class:`RevisionNotFoundError` when no regular file is there (a directory, a
         symlink that leaves ``root`` or loops included); :class:`GitError` when git
         cannot read the tree.
         """
         resolved = self.resolve(commit)
-        current = path
-        for _ in range(MAX_SYMLINK_HOPS):
-            mode, oid, size = self._tree_entry(resolved, current, commit)
-            if mode != SYMLINK_MODE:
-                if size > limit:
-                    raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-                return self._blob(oid)
-            if root is None or size > MAX_PATH_BYTES:
-                break
-            target = self._blob(oid).decode("utf-8", "replace")
-            current = posixpath.normpath(posixpath.join(posixpath.dirname(current), target))
-            if target.startswith("/") or not current.startswith(f"{root}/"):
-                break
-        raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-
-    def _tree_entry(self, resolved: str, path: str, commit: str) -> tuple[str, str, int]:
-        """``path``'s mode, blob id and size at ``resolved``: a regular file or a symlink,
-        else :class:`RevisionNotFoundError`."""
-        listing = self._out("ls-tree", "-l", resolved, "--", path)
-        # `<mode> <type> <object> <size>\t<path>`, one line for a file or a directory;
-        # nothing at all for a path that is not there.
-        fields = listing.partition("\t")[0].split()
-        if (
-            len(fields) != 4
-            or fields[0] not in (*FILE_MODES, SYMLINK_MODE)
-            or fields[1] != "blob"
-            or not fields[3].isdigit()
-        ):
+        # The usual case, a plain file at a plain path, in one tree read.
+        entry = self._tree_entry(resolved, path)
+        if entry is not None and entry[0] in FILE_MODES:
+            return self._sized_blob(entry, limit, path, commit)
+        if root is None:
             raise RevisionNotFoundError(f"{path!r} is not a file at {commit}")
-        return fields[0], fields[2], int(fields[3])
+        return self._walk(resolved, path, root, limit, commit)
+
+    def _walk(self, resolved: str, path: str, root: str, limit: int, commit: str) -> bytes:
+        """:meth:`read_blob` one segment at a time, following each symlink met."""
+        missing = RevisionNotFoundError(f"{path!r} is not a file at {commit}")
+        done: list[str] = []
+        pending = path.split("/")
+        hops = 0
+        while pending:
+            segment = pending.pop(0)
+            entry = self._tree_entry(resolved, "/".join([*done, segment]))
+            if entry is None:
+                raise missing
+            mode, oid, size = entry
+            if mode == SYMLINK_MODE:
+                hops += 1
+                if hops > MAX_SYMLINK_HOPS or size > MAX_PATH_BYTES:
+                    raise missing
+                target = self._blob(oid).decode("utf-8", "replace")
+                followed = posixpath.normpath(posixpath.join("/".join(done), target))
+                if target.startswith("/") or not followed.startswith(f"{root}/"):
+                    raise missing
+                done, pending = [], [*followed.split("/"), *pending]
+            elif pending:
+                if mode != TREE_MODE:
+                    raise missing
+                done.append(segment)
+            elif mode in FILE_MODES:
+                return self._sized_blob(entry, limit, path, commit)
+            else:
+                raise missing
+        raise missing
+
+    def _sized_blob(self, entry: tuple[str, str, int], limit: int, path: str, commit: str) -> bytes:
+        if entry[2] > limit:
+            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+        return self._blob(entry[1])
+
+    def _tree_entry(self, resolved: str, path: str) -> tuple[str, str, int] | None:
+        """``path``'s mode, object id and size (0 for a directory) at ``resolved``, or
+        None when nothing is there. :class:`GitError` when git cannot read the tree."""
+        listing = self._out("ls-tree", "-l", resolved, "--", path)
+        # `<mode> <type> <object> <size>\t<path>`, size `-` for a tree; a directory
+        # named without a trailing slash lists as itself, not its contents.
+        fields = listing.partition("\t")[0].split()
+        if len(fields) != 4 or fields[0] not in (*FILE_MODES, SYMLINK_MODE, TREE_MODE):
+            return None
+        return fields[0], fields[2], int(fields[3]) if fields[3].isdigit() else 0
 
     def _blob(self, oid: str) -> bytes:
         completed = self._run("cat-file", "blob", oid, text=False)

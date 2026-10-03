@@ -270,3 +270,23 @@ def test_a_symlink_inside_the_directory_is_followed_at_a_revision_too(
     assert live.content == PNG
     assert pinned.status_code == 200, pinned.text
     assert pinned.content == PNG
+
+
+@pytest.mark.requires_git
+def test_a_symlinked_directory_inside_the_folder_is_followed_live_and_at_a_revision(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _upload(client)
+    (paths.model_dir(SLUG) / "assets").mkdir()
+    (paths.model_dir(SLUG) / "assets" / "a.png").write_bytes(PNG)
+    (paths.model_dir(SLUG) / "images").symlink_to("assets")
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    commit = state.history.commit("Add a linked image folder", model_path(SLUG))
+    assert commit is not None
+
+    live = client.get(f"/api/v1/models/{SLUG}/images/images/a.png")
+    pinned = client.get(f"/api/v1/models/{SLUG}/images/images/a.png", params={"commit": commit})
+
+    assert live.content == PNG
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.content == PNG

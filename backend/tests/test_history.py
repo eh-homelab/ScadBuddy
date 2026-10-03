@@ -387,6 +387,31 @@ def test_read_blob_follows_a_symlink_that_stays_under_its_root(
     )
 
 
+def test_read_blob_follows_a_symlinked_directory_under_its_root(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models, "other", "cube(1);\n")
+    (models / "other" / "secret.png").write_bytes(b"OTHER")
+    folder = models / "keychain"
+    (folder / "assets" / "deep").mkdir(parents=True)
+    (folder / "assets" / "deep" / "real.png").write_bytes(b"REAL")
+    (folder / "images").symlink_to("assets")
+    (folder / "nested").symlink_to("images/deep")
+    (folder / "away").symlink_to("../other")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    for path in ("images/deep/real.png", "nested/real.png"):
+        assert history.read_blob(commit, f"keychain/{path}", limit=100, root="keychain") == (
+            b"REAL"
+        )
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/away/secret.png", limit=100, root="keychain")
+    with pytest.raises(RevisionNotFoundError):
+        history.read_blob(commit, "keychain/images/deep/real.png", limit=100)
+
+
 def test_read_blob_reports_a_failed_tree_read_as_a_git_error(
     models: Path, history: ModelHistory
 ) -> None:
