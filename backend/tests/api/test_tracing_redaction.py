@@ -107,3 +107,16 @@ def test_the_bambuddy_api_key_never_appears(
         client.get("/api/v1/settings/bambuddy")
     wait_for_span(spans, lambda s: s.name.startswith("bambuddy.") and s.kind == SpanKind.CLIENT)
     assert SENTINEL not in _everything(spans)
+
+
+def test_a_query_string_never_appears(client: TestClient, spans: InMemorySpanExporter) -> None:
+    client.get(f"/api/v1/fonts/catalogue?q={SENTINEL}")
+    server = wait_for_span(
+        spans,
+        lambda s: (
+            s.kind == SpanKind.SERVER
+            and (s.attributes or {}).get("http.route") == "/api/v1/fonts/catalogue"
+        ),
+    )
+    assert server is not None
+    assert SENTINEL not in _everything(spans)

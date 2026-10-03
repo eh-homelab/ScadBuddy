@@ -9,14 +9,19 @@ rule is enforced here, once, rather than at each call site."""
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status
+from opentelemetry.util.types import AttributeValue
 
-_FRAME: Final = re.compile(r'^\s*(File ".*", line \d+, in .*)$')
+_FRAME: Final = re.compile(r'^ {2}(?:\| +)*(File "[^"\n]*", line \d+, in [\w.<>]+)$')
+#: Attributes the HTTP instrumentation fills from the request's own text: a query
+#: string can carry anything a user typed, a user agent is a header value.
+_DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
+_CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
 
 
 def frames_only(stacktrace: str) -> str:
@@ -48,6 +53,17 @@ def _exception_type(events: Sequence[Event]) -> str | None:
     return None
 
 
+def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
+    kept: dict[str, AttributeValue] = {}
+    for key, value in (attributes or {}).items():
+        if key in _DROPPED:
+            continue
+        if key in _CUT_AT_QUERY and isinstance(value, str):
+            value = value.split("?", 1)[0]
+        kept[key] = value
+    return kept
+
+
 def scrub(span: ReadableSpan) -> ReadableSpan:
     events = [_scrub_event(event) for event in span.events]
     status = span.status
@@ -58,7 +74,7 @@ def scrub(span: ReadableSpan) -> ReadableSpan:
         context=span.context,
         parent=span.parent,
         resource=span.resource,
-        attributes=span.attributes,
+        attributes=_scrub_attributes(span.attributes),
         events=events,
         links=span.links,
         kind=span.kind,

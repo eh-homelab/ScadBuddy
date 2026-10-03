@@ -94,3 +94,44 @@ def test_a_clean_span_passes_through_unchanged() -> None:
     (span,) = exported.get_finished_spans()
     assert span.name == "work"
     assert span.status.status_code is StatusCode.UNSET
+
+
+def _exported_attributes(attributes: dict[str, str]) -> dict[str, object]:
+    inner = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(inner)))
+    with provider.get_tracer("t").start_as_current_span("work", attributes=attributes):
+        pass
+    (span,) = inner.get_finished_spans()
+    return dict(span.attributes or {})
+
+
+def test_no_query_string_or_user_agent_survives() -> None:
+    kept = _exported_attributes(
+        {
+            "http.url": f"http://h/api/v1/x?q={SENTINEL}",
+            "url.full": f"http://h/api/v1/x?q={SENTINEL}",
+            "http.target": f"/api/v1/x?q={SENTINEL}",
+            "url.query": f"q={SENTINEL}",
+            "http.user_agent": SENTINEL,
+            "user_agent.original": SENTINEL,
+            "http.route": "/api/v1/x",
+        }
+    )
+    assert SENTINEL not in repr(kept)
+    assert kept["http.url"] == "http://h/api/v1/x"
+    assert kept["url.full"] == "http://h/api/v1/x"
+    assert kept["http.target"] == "/api/v1/x"
+    assert kept["http.route"] == "/api/v1/x"
+
+
+def test_a_frame_line_with_anything_but_a_function_name_does_not_survive() -> None:
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "/ok.py", line 3, in fine_name\n'
+        f'  File "/x", line 1, in {SENTINEL}-detail with spaces\n'
+        "ValueError: boom"
+    )
+    kept = frames_only(text)
+    assert SENTINEL not in kept
+    assert 'File "/ok.py", line 3, in fine_name' in kept
