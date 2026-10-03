@@ -442,7 +442,7 @@ def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjec
 def _accept(
     store: JobProjection, run_id: str, *, max_pending: int = 0, **params: ParamValue
 ) -> Job:
-    job = _job(**params)
+    job = _job("demo", **params)
     key = render_key("demo", job.params, None)
     return store.accept(
         job, key, workflow_id=f"render-{key}", run_id=run_id, max_pending=max_pending
