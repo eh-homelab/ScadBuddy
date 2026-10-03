@@ -231,7 +231,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
   a session they are denied as "needs approval");
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  `src/api/schema.d.ts`.
+  Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
+  `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
+  before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
+  park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,
+  `decision_traceparent`). Only `api/backend.ts`'s middleware injects `traceparent`;
+  never add trace context to another outgoing call. Tests share one provider
+  (`test/support/tracing.ts` `testTracing`).
+  `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
