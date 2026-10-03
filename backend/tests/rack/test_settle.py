@@ -354,11 +354,12 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
 ) -> None:
     """#1083: the hook's settings read is a blocking database read. Run on the event
     loop it would freeze the watch, and the watcher's timeout could never fire."""
-    release = threading.Event()
+    release, returned = threading.Event(), threading.Event()
     settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
 
     def load() -> StoredSettings:
-        release.wait(timeout=2)
+        release.wait(timeout=10)
+        returned.set()
         return settings
 
     write_output(paths)
@@ -367,11 +368,10 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
     watcher.on_settled.append(settle_hook(store, PrintLinkStore(pool), load))
     try:
         with caplog.at_level(logging.DEBUG):
-            started = time.monotonic()
             watcher.watch(WATCHED)
             await until_idle(watcher)
-            # Well inside the read's 2 s block: the loop was never frozen by it.
-            assert time.monotonic() - started < 1
+            # The watch finished while the read was still blocked: it never froze the loop.
+            assert not returned.is_set()
     finally:
         release.set()
 

@@ -182,10 +182,24 @@ async def test_migrating_waits_out_another_process_holding_the_lock(
     # on the same test database from waiting on, or holding, the real one.
     lock = secrets.randbits(62)
     monkeypatch.setattr(pg_store, "MIGRATION_LOCK", lock)
-    with psycopg.connect(pg_conninfo) as holder:
+    with psycopg.connect(pg_conninfo) as holder, psycopg.connect(pg_conninfo) as watch:
         holder.execute("SELECT pg_advisory_xact_lock(%s)", (lock,))
         first = asyncio.create_task(store.seen(1, [A]))
-        await asyncio.sleep(0.6)
+        # Proven waiting on the lock, not still connecting: a bigint key shows in
+        # pg_locks as its high and low 32 bits.
+        waiting = (
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            " AND classid::bigint = %s AND objid::bigint = %s"
+        )
+        for _ in range(200):
+            found = watch.execute(waiting, (lock >> 32, lock & 0xFFFF_FFFF)).fetchone()
+            if found and found[0]:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the store never waited on the migration lock")
+        # Past the 200 ms bound, which would have cancelled the wait without the fix.
+        await asyncio.sleep(0.5)
         assert not first.done()
         holder.commit()
     await first
