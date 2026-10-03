@@ -29,9 +29,23 @@ export function restartMockBackend(): void {
   setMockSettings({ ...mockSettings(), restart_required: [] })
 }
 
-const SECRETS = { bambuddy_api_key: 'has_api_key', google_fonts_api_key: 'has_google_fonts_api_key' } as const
+const SECRETS = {
+  bambuddy_api_key: 'has_api_key',
+  bambuddy_render_api_key: 'has_render_api_key',
+  google_fonts_api_key: 'has_google_fonts_api_key',
+} as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
-const NULLABLE = new Set(['bambuddy_url', 'bambuddy_api_key', 'public_url', 'default_plate', 'google_fonts_api_key', 'temporal_ui_url'])
+const NULLABLE = new Set([
+  'bambuddy_url',
+  'bambuddy_api_key',
+  'bambuddy_render_api_key',
+  'public_url',
+  'default_plate',
+  'google_fonts_api_key',
+  'temporal_ui_url',
+])
+/** The settings the backend's `StoreNotReadyError` is decided from. */
+const STORE_READINESS = ['store_backend', 'bambuddy_url', 'library_folder_id']
 const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
 const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'media_upload_max_bytes'])
 
@@ -96,6 +110,21 @@ function putSettings(body: Record<string, unknown>) {
     else next[name] = value
     sources[name] = fromEnv ? 'env' : 'default'
   }
+  // #426 — `SettingsStore.save`: the merged settings may not leave the Bambuddy store
+  // without its URL or inbox, whichever of them this save touched.
+  if (
+    STORE_READINESS.some((name) => name in body || reset.includes(name)) &&
+    next.store_backend === 'bambuddy' &&
+    (!next.bambuddy_url || next.library_folder_id === null || next.library_folder_id === undefined)
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
+    )
+  }
+  // #426 — without their own key, render workers are handed the full one.
+  next.render_key_fallback = Boolean(next.has_api_key) && !next.has_render_api_key
   next.sources = sources
   next.restart_required = Object.entries(fixtures.settingsApplies)
     .filter(([name, applies]) => applies === 'restart' && next[name] !== (state.running as Record<string, unknown>)[name])

@@ -2,6 +2,7 @@ import { fireEvent, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job, Output } from '../api/types'
+import { NO_EXTRA } from '../lib/inputs'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
 
@@ -29,6 +30,7 @@ function setup(
       capture={async () => null}
       captureImage={async () => null}
       viewSize={() => ({ width: 800, height: 500 })}
+      extra={NO_EXTRA}
       fit={undefined}
       onPrinterModel={() => undefined}
       onGenerated={() => undefined}

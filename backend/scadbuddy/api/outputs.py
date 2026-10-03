@@ -4,7 +4,7 @@ import asyncio
 import logging
 import zipfile
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
@@ -21,6 +21,7 @@ from scadbuddy.api.deps import (
     RenderDep,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
@@ -51,8 +52,15 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
+from scadbuddy.render.inputs import (
+    InputsDisagreeError,
+    InputsError,
+    legacy_inputs,
+    normalize_inputs,
+)
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
+from scadbuddy.store.cache import materialize_result
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +79,8 @@ class OutputSummary(OutputMeta):
 
 class OutputDetail(OutputSummary):
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: The template inputs this output was saved with (spec §4.3).
+    inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class OutputPlate(BaseModel):
@@ -78,11 +88,17 @@ class OutputPlate(BaseModel):
 
     index: int
     has_thumbnail: bool
+    #: What the plate holds, for its label (#929): its own name, else the names of the
+    #: objects on it; ``None`` when neither says, and the UI falls back to "Plate N".
+    name: str | None = None
 
 
 class CreateOutputRequest(BaseModel):
     job_id: str
     name: str | None = None
+    #: The inputs on screen when Generate was pressed (spec §4.3). Their ``params``
+    #: must be the ones the job rendered; left out, the job's own inputs are recorded.
+    inputs: dict[str, Any] | None = None
 
 
 class EditTarget(BaseModel):
@@ -95,16 +111,19 @@ class EditTarget(BaseModel):
     slug: str
     name: str | None
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    inputs: dict[str, Any] = Field(default_factory=dict)
     model_version: str | None = None
     #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
     source: Literal["record", "3mf"]
 
 
 def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+    params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
-        params=store.params(meta.id),
+        params=params,
+        inputs=store.inputs(meta.id, params),
         library_files=library_files,
     )
 
@@ -132,7 +151,7 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
     status_code=status.HTTP_201_CREATED,
     summary="Persist a finished render",
 )
-def create_output(
+async def create_output(
     slug: SlugPath,
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
@@ -140,9 +159,10 @@ def create_output(
     render: RenderDep,
     store: SettingsStoreDep,
     events: EventsDep,
+    state: StateDep,
 ) -> OutputDetail:
-    require_model(catalogue, slug)
-    job = require_job(render, body.job_id)
+    await asyncio.to_thread(require_model, catalogue, slug)
+    job = await asyncio.to_thread(require_job, render, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
@@ -151,7 +171,36 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
+    inputs: dict[str, Any] | None = None
+    if body.inputs is not None:
+        rendered = f"inputs.params are not the parameters job {job.id} rendered"
+        # One pass: the shape checks, then the typed comparison with what the job
+        # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
+        try:
+            inputs = normalize_inputs(body.inputs, job.params).data
+        except InputsDisagreeError:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
+        except InputsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        # The job with no params: nothing was compared above, so compare here.
+        if inputs["params"] != job.params:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
+    # The copy reads the job's files, which on the bambuddy backend come through the cache.
+    await materialize_result(state.store.blobs, job.result)
+    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
+    # fetched, and the copy would fail with a server path in its message: say so instead.
+    files = (job.result.model_3mf, job.result.preview_glb)
+    if not all((outputs.paths.root / name).is_file() for name in files):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
+    public_url = (await asyncio.to_thread(store.load)).public_url
+    try:
+        meta = await asyncio.to_thread(
+            outputs.create, job, name=body.name, public_url=public_url, inputs=inputs
+        )
+    except OSError:
+        # Evicted or swept after the check above, or unreadable: the same answer, not
+        # the copy's path.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])
@@ -206,6 +255,7 @@ def get_edit_target(
             slug=stamped.model,
             name=None,
             params=stamped.params,
+            inputs=legacy_inputs(stamped.params),
             model_version=stamped.version,
             source="3mf",
         )
@@ -213,11 +263,13 @@ def get_edit_target(
     # outlive its output — that is the point of the 3MF fallback — but not its model:
     # answering 200 would send the customizer somewhere it cannot load.
     require_model(catalogue, meta.slug)
+    params = outputs.params(output_id)
     return EditTarget(
         output_id=meta.id,
         slug=meta.slug,
         name=meta.name,
-        params=outputs.params(output_id),
+        params=params,
+        inputs=outputs.inputs(output_id, params),
         model_version=meta.model_version,
         source="record",
     )
@@ -354,7 +406,7 @@ def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[Outp
     one plate unless the template asks for more (#289)."""
     require_output(outputs, output_id)
     return [
-        OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None)
+        OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None, name=plate.name)
         for plate in plates_of(_model_3mf(outputs, output_id))
     ]
 

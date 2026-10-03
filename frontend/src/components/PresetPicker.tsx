@@ -8,9 +8,10 @@ import {
   applyPreset,
   parsePresetTags,
   presetDescriptionProblem,
-  presetParams,
+  presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
+import type { InputsExtra } from '../lib/inputs'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -20,8 +21,10 @@ interface Props {
   slug: string
   schema: CustomizerSchema
   values: ParamValues
-  /** Replaces every value on screen, as Reset to defaults does. */
-  onApply: (values: ParamValues) => void
+  /** The UI state saved with a preset (spec 2026-09-27 §4.3). */
+  extra: InputsExtra
+  /** Replaces every value on screen, and the UI state, as Reset to defaults does. */
+  onApply: (values: ParamValues, extra: InputsExtra) => void
 }
 
 interface Selection {
@@ -43,7 +46,7 @@ const FIELD =
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, onApply }: Props) {
+export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -88,7 +91,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     const applied = applyPreset(schema, preset)
     setSelection({ preset, applied: applied.values })
     setSkipped(applied.skipped)
-    onApply(applied.values)
+    onApply(applied.values, applied.extra)
   }
 
   function openSaveAs() {
@@ -165,7 +168,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     try {
       const created = await api.createPreset(slug, {
         name: chosen,
-        params: presetParams(schema, values),
+        inputs: presetInputs(schema, values, extra),
         ...described,
       })
       presetsState.setData([...presets, created])
@@ -240,7 +243,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setError(null)
     try {
       const updated = await api.updatePreset(slug, selected.id, {
-        params: presetParams(schema, values),
+        inputs: presetInputs(schema, values, extra),
       })
       presetsState.setData(presets.map((preset) => (preset.id === updated.id ? updated : preset)))
       setSelection({ preset: updated, applied: values })

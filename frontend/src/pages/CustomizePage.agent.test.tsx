@@ -1,4 +1,5 @@
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
@@ -6,6 +7,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
+import { projectViews } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -28,7 +30,7 @@ function watchRenders(): Record<string, unknown>[] {
   const bodies: Record<string, unknown>[] = []
   server.events.on('request:start', async ({ request }) => {
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
-      bodies.push(((await request.clone().json()) as { params: Record<string, unknown> }).params)
+      bodies.push(((await request.clone().json()) as { inputs: { params: Record<string, unknown> } }).inputs.params)
     }
   })
   return bodies
@@ -92,10 +94,10 @@ describe('customizer tools', () => {
   })
 
   it('render waits for the values on screen when a newer change supersedes a render', async () => {
-    const bodies: { params: Record<string, unknown>; supersedes?: string }[] = []
+    const bodies: { inputs: { params: Record<string, unknown> }; supersedes?: string }[] = []
     server.events.on('request:start', async ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
-        bodies.push((await request.clone().json()) as { params: Record<string, unknown>; supersedes?: string })
+        bodies.push((await request.clone().json()) as { inputs: { params: Record<string, unknown> }; supersedes?: string })
       }
     })
     await open()
@@ -107,7 +109,7 @@ describe('customizer tools', () => {
     await waitFor(() => expect(bodies).toHaveLength(2))
     await call('set_param', { name: 'name', value: 'Nova' })
     await waitFor(() => expect(bodies).toHaveLength(3))
-    expect(bodies[2]).toMatchObject({ params: { name: 'Nova' }, supersedes: expect.any(String) })
+    expect(bodies[2]).toMatchObject({ inputs: { params: { name: 'Nova' } }, supersedes: expect.any(String) })
 
     // The answer is Nova's render, never the superseded Workshop one (81.4 mm wide).
     const rendered = await call('render', { timeout_ms: 5000 })
@@ -169,6 +171,89 @@ describe('customizer tools', () => {
     expect(!confirm.ok && confirm.error.code).toBe('refused')
     expect(send).not.toHaveBeenCalled()
     expect(bridge.snapshot().dialogs).toEqual(['Send to Bambuddy'])
+  })
+
+  /** A request to `path` that waits until the returned function is called, then falls through. */
+  function hold(method: 'post', path: string): () => void {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http[method](path, async () => {
+        await gate
+        return undefined
+      }),
+    )
+    return release
+  }
+
+  it('freezes the print dialog\'s picker while a Generate files the project (#665)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
+      ),
+    )
+    await open()
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    expect(await call('open_print_dialog', { kind: 'print' })).toMatchObject({ ok: true })
+    const dialog = await screen.findByRole('dialog')
+    // The dialog's project picker is an Advanced step.
+    fireEvent.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    expect(dialogPicker).toHaveValue('1')
+    expect(dialogPicker).toBeEnabled()
+
+    // The dialog is open when the agent generates again: its picker shares the project.
+    const release = hold('post', '/api/v1/outputs/:id/project-file')
+    const generating = call('generate', { timeout_ms: 5000 })
+    await waitFor(() => expect(dialogPicker).toBeDisabled())
+    release()
+    expect(await generating).toMatchObject({ ok: true })
+    // A new output resets the dialog to Simple, so open Advanced again.
+    const again = await screen.findByRole('dialog')
+    fireEvent.click(await within(again).findByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(within(again).getByTestId('project-select')).toBeEnabled())
+  })
+
+  it('holds Generate while a project is being created (#665)', async () => {
+    const { user } = await open()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('post', '/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // Its completion switches the project, so neither the button nor the tool may start.
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeDisabled())
+    const refused = await call('generate', { timeout_ms: 5000 })
+    expect(!refused.ok && refused.error.message).toMatch(/still being created/)
+
+    release()
+    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+  })
+
+  it('holds Print and open_print_dialog while a project is being created (#710 review)', async () => {
+    const { user } = await open()
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('post', '/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // The dialog's picker would let a reselection be reverted when the create lands.
+    await waitFor(() => expect(screen.getByTestId('print')).toBeDisabled())
+    const refused = await call('open_print_dialog', { kind: 'print' })
+    expect(!refused.ok && refused.error.message).toMatch(/still being created/)
+
+    release()
+    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 
   it('reports itself in the snapshot and goes unavailable when the page does', async () => {

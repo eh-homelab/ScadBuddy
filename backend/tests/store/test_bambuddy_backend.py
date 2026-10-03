@@ -158,6 +158,27 @@ async def test_delete_outside_a_work_folder_is_refused_without_a_request(pool: P
 
 
 @respx.mock
+async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
+            " VALUES (%s, 'old', 'work', 42)",
+            (INBOX + 1,),
+        )
+    respx.get(f"{API}/library/files/78").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileResponse", id=78, filename="p", folder_id=42)
+        )
+    )
+    delete = respx.delete(f"{API}/library/files/78")
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("78")
+    assert not delete.called
+    await backend.aclose()
+
+
+@respx.mock
 async def test_delete_in_work_is_sent_and_an_already_gone_file_is_fine(pool: Pool) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)

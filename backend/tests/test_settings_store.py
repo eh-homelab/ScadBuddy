@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
+    STORE_READINESS_LOCK,
     ModelPrintChoices,
     RenderStoreSettings,
     SettingsPatch,
@@ -453,3 +454,38 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "bambuddy"
     store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "local"
+
+
+def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_refused(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """Clearing the URL and switching to Bambuddy are each safe alone. While one save
+    (here, by hand) holds the readiness lock and has cleared the URL, the switch waits,
+    then sees the clear and is refused: the store is never Bambuddy without a URL."""
+    store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+    errors: list[Exception] = []
+
+    def switch() -> None:
+        try:
+            store.save(SettingsPatch(store_backend="bambuddy"))
+        except Exception as error:
+            errors.append(error)
+
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
+        )
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES ('bambuddy_url', 'null'::jsonb)"
+            " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
+        )
+        thread = threading.Thread(target=switch)
+        thread.start()
+        thread.join(0.5)
+        assert thread.is_alive()  # the switch waits on the lock
+        conn.commit()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], StoreNotReadyError)
+    loaded = _fresh_load(settings)
+    assert (loaded.store_backend, loaded.bambuddy_url) == ("local", None)
