@@ -820,7 +820,8 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   1. delete the `ai_payload_keys` row, after which every copy of the payloads (history,
      Visibility memo, Archival) is undecryptable;
   2. terminate the workflow if it is open, then `DeleteWorkflowExecution`;
-  3. delete our rows, as today.
+  3. delete our rows, as today, including the session's `ai_pending_input` and
+     `ai_input_responses` rows (§6.6), which hold questions and answers in plaintext.
 
   Postgres backups hold the key row for their 7-day window, the same window in which
   they already hold `ai_session_entries` today. So the guarantee is the one deletion
@@ -911,16 +912,39 @@ happens, and there is no separate request system.
     `approvals/service.ts` writes for a classic decision or expiry (`audit/log.ts:276`).
     So no resolution reaches the plugin without the projection, the event and the audit
     recording it, and a durable expiry is recorded as `expired` there.
+  - **Ending without a decision**, as classic `cancelPending` does
+    (`approvals/service.ts:87-95`). An interrupt, a handoff and a new turn that
+    supersedes the call each first send `DurableSession` a `cancel_input(reason)`
+    Update, from the agent service's interrupt, handoff and send paths, and proceed only
+    once it returns. It resolves the parked entry as `cancelled` through
+    `resolve_input`, then lets the call end: an `approval` with `agent.decide(…,
+    False, "system:cancel")`, so it never runs, and an `answer` let through with the
+    `cancelled` outcome. So an interrupted turn leaves no entry, and a new owner after a
+    handoff never inherits an approval asked for in the previous owner's turn. The
+    attention `stop` path (Timeouts) is an interrupt and goes through it too.
+  - **When the workflow ends some other way** (an operator's terminate, a Reset,
+    `forgetSubject`), nothing in it runs. Two things clean up:
+    - `forgetSubject` deletes the subject's `ai_pending_input` and `ai_input_responses`
+      rows with its other rows (§6.5 step 3);
+    - every entry has an `expires_at` of at most 86 400 s, so the agent service's
+      periodic sweep, the one that runs `expireDue()` (`approvals/service.ts:100`),
+      also deletes `ai_pending_input` rows more than 10 minutes past `expires_at`,
+      writing `input.resolved` with outcome `cancelled` and reason `workflow gone`. A
+      live workflow resolves its own entry at `expires_at`, so the sweep only meets
+      orphans.
+    A Reset replays to before or after `open_input`. `open_input` is an upsert on
+    `request_id`, so a replayed park reuses the row rather than adding one.
   - `ai_pending_input(request_id primary key, session_id, kind, tool, summary,
     input_hash, prompt, requested_by, responders, created_at, expires_at)` and
-    `ai_input_responses` are one new agent migration in phase 5. The `agent-durable`
+    `ai_input_responses(request_id primary key, session_id, kind, outcome, response
+    jsonb, responder, created_at)` are one new agent migration in phase 5. The `agent-durable`
     role writes both (§6.3a).
 - **Two reads, two sources.**
   - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
     one it sends the Query, which is the source of truth. It writes nothing. The
-    projection below needs no reconciler: only `open_input` and `resolve_input` write
-    it, each in one transaction with its event, and both run before the plugin is
-    told, so the two cannot disagree for longer than a retrying activity.
+    projection below is written by `open_input` and `resolve_input`, each in one
+    transaction with its event and before the plugin is told, and swept for orphans as
+    described above.
   - `GET /api/v1/ai/pending-input` answers for everything the principal may see, the
     badge's read. It is **one Postgres read of a projection**, `ai_pending_input`,
     written by `open_input` and `resolve_input` (above), as `render_jobs` is projected
@@ -960,17 +984,21 @@ happens, and there is no separate request system.
 - **The validator** refuses, before anything is written to history:
   - a stale id, meaning no such call is parked;
   - an entry that is already resolved (decided, answered, timed out or cancelled);
-  - a responder the policy does not allow, including a principal answering its own
-    call;
+  - a responder the policy does not allow. For an `approval` that includes a principal
+    deciding its own call (`approvals/service.ts:74-81`). That rule is the `approval`
+    kind's only: an `answer` is asked of the session's owner, who is the one allowed
+    responder even though the call was made in their own session;
   - a response that does not match the kind's shape, and any response over 16 KiB.
   For an `approval` it also runs the plugin's `validate_decision`, and it checks
   `input_hash` when one is sent, as `approvals/service.ts:737` does. The agent's
   `approvers` list is left unset: who may answer depends on the kind, which the
   plugin's single list cannot say, so our validator decides. With `approvers` unset the
   plugin accepts any approver name (`_workflow.py:360`), so the guard is structural:
-  `DurableSession` registers **no decision Signal** and no other Update that reaches
-  `agent.decide`, and `respond` and the entry's timer are its only callers. A test in
-  §8 asserts the workflow's handler set.
+  `DurableSession` registers **no decision Signal**, and the only handlers that reach
+  `agent.decide` are `respond`, `cancel_input` (which can only cancel) and the entry's
+  timer. A test in §8 asserts the workflow's complete handler set, read from the
+  running workflow rather than from our source, so a handler the plugin or harness
+  registers by default is caught too. Phase 5 checks whether the plugin registers any.
 - **Why an Update, not the cookbook's Signal.** A Signal cannot refuse. The plugin's
   `decide` logs an invalid decision and drops it, so the person who clicked would see
   nothing happen. An Update's validator rejects synchronously: the panel gets the reason
@@ -980,10 +1008,10 @@ happens, and there is no separate request system.
   - `approval`: the handler is async. It marks the entry *resolving*, runs
     `resolve_input` (no answer to write, only the outcome, the projection, the event
     and the audit), then calls `agent.decide(tool_use_id, approved, responder)`.
-  - `answer`: the handler is async. It writes the outcome with an activity to
-    `ai_input_responses(request_id primary key, session_id, kind, outcome, response
-    jsonb, responder, created_at)`, a new agent migration in phase 5, then calls
-    `agent.decide(tool_use_id, True, approver)`. The tool's activity on `agent-tools`
+  - `answer`: the handler is async. It marks the entry *resolving*, runs
+    `resolve_input` with the response (the same activity as for an approval, so the
+    response, the projection delete, the event and the outcome are one transaction),
+    then calls `agent.decide(tool_use_id, True, approver)`. The tool's activity on `agent-tools`
     reads that row by `request_id` and returns it as the result. The plugin's gate
     carries only a yes or no, so this is how an answer becomes the result with only its
     documented API. The table is the durable store for every `answer` kind (questions
@@ -1260,14 +1288,23 @@ happens, and there is no separate request system.
     and an `approval` entry never carries the call's raw input;
   - an `answer` whose write activity fails returns to pending, can be answered again,
     and still times out;
-  - `DurableSession` registers no Signal and no Update other than `send_message` and
-    `respond` that reaches `agent.decide`;
+  - a running `DurableSession`'s registered Signal and Update handlers are exactly
+    `send_message`, `respond` and `cancel_input`, with no Signal, read from the
+    workflow, not from our source;
+  - interrupt, handoff and a superseding send each cancel a parked durable entry
+    through `cancel_input`: the row is gone, `input.resolved` and the audit say
+    `cancelled`, and an approval asked before a handoff cannot be approved after it;
+  - the sweep removes an `ai_pending_input` row whose workflow was terminated;
+  - `forgetSubject` removes the subject's `ai_pending_input` and `ai_input_responses`
+    rows;
   - the aggregate read includes a session-less MCP approval, and a durable entry
     leaves it when it is answered or times out;
   - every validator refusal (stale id, resolved, wrong responder, self, malformed, over
     16 KiB) is a **shared vector** in `agent/test/fixtures/pending-input-vectors.json`,
     run against the classic TypeScript validators and the durable Python ones, as the
-    credential vectors are, so the two cannot drift. *Being resolved* is marked
+    credential vectors are, so the two cannot drift. The `self` vector is marked
+    `kind: approval`, beside a vector in which the owner answers their own session's
+    question and is accepted. *Being resolved* is marked
     `durable_only`: classic decisions are one guarded `UPDATE` (`approvals/service.ts`
     `settle`), with no in-between state, and a classic run skips those vectors by that
     flag, never silently;
@@ -1336,7 +1373,9 @@ Each phase is its own implementation plan and ships alone.
 5. **Durable session mode** (§6.1, §6.2, §6.4, §6.6): `agent-durable/`, the plugin pin,
    the `SessionStore`, the credential port, the event subscriber, the tool-call gate
    (§6.6), the mode UI and setting. The gate's work, both modes:
-   - durable: `pending_input`, `respond`, the timers, `open_input` / `resolve_input`,
+   - durable: `pending_input`, `respond`, `cancel_input` and its callers in the
+     interrupt, handoff and send paths, the timers, `open_input` / `resolve_input`, the
+     orphan sweep,
      the `ai_pending_input` and `ai_input_responses` migration, `ask_user` /
      `wait_for_user` as tools, and the subscriber's `approval.required` /
      `question.asked` mapping;
