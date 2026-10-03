@@ -34,6 +34,21 @@ async function start() {
       </BrowserRouter>
     </StrictMode>,
   )
+  loadTracingAfterFirstPaint()
+}
+
+/**
+ * Tracing spec 2026-10-01 §5.3: the SDK is its own chunk, fetched after the first
+ * paint (the frame after the next one), so it never delays the page or the 3D viewer.
+ * Until it loads, `lib/traceAction.ts` makes no-op spans. A chunk that fails to load
+ * leaves the page untraced; `installStaleChunkReload` handles a stale deploy.
+ */
+function loadTracingAfterFirstPaint() {
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      import('./lib/tracing').then(({ startTracing }) => startTracing()).catch(() => undefined)
+    }, 0)
+  })
 }
 
 void start()
