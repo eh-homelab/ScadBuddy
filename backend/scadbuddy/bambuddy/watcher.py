@@ -85,8 +85,9 @@ MAX_AGE = timedelta(hours=24)
 RESCAN_INTERVAL = 300.0
 #: How long one settled-print hook may run (#1083). Hooks are awaited inside the
 #: watch loop, so one that never returns would hold the watch open. A hook cut off here
-#: is not retried: the rack's settle loses the usage of the archives it had not yet
-#: started, and the warning names the output so that loss can be traced. Cutting a
+#: is not retried now: the rack's settle leaves the archives it had not yet started
+#: unrecorded until that output settles again (another print of it), which records them
+#: with its own time; the warning names the output so the gap can be traced. Cutting a
 #: hook off stops the wait, not the work: a database read or write it started in a
 #: thread runs on until Postgres answers, so the archive whose write was in flight may
 #: still be recorded.

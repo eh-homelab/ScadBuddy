@@ -146,12 +146,14 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** Bumped by each algorithm save: only the latest one's outcome counts, whatever
    *  order the answers arrive in (#1086 review). */
   const algorithmSave = useRef(0)
-  /** The printer the dialog is on, for a save that lands after its session ended. */
-  const algorithmPrinter = useRef(printerId)
+  /** The choices read, for a save that lands after its session ended. */
+  const reloadChoices = useRef(picker.reload)
+  useEffect(() => {
+    reloadChoices.current = picker.reload
+  }, [picker.reload])
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
-    algorithmPrinter.current = printerId
     setChosenAlgorithm(null)
     setRackPosition(null)
     setAlgorithmUnsaved(false)
@@ -173,15 +175,10 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     if (printerId !== null)
       void api.putPrinterRackAlgorithm(printerId, next).then(
         () => {
-          // Saved after a close and reopen on this printer (#1086 review): it is now the
-          // printer's algorithm, which the reopened dialog read before it landed. Show it,
-          // unless this session has chosen its own.
-          if (
-            algorithmSave.current === save &&
-            algorithmSession.current !== session &&
-            algorithmPrinter.current === printerId
-          )
-            setChosenAlgorithm((chosen) => chosen ?? next)
+          // Saved after its session ended (#1086 review): the printer's stored algorithm
+          // changed under a dialog that may already have read it. Read it again rather
+          // than carry the old session's choice in; a closed dialog reads it on opening.
+          if (algorithmSession.current !== session) reloadChoices.current()
         },
         () => {
           if (algorithmSave.current === save && algorithmSession.current === session)

@@ -356,8 +356,9 @@ async def record_settled(
     wore either way (spec §10). One still running is left for its own settle. An
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
-    and ids and skipped, as is an archive read that stalls past ``archive_timeout``;
-    nothing is retried."""
+    and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
+    Nothing is retried now: an archive skipped here is recorded by the output's next
+    settle, which reads every linked archive not yet recorded."""
     try:
         linked = [
             (link.archive_id, link.queue_item_id)

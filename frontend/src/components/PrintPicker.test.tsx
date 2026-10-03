@@ -2079,9 +2079,10 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
 
-  it('shows a save that lands after a close and reopen, and sends it', async () => {
+  it('shows a save that lands after a close and reopen, and leaves it to the server', async () => {
     // #1086 review: the reopened dialog read the old algorithm before the save landed, so
-    // it labelled one the backend no longer used.
+    // it labelled one the backend no longer used. It re-reads the choices, and sends no
+    // choice of its own: the stored one is the server's to apply.
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
     // The printer's stored algorithm, as the choices read reports it.
@@ -2119,7 +2120,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await act(() => Promise.allSettled(saves))
 
     await waitFor(() => expect(select.value).toBe('oldest_first'))
-    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+    expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
 
     // A third open reads the choices again, which now carry the saved algorithm.
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -2133,12 +2134,16 @@ describe('PrintPicker · rack nozzle (#836)', () => {
   /** Holds each algorithm PUT until the test answers it, in any order. */
   function heldSaves() {
     const answers: ((status: number) => void)[] = []
+    // The printer's stored algorithm, as the choices read reports it.
+    let stored = 'least_used'
     server.use(
-      http.put('/api/v1/print/printers/:id/rack-algorithm', async () => {
+      http.get('/api/v1/print/outputs/:id/choices', () => HttpResponse.json({ ...choicesView, rack_algorithm: stored })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', async ({ request }) => {
+        const { algorithm } = (await request.json()) as { algorithm: string }
         const status = await new Promise<number>((resolve) => answers.push(resolve))
-        return status === 200
-          ? HttpResponse.json({})
-          : HttpResponse.json({ title: 'Service Unavailable', status }, { status })
+        if (status !== 200) return HttpResponse.json({ title: 'Service Unavailable', status }, { status })
+        stored = algorithm
+        return HttpResponse.json({ algorithm })
       }),
     )
     const saves: Promise<unknown>[] = []
@@ -2172,12 +2177,12 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
 
-  it('shows the latest of two saves that land after a close and reopen', async () => {
+  it('shows what two saves landing after a close and reopen left stored', async () => {
     // #1086 review: the first to arrive was adopted, and the later choice then ignored.
     const checks = watch('POST', '/check')
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const { answers, answer, saves } = heldSaves()
-    const { user } = renderPicker()
+    const { user } = renderReopenable()
     await loaded()
     await showAdvanced()
     const first = await screen.findByLabelText('Rack algorithm')
@@ -2186,6 +2191,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(answers.length).toBe(2))
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
     await loaded()
     await showAdvanced()
     const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
@@ -2194,7 +2200,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await act(() => Promise.allSettled(saves))
 
     await waitFor(() => expect(select.value).toBe('bambuddy'))
-    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'bambuddy' }))
+    expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
   })
 
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
