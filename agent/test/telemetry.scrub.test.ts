@@ -96,4 +96,16 @@ describe('framesOnly', () => {
     const stack = `Error: ${SENTINEL}\n    at f (file:///app/x.js:1:2)\n    at async g (file:///app/y.js:3:4)`
     expect(framesOnly(stack, SENTINEL)).toBe('at f (file:///app/x.js:1:2)\nat async g (file:///app/y.js:3:4)')
   })
+
+  it.each(['a', '1', 'at', 'f', 'x.js', ' '])('keeps frame lines byte-identical when the message is %j', (message) => {
+    const frames = 'at a (file:///app/a1.js:1:2)\nat async at (file:///app/at.js:3:4)'
+    const stack = `Error: ${message}\n    ${frames.replace('\n', '\n    ')}`
+    expect(framesOnly(stack, message)).toBe(frames)
+  })
+
+  it('cuts a multi-line message with a frame-shaped line from the head only', () => {
+    const message = `x\n    at ${SENTINEL} (file:1:2)`
+    const stack = `Error: ${message}\n    at real (file:///app/x.js:1:2)`
+    expect(framesOnly(stack, message)).toBe('at real (file:///app/x.js:1:2)')
+  })
 })
