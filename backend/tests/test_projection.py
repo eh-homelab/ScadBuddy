@@ -434,3 +434,16 @@ def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjec
             )
         )
     assert "render_jobs_settled_at" in plan
+
+
+def test_a_coalesced_submit_returns_the_first_callers_traceparent(
+    projection: JobProjection,
+) -> None:
+    key = render_key("demo", {"width": 1}, None)
+    first = _job(width=1)
+    first.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    projection.submit(first, key)
+    joined = projection.submit(_job(width=1), key)
+    assert joined.coalesced
+    assert joined.job.traceparent == first.traceparent
+    assert projection.read(first.id).traceparent == first.traceparent

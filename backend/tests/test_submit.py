@@ -14,6 +14,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
@@ -25,6 +26,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import current_traceparent
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
 from scadbuddy.render.jobs import SnapshotUnavailableError
@@ -847,3 +849,83 @@ async def test_with_a_snapshot_store_a_submit_names_the_pinned_revision(
     assert pinned.asked == [(SLUG, None)]
     assert job.model_version == "f" * 40
     assert (await asyncio.to_thread(projection.read, job.id)).model_version == "f" * 40
+
+
+async def test_a_coalesced_submit_links_to_the_render_it_joined(
+    make_service: ServiceFactory, spans: InMemorySpanExporter
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        # No worker: the first job stays pending, so the second coalesces onto it.
+        first = await service.submit(SLUG, {"width": 7})
+        second = await service.submit(SLUG, {"width": 7})
+        await service.aclose()
+    assert second.id == first.id
+    submits = [s for s in spans.get_finished_spans() if s.name == "render.submit"]
+    assert len(submits) == 2
+    opened, joined = submits
+    assert (joined.attributes or {})["scadbuddy.coalesced"] is True
+    assert (opened.attributes or {})["scadbuddy.coalesced"] is False
+    assert [link.context.span_id for link in joined.links] == [opened.context.span_id]
+
+
+async def test_a_row_without_a_traceparent_coalesces_without_a_link(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # A pending row written before the migration.
+    old = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 8},
+        inputs={"params": {"width": 8}},
+        created_at=now(),
+        traceparent=None,
+    )
+    await asyncio.to_thread(projection.submit, old, render_key(SLUG, {"width": 8}, None))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        joined = await service.submit(SLUG, {"width": 8})
+        await service.aclose()
+    assert joined.id == old.id
+    (submit,) = [s for s in spans.get_finished_spans() if s.name == "render.submit"]
+    assert list(submit.links) == []
+
+
+async def test_the_reconciler_starts_a_row_in_its_first_callers_trace(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    stale = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 9},
+        inputs={"params": {"width": 9}},
+        created_at=now(),
+        traceparent=traceparent,
+    )
+    await asyncio.to_thread(projection.submit, stale, render_key(SLUG, {"width": 9}, None))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        started: list[str | None] = []
+        start = client.start_workflow
+
+        async def capturing(*args: Any, **kwargs: Any) -> Any:
+            started.append(current_traceparent())
+            return await start(*args, **kwargs)
+
+        client.start_workflow = capturing  # type: ignore[method-assign]
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    assert started and started[0] is not None
+    assert started[0].split("-")[1] == "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+async def test_with_no_valid_span_rows_carry_no_traceparent(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scadbuddy.render.submit.current_traceparent", lambda: None)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        job = await service.submit(SLUG, {"width": 11})
+        await service.aclose()
+    assert (await asyncio.to_thread(projection.read, job.id)).traceparent is None

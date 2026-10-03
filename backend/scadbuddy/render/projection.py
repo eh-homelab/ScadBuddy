@@ -60,6 +60,7 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "traceparent",
 )
 
 
@@ -160,8 +161,8 @@ class JobProjection:
                         raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
-                " created_at, render_key, workflow_id, kind)"
-                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)"
+                " created_at, render_key, workflow_id, kind, traceparent)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)"
                 " ON CONFLICT (render_key) WHERE state = 'pending'"
                 " DO UPDATE SET claims = render_jobs.claims + 1"
                 " RETURNING *, (xmax = 0) AS inserted",
@@ -175,6 +176,7 @@ class JobProjection:
                     key,
                     workflow_id_for(job.id),
                     job.kind,
+                    job.traceparent,
                 ),
             ).fetchone()
             assert row is not None
