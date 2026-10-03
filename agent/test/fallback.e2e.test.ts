@@ -106,7 +106,7 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
 
   it('cools a rate-limited key down until the time the endpoint names', async () => {
     // A long retry-after: Claude Code does not retry and reports no time, so the
-    // time comes from asking the endpoint again (credentialErrors.ts probeRateLimit).
+    // time comes from asking the endpoint again (credentialErrors.ts probeCredential).
     forA = () => ({
       error: {
         status: 429,
