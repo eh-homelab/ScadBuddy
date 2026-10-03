@@ -225,6 +225,8 @@ export const customizerTools: Tool[] = [
         // The backend's reason is upstream text: wrapped under the error-detail
         // source (toolErrorText), as a thrown ToolError's would be.
         if (!(err instanceof ToolError)) throw err
+        // The audit row keeps the whole reason, as for any thrown ToolError.
+        ctx.report?.({ detail: err.message })
         return { ...json({ ...summary, output: null, output_error: toolErrorText(err, 'render_model') }), isError: true }
       }
       return json({ ...summary, output })

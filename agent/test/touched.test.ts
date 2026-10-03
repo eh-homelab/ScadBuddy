@@ -332,4 +332,24 @@ describe('the harness projection', () => {
     expect((await runToolWithOutcome(find('render_model'), { slug: 'box' }, ctx)).outcome).toBe('error')
     expect(rows).toEqual([])
   })
+
+  it("keeps a failed save's reason in render_model's audit detail", async () => {
+    backend.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json({ groups: [], parameters: [] })),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () =>
+        HttpResponse.json({ job_id: 'j8', status_url: '/api/v1/jobs/j8' }, { status: 202 }),
+      ),
+      http.get(`${BACKEND}/api/v1/jobs/j8`, () => HttpResponse.json({ id: 'j8', slug: 'box', status: 'done', params: {} })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, () => HttpResponse.json({ detail: 'disk full' }, { status: 507 })),
+    )
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'render_model')!, { slug: 'box', save_output: true }, {
+      ...services(),
+      principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+      progress: async () => {},
+      signal: new AbortController().signal,
+    })
+    expect(run.outcome).toBe('error')
+    expect(run.detail).toContain('HTTP 507')
+    expect(run.detail).toContain('disk full')
+  })
 })
