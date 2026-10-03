@@ -3,6 +3,7 @@ update-with-start, attaches to a running execution and keeps the reuse policy.""
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -17,6 +18,7 @@ from temporalio.worker import Worker
 from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandStillAcceptingError,
+    TemporalUnavailableError,
     start_command,
 )
 from tests.support.temporal import temporal_client
@@ -153,3 +155,19 @@ async def test_an_update_slower_than_the_deadline_is_still_accepting(
         again = await echo(client, queue, workflow_id, EchoInput(delay_s=2))
         await client.get_workflow_handle(workflow_id).signal("finish")
     assert again.updates == 2
+
+
+async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue: str) -> None:
+    """The lazy client's first connect retries for minutes; a route must not (§4.2)."""
+    # Here, not at the top: the workflow sandbox re-imports this module.
+    from scadbuddy.workflows.client import connect_lazily
+
+    began = time.monotonic()
+    with pytest.raises(TemporalUnavailableError):
+        await echo(
+            connect_lazily("127.0.0.1:1", "default"),
+            queue,
+            "echo-unreachable",
+            deadline=timedelta(seconds=1),
+        )
+    assert time.monotonic() - began < 10

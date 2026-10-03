@@ -13,6 +13,7 @@ that holds itself open for a window (a print without a ``request_id``, §5.2).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from temporalio.client import (
@@ -29,6 +30,9 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 #: Below Envoy's 15 s route timeout (§1), so no command holds a request open past it.
 COMMAND_ANSWER_DEADLINE = timedelta(seconds=10)
+#: How much longer than the deadline a call may take before Temporal counts as
+#: unreachable; still below Envoy's 15 s with the default deadline.
+CONNECT_MARGIN_SECONDS = 2.0
 #: What a client waits before it sends the same request again.
 RETRY_AFTER_SECONDS = 2
 
@@ -36,6 +40,11 @@ RETRY_AFTER_SECONDS = 2
 class CommandStillAcceptingError(Exception):
     """The command's Update did not answer within the deadline. The execution goes on,
     and the same request attaches to it."""
+
+
+class TemporalUnavailableError(Exception):
+    """Temporal did not answer at all within the deadline (its frontend is down or
+    unreachable): nothing was started."""
 
 
 class AlreadyClosedError(Exception):
@@ -67,14 +76,28 @@ async def start_command[T](
         id_reuse_policy=reuse,
         search_attributes=search_attributes,
     )
+    # `rpc_timeout` bounds the Update; the outer bound is for the connect a lazy
+    # client makes on its first call, which retries for minutes on its own.
+    bound = asyncio.timeout(deadline.total_seconds() + CONNECT_MARGIN_SECONDS)
     try:
-        answer: T = await client.execute_update_with_start_workflow(
-            update,
-            start_workflow_operation=operation,
-            result_type=result_type,
-            rpc_timeout=deadline,
-        )
+        async with bound:
+            answer: T = await client.execute_update_with_start_workflow(
+                update,
+                start_workflow_operation=operation,
+                result_type=result_type,
+                rpc_timeout=deadline,
+            )
+    except TimeoutError as error:
+        raise TemporalUnavailableError(id) from error
+    except RuntimeError as error:
+        # How a lazy client's first connect fails (temporalio 1.33).
+        if str(error).startswith("Failed client connect"):
+            raise TemporalUnavailableError(id) from error
+        raise
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
+        # The SDK reports the outer bound's cancellation as this error too.
+        if bound.expired():
+            raise TemporalUnavailableError(id) from error
         raise CommandStillAcceptingError(id) from error
     except WorkflowAlreadyStartedError as error:
         raise AlreadyClosedError(id) from error

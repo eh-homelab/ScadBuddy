@@ -10,6 +10,7 @@ that run rather than queueing a second print.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import threading
@@ -28,8 +29,11 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import LOST_DETAIL, LOST_UNQUEUED_DETAIL, PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
+from scadbuddy.workflows.client import connect_lazily
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
     API,
@@ -39,7 +43,6 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
-from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -391,110 +394,122 @@ def test_a_refusal_the_choices_decide_is_still_answered_before_any_run(
 
 
 @respx.mock
-def test_a_racer_refused_by_its_own_read_answers_with_the_run_that_won(
-    client: TestClient, model: str, pg_conninfo: str
-) -> None:
-    """Two POSTs of one request race: the winner claims its run while the loser is
-    still checking, and the loser's own read refuses. The loser's caller gets the
-    winner's run, not an unrelated-looking refusal."""
+def test_two_posts_that_race_get_one_run(client: TestClient, model: str, gate: Gate) -> None:
+    """Both reach Temporal before either has a record: one execution (USE_EXISTING),
+    one row, and the second answer is the first's run (#1052, spec 2026-10-01 §5.1)."""
     output_id = prepared(client, model)
-    request = body(nozzles=[{"size": "0.2"}, {"size": "0.4"}])
-    key = run_key(output_id, PrintRunRequest.model_validate(request))
-    uploaded = upload_route()
-    run_routes()
-    won: list[str] = []
-
-    def winner_claims(_: httpx.Request) -> httpx.Response:
-        won.append(_insert_run(pg_conninfo, output_id, key, "0 seconds"))
-        return httpx.Response(200, json=recording("printers.json"))
-
-    respx.get(f"{API}/printers/").mock(side_effect=winner_claims)
-
-    response = start(client, output_id, request)
-
-    assert response.status_code == 200, response.text
-    assert response.json()["id"] == won[0]
-    assert response.json()["repeated"] is True
-    assert not uploaded.called
-
-
-def _insert_run(
-    conninfo: str, output_id: str, key: str, heartbeat_age: str, *, enqueued: bool = False
-) -> str:
-    run_id = uuid.uuid4().hex
-    with psycopg.connect(conninfo) as conn:
-        conn.execute(
-            "INSERT INTO print_runs"
-            " (id, output_id, idempotency_key, status, heartbeat_at, enqueue_attempted)"
-            " VALUES (%s, %s, %s, 'running', now() - %s::interval, %s)",
-            (run_id, output_id, key, heartbeat_age, enqueued),
-        )
-    return run_id
-
-
-@respx.mock
-def test_a_run_whose_process_died_before_queueing_reads_as_failed_and_frees_its_key(
-    client: TestClient, model: str, pg_conninfo: str, gate: Gate
-) -> None:
-    """Nothing is touching this run's heartbeat any more (a restart, another replica
-    that died): it reads as failed rather than running for ever. It had not tried to
-    queue, and now never can, so a retry is a new run, not that one."""
-    output_id = prepared(client, model)
-    request = body()
-    key = run_key(output_id, PrintRunRequest.model_validate(request))
-    lost = _insert_run(pg_conninfo, output_id, key, "10 minutes")
-
-    run = client.get(f"/api/v1/print/runs/{lost}").json()
-    assert run["status"] == "failed"
-    assert run["error"]["detail"] == LOST_UNQUEUED_DETAIL
-    assert run["may_have_queued"] is False
-    assert run["finished_at"] is not None
-
     upload_route()
     run_routes()
     gated_slice_routes(gate)
-    queue_route()
+    queued = queue_route()
+    answers: list[httpx.Response] = []
+
+    def post() -> None:
+        answers.append(start(client, output_id, body()))
+
+    racers = [threading.Thread(target=post) for _ in range(2)]
+    for racer in racers:
+        racer.start()
+    for racer in racers:
+        racer.join()
+
+    assert sorted(answer.status_code for answer in answers) == [200, 202]
+    assert len({answer.json()["id"] for answer in answers}) == 1
     gate.open()
-    retry = start(client, output_id, request)
-    assert retry.status_code == 202
-    assert retry.json()["id"] != lost
-    follow_run(client, retry.json()["id"])
+    follow_run(client, answers[0].json()["id"])
+    assert queued.call_count == 1
 
 
-def test_a_run_whose_process_died_while_queueing_holds_its_key(
-    client: TestClient, model: str, pg_conninfo: str
+@respx.mock
+def test_a_request_id_retry_after_a_recorded_failure_returns_that_run(
+    client: TestClient, model: str
 ) -> None:
-    """It had started queueing, so the print may be on Bambuddy's queue: the retry
-    answers with the lost run (no Bambuddy route is mocked, so nothing is called)."""
+    """One press is one print (§5.2): its retry, however late, gets the run as
+    recorded, here a failure found after the upload, and starts nothing."""
     output_id = prepared(client, model)
-    request = body()
-    key = run_key(output_id, PrintRunRequest.model_validate(request))
-    lost = _insert_run(pg_conninfo, output_id, key, "10 minutes", enqueued=True)
+    uploaded = upload_route()
+    run_routes()
+    request = {**body(), "filament_plan": {"slots": []}, "request_id": uuid.uuid4().hex}
+
+    first = start(client, output_id, request)
+    assert first.status_code == 202, first.text
+    failed = follow_run(client, first.json()["id"])
+    assert failed["status"] == "failed"
+    calls = uploaded.call_count
 
     retry = start(client, output_id, request)
 
     assert retry.status_code == 200, retry.text
-    assert retry.json()["id"] == lost
-    assert retry.json()["status"] == "failed"
-    assert retry.json()["error"]["detail"] == LOST_DETAIL
-    assert retry.json()["may_have_queued"] is True
+    assert retry.json()["id"] == first.json()["id"]
+    assert retry.json()["repeated"] is True
+    assert uploaded.call_count == calls
+
+
+def test_temporal_unreachable_is_a_503_and_writes_nothing(
+    client: TestClient, model: str, app: FastAPI, pg_conninfo: str
+) -> None:
+    output_id = prepared(client, model)
+    state = getattr(app.state, STATE_ATTR)
+    runs = state.print_runs
+    state.print_runs = dataclasses.replace(runs, client=connect_lazily("127.0.0.1:1", "default"))
+    try:
+        response = start(client, output_id, body())
+    finally:
+        state.print_runs = runs
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert response.headers["Retry-After"] == "5"
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
+
+
+def _insert_run(conninfo: str, output_id: str, key: str) -> str:
+    run_id = uuid.uuid4().hex
+    with psycopg.connect(conninfo) as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status)"
+            " VALUES (%s, %s, %s, 'running')",
+            (run_id, output_id, key),
+        )
+    return run_id
 
 
 def test_a_live_run_found_by_its_key_is_returned_without_touching_bambuddy(
     client: TestClient, model: str, pg_conninfo: str
 ) -> None:
-    """Another replica's run, with a fresh heartbeat: the retry answers with it, even
-    with Bambuddy unreachable (no route is mocked here)."""
+    """Our record is read first (§4.2): a retry answers with the run in flight, even
+    with Bambuddy unreachable (no route is mocked here) and without calling Temporal."""
     output_id = prepared(client, model)
     request = body()
     key = run_key(output_id, PrintRunRequest.model_validate(request))
-    live = _insert_run(pg_conninfo, output_id, key, "0 seconds")
+    live = _insert_run(pg_conninfo, output_id, key)
 
     response = start(client, output_id, request)
 
     assert response.status_code == 200, response.text
     assert response.json()["id"] == live
     assert response.json()["status"] == "running"
+
+
+@respx.mock
+def test_the_run_survives_the_app_that_accepted_it(
+    settings: Settings, model: str, gate: Gate
+) -> None:
+    """The process that answered 202 goes away mid-slice; the next one, on the same
+    database and queue, finishes the run (#1052: run 3c241a88 was lost this way)."""
+    with TestClient(create_app(settings)) as first:
+        output_id = prepared(first, model)
+        upload_route()
+        run_routes()
+        gated_slice_routes(gate)
+        queued = queue_route()
+        run_id = start(first, output_id, body()).json()["id"]
+    gate.open()
+    with TestClient(create_app(settings)) as second:
+        ended = follow_run(second, run_id, timeout=90)
+    assert ended["status"] == "succeeded", ended
+    assert queued.call_count == 1
 
 
 def test_the_key_is_the_output_and_the_request_not_its_spelling() -> None:
@@ -545,8 +560,9 @@ def test_without_a_database_both_routes_are_a_503_and_nothing_is_uploaded(
     output_id = prepared(client, model)
     run_routes()
     uploaded = upload_route()
-    runs = getattr(app.state, STATE_ATTR).print_runs
-    store, runs.store = runs.store, PrintRunStore(None)
+    state = getattr(app.state, STATE_ATTR)
+    runs = state.print_runs
+    state.print_runs = dataclasses.replace(runs, store=PrintRunStore(None))
     try:
         for response in (
             start(client, output_id, body()),
@@ -557,5 +573,5 @@ def test_without_a_database_both_routes_are_a_503_and_nothing_is_uploaded(
             assert problem["type"] == DATABASE_REQUIRED_PROBLEM
             assert "Error" not in problem["detail"]
     finally:
-        runs.store = store
+        state.print_runs = runs
     assert not uploaded.called

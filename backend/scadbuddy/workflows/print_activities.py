@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -86,6 +86,19 @@ def problem(error: ApiError) -> PrintRunError:
 
 def _raised(error: ApiError, kind: str) -> ApplicationError:
     return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
+
+
+async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
+    task = asyncio.create_task(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_EVERY)
+            if done:
+                return task.result()
+            activity.heartbeat()
+    finally:
+        task.cancel()
 
 
 class PrintActivities:
@@ -160,8 +173,8 @@ class PrintActivities:
         try:
             async with client_for(settings) as client:
                 source = await self._source(client, input.accepted.source, settings)
-                return await plan_run(
-                    client, source, settings, input.input.request, input.accepted.prepared
+                return await _heartbeating(
+                    plan_run(client, source, settings, input.input.request, input.accepted.prepared)
                 )
         except ApiError as error:
             raise _raised(error, FAILED) from None
@@ -184,15 +197,7 @@ class PrintActivities:
         """Polls the slice job inside the activity, heartbeating (§5.3)."""
         try:
             async with client_for(self._settings()) as client:
-                waiting = asyncio.create_task(wait_slice(client, job_id))
-                try:
-                    while True:
-                        done, _ = await asyncio.wait({waiting}, timeout=HEARTBEAT_EVERY)
-                        if done:
-                            return waiting.result()
-                        activity.heartbeat()
-                finally:
-                    waiting.cancel()
+                return await _heartbeating(wait_slice(client, job_id))
         except ApiError as error:
             raise _raised(error, FAILED) from None
 

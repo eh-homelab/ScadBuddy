@@ -7,16 +7,18 @@ than about an output, and only some of them are output-scoped at all. ``POST
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.service import RPCError
 
 from scadbuddy.api.deps import (
-    CatalogueDep,
     OutputIdPath,
     OutputsDep,
+    PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
@@ -26,22 +28,18 @@ from scadbuddy.api.deps import (
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.outputs import output_stem, require_output
+from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
-    PrintRunResult,
     check_for_output,
     chosen_project,
-    execute_run,
     filament_options_for_output,
-    prepare_run,
 )
-from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -52,9 +50,29 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
 )
-from scadbuddy.bambuddy.runs import BeforeEnqueue, PrintRun, PrintRuns, run_key
+from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRun, run_key
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.workflows.commands import (
+    RETRY_AFTER_SECONDS,
+    AlreadyClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+    start_command,
+)
+from scadbuddy.workflows.print_models import (
+    ACCEPTED_UPDATE,
+    PRINT_RUN_WORKFLOW,
+    AcceptAnswer,
+    PrintRunInput,
+    SourceSpec,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Problem ``type``s for a print the route could not hand to Temporal (#1052).
+STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
+TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -157,12 +175,7 @@ async def post_run(
     body: PrintRunRequest,
     response: Response,
     outputs: OutputsDep,
-    uploads: UploadsDep,
-    store: SettingsStoreDep,
-    observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
     runs: PrintRunsDep,
-    catalogue: CatalogueDep,
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -190,93 +203,103 @@ async def post_run(
     (same id) its run.
     """
     meta = require_output(outputs, output_id)
-    settings = store.load()
-
-    async def source_for(_: BambuddyClient) -> PrintSource:
-        # A copy uploaded into a project's folder is named like the one Generate files (#317).
-        stem = (
-            await output_stem(meta, outputs, catalogue)
-            if chosen_project(body, settings) is not None
-            else None
-        )
-        # Read before the 202, so a model.json that refuses them fails the request (#770).
-        return OutputSource(
-            outputs,
-            uploads,
-            meta,
-            settings,
-            stem=stem,
-            print_settings=catalogue.print_settings(meta.slug),
-        )
-
-    async def started() -> None:
-        observer.started(meta)
-        await watcher.started(meta.id)
-
     return await accept_run(
         runs,
         response,
         subject=meta.id,
         slug=meta.slug,
-        settings=settings,
         request=body,
-        source_for=source_for,
-        started=started,
+        source=SourceSpec(kind="output", output_id=meta.id),
     )
 
 
 async def accept_run(
-    runs: PrintRuns,
+    runs: PrintCommands,
     response: Response,
     *,
     subject: str,
     slug: str,
-    settings: StoredSettings,
     request: PrintRunRequest,
-    source_for: Callable[[BambuddyClient], Awaitable[PrintSource]],
-    started: Callable[[], Awaitable[None]] | None = None,
+    source: SourceSpec,
 ) -> PrintRun:
-    """The 202-and-follow model every print run shares (#470, #742).
+    """The 202-and-follow model every print run shares (#470, #742), on Temporal
+    (#1052, spec 2026-10-01 §5.1).
 
     ``subject`` is what the run is keyed and recorded under: an output's id, or
-    ``library:<file id>``. A repeat of ``request`` answers 200 with its run. Otherwise
-    ``source_for`` and :func:`prepare_run` make the refusals that come before the 202,
-    a run is claimed and the rest happens in the background. ``started`` is awaited
-    once the print is queued.
+    ``library:<file id>``. Our record is read first: a repeat answers 200 with its run
+    and touches nothing else. Otherwise ``PrintRun`` is started (or attached to) with
+    update-with-start, and its ``accepted`` Update answers with the new row (202), the
+    run it repeats (200) or the refusal, raised as the problem it carries.
     """
     key = run_key(subject, request)
-    repeated = await runs.store.find(key)
+    has_request_id = request.request_id is not None
+    repeated = await runs.store.find(key, has_request_id=has_request_id)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
+    arg = PrintRunInput(
+        subject=subject,
+        slug=slug,
+        key=key,
+        source=source,
+        request=request,
+        repeat_window_s=REPEAT_WINDOW.total_seconds(),
+        search_attributes=runs.search_attributes,
+    )
     try:
-        async with client_for(settings) as client:
-            source = await source_for(client)
-            prepared = await prepare_run(client, source, settings, request)
-    except ApiError:
-        # A racer with the same key may have claimed its run while this one was
-        # checking; its caller gets that run, not a refusal from a separate read.
-        raced = await runs.store.find(key)
-        if raced is None:
-            raise
+        answer = await start_command(
+            runs.client,
+            PRINT_RUN_WORKFLOW,
+            arg,
+            id=f"print-{key}",
+            task_queue=runs.task_queue,
+            update=ACCEPTED_UPDATE,
+            result_type=AcceptAnswer,
+            reuse=(
+                WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
+                if has_request_id
+                else WorkflowIDReusePolicy.ALLOW_DUPLICATE
+            ),
+        )
+    except AlreadyClosedError:
+        # The press's execution closed after recording its run (§4.2): that run.
+        closed = await runs.store.find(key, has_request_id=True)
+        if closed is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "This print's run has ended and left no record. Print again to retry.",
+            ) from None
         response.status_code = status.HTTP_200_OK
-        return raced.model_copy(update={"repeated": True})
-    run, created = await runs.store.claim(subject, key)
-    if not created:
-        # Another request for the same print claimed it while this one was checking.
+        return closed.model_copy(update={"repeated": True})
+    except CommandStillAcceptingError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy is still checking this print. Send the same request again to follow it.",
+            type_=STILL_ACCEPTING_PROBLEM,
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+        ) from None
+    except (RPCError, TemporalUnavailableError):
+        logger.warning("could not start a print run on Temporal", exc_info=True)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try"
+            " again shortly.",
+            type_=TEMPORAL_UNAVAILABLE_PROBLEM,
+            headers={"Retry-After": "5"},
+        ) from None
+    if answer.refusal is not None:
+        refusal = answer.refusal
+        raise ApiError(
+            refusal.status,
+            refusal.detail,
+            title=refusal.title,
+            type_=refusal.type,
+            **refusal.extensions,
+        )
+    assert answer.run is not None  # the Update answers one or the other
+    if answer.repeated:
         response.status_code = status.HTTP_200_OK
-        return run.model_copy(update={"repeated": True})
-
-    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
-        async with client_for(settings) as client:
-            result = await execute_run(client, source, settings, request, prepared, before_enqueue)
-        if started is not None:
-            await started()
-        return result
-
-    runs.start(run, slug, work)
-    runs.announce(run, slug)
-    return run
+    return answer.run.model_copy(update={"repeated": answer.repeated})
 
 
 @router.get(

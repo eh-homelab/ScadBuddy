@@ -320,6 +320,25 @@ async def test_slice_start_and_enqueue_have_maximum_attempts_one(
     assert attempts["print_slice_wait"] != 1
 
 
+async def test_the_long_activities_heartbeat_so_a_dead_worker_is_noticed(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """A worker that dies mid-upload or mid-slice is noticed within the heartbeat
+    timeout, not at the activity's whole budget (the run then resumes elsewhere)."""
+    arg = run_input()
+    await start(client, worker, arg)
+    await ended(client, arg)
+    heartbeats: dict[str, float] = {}
+    async for event in client.get_workflow_handle(f"print-{arg.key}").fetch_history_events():
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            scheduled = event.activity_task_scheduled_event_attributes
+            heartbeats[scheduled.activity_type.name] = (
+                scheduled.heartbeat_timeout.ToTimedelta().total_seconds()
+            )
+    assert heartbeats["print_plan"] == 30
+    assert heartbeats["print_slice_wait"] == 30
+
+
 async def test_a_failure_before_any_enqueue_closes_at_once(
     client: Client, worker: str, fake: Fake
 ) -> None:

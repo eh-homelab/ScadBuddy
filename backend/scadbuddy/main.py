@@ -42,7 +42,8 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import connect
+from scadbuddy.workflows.client import connect, print_worker
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
 
@@ -379,6 +380,57 @@ async def _stop_worker(state: AppState, worker: asyncio.Task[None], deps: Worker
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
 
+#: How long the print worker waits before connecting again to a Temporal that is down.
+PRINT_WORKER_RECONNECT = 5.0
+
+
+async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
+    """Serve the ``bambuddy`` queue until ``stop`` (#1052): print runs need the data
+    volume and the Bambuddy key this process holds (#1060). It connects eagerly (a
+    worker cannot run on the lazy client), retrying while Temporal is down, so the API
+    still boots without it; print routes answer 503 meanwhile."""
+    settings = state.settings
+    client = state.temporal
+    while client is None:
+        try:
+            client = await connect(settings.temporal_address, settings.temporal_namespace)
+        except Exception:
+            logger.warning("the print worker cannot reach Temporal yet; retrying", exc_info=True)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+            if stop.is_set():
+                return
+    deps = PrintDeps(
+        settings_store=state.settings_store,
+        outputs=state.outputs,
+        uploads=state.uploads,
+        catalogue=state.catalogue,
+        store=state.print_runs.store,
+        observer=state.print_progress,
+        watcher=state.print_watcher,
+    )
+    worker = print_worker(
+        client, settings.temporal_task_queue_bambuddy, PrintActivities(deps).all()
+    )
+    async with worker:
+        await stop.wait()
+
+
+async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(task, PRINT_WORKER_STOP_TIMEOUT)
+    except TimeoutError:
+        logger.warning("the print worker did not stop in time; cancelled it")
+    except Exception:
+        logger.exception("the print worker failed")
+
+
+#: The worker's own graceful shutdown (30 s) and a margin.
+PRINT_WORKER_STOP_TIMEOUT = 40.0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
@@ -447,6 +499,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
+    stop_printing = asyncio.Event()
+    printing: asyncio.Task[None] | None = None
     try:
         # Every component's `run` (`core/components.py`), now that the database and
         # the bus are up. One that fails exits those already running and fails the
@@ -461,6 +515,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             worker = (task, deps)
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
+        # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
+        printing = asyncio.create_task(_run_print_worker(state, stop_printing))
         # After the projection has opened: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state, converge=False)
@@ -503,9 +559,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
-        # Before the watcher (a run starts one) and the queue (its pool records the
-        # runs this process leaves unfinished as failed).
-        await state.print_runs.aclose()
+        # Before the watcher: a run's last activity starts one.
+        stop_printing.set()
+        await _stop_print_worker(printing)
         await state.print_watcher.aclose()
         if worker is not None:
             stop.set()

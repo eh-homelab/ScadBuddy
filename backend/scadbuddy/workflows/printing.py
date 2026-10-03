@@ -62,7 +62,9 @@ PLAN_TIMEOUT = timedelta(minutes=5)
 SHORT = timedelta(seconds=60)
 #: ``DEFAULT_SLICE_TIMEOUT`` (600 s) and a margin; polled inside the activity.
 SLICE_WAIT_TIMEOUT = timedelta(seconds=660)
-SLICE_WAIT_HEARTBEAT = timedelta(seconds=30)
+#: The upload and the slice wait beat while they run, so a worker that died is noticed
+#: within this rather than at the activity's whole budget.
+HEARTBEAT = timedelta(seconds=30)
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
@@ -141,6 +143,7 @@ class PrintRunWorkflow:
             PlanInput(input=input, accepted=accepted),
             result_type=PlannedRun,
             start_to_close_timeout=PLAN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=READ_RETRY,
         )
         outcomes: list[QueueOutcome] = []
@@ -163,7 +166,7 @@ class PrintRunWorkflow:
                 started.job_id,
                 result_type=int,
                 start_to_close_timeout=SLICE_WAIT_TIMEOUT,
-                heartbeat_timeout=SLICE_WAIT_HEARTBEAT,
+                heartbeat_timeout=HEARTBEAT,
                 retry_policy=READ_RETRY,
             )
             if not enqueue_attempted:
