@@ -57,11 +57,11 @@ function entries(rows: readonly SessionResource[]): Entry[] {
 
 const short = (id: string) => (/^[0-9a-f]{12,}$/.test(id) ? id.slice(0, 7) : id)
 
-/** What the entry is called, and its page in the app; no page once it is gone. */
-function describe(e: Entry): { name: string; to: string | null } {
+/** What the entry is called, and its page in the app; no page once it, or its model, is gone. */
+function describe(e: Entry, deletedModels: ReadonlySet<string>): { name: string; to: string | null } {
   const id = e.id ?? ''
   const on = e.model ? ` · ${e.model}` : ''
-  const gone = e.actions.at(-1) === 'deleted'
+  const gone = e.actions.at(-1) === 'deleted' || (e.model !== null && deletedModels.has(e.model))
   const page = (to: string | null) => (gone ? null : to)
   switch (e.type) {
     case 'model':
@@ -69,7 +69,7 @@ function describe(e: Entry): { name: string; to: string | null } {
     case 'revision':
       return {
         name: `${short(id)}${on}`,
-        to: e.model ? `${modelPath(e.model)}?version=${encodeURIComponent(id)}` : null,
+        to: e.model ? page(`${modelPath(e.model)}?version=${encodeURIComponent(id)}`) : null,
       }
     case 'preset':
     case 'asset':
@@ -114,6 +114,9 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
   if (!data) return <p className="px-3 py-2 text-[12px] text-faint">Loading…</p>
 
   const all = entries(data.resources)
+  const deletedModels = new Set(
+    all.filter((e) => e.type === 'model' && e.id !== null && e.actions.at(-1) === 'deleted').map((e) => e.id as string),
+  )
   if (all.length === 0) {
     return <p className="px-3 py-2 text-[12px] text-muted">Nothing changed by this session yet.</p>
   }
@@ -131,7 +134,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
             </h3>
             <ul className="mt-0.5 space-y-0.5">
               {items.map((e, i) => {
-                const { name, to } = describe(e)
+                const { name, to } = describe(e, deletedModels)
                 return (
                   <li key={e.id ?? `${e.tools.join()}-${i}`} className="flex items-baseline gap-1.5" title={e.tools.join(', ')}>
                     {to ? (
