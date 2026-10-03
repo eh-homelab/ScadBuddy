@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.trace import Status
+from opentelemetry.trace import Link, Status
 
 if TYPE_CHECKING:
     # tracing imports this module at run time; the alias is needed only by mypy.
@@ -38,9 +38,18 @@ _ANONYMOUS: Final = frozenset(
 _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
 #: string can carry anything a user typed, a user agent is a header value. The browser
-#: relay applies the same two sets to the page's spans (`telemetry/payload.py`).
+#: relay applies the same set to the page's spans (`telemetry/payload.py`).
 DROPPED_ATTRIBUTES: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
-CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
+#: Attributes that hold the request's path, which is data too: a file path a user
+#: chose, a photo filename Bambuddy returned, whatever the SPA fallback was asked for.
+#: The route's template stands in for it; with no route, the attribute is dropped.
+_PATH_ONLY: Final = frozenset({"http.target", "url.path"})
+_WITH_ORIGIN: Final = frozenset({"http.url", "url.full"})
+#: Every attribute that holds a path. The browser relay reduces each on a page's
+#: spans to the backend route its path names, or its origin (`telemetry/payload.py`).
+URL_ATTRIBUTES: Final = _PATH_ONLY | _WITH_ORIGIN
+#: An absolute URL's ``scheme://host[:port]``, kept in front of the route.
+_ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 #: Headers the instrumentation captures when a deployment sets
 #: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything. The
 #: relay drops them from the page's spans too.
@@ -115,15 +124,17 @@ def frames_only(stacktrace: str) -> str:
 
 
 def _scrub_event(event: Event) -> Event:
-    if event.name != "exception" or not event.attributes:
-        return event
-    attributes = {
-        key: value for key, value in event.attributes.items() if key != "exception.message"
-    }
-    stacktrace = attributes.get("exception.stacktrace")
-    if isinstance(stacktrace, str):
-        attributes["exception.stacktrace"] = frames_only(stacktrace)
+    attributes = _scrub_attributes(event.attributes)
+    if event.name == "exception":
+        attributes.pop("exception.message", None)
+        stacktrace = attributes.get("exception.stacktrace")
+        if isinstance(stacktrace, str):
+            attributes["exception.stacktrace"] = frames_only(stacktrace)
     return Event(event.name, attributes, event.timestamp)
+
+
+def _scrub_link(link: Link) -> Link:
+    return Link(link.context, _scrub_attributes(link.attributes))
 
 
 def _exception_type(events: Sequence[Event]) -> str | None:
@@ -136,12 +147,21 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 
 
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
+    attributes = attributes or {}
+    route = attributes.get("http.route")
     kept: dict[str, AttributeValue] = {}
-    for key, value in (attributes or {}).items():
+    for key, value in attributes.items():
         if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue
-        if key in CUT_AT_QUERY and isinstance(value, str):
-            value = value.split("?", 1)[0]
+        if key in _PATH_ONLY or key in _WITH_ORIGIN:
+            if not isinstance(route, str) or not isinstance(value, str):
+                continue
+            if key in _PATH_ONLY:
+                value = route
+            elif origin := _ORIGIN.match(value):
+                value = origin.group(0) + route
+            else:
+                continue
         kept[key] = value
     return kept
 
@@ -158,7 +178,7 @@ def scrub(span: ReadableSpan) -> ReadableSpan:
         resource=span.resource,
         attributes=_scrub_attributes(span.attributes),
         events=events,
-        links=span.links,
+        links=[_scrub_link(link) for link in span.links],
         kind=span.kind,
         status=status,
         start_time=span.start_time,
@@ -182,9 +202,9 @@ class ScrubbingSpanExporter(SpanExporter):
 
 
 __all__ = [
-    "CUT_AT_QUERY",
     "DROPPED_ATTRIBUTES",
     "HEADER_PREFIXES",
+    "URL_ATTRIBUTES",
     "ScrubbingSpanExporter",
     "frames_only",
     "scrub",

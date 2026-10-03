@@ -6,10 +6,13 @@ mount after it, the excluded server span, the component and its counter."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -17,20 +20,39 @@ from opentelemetry.trace import SpanKind
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from tests.support.otlp import export, span
+from scadbuddy.telemetry import component
+from scadbuddy.telemetry.forwarder import TraceForwarder
+from tests.support.otlp import SENTINEL, export, span, string
 
 PATH = "/telemetry/v1/traces"
 UI = {"Origin": "http://localhost:5173", "Content-Type": "application/json"}
-#: Nothing listens on the discard port: a forwarded batch fails, which no test waits on.
-UNREACHABLE_COLLECTOR = "http://127.0.0.1:9"
+#: Never dialled: the component's forwarder posts through a mock transport.
+COLLECTOR = "http://collector.test:4318"
 
 
 @contextmanager
 def app_client(
-    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str | None
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str | None,
+    collected: list[bytes] | None = None,
 ) -> Iterator[TestClient]:
     """The real app, with a bundle so the SPA's fallback is mounted. The endpoint is read
-    when the app is built; the tests' own span provider is kept either way."""
+    when the app is built; the tests' own span provider is kept either way. The
+    component's forwarder posts to a mock transport, never over the network; what it
+    posts is appended to ``collected``."""
+    bodies = [] if collected is None else collected
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(
+        component,
+        "TraceForwarder",
+        partial(TraceForwarder, transport=httpx.MockTransport(collector)),
+    )
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
     if endpoint is None:
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
@@ -47,7 +69,7 @@ def app_client(
 def relay_client(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[TestClient]:
-    with app_client(settings, tmp_path, monkeypatch, UNREACHABLE_COLLECTOR) as client:
+    with app_client(settings, tmp_path, monkeypatch, COLLECTOR) as client:
         yield client
 
 
@@ -60,10 +82,16 @@ def test_without_a_collector_the_relay_answers_off(
     assert response.headers["x-scadbuddy-tracing"] == "off"
 
 
-def test_with_a_collector_a_batch_is_accepted(relay_client: TestClient) -> None:
-    response = relay_client.post(PATH, content=export(span()), headers=UI)
+def test_with_a_collector_a_batch_is_accepted_and_forwarded(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collected: list[bytes] = []
+    with app_client(settings, tmp_path, monkeypatch, COLLECTOR, collected) as client:
+        response = client.post(PATH, content=export(span()), headers=UI)
     assert response.status_code == 204
     assert "x-scadbuddy-tracing" not in response.headers
+    (body,) = collected
+    assert b'"scadbuddy-web"' in body
 
 
 def test_the_body_gate_holds_it_to_256_kib(relay_client: TestClient) -> None:
@@ -102,3 +130,19 @@ def test_its_counter_is_scraped_from_zero(relay_client: TestClient) -> None:
 def test_it_is_not_in_the_openapi_schema(relay_client: TestClient) -> None:
     paths = relay_client.get("/openapi.json").json()["paths"]
     assert not [path for path in paths if path.startswith("/telemetry")]
+
+
+def test_a_page_spans_url_reaches_the_collector_as_its_route_template(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collected: list[bytes] = []
+    url = f"http://localhost/api/v1/models/box/files/{SENTINEL}.scad?x=1"
+    body = export(span(attributes=[string("url.full", url)]))
+    with app_client(settings, tmp_path, monkeypatch, COLLECTOR, collected) as client:
+        assert client.post(PATH, content=body, headers=UI).status_code == 204
+    (sent,) = collected
+    assert SENTINEL.encode() not in sent
+    (forwarded,) = json.loads(sent)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert forwarded["attributes"] == [
+        string("url.full", "http://localhost/api/v1/models/{slug}/files/{path:path}")
+    ]

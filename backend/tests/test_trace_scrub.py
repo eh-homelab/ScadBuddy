@@ -9,7 +9,7 @@ from typing import cast
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import Link, Status, StatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter, frames_only
@@ -238,3 +238,36 @@ def test_no_captured_header_survives() -> None:
         }
     )
     assert kept == {"http.route": "/api/v1/x"}
+
+
+def test_no_event_or_link_carries_what_a_span_may_not() -> None:
+    # Review 3 of #1064: the rule covers every attribute that leaves the process, not
+    # only the span's own and its exception events'.
+    leaky = {
+        "http.url": f"http://h/api/v1/x?q={SENTINEL}",
+        "url.query": f"q={SENTINEL}",
+        "http.user_agent": SENTINEL,
+        "user_agent.original": SENTINEL,
+        "http.request.header.cookie": SENTINEL,
+        "http.response.header.set_cookie": SENTINEL,
+        "scadbuddy.attempt": 2,
+    }
+    inner = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(inner)))
+    tracer = provider.get_tracer("t")
+    with tracer.start_as_current_span("earlier") as earlier:
+        pass
+    link = Link(earlier.get_span_context(), attributes=leaky)
+    with tracer.start_as_current_span("work", links=[link]) as current:
+        current.add_event("retry", attributes=leaky)
+    (span,) = [s for s in inner.get_finished_spans() if s.name == "work"]
+    (event,) = span.events
+    (exported_link,) = span.links
+    for attributes in (dict(event.attributes or {}), dict(exported_link.attributes or {})):
+        assert SENTINEL not in repr(attributes)
+        assert attributes["scadbuddy.attempt"] == 2
+        for key in leaky.keys() - {"http.url", "scadbuddy.attempt"}:
+            assert key not in attributes
+    assert event.name == "retry"
+    assert exported_link.context == earlier.get_span_context()

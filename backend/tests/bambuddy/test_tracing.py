@@ -93,3 +93,41 @@ async def test_a_transport_error_records_its_class_and_error_status(
     (call,) = [s for s in spans.get_finished_spans() if s.name == "bambuddy.GET"]
     assert "scadbuddy.failure_class" in (call.attributes or {})
     assert call.status.status_code is trace.StatusCode.ERROR
+
+
+class _ConsumerError(Exception):
+    pass
+
+
+@respx.mock
+async def test_the_consumers_error_inside_a_stream_does_not_fail_bambuddys_span(
+    bambuddy: Any, spans: InMemorySpanExporter
+) -> None:
+    # Review 2 of #1064: Bambuddy answered 2xx; a failure writing the bytes on (a
+    # browser gone away) is ours, not Bambuddy's.
+    respx.get(f"{BASE_URL}/api/v1/archives/1/video").mock(
+        return_value=httpx.Response(200, content=b"bytes")
+    )
+    with trace.get_tracer("t").start_as_current_span("request"), pytest.raises(_ConsumerError):
+        async with bambuddy.stream("/archives/1/video", what="read it"):
+            raise _ConsumerError
+    (call,) = [s for s in spans.get_finished_spans() if s.name == "bambuddy.GET"]
+    assert call.status.status_code is trace.StatusCode.UNSET
+    assert "scadbuddy.failure_class" not in (call.attributes or {})
+    assert [event.name for event in call.events] == []
+    assert (call.attributes or {})["http.response.status_code"] == 200
+
+
+@respx.mock
+async def test_a_refused_stream_still_fails_its_span(
+    bambuddy: Any, spans: InMemorySpanExporter
+) -> None:
+    respx.get(f"{BASE_URL}/api/v1/archives/1/video").mock(
+        return_value=httpx.Response(404, json={"detail": "gone"})
+    )
+    with trace.get_tracer("t").start_as_current_span("request"), pytest.raises(ApiError):
+        async with bambuddy.stream("/archives/1/video", what="read it"):
+            pass
+    (call,) = [s for s in spans.get_finished_spans() if s.name == "bambuddy.GET"]
+    assert call.status.status_code is trace.StatusCode.ERROR
+    assert "scadbuddy.failure_class" in (call.attributes or {})

@@ -212,8 +212,9 @@ path except `/api/v1/ai/*` to the backend.
   `POST /telemetry/v1/traces` beside the media upload's in `main.py`, so an
   oversized body is refused on its headers, or as it streams when it has no
   `Content-Length`, before the handler runs. Without one the
-  `application/json` default (8 MiB) would apply. The 512-span cap is checked
-  after parsing; over it is also 413.
+  `application/json` default (8 MiB) would apply. The 512-span cap, and the
+  caps of 16 `resourceSpans` and 64 `scopeSpans`, are checked after parsing;
+  over any of them is also 413, its detail naming the cap.
 - **Rate limits**, in memory with `RateLimit` (`api/realtime.py`'s token
   bucket). Over a limit is 429; the client drops the batch and does not retry.
   - A **per-process** bucket caps the relay's total rate whatever the
@@ -267,6 +268,11 @@ path except `/api/v1/ai/*` to the backend.
 
   These match the SDK limits `RelayExporter`'s provider is configured with
   (`spanLimits`), so a well-behaved page never hits them.
+- A page span's URL (`url.full`, `http.url`, `http.target`, `url.path`, on the
+  span, its events and its links) is reduced to the backend route template its
+  path matches, after the `scheme://host` of an absolute URL, or else to that
+  origin alone; a relative URL on no route is dropped. The SPA's routes are the
+  browser's own, so a page's URL keeps only its origin.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
@@ -303,9 +309,10 @@ path except `/api/v1/ai/*` to the backend.
   else's render or turn in Tempo. This is accepted:
   - the harm is to what the trace view shows, never to data;
   - the relay never reads anything back;
-  - the forged spans are always `service.name=scadbuddy-web` and carry the
-    relay's client address, so they can be told apart from the backend's
-    own;
+  - the forged spans are always `service.name=scadbuddy-web`, so they can be
+    told apart from the backend's own, and the relay's per-client rate limit
+    bounds how many one client can post. They do not carry the client's
+    address: an IP in traces is personal data;
   - an attacker who can already run script on the origin can call the API
     directly, which is far worse.
 
@@ -472,6 +479,12 @@ not copied from that module, which has no such list:
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
   is configured; URLs are recorded without the query);
+- the request path: a segment is data (a file path a user chose, a photo
+  filename Bambuddy returned, whatever the SPA fallback was asked for), so the
+  route's template stands in for it (`http.target`, `url.path`, and after the
+  `scheme://host` of `http.url`, `url.full`), and a request with no route
+  records no path at all; a page span's URLs are reduced by the relay to the
+  backend route template or to the origin (§5.2);
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 

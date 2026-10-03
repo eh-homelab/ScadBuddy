@@ -32,6 +32,8 @@ from scadbuddy.telemetry import payload
 from scadbuddy.telemetry.admission import RelayLimits
 from scadbuddy.telemetry.component import TRACE_RELAY, TraceRelay
 from scadbuddy.telemetry.forwarder import TraceForwarder
+from scadbuddy.telemetry.payload import RouteMatcher
+from scadbuddy.telemetry.routes import route_matcher
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.otlp import SENTINEL, export, span, string
 
@@ -254,10 +256,16 @@ def test_a_body_that_is_not_an_export_is_400(client: TestClient) -> None:
     assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
 
 
-def test_empty_resource_spans_are_400(client: TestClient) -> None:
+def test_more_than_16_resource_spans_is_413(client: TestClient) -> None:
     body = json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode()
     response = client.post(PATH, content=body, headers=UI)
-    assert_problem(response, 400, "the body is not an OTLP/JSON trace export")
+    assert_problem(response, 413, "a trace batch holds at most 16 resourceSpans")
+
+
+def test_more_than_64_scope_spans_is_413(client: TestClient) -> None:
+    body = json.dumps({"resourceSpans": [{"scopeSpans": [{} for _ in range(65)]}]}).encode()
+    response = client.post(PATH, content=body, headers=UI)
+    assert_problem(response, 413, "a trace batch holds at most 64 scopeSpans")
 
 
 def test_a_batch_with_no_valid_span_is_204_and_queues_nothing(
@@ -277,13 +285,13 @@ def test_the_payload_is_prepared_off_the_event_loop(
     on_loop: list[bool] = []
     real = payload.prepare
 
-    def spy(body: bytes) -> bytes | None:
+    def spy(body: bytes, match_route: RouteMatcher) -> bytes | None:
         try:
             asyncio.get_running_loop()
             on_loop.append(True)
         except RuntimeError:
             on_loop.append(False)
-        return real(body)
+        return real(body, match_route)
 
     monkeypatch.setattr(telemetry, "prepare", spy)
     assert client.post(PATH, content=export(span()), headers=UI).status_code == 204
@@ -394,3 +402,52 @@ def test_no_other_telemetry_path_serves_the_page(
 def test_the_page_is_still_served_beside_it(relay: TraceRelay, frontend: Path) -> None:
     with TestClient(relay_app(relay, frontend)) as client:
         assert "text/html" in client.get("/models/demo").headers["content-type"]
+
+
+def test_a_page_spans_url_is_forwarded_as_the_route_it_named(
+    relay: TraceRelay, collector: Collector, frontend: Path
+) -> None:
+    app = relay_app(relay, frontend)
+
+    @app.get("/api/v1/models/{slug}/files/{path:path}")
+    async def model_file() -> None: ...
+
+    # The SPA's mount is last: added after it, the route must still be found.
+    app.router.routes.append(app.router.routes.pop(-2))
+    url = f"https://scadbuddy.example/api/v1/models/box/files/{SENTINEL}.scad?x=1"
+    page = f"https://scadbuddy.example/m/{SENTINEL}"
+    body = export(
+        span(attributes=[string("url.full", url)]), span(attributes=[string("url.full", page)])
+    )
+    with TestClient(app) as client:
+        assert client.post(PATH, content=body, headers=UI).status_code == 204
+        until(lambda: outcome(relay, "forwarded") == 1)
+    (sent,) = collector.bodies
+    assert SENTINEL not in sent.decode()
+    spans = json.loads(sent)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert [s["attributes"] for s in spans] == [
+        [string("url.full", "https://scadbuddy.example/api/v1/models/{slug}/files/{path:path}")],
+        [string("url.full", "https://scadbuddy.example")],
+    ]
+
+
+def test_the_route_matcher_prefers_a_full_match_and_never_names_the_pages_mount(
+    frontend: Path,
+) -> None:
+    app = FastAPI()
+
+    @app.put("/models/{slug}/files/{name}")
+    async def put_file() -> None: ...
+
+    @app.get("/models/{slug}/files/{path:path}")
+    async def get_file() -> None: ...
+
+    @app.delete("/models/{slug}")
+    async def delete_model() -> None: ...
+
+    app.mount("/", SPAStaticFiles(frontend), name="frontend")
+    match = route_matcher(app.routes)
+    assert match("/models/box/files/a.scad") == "/models/{slug}/files/{path:path}"
+    assert match("/models/box") == "/models/{slug}"
+    assert match("/m/box") is None
+    assert match("/") is None

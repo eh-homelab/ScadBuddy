@@ -234,6 +234,23 @@ async def test_a_post_cut_off_by_shutdown_counts_as_shutdown() -> None:
     assert outcome(metrics, "failed") == 0
 
 
+async def test_a_slow_post_in_flight_at_shutdown_finishes_within_the_budget() -> None:
+    entered = asyncio.Event()
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(0.2)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector, drain_seconds=2.0)
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await entered.wait()
+        forwarder.offer(BATCH)
+    assert outcome(metrics, "forwarded") == 2
+    assert outcome(metrics, "shutdown") == 0
+
+
 async def test_off_starts_nothing_and_posts_nothing() -> None:
     calls = 0
 
