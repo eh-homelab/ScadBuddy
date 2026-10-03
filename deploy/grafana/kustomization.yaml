@@ -1,0 +1,32 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ScadBuddy's Grafana dashboard (spec 2026-10-01 §7, #988), as a ConfigMap the
+# rancher-monitoring Grafana's dashboard sidecar loads: it watches
+# `cattle-dashboards` for the `grafana_dashboard: "1"` label.
+#
+# eh-homelab/clusters' clusters/prod/scadbuddy overlay pulls this directory in
+# as a remote resource pinned to a full commit SHA, and deploy.reusable.yml
+# moves that `ref` in the same deploy PR as the image digest, so the dashboard
+# shown is the one written for the build that is serving.
+#
+# The namespace is set on the generator, not with a top-level `namespace:`
+# field, as in clusters/prod/bambuddy. The overlay has to namespace its own
+# resources with an `unsetOnly` NamespaceTransformer, not a plain `namespace:`
+# field, or this ConfigMap is rewritten into the overlay's namespace, where the
+# sidecar never looks (clusters#1596 Phase 5).
+#
+# No hash suffix: the sidecar keys on the dashboard's uid, not the ConfigMap's
+# name, and a stable name lets ArgoCD update it in place.
+configMapGenerator:
+  - name: scadbuddy-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        k8s-sidecar-target-directory: /tmp/dashboards/ScadBuddy
+    files:
+      - scadbuddy.json
