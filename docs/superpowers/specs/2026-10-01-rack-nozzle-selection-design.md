@@ -299,6 +299,10 @@ keeps its `first_seen_at` and its print history, and the write updates
   saved for it and its use is never counted. An owner who prints mostly from
   the library sees "least used" fall through to color and lowest position.
   Tracked in #1073.
+- Known limit: ranking reads settled use only. A pick counts once its print
+  settles, so prints queued back to back rank against the same totals and
+  Least used gives them all the same hotend. Counting open picks is tracked in
+  #1079.
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.
