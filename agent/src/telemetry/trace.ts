@@ -54,7 +54,11 @@ export function linkTo(traceparent: string | null | undefined): Link | undefined
 
 /** `scadbuddy.failure_class` (spec §6): the exception's class name. */
 export function failureClass(err: unknown): string {
-  if (err instanceof Error) return err.name || err.constructor.name || 'Error'
+  if (err instanceof Error) {
+    const cls = err.constructor?.name
+    if (typeof cls === 'string' && cls !== '' && cls !== 'Object') return cls
+    return err.name || 'Error'
+  }
   return typeof err
 }
 

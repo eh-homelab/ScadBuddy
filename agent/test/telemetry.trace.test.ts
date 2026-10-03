@@ -14,10 +14,10 @@ import {
   unbindToolContext,
   withSpan,
 } from '../src/telemetry/trace.js'
-import { exportedText, flushTracing, PARENT_SPAN_ID, TRACE_ID, TRACEPARENT, testTracing } from './support/tracing.js'
+import { exportedText, flushTracing, PARENT_SPAN_ID, resetTracing, TRACE_ID, TRACEPARENT, testTracing } from './support/tracing.js'
 
 const spans = testTracing()
-beforeEach(() => spans.reset())
+beforeEach(resetTracing)
 const SENTINEL = 's3ntinel-41c0'
 
 describe('traceparents', () => {
@@ -71,6 +71,8 @@ describe('failures', () => {
       override name = 'OddError'
     }
     expect(failureClass(new OddError('x'))).toBe('OddError')
+    class FooError extends Error {}
+    expect(failureClass(new FooError('x'))).toBe('FooError')
     expect(failureClass('a string')).toBe('string')
     const span = tracer().startSpan('work')
     recordFailure(span, new OddError(SENTINEL))

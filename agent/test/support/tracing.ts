@@ -43,6 +43,16 @@ export async function flushTracing(): Promise<void> {
   await (globalThis as unknown as Record<symbol, TracerProvider | undefined>)[PROVIDER_KEY]?.forceFlush()
 }
 
+/**
+ * Flush, then clear the exporter. Use it in `beforeEach` (not a bare
+ * `spans.reset()`): a span ended by the previous test but not yet exported
+ * would otherwise land in the next test's spans.
+ */
+export async function resetTracing(): Promise<void> {
+  await flushTracing()
+  testTracing().reset()
+}
+
 /** The first exported span `predicate` accepts, polling until `timeoutMs`. */
 export async function waitForSpan(
   spans: InMemorySpanExporter,
