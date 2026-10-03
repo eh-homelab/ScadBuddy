@@ -565,11 +565,18 @@ async def rack_preview(
 def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -> None:
     """Spec §5: a manual pick that cannot print this is a 422 before anything is sliced.
     Judged on the flow the slice will carry, which is what Bambuddy re-checks at
-    dispatch. An unreadable rack refuses nothing: Bambuddy still re-checks it then."""
+    dispatch. An unreadable rack refuses nothing: Bambuddy still re-checks it then. A
+    readable status with no rack at all is refused as that, not as one empty position."""
     if request.rack_position is None or status is None:
         return
+    positions = rack_positions(status.nozzle_rack)
+    if not positions:
+        raise RunRefusalError(
+            f"Rack position {request.rack_position} was chosen, but this printer reports no "
+            "nozzle rack. Choose Automatic."
+        )
     size = request.choices.nozzles[0].size
-    held = rack_positions(status.nozzle_rack).get(request.rack_position)
+    held = positions.get(request.rack_position)
     if held is not None and eligible(held, size, SLICED_VOLUME_TYPE):
         return
     if held is None:

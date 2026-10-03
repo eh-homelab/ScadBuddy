@@ -384,8 +384,9 @@ def test_a_refused_manual_pick_is_an_error_and_not_also_a_warning(
 def test_an_empty_rack_previews_nothing_and_refuses_a_manual_position(
     client: TestClient, model: str
 ) -> None:
-    """Review M3, kept as is: a readable status with an empty ``nozzle_rack`` has no rack
-    to preview, and a position on it holds no hotend, on /check and /run alike."""
+    """Review M3: a readable status with an empty ``nozzle_rack`` has no rack to preview,
+    and a hand pick on it is refused, on /check and /run alike, saying the printer has no
+    rack rather than that one position is empty (claude-review on #1043, finding 1)."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -394,8 +395,7 @@ def test_an_empty_rack_previews_nothing_and_refuses_a_manual_position(
     status["nozzle_rack"] = []
     respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
     message = (
-        "Rack position 2 holds no hotend, and this prints with a 0.4 mm Standard nozzle. "
-        "Choose another position, or Automatic."
+        "Rack position 2 was chosen, but this printer reports no nozzle rack. Choose Automatic."
     )
 
     result = check(client, output_id, rack_position=2)
