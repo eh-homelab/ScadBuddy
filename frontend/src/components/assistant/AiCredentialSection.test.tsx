@@ -87,6 +87,29 @@ describe('AiCredentialSection (#1000)', () => {
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' }))
     expect(await screen.findByText(/No credential saved/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Test' })).not.toBeInTheDocument()
+    expect(screen.getByText('Deleted. The assistant is off until a credential is saved.')).toBeInTheDocument()
+  })
+
+  it('says the next credential is in use when one moves up (#1093)', async () => {
+    server.use(
+      http.delete(base, () =>
+        HttpResponse.json({
+          configured: true,
+          kind: 'gateway',
+          base_url: 'https://llm.example',
+          last4: 'Zz99',
+          updated_at: '2026-10-01T09:00:00Z',
+          usable: true,
+          can_save: true,
+          cannot_save_reason: null,
+        }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' }))
+    expect(await screen.findByText('Deleted. The next credential is in use now.')).toBeInTheDocument()
+    expect(screen.getByTestId('ai-credential-current')).toHaveTextContent('Zz99')
   })
 
   it('says why it cannot save, and disables Save', async () => {

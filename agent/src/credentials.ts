@@ -95,8 +95,12 @@ export type CredentialRepo = {
   /** One credential; the first by priority when `id` is omitted (the single-credential routes). */
   get(id?: string): Promise<StoredCredential | undefined>
   reveal(kek: Kek, id?: string): Promise<Credential | undefined>
-  /** One credential decrypted, with the epoch of the very row it was decrypted from. */
-  revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined>
+  /**
+   * Every credential in priority order, with its secret decrypted where the
+   * key opens it (undefined where it does not), all from one read: each row's
+   * `epoch` is that of the secret beside it.
+   */
+  revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]>
   /**
    * Saves `update` over a credential (the first by priority when `id` is
    * omitted; one is created when there is none). A new secret makes it
@@ -351,6 +355,21 @@ async function lockForWrite(tx: TransactionSql): Promise<void> {
   await tx`LOCK TABLE ai_credentials IN SHARE ROW EXCLUSIVE MODE`
 }
 
+/** `openCredential`, or undefined for a row the key does not open (altered, wrong key, v1). */
+function tryOpen(kek: Kek, row: Pick<Row, 'id' | 'kind' | 'base_url' | 'secret_sealed' | 'dek_sealed' | 'kek_id'>): Credential | undefined {
+  try {
+    return openCredential(kek, {
+      id: row.id,
+      kind: row.kind,
+      base_url: row.base_url,
+      envelope: { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
+    })
+  } catch (err) {
+    if (err instanceof SealError) return undefined
+    throw err
+  }
+}
+
 export class CredentialStore implements CredentialRepo {
   private readonly sql: Sql
   constructor(sql: Sql) {
@@ -393,17 +412,18 @@ export class CredentialStore implements CredentialRepo {
     })
   }
 
-  async revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined> {
-    const [row] = await this.sql<Row[]>`
-      SELECT id, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch FROM ai_credentials WHERE id = ${id}`
-    if (!row) return undefined
-    const credential = openCredential(kek, {
-      id: row.id,
-      kind: row.kind,
-      base_url: row.base_url,
-      envelope: { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
+  async revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+    const rows = await this.sql<Row[]>`
+      SELECT id, priority, kind, base_url, last4, updated_at, kek_id, secret_sealed, dek_sealed,
+             get_byte(secret_sealed, 0) AS seal_version,
+             CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
+             CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
+             last_error, last_error_at, last_used_at, epoch
+      FROM ai_credentials ORDER BY priority`
+    return rows.map((row) => {
+      const view = stored(row)
+      return { stored: view, credential: opensWith(view, { ok: true, kek }) ? tryOpen(kek, row) : undefined }
     })
-    return { credential, epoch: row.epoch }
   }
 
   async put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential> {

@@ -129,21 +129,42 @@ export function cooldownUntil(until: number | undefined, now: number): Date {
 }
 
 export type ProbeOptions = {
-  /** The model the query used (its init message); a rate limit may be per model. */
+  /**
+   * The model the query used (its init message), for a rate limit, which may
+   * be per model. Left out when confirming a refusal: the probe then asks with
+   * PROBE_FALLBACK_MODEL, so a refusal scoped to the turn's model (or to a
+   * feature it used) does not confirm itself.
+   */
   model: string | undefined
+  /** The query's signal: an aborted turn stops its probes too. */
+  signal?: AbortSignal | undefined
   fetch?: typeof fetch
   resolveHost?: Resolver
   timeoutMs?: number
   now?: () => number
 }
 
-/** Used when the query reported no model. */
+/** Used when the query reported no model, and for every refusal check: cheap, and open to every key. */
 export const PROBE_FALLBACK_MODEL = 'claude-haiku-4-5'
+
+/**
+ * A 403 that is about the key, the account or its billing, not about the
+ * request: only such a 403 (or a 401, a 402, a billing 400) confirms a
+ * refusal. One that names a model is about the model.
+ */
+const KEY_REFUSAL = /api[ _-]?key|x-api-key|token|authenticat|organi[sz]ation|account|billing|credit|revoked|disabled|suspended/i
+
+/** Whether a probe's refusal is the key's own (see KEY_REFUSAL). */
+export function refusesTheKey(status: number, body: string): boolean {
+  if (status === 401 || status === 402) return true
+  if (BILLING_MESSAGE.test(body)) return status === 400 || status === 403
+  return status === 403 && KEY_REFUSAL.test(body) && !/\bmodel\b/i.test(body)
+}
 const ANTHROPIC_API = 'https://api.anthropic.com'
 
 /**
  * What the probe found:
- *   - refused: 401, 402, 403 or a billing 400 again; the credential itself is refused;
+ *   - refused: a refusal that is the key's own (`refusesTheKey`);
  *   - answered: 2xx; the credential works now (`until` is a second away);
  *   - rate_limited: 429; `until` is the reset its headers name, else the default;
  *   - unknown: anything else, or no answer; `until` is the default cooldown.
@@ -164,7 +185,8 @@ export const CLEARED_COOLDOWN_MS = 1000
  *   - 429: the reset its headers name (`rateLimitResetFromHeaders`), else the default;
  *   - 2xx: answered, so usable again in a second. The `-reset` headers of a
  *     success say when a bucket is full again, not when it can be used;
- *   - 401, 402, 403, or a 400 with a billing message: refused outright;
+ *   - 401, 402, or a 400/403 that names the key, account or billing
+ *     (`refusesTheKey`): refused outright;
  *   - anything else, or no answer (network, timeout, a gateway host the
  *     egress rules refuse): unknown, with the default cooldown.
  */
@@ -172,7 +194,8 @@ export async function probeCredential(credential: Credential, options: ProbeOpti
   const now = options.now ?? Date.now
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
-  const signal = AbortSignal.timeout(options.timeoutMs ?? 10_000)
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 10_000)
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   try {
     if (credential.kind === 'gateway') await assertGatewayHostAllowed(base, options.resolveHost ?? systemResolver)
     const res = await doFetch(`${base}/v1/messages`, {
@@ -194,8 +217,8 @@ export async function probeCredential(credential: Credential, options: ProbeOpti
     })
     if (res.status === 401 || res.status === 402 || res.status === 403 || res.status === 400) {
       const body = (await res.text().catch(() => '')).slice(0, 300)
-      // A 400 refuses the key only when it says so (out of credit); otherwise it is about the probe.
-      if (res.status !== 400 || BILLING_MESSAGE.test(body)) {
+      // Only a refusal that is the key's own (refusesTheKey); any other is about the probe.
+      if (refusesTheKey(res.status, body)) {
         return { verdict: 'refused', reason: `the probe was refused (HTTP ${res.status})${body ? `: ${body}` : ''}` }
       }
       return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }

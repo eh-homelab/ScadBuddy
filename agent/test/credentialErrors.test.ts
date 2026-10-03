@@ -10,6 +10,7 @@ import {
   PROBE_FALLBACK_MODEL,
   probeCredential,
   rateLimitResetFromHeaders,
+  refusesTheKey,
 } from '../src/harness/credentialErrors.js'
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
 
@@ -195,9 +196,45 @@ describe('probeCredential', () => {
     expect(other).toEqual({ verdict: 'unknown', until: new Date(now() + DEFAULT_COOLDOWN_MS) })
   })
 
+  it.each([
+    [401, 'invalid x-api-key', true],
+    [402, '', true],
+    [403, 'Your API key does not have permission to use the API', true],
+    [403, 'This organization has been disabled.', true],
+    [403, 'Your credit balance is too low', true],
+    [400, 'Your credit balance is too low', true],
+    [403, 'Request blocked by policy', false],
+    [403, 'Your organization does not have access to model claude-opus-4-1', false],
+    [403, '', false],
+    [400, 'messages: bad', false],
+  ] as const)('refusesTheKey(%i, %j) is %s', (status, body, expected) => {
+    expect(refusesTheKey(status, body)).toBe(expected)
+  })
+
+  it('treats a probe answered with a 403 that is not about the key as unknown', async () => {
+    const blocked: typeof fetch = () => Promise.resolve(new Response('blocked by policy', { status: 403 }))
+    expect(await probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: blocked, now })).toEqual({
+      verdict: 'unknown',
+      until: new Date(now() + DEFAULT_COOLDOWN_MS),
+    })
+  })
+
+  it('stops a probe when the caller aborts', async () => {
+    const stop = new AbortController()
+    const hanging: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))
+    const started = Date.now()
+    const verdict = probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: hanging, now, signal: stop.signal })
+    stop.abort()
+    expect((await verdict).verdict).toBe('unknown')
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
   it.each([401, 402, 403])('reports a probe answered %i as refused outright', async (status) => {
     const refused: typeof fetch = () =>
-      Promise.resolve(new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error' } }), { status }))
+      Promise.resolve(
+        new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid api key' } }), { status }),
+      )
     const verdict = await probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: refused, now })
     expect(verdict.verdict).toBe('refused')
     expect('reason' in verdict && verdict.reason).toMatch(`the probe was refused (HTTP ${status}): `)

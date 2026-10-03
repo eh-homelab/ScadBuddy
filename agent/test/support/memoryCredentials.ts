@@ -85,10 +85,17 @@ export class MemoryCredentials implements CredentialRepo {
     }
   }
 
-  async revealEntry(kek: Kek, id: string): Promise<{ credential: Credential; epoch: number } | undefined> {
-    const row = this.find(id)
-    if (!row) return undefined
-    return { credential: openCredential(kek, row), epoch: row.epoch }
+  async revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+    await this.read()
+    return this.rows.map((row, i) => {
+      let credential: Credential | undefined
+      try {
+        credential = openCredential(kek, row)
+      } catch {
+        credential = undefined
+      }
+      return { stored: this.view(row, i), credential }
+    })
   }
 
   async put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential> {

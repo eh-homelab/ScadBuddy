@@ -61,7 +61,7 @@ type Script = (run: HarnessRun, attempt: number) => SDKMessage[] | { messages: S
 function harness(script: Script) {
   const runs: HarnessRun[] = []
   const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
-  const probes: (Credential & { model: string | undefined })[] = []
+  const probes: (Credential & { model: string | undefined; signal: AbortSignal | undefined })[] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -97,8 +97,8 @@ function harness(script: Script) {
               reports.push({ id: attempt.id, outcome, next: next?.id })
               return Promise.resolve()
             },
-            probe: (credential, model) => {
-              probes.push({ ...credential, model })
+            probe: (credential, model, signal) => {
+              probes.push({ ...credential, model, signal })
               return typeof probeVerdict === 'function' ? probeVerdict() : Promise.resolve(probeVerdict)
             },
             ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
@@ -187,7 +187,7 @@ describe('runWithFallback (#1093)', () => {
     )
     const until = new Date('2026-10-03T12:05:00Z')
     await h.collect([A, B], {}, { verdict: 'rate_limited', until })
-    expect(h.probes).toEqual([{ ...A.credential, model: 'claude-opus-4-1' }])
+    expect(h.probes).toEqual([{ ...A.credential, model: 'claude-opus-4-1', signal: undefined }])
     // At once with the default cooldown and the fallback; then the probe's time replaces it.
     const reason = 'API Error: Request rejected (429) · slow down'
     const provisional = (h.reports[0]?.outcome as { until: Date }).until
@@ -339,8 +339,10 @@ describe('runWithFallback (#1093)', () => {
       messages: [init(), apiError('Failed to authenticate. API Error: 403 blocked by policy', 'authentication_failed'), errorResult(403, 'Failed to authenticate. API Error: 403 blocked by policy')],
       throws: new Error('Claude Code returned an error result'),
     }))
-    const { messages, error } = await h.collect([A, B, C], {}, { verdict: 'answered', until: new Date() })
+    const { messages, error } = await h.collect([A, B, C], { model: 'claude-opus-4-1' }, { verdict: 'answered', until: new Date() })
     expect(h.runs).toHaveLength(1)
+    // Asked on the probe's own model, not the turn's: a refusal of the turn's model does not confirm itself.
+    expect(h.probes.map((p) => p.model)).toEqual([undefined])
     expect(h.reports).toEqual([])
     expect(kinds(messages)).toEqual(['system/init', 'assistant', 'result/success'])
     expect((error as Error).message).toMatch(/Claude Code returned an error result/)
@@ -354,6 +356,37 @@ describe('runWithFallback (#1093)', () => {
     )
     await h.collect([A, B], {}, { verdict: 'unknown', until: new Date() })
     expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'transient', reason: 'API Error: 403' }, next: 'b' })
+  })
+
+  it('does not wait for a pending probe once the caller stops the turn', async () => {
+    const stop = new AbortController()
+    const h = harness((_r, n) => {
+      if (n === 0) {
+        return { messages: [init(), apiError('API Error: Request rejected (429)', 'rate_limit'), errorResult(429, 'API Error: Request rejected (429)')], throws: new Error('x') }
+      }
+      stop.abort()
+      return { messages: [init()], throws: new Error('aborted') }
+    })
+    // A probe that only ends when its signal does.
+    const never = () => new Promise<ProbeVerdict>(() => {})
+    const started = Date.now()
+    const { error } = await h.collect([A, B], { signal: stop.signal }, never)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(error).toBeInstanceOf(Error)
+    expect(h.probes[0]?.signal).toBe(stop.signal)
+  })
+
+  it('keeps the real error, not a "refused", when the allowance ends the chain after a stop at a retry', async () => {
+    const rate = harness(() => [init(), retry(429, 'rate_limit')])
+    const r1 = await rate.collect([A, B], { maxTurns: 0 })
+    expect(rate.runs).toHaveLength(1)
+    expect((r1.error as Error).message).toBe(
+      "the Claude credential (credential a) is rate limited: HTTP 429: rate_limit; no other credential was tried, since the turn's turns or budget are used up",
+    )
+    // A refusal the probe could not confirm is not reported as "refused".
+    const h = harness(() => [init(), retry(401, 'authentication_failed')])
+    const r2 = await h.collect([A], {}, { verdict: 'unknown', until: new Date() })
+    expect((r2.error as Error).message).toBe('the Claude credential (credential a) failed: HTTP 401: authentication_failed')
   })
 
   it('starts no further attempt once the turn’s allowance is used up, showing the failure as it came', async () => {

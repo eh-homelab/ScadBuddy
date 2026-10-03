@@ -265,21 +265,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
           expect(audit.at(-1)).toMatchObject({ action: 'recover', outcome: 'ok' })
         })
 
-        it('records against the epoch of the secret the turn runs on, even when a save lands between list and reveal', async () => {
+        it('reads every candidate, its epoch and its secret in one query, and records against that epoch', async () => {
           const a = await store.create({ kind: 'anthropic_api_key', secret: KEY_A }, kek)
-          // A save committing just after the pool listed the credentials.
-          class Racing extends CredentialStore {
-            override async list() {
-              const listed = await super.list()
-              await store.put({ kind: 'anthropic_api_key', secret: KEY_B }, kek, a.id)
-              return listed
-            }
-          }
-          const pool = new CredentialPool({ repo: new Racing(db.sql), kek: kekStatus, log: () => {} })
-          const [pooled] = await pool.candidates()
-          expect(pooled?.credential.secret).toBe(KEY_B)
-          expect(pooled?.epoch).toBe(a.epoch + 1)
-          await pool.report(pooled!, { class: 'permanent', reason: 'HTTP 401' }, undefined)
+          await store.create({ kind: 'anthropic_api_key', secret: KEY_B }, kek)
+          await store.create({ kind: 'gateway', base_url: 'https://llm.example', secret: GW }, kek)
+          await store.put({ kind: 'anthropic_api_key', secret: `${KEY_A}-new` }, kek, a.id)
+          // Only revealAll may be used: one read, so no save can land between a row's epoch and its secret.
+          let reads = 0
+          const repo = new Proxy(store, {
+            get(target, prop, receiver) {
+              if (prop === 'revealAll') {
+                return (k: typeof kek) => {
+                  reads++
+                  return target.revealAll(k)
+                }
+              }
+              if (prop === 'list' || prop === 'reveal' || prop === 'get') throw new Error(`candidates() used ${String(prop)}`)
+              return Reflect.get(target, prop, receiver) as unknown
+            },
+          })
+          const pool = new CredentialPool({ repo, kek: kekStatus, log: () => {} })
+          const pooled = await pool.candidates()
+          expect(reads).toBe(1)
+          expect(pooled.map((c) => c.credential.secret)).toEqual([`${KEY_A}-new`, KEY_B, GW])
+          expect(pooled[0]?.epoch).toBe(a.epoch + 1)
+          await pool.report(pooled[0]!, { class: 'permanent', reason: 'HTTP 401' }, undefined)
           expect(await store.get(a.id)).toMatchObject({ status: 'disabled' })
         })
 

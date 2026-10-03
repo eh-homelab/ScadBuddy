@@ -161,7 +161,12 @@ export function AiCredentialSection() {
     setError(null)
     setNotice(null)
     try {
-      applied(await api.deleteAiCredential(), 'Deleted. The assistant is off until a credential is saved.')
+      const next = await api.deleteAiCredential()
+      // Another credential (#1093) may have moved up into its place.
+      applied(
+        next,
+        next.configured ? 'Deleted. The next credential is in use now.' : 'Deleted. The assistant is off until a credential is saved.',
+      )
       setConfirmDelete(false)
     } catch (caught) {
       setConfirmDelete(false)
