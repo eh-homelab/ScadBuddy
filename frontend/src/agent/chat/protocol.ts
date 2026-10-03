@@ -260,6 +260,15 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
+    /**
+     * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
+     * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent
+     * before the page's tracing has loaded; an agent that predates it ignores it.
+     */
+    traceparent: z
+      .string()
+      .regex(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/)
+      .optional(),
   }),
   z.object({
     v,
