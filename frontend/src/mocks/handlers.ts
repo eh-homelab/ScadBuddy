@@ -34,7 +34,6 @@ import type {
   PrintDetail,
   PrintPage,
   PrintProgress,
-  PrintCheck,
   PrintRunRequest,
   PrintRun,
   PrintRunResult,
@@ -55,6 +54,7 @@ import type {
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
+import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -2877,6 +2877,10 @@ export const handlers = [
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+      rack_picks:
+        body.rack_algorithm === 'bambuddy' && body.rack_position == null
+          ? []
+          : mockRackPicks(body.rack_position ?? null, [body.plate_id ?? 1]),
     } satisfies PrintRunResult
     // #470: the server answers 202 with a run. This one has already finished, so the
     // client reads its result without polling; GET /print/runs/:id answers it too.
@@ -2905,9 +2909,11 @@ export const handlers = [
    * #755 — the check before Print. The run checks no mounted nozzle (#768), so it
    * refuses nothing here; a test that needs a verdict answers this route itself.
    */
-  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+  http.post(`${base}/print/outputs/:id/check`, async ({ params, request }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
-    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
+    // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
+    const body = (await request.json()) as { rack_position?: number | null }
+    return HttpResponse.json(mockRackCheck(body.rack_position ?? null))
   }),
 
   // --- #79 projects -----------------------------------------------------------------

@@ -368,3 +368,36 @@ def test_a_worker_shutdown_ends_the_attempt_at_once(paths: DataPaths) -> None:
 
     error = asyncio.run(scenario())
     assert isinstance(error, ApplicationError) and not error.non_retryable
+
+
+def test_a_settled_print_runs_each_settled_hook_once(paths: DataPaths) -> None:
+    """#836: a feature hears that a print settled (the rack credits its hotends), after
+    its ``print.settled`` is published."""
+    write_output(paths)
+    follower, seen = follower_for(
+        paths, Script(progress("running"), progress("done", settled=True))
+    )
+    heard: list[tuple[str, str]] = []
+
+    async def hook(meta: OutputMeta) -> None:
+        heard.append((meta.id, kinds(seen)[-1]))
+
+    follower.on_settled.append(hook)
+    assert follow(follower) == "settled"
+    assert heard == [(OUTPUT, "print.settled")]
+
+
+def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> None:
+    write_output(paths)
+    follower, _ = follower_for(paths, Script(progress("done", settled=True)))
+    ran: list[str] = []
+
+    async def broken(meta: OutputMeta) -> None:
+        raise RuntimeError("serial ABC123 leaked")
+
+    async def after(meta: OutputMeta) -> None:
+        ran.append(meta.id)
+
+    follower.on_settled.extend([broken, after])
+    assert follow(follower) == "settled"
+    assert ran == [OUTPUT]

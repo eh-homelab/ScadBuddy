@@ -22,6 +22,7 @@ describe('the sessions_* tools', () => {
     expect(tiers).toEqual({
       sessions_list: 'read',
       sessions_get: 'read',
+      sessions_resources: 'read',
       sessions_attach: 'read',
       sessions_list_approvals: 'read',
       sessions_start: 'write',

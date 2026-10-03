@@ -48,6 +48,8 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrinterRackAlgorithm,
+  RackAlgorithm,
   PrintAgain,
   PrintDetail,
   PrintPage,
@@ -857,6 +859,13 @@ export const api = {
     request<PrinterBedType>(`/print/printers/${printerId}/bed-type`, {
       method: 'PUT',
       body: JSON.stringify({ bed_type: bedType }),
+    }),
+
+  /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
+  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null) =>
+    request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
+      method: 'PUT',
+      body: JSON.stringify({ algorithm }),
     }),
 
   /**
