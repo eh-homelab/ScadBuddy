@@ -8,20 +8,26 @@ from typing import Annotated
 
 from fastapi import APIRouter, FastAPI, File, Path, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     DATABASE_REQUIRED_PROBLEM,
+    IMPORT_CONCURRENCY,
+    AppState,
     AssetsDep,
     CatalogueDep,
     FetcherDep,
     HistoryDep,
+    ImportsDep,
     PathsDep,
+    SettingsStoreDep,
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.models import RESOLVER_RETRY_AFTER, fetch_busy, require_model_exists
 from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.problems import ApiError, problem_response
+from scadbuddy.library.asset_fetch import fetch_file
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
     MAX_ASSET_BYTES,
@@ -37,6 +43,7 @@ from scadbuddy.library.assets import (
     sample_files,
 )
 from scadbuddy.library.history import GitError, RevisionNotFoundError
+from scadbuddy.library.url_import import IMPORT_TIMEOUT, ImportRefusedError, ResolverBusyError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 from scadbuddy.store.content import StoreFullError, template_title
@@ -116,9 +123,16 @@ async def upload_asset(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"the file is larger than {MAX_ASSET_BYTES} bytes",
         )
+    return await _store(slug, data, file.filename, assets=assets, state=state)
+
+
+async def _store(
+    slug: str, data: bytes, filename: str | None, *, assets: AssetStore, state: AppState
+) -> AssetMeta:
+    """An upload's bytes into the store, and mirrored where workers read them."""
     try:
         # Decoding a PNG and parsing an SVG are CPU work; keep them off the loop.
-        meta = await asyncio.to_thread(assets.put, data, file.filename)
+        meta = await asyncio.to_thread(assets.put, data, filename)
     except AssetRejectedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except AssetQuotaError as error:
@@ -138,6 +152,73 @@ async def upload_asset(
                 f"the blob store has no room for this file: {error}",
             ) from None
     return meta
+
+
+class AssetFetch(BaseModel):
+    url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
+
+
+class FetchedAsset(AssetMeta):
+    #: The URL as given, to credit and to fetch again. Not capped: it is the parsed
+    #: form, which percent-encodes what the request's 2048 characters allowed, and
+    #: can be longer (as `ModelRecord.origin_url`).
+    source_url: str
+
+
+@router.post(
+    "/models/{slug}/assets/fetch",
+    response_model=FetchedAsset,
+    status_code=status.HTTP_201_CREATED,
+    summary="Fetch a file for a file parameter from a URL",
+    description=(
+        "Fetches an SVG or PNG on the server and stores it exactly as an upload: the "
+        "answer's `id` is the value a `// file` parameter takes. The URL's host, and "
+        "every redirect's, must be on the asset allowlist (`asset_fetch_domains` in "
+        "Settings, each domain with its subdomains). Otherwise as the URL import: "
+        f"https only, public internet addresses only, at most {MAX_ASSET_BYTES} bytes, "
+        f"within {IMPORT_TIMEOUT:.0f} seconds. Every refusal is a 422; a full store is "
+        "the upload's 413."
+    ),
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "the replica's fetch budget (shared with imports) or its resolver threads "
+                "are all in use; retry after `Retry-After` seconds"
+            )
+        }
+    },
+)
+async def fetch_asset(
+    slug: SlugPath,
+    body: AssetFetch,
+    catalogue: CatalogueDep,
+    assets: AssetsDep,
+    settings: SettingsStoreDep,
+    imports: ImportsDep,
+    state: StateDep,
+) -> FetchedAsset:
+    require_model_exists(catalogue, slug)
+    # Off the loop, like the store's own work below: `load` is blocking psycopg I/O,
+    # and this route is async (it awaits the fetch). The sync routes that call it
+    # inline already run on FastAPI's threadpool.
+    domains = (await asyncio.to_thread(settings.load)).allowed_asset_domains()
+    # As the import: no await between the check and the hold.
+    if imports.full():
+        raise fetch_busy(
+            f"{IMPORT_CONCURRENCY} fetches are already running on this replica",
+            imports.retry_after(),
+        )
+    with imports.hold():
+        try:
+            fetched = await fetch_file(body.url, domains=domains, limit=MAX_ASSET_BYTES)
+        except ImportRefusedError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except ResolverBusyError:
+            raise fetch_busy(
+                "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
+            ) from None
+    meta = await _store(slug, fetched.data, fetched.filename, assets=assets, state=state)
+    return FetchedAsset(**meta.model_dump(), source_url=fetched.source_url)
 
 
 @router.get(

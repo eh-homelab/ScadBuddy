@@ -793,7 +793,9 @@ async def _create(
 RESOLVER_RETRY_AFTER = math.ceil(RESOLVE_TIMEOUT)
 
 
-def _import_busy(why: str, retry_after: int) -> ApiError:
+def fetch_busy(why: str, retry_after: int) -> ApiError:
+    """A fetch refused for a full budget or busy resolver threads: a 503 with
+    Retry-After. Shared with `POST /models/{slug}/assets/fetch` (`api/assets.py`)."""
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         f"{why}; try again in {retry_after} s",
@@ -846,7 +848,7 @@ async def import_model(
     # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
     # spend its wait against the client's patience, not the import's deadline.
     if imports.full():
-        raise _import_busy(
+        raise fetch_busy(
             f"{IMPORT_CONCURRENCY} imports are already fetching on this replica",
             imports.retry_after(),
         )
@@ -859,7 +861,7 @@ async def import_model(
             # Library installs vet clone URLs on the same resolver threads. None free
             # is decided before the host is looked up, so it says nothing about the
             # host: the same retry as a full import budget, not the refusal.
-            raise _import_busy(
+            raise fetch_busy(
                 "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
             ) from None
     _require_within_cap(imported.source, "the imported file")

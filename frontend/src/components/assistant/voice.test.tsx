@@ -371,4 +371,10 @@ describe('spokenText', () => {
     expect(long.length).toBeLessThan(450)
     expect(long).toMatch(/sentence\. The rest is in the panel\.$/)
   })
+
+  it('skips tables and speaks an image as its alt text (#820)', () => {
+    expect(spokenText('Plan:\n\n| Part | Spool |\n|--|--|\n| body | red |\n\nTop: ![top view](/api/v1/jobs/j/views/top.png)')).toBe(
+      'Plan: Top: top view.',
+    )
+  })
 })

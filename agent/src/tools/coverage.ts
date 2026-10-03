@@ -33,7 +33,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'key, which are entered in the Settings UI only and never pass through an agent (spec §8.6, credential ' +
       'leakage), and the runtime settings (render concurrency and timeouts, queue caps, upload and library ' +
       'limits, retention, log level), which decide how the server runs for everyone and are an operator ' +
-      'decision made in Settings. Reading them all, with their sources, is get_settings.',
+      'decision made in Settings, and the asset allowlist fetch_asset is held to (#844), which an agent must ' +
+      'not widen for itself. Reading them all, with their sources, is get_settings.',
   },
   {
     operation: 'DELETE /api/v1/settings/remembered',

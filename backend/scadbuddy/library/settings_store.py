@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
+from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.render.pg_store import migrate
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,9 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
+    #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
+    #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
+    asset_fetch_domains: list[str] | None = None
 
     #: Model slug -> what the picker chose, set one model at a time
     #: (:meth:`SettingsStore.set_model_choices`).
@@ -193,6 +197,28 @@ class StoredSettings(BambuddyIds):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+
+    @field_validator("asset_fetch_domains")
+    @classmethod
+    def _normalised_domains(cls, domains: list[str] | None) -> list[str] | None:
+        """`host_allowed` compares against normalised entries. A save already
+        normalises them (`SettingsPatch`); a row written any other way is normalised
+        here, and an entry that is not a domain is dropped rather than failing the
+        load of every setting."""
+        if domains is None:
+            return None
+        kept: list[str] = []
+        for domain in domains:
+            try:
+                kept.append(normalise_domain(domain))
+            except ValueError:
+                logger.warning("ignoring a stored asset domain that is not a domain")
+        return list(dict.fromkeys(kept))
+
+    def allowed_asset_domains(self) -> tuple[str, ...]:
+        if self.asset_fetch_domains is None:
+            return DEFAULT_ASSET_FETCH_DOMAINS
+        return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
         """The key render workers use, and whether it is the full key by fallback. With
@@ -230,6 +256,9 @@ class SettingsPatch(BaseModel):
     display_unit: DisplayUnit | None = None
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
+    #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
+    #: it: no agent tool writes settings.
+    asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
@@ -280,6 +309,13 @@ class SettingsPatch(BaseModel):
                 f"{env_var(name)} cannot be cleared; reset it to follow the deployment's value"
             )
         return check_value(name, value)
+
+    @field_validator("asset_fetch_domains")
+    @classmethod
+    def _domains(cls, domains: list[str] | None) -> list[str] | None:
+        if domains is None:
+            return None
+        return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
 
     @field_validator("reset")
     @classmethod
