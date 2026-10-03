@@ -140,6 +140,14 @@ describe('chatReducer', () => {
       queued,
     )
     expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+
+    // Refused by the agent: answerable again, with the error beside it.
+    const refused = run([server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each' })], sent)
+    expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each' })
+    // A frame the agent could not parse has no session: the open one's card is answerable again.
+    const unparsed = run([server({ type: 'error', code: 'invalid', message: 'ignored a malformed message' })], sent)
+    expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {

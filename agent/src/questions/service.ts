@@ -186,15 +186,22 @@ export class QuestionService {
   }
 
   /**
-   * Cancels a session's pending questions (its turn ended); returns how many.
-   * A parked call is refused with `reason`. `refresh: false`: the caller (a
-   * finishing turn) sets the status itself.
+   * Cancels a session's pending questions (its turn ended, a handoff); returns
+   * how many. `turnId`: only that turn's, so a turn that lost its claim never
+   * cancels the newer turn's. A parked call is refused with `reason`.
+   * `refresh: false`: the caller (a finishing turn) sets the status itself.
    */
-  async cancelPending(sessionId: string, reason: string, options: { refresh?: boolean } = {}): Promise<number> {
+  async cancelPending(
+    sessionId: string,
+    reason: string,
+    options: { refresh?: boolean; turnId?: string } = {},
+  ): Promise<number> {
+    const turnId = options.turnId ?? null
     const rows = await this.atomically(sessionId, async (tx) => {
       const cancelled = await tx<{ id: string }[]>`
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE session_id = ${sessionId} AND outcome IS NULL
+          AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
         RETURNING id`
       return {
         value: cancelled,
@@ -248,7 +255,12 @@ export class QuestionService {
       const id = randomUUID()
       const questions = redactQuestions(request.questions, context.secrets())
       const { sessionId, turnId } = context
-      await this.atomically(sessionId, async (tx) => {
+      const asked = await this.atomically(sessionId, async (tx) => {
+        // Still this turn's, and still the user's: after a handoff mid-turn
+        // the new owner is not asked, so nothing parks for them.
+        const [owner] = await tx<{ owner_kind: string }[]>`
+          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND turn_id = ${turnId} FOR UPDATE`
+        if (owner?.owner_kind !== 'browser') return { value: false, events: [] }
         const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
         await tx`
           INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
@@ -260,8 +272,11 @@ export class QuestionService {
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`
         if (moved.count > 0) tail.push(event({ type: 'session.status', sessionId, status: 'waiting_input' }))
-        return { value: undefined, events: tail }
+        return { value: true, events: tail }
       })
+      if (!asked) {
+        return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
+      }
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const resolved = await this.waitFor(id, AbortSignal.any([context.signal, request.signal]))

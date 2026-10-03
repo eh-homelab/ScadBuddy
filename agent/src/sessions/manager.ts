@@ -1267,7 +1267,8 @@ export class SessionManager {
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
     // A question never outlives its turn (questions/service.ts), shutdown or not.
-    await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
+    // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
+    await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
@@ -1688,7 +1689,12 @@ export class SessionManager {
    * are revoked, as finish() does on a shutdown. Returns the sessions reaped.
    */
   async reapExpired(): Promise<string[]> {
-    const rows = await this.deps.sql<{ id: string; status: SessionStatus }[]>`
+    const rows = await this.deps.sql<{ id: string; status: SessionStatus; dead_turn: string }[]>`
+      WITH dead AS (
+        SELECT id, turn_id FROM ai_sessions
+        WHERE turn_id IS NOT NULL AND lease_until <= now()
+        FOR UPDATE SKIP LOCKED
+      )
       UPDATE ai_sessions s
       SET status = CASE
             WHEN s.status = 'done' THEN 'done'
@@ -1697,11 +1703,13 @@ export class SessionManager {
             ELSE 'idle'
           END,
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
-      WHERE s.turn_id IS NOT NULL AND s.lease_until <= now()
-      RETURNING s.id, s.status`
-    for (const { id, status } of rows) {
+      FROM dead
+      WHERE s.id = dead.id
+      RETURNING s.id, s.status, dead.turn_id AS dead_turn`
+    for (const { id, status, dead_turn } of rows) {
       await this.approvals.revokeUnused(id, 'the turn ended')
-      await this.questions.cancelPending(id, 'the turn ended', { refresh: false })
+      // The dead turn's questions only (questions/service.ts).
+      await this.questions.cancelPending(id, 'the turn ended', { refresh: false, turnId: dead_turn })
       await this.events.append(id, [
         event({
           type: 'error',

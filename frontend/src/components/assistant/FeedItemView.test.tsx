@@ -8,7 +8,7 @@ const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
   const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you }
-  return render(<FeedItemView item={item} onDecide={vi.fn()} />)
+  return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
 describe('the approval card', () => {
@@ -40,6 +40,7 @@ describe('the memory line', () => {
       <FeedItemView
         item={{ kind: 'memory', id: 'memory-0', action: 'recall', bank: 'scadbuddy', outcome: 'ok', ...item }}
         onDecide={vi.fn()}
+        onAnswer={vi.fn()}
         advanced={advanced}
       />,
     )
@@ -117,6 +118,7 @@ describe('the tool card', () => {
           result: { ok: true, summary: 'Set 1 parameter', sources: [{ title: 'Customizer docs', url: 'https://example.com/c' }] },
         } as Extract<FeedItem, { kind: 'tool' }>}
         onDecide={vi.fn()}
+        onAnswer={vi.fn()}
         advanced={advanced}
       />,
     )
@@ -225,6 +227,23 @@ describe('the question card (#940)', () => {
     await user.type(box, '## Bed adhesion')
     await user.click(screen.getByRole('button', { name: 'Send answer' }))
     expect(edit.onAnswer).toHaveBeenCalledWith('q1', ['## Bed adhesion'])
+  })
+
+  it('will not send a multi-select answer longer than the agent takes, picked labels included', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = ask([extras])
+    await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
+    await user.click(screen.getByRole('checkbox', { name: 'Other…' }))
+    const box = screen.getByRole('textbox', { name: 'Your answer' })
+    // Exactly the cap typed, then ", Magnets" goes over it.
+    await user.click(box)
+    await user.paste('x'.repeat(20_000))
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/longer than the assistant takes/)
+    await user.click(screen.getByRole('checkbox', { name: /Magnets/ }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Send answer' }))
+    expect(onAnswer).toHaveBeenCalledWith('q1', ['x'.repeat(20_000)])
   })
 
   it('offers its controls only to the user, never to the browser bridge', () => {

@@ -180,14 +180,20 @@ type Choice = { picked: string[]; other: boolean; text: string }
 
 const NO_CHOICE: Choice = { picked: [], other: false, text: '' }
 
-/** One question's answer as the agent reads it, or undefined while it has none. */
-function answerOf(q: AskedQuestion, c: Choice): string | undefined {
+/** One question's answer as the agent reads it, whether or not it fits ANSWER_MAX; undefined while it has none. */
+function rawAnswerOf(q: AskedQuestion, c: Choice): string | undefined {
   const own = c.other ? c.text.trim() : ''
   if (c.other && !own) return undefined
   if (!q.multiSelect) return c.other ? own : c.picked[0]
   const parts = q.options.map((o) => o.label).filter((l) => c.picked.includes(l))
   if (own) parts.push(own)
   return parts.length ? parts.join(', ') : undefined
+}
+
+/** The answer to send, or undefined while it has none or is longer than the agent takes. */
+function answerOf(q: AskedQuestion, c: Choice): string | undefined {
+  const answer = rawAnswerOf(q, c)
+  return answer !== undefined && answer.length <= ANSWER_MAX ? answer : undefined
 }
 
 /** The question's draft: its first option preview, what "Edit…" starts from. */
@@ -307,6 +313,11 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                     onChange={(e) => update(i, (c) => ({ ...c, text: e.target.value }))}
                   />
                 )}
+                {(rawAnswerOf(q, choice)?.length ?? 0) > ANSWER_MAX && (
+                  <p className="text-[12px] text-warn" role="alert">
+                    This answer is longer than the assistant takes ({ANSWER_MAX.toLocaleString()} characters). Shorten it to send.
+                  </p>
+                )}
               </fieldset>
             )
           })}
@@ -339,13 +350,13 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
 export function FeedItemView({
   item,
   onDecide,
-  onAnswer = () => {},
+  onAnswer,
   advanced = false,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
   /** #940 — the user's answer to a question: one per question, in order. */
-  onAnswer?: (questionId: string, answers: string[]) => void
+  onAnswer: (questionId: string, answers: string[]) => void
   /** The panel's Advanced switch: every detail, open. Off, only the basics. */
   advanced?: boolean
 }) {

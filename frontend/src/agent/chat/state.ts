@@ -364,12 +364,18 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
       }
       const message = errorMessage(event.code, event.message)
+      // #940: an answer the agent refused (or never parsed) resolves nothing, and a
+      // question has no expiry, so a card left `sent` would wait forever. An error for
+      // its session (or, without one, for the open session) makes it answerable again.
+      const retry = (s: SessionState): SessionState =>
+        mapItems(s, (i) => (i.kind === 'question' && i.state === 'sent' ? { ...i, state: 'pending' } : i))
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(s, { kind: 'error', id: `error-${s.items.length}`, message }),
+          push(retry(s), { kind: 'error', id: `error-${s.items.length}`, message }),
         )
       }
-      return { ...state, notice: message, awaitingStart: false }
+      const next = { ...state, notice: message, awaitingStart: false }
+      return state.activeId ? patchSession(next, state.activeId, retry) : next
     }
   }
 }

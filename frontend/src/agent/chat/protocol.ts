@@ -90,14 +90,10 @@ export const VersionLinkSchema = z.object({
 export type VersionLink = z.infer<typeof VersionLinkSchema>
 
 /**
- * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
- * picks an option (several when `multiSelect`) or types their own answer. An option's
- * `preview` is Markdown it shows, e.g. a draft to approve.
- */
-/**
  * The longest answer the agent takes (agent `src/harness/questions.ts` `ANSWER_MAX`). A
  * longer one is refused as a malformed frame and never reaches the question, so the
- * panel stops the user typing past it.
+ * panel never sends one: the card treats a longer answer (typed words plus any picked
+ * labels) as unfinished.
  */
 export const ANSWER_MAX = 20_000
 /** The agent's other bounds on a question (`src/harness/questions.ts`); its tests pin them to these. */
@@ -107,6 +103,11 @@ export const OPTIONS_MAX = 4
 export const QUESTION_TEXT_MAX = 2_000
 export const PREVIEW_MAX = 20_000
 
+/**
+ * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
+ * picks an option (several when `multiSelect`) or types their own answer. An option's
+ * `preview` is Markdown it shows, e.g. a draft to approve.
+ */
 export const QuestionSchema = z.object({
   question: z.string().min(1).max(QUESTION_TEXT_MAX),
   header: z.string().max(200),

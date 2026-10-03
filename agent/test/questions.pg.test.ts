@@ -269,6 +269,61 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false })
   })
 
+  it('cancelling for a turn leaves another turn’s question alone', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    // A turn that lost its claim finishing late cancels only its own questions.
+    expect(await m.questions.cancelPending(session.id, 'an older turn ended', { turnId: '00000000-0000-4000-8000-000000000001' })).toBe(0)
+    expect((await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]).toEqual({ outcome: null })
+    await m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
+  })
+
+  it('the reaper cancels the dead turn’s question and says so', async () => {
+    const paths = await tempPaths()
+    // A replica whose turn stops renewing its lease (its process is stuck), and another that reaps it.
+    const stuck = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20, renewMs: 600_000 })
+    const reaper = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
+    const { session, turn } = await stuck.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(stuck, session.id)
+    await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
+
+    expect(await reaper.reapExpired()).toEqual([session.id])
+    expect((await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]).toEqual({ outcome: 'cancelled' })
+    const resolved = (await events(reaper, session.id)).find((e) => e.type === 'question.resolved')
+    expect(resolved).toMatchObject({ id, answered: false, reason: 'the turn ended' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+  })
+
+  it('a handoff cancels the pending question, and the running turn cannot park on another for the new owner', async () => {
+    let second: QuestionVerdict | undefined
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q1', signal }))
+        second = await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q2', signal })
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    await pendingQuestion(m, session.id)
+
+    await m.handoff(session.id, browser, agentA)
+    await m.acceptHandoff(session.id, agentA)
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/handed off/) }])
+    expect(second).toEqual({ answered: false, message: expect.stringMatching(/no longer the user/) })
+    // Nothing was recorded for the second call: no card, no wait.
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id}`).toEqual([
+      { tool_use_id: 'toolu_q1', outcome: 'cancelled' },
+    ])
+    expect((await m.get(session.id, agentA)).status).toBe('idle')
+  })
+
   it('a row and the event that reports it commit together: a failed append resolves nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
