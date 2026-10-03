@@ -28,6 +28,8 @@ const { createBackendClient } = await import('./api/backend.js')
 const { shutdownTelemetry, traceListener } = await import('./telemetry/setup.js')
 
 const target = process.argv[2]
+// HttpInstrumentation wraps Server.prototype.emit with shimmer, which marks the wrapper.
+const emitWrapped = Object.hasOwn(http.Server.prototype.emit, '__wrapped')
 const get = (url, headers = {}) =>
   new Promise((resolve, reject) => {
     http
@@ -69,12 +71,26 @@ server.close()
 await shutdownTelemetry()
 // Like main.ts, exit explicitly: a pending export retry to an unreachable
 // collector would otherwise keep the loop alive past shutdownTelemetry's budget.
-process.stdout.write(JSON.stringify({ incoming: incoming.traceId, forwarded: forwarded.traceId, work }) + '\\n', () => process.exit(0))
+process.stdout.write(JSON.stringify({ incoming: incoming.traceId, forwarded: forwarded.traceId, work, emitWrapped, hooks: globalThis.registeredHooks }) + '\\n', () => process.exit(0))
+`
+
+// Imported before telemetry.js: records each loader hook registered, since
+// node:module offers no way to list them. syncBuiltinESMExports carries the
+// patch to the named `register` export telemetry.ts imports.
+const RECORDER = `
+import module, { syncBuiltinESMExports } from 'node:module'
+const original = module.register
+globalThis.registeredHooks = []
+module.register = (specifier, ...rest) => {
+  globalThis.registeredHooks.push(String(specifier))
+  return original(specifier, ...rest)
+}
+syncBuiltinESMExports()
 `
 
 type Hit = { path: string; traceparent: string | undefined; contentType: string | undefined; body: Buffer }
 
-type Out = { incoming: string | null; forwarded: string | null; work: string }
+type Out = { incoming: string | null; forwarded: string | null; work: string; emitWrapped: boolean; hooks: string[] }
 
 let target: Server
 let url: string
@@ -103,6 +119,7 @@ beforeAll(async () => {
     { cwd: AGENT },
   )
   await writeFile(path.join(OUT, 'child.mjs'), CHILD)
+  await writeFile(path.join(OUT, 'recorder.mjs'), RECORDER)
   target = createServer((req, res) => {
     const chunks: Buffer[] = []
     const hit: Hit = {
@@ -138,7 +155,12 @@ beforeEach(() => {
 async function runChild(env: Record<string, string>): Promise<{ code: number | null; out: Out }> {
   const child = spawn(
     process.execPath,
-    ['--import', pathToFileURL(path.join(OUT, 'telemetry.js')).href, path.join(OUT, 'child.mjs'), url],
+    [
+      '--import', pathToFileURL(path.join(OUT, 'recorder.mjs')).href,
+      '--import', pathToFileURL(path.join(OUT, 'telemetry.js')).href,
+      path.join(OUT, 'child.mjs'),
+      url,
+    ],
     { env: { PATH: process.env.PATH ?? '', ...env }, stdio: ['ignore', 'pipe', 'inherit'] },
   )
   let stdout = ''
@@ -158,6 +180,8 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     const { code, out } = await runChild({ OTEL_EXPORTER_OTLP_ENDPOINT: url })
     expect(code).toBe(0)
     expect(out.incoming).toBe(TRACE_ID)
+    expect(out.emitWrapped).toBe(true)
+    expect(out.hooks).toEqual(['@opentelemetry/instrumentation/hook.mjs'])
     expect(hit('/healthz')?.traceparent).toMatch(new RegExp(`^00-${out.work}-[0-9a-f]{16}-01$`))
     expect(hit('/plain')).toMatchObject({ traceparent: undefined })
     expect(hit('/node')).toMatchObject({ traceparent: undefined })
@@ -187,6 +211,9 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     const { code, out } = await runChild({ OTEL_SDK_DISABLED: 'true', OTEL_EXPORTER_OTLP_ENDPOINT: url })
     expect(code).toBe(0)
     expect(out.incoming).toBeNull()
+    // The kill switch's point: no loader hook, so node:http is never shimmed.
+    expect(out.emitWrapped).toBe(false)
+    expect(out.hooks).toEqual([])
     expect(hit('/healthz')).toMatchObject({ traceparent: undefined })
     expect(hit('/v1/traces')).toBeUndefined()
   }, 30_000)
