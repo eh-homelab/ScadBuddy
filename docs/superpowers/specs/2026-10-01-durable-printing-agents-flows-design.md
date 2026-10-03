@@ -717,7 +717,8 @@ the most constrained runtime in the system.
 
   It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
   `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`) and the session counters. It can do
+  `ai_durable_entries` (or `ai_session_entries`), `ai_input_responses` (§6.6) and the
+  session counters. It can do
   nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
   DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
@@ -856,7 +857,7 @@ happens, and there is no separate request system.
 | Attention request, `request_user_attention` / `wait_for_user` (#815) | yes | `answer` | the browser user, owner; for `tab_disconnected`, also the system on re-pair | `{choice?: <one of options>, text?}`, or `reconnected` | the call's own `timeout_s` (default 300 s), then `on_timeout`: see "Timeouts" | not built (#993 built only the badge) |
 | Flow `wait_for_human(question, timeout=…)` (§7.1) | yes, a Code Mode host call | `answer` | the browser user, on the Workflows page (§7.3) | `{answer: string}` | the script's `timeout`, then the host call raises; it never returns an answer | spec only |
 | Budget exhausted, `raiseBudget` (`sessions/manager.ts:1560`, #790, #823) | **no** | (none) | the browser user, owner | `{add_usd}` | none | both modes, unchanged |
-| Handoff offer (`sessions/manager.ts:1366`, TTL `HANDOFF_OFFER_TTL_MS` 1 h, line 169) | **no** | (none) | the principal it is offered to | accept or decline | the offer lapses | classic; durable unchanged |
+| Handoff offer (`sessions/manager.ts:1366`, TTL `HANDOFF_OFFER_TTL_MS` 1 h, line 170) | **no** | (none) | the principal it is offered to | accept or decline | the offer lapses | classic; durable unchanged |
 
 - **What is not a session wait.** Approving a plugin package (`routes/pluginPackages.ts:19`,
   `plugins/packages/store.ts:238`) is an admin's review in Settings. No tool installs
@@ -866,28 +867,48 @@ happens, and there is no separate request system.
 
 #### Reads: the `pending_input` Query
 
-- One Query, `pending_input`, returns the gate's parked calls. It replaces per-kind
-  Queries such as the plugin's `pending_approvals`. It is read-only and adds nothing to
-  history, so the panel and #993's badge can poll it as often as they like.
+- One Query, `pending_input`, returns a durable session's parked calls. It replaces
+  per-kind Queries such as the plugin's `pending_approvals`. It is read-only and adds
+  nothing to history.
 - Each entry is
-  `{id, kind, tool, summary, input, requested_by, responders, created_at, expires_at}`:
-  - `id` is the call's `tool_use_id`;
+  `{id, kind, tool, summary, input_hash, prompt, requested_by, responders, created_at, expires_at}`:
+  - `id` is the `request_id` that `respond` takes. It is opaque to clients: the row id
+    for a classic entry (an `ai_approvals` or `ai_questions` row, whose `tool_use_id`
+    is not unique, since cancelled, expired and re-asked rows are kept), and
+    `durable:<session id>:<tool_use_id>` for a durable one, where the plugin runs each
+    `tool_use_id` once (§3.2);
   - `kind` and `responders` come from the tool's HITL policy;
-  - `input` is what the person is shown: the call's input for an `approval`, the
-    question and its options for an `answer`.
+  - for an `approval`, the entry carries the scrubbed `summary` and the `input_hash`
+    and **never the call's raw input**, as the approval reads already do
+    (`routes/approvals.ts:20-22`); `prompt` is empty;
+  - for an `answer`, `prompt` is what the person must read: the question and its
+    options, or the attention message. It is the model's own text, not a tool's input.
 - In a durable session it is built from the plugin's `pending_approvals()` (`id`,
   `name`, `input`), joined with the entry's policy and times, which the workflow keeps
   in its own state when the call parks. The plugin runs one durable call at a time
   (§3.2), so a durable session has at most one entry.
-- The route `GET /api/v1/ai/sessions/{id}/pending-input` answers it for one session, and
-  `GET /api/v1/ai/pending-input` for every session the principal may see. It is a read
-  (§4.1), and it has a tool, as the coverage test requires.
+- **Two reads, two sources.**
+  - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
+    one it sends the Query: it is the source of truth, and it reconciles the projection
+    below.
+  - `GET /api/v1/ai/pending-input` answers for everything the principal may see, the
+    badge's read. It is **one Postgres read of a projection**, `ai_pending_input`,
+    maintained by the `input.requested` and `input.resolved` events (Notifications),
+    as `render_jobs` is projected. It never fans a Query out per workflow: that would
+    cost one worker round-trip per open session per poll, and every poll would time
+    out while the `agent-durable` worker is down. Classic entries come from their own
+    tables, as today.
+  - The aggregate includes **session-less entries**: an MCP prepare (`mcp.ts:97`,
+    `session_id` null, `tool_use_id` `mcp:<uuid>`) that `GET /api/v1/ai/approvals`
+    lists today, so the badge keeps counting them.
+  - Both are reads (§4.1), and each has a tool, as the coverage test requires.
 
 #### Responses: the `respond` Update
 
 - `respond(request_id, response)` answers one entry. The route is
-  `POST /api/v1/ai/sessions/{id}/pending-input/{request_id}`, and the principal is the
-  authenticated caller, never a field of the body.
+  `POST /api/v1/ai/pending-input/{request_id}`, for a session's entry and a session-less
+  one alike; the route resolves `request_id` to its store or its workflow. The principal
+  is the authenticated caller, never a field of the body.
 - **The validator** refuses, before anything is written to history:
   - a stale id, meaning no such call is parked;
   - an entry that is already resolved (decided, answered, timed out or cancelled);
@@ -897,7 +918,11 @@ happens, and there is no separate request system.
   For an `approval` it also runs the plugin's `validate_decision`, and it checks
   `input_hash` when one is sent, as `approvals/service.ts:737` does. The agent's
   `approvers` list is left unset: who may answer depends on the kind, which the
-  plugin's single list cannot say, so our validator decides.
+  plugin's single list cannot say, so our validator decides. With `approvers` unset the
+  plugin accepts any approver name (`_workflow.py:360`), so the guard is structural:
+  `DurableSession` registers **no decision Signal** and no other Update that reaches
+  `agent.decide`, and `respond` and the entry's timer are its only callers. A test in
+  §8 asserts the workflow's handler set.
 - **Why an Update, not the cookbook's Signal.** A Signal cannot refuse. The plugin's
   `decide` logs an invalid decision and drops it, so the person who clicked would see
   nothing happen. An Update's validator rejects synchronously: the panel gets the reason
@@ -905,17 +930,26 @@ happens, and there is no separate request system.
   written to history. The cookbook allows either; the plugin documents both.
 - **How each kind resolves.**
   - `approval`: the handler calls `agent.decide(tool_use_id, approved, approver)`.
-  - `answer`: the handler is async. It writes the answer with an activity (to
-    `ai_questions` for a question, for example), then calls `agent.decide(tool_use_id,
-    True, approver)`. The tool's activity on `agent-tools` reads that answer by
-    `tool_use_id` and returns it as the result. The plugin's gate carries only a yes or
-    no, so this is how an answer becomes the result with only its documented API. Phase
-    5 checks this at its start; anything that needs the plugin's private state goes to
-    the user (§9).
-  - Whichever comes first wins. The handler marks the entry resolved in workflow state
-    before its first `await`, so a timer that fires while the answer's activity runs
-    finds it resolved and does nothing, and the validator refuses any later response.
-    The plugin also keeps only the first decision.
+  - `answer`: the handler is async. It writes the outcome with an activity to
+    `ai_input_responses(request_id primary key, session_id, kind, outcome, response
+    jsonb, responder, created_at)`, a new agent migration in phase 5, then calls
+    `agent.decide(tool_use_id, True, approver)`. The tool's activity on `agent-tools`
+    reads that row by `request_id` and returns it as the result. The plugin's gate
+    carries only a yes or no, so this is how an answer becomes the result with only its
+    documented API. The table is the durable store for every `answer` kind (questions
+    and attention requests); it does not depend on PR #998's `ai_questions`, which stays
+    the classic store. Phase 5 checks this at its start; anything that needs the
+    plugin's private state goes to the user (§9).
+  - Whichever comes first wins. The handler marks the entry *resolving* in workflow
+    state before its first `await`: the validator refuses another response, and a timer
+    that fires meanwhile waits for the handler rather than acting.
+    - If the write succeeds, the entry is resolved and the plugin is told.
+    - **If the write fails** (the activity's retries are exhausted, or it fails
+      non-retryably), the handler puts the entry back to pending and re-raises, so the
+      Update fails and the person sees the error and can answer again. If the timer
+      came due meanwhile, it fires at once. So a failed write never leaves the call
+      parked with no timer and no way to answer.
+    - The plugin also keeps only the first decision.
 
 #### Timeouts
 
@@ -925,9 +959,9 @@ happens, and there is no separate request system.
 
 | Kind | When the timer fires |
 |---|---|
-| `approval` | **Deny.** The call does not run. A classic session tells the model nobody decided (`approvals/service.ts:341`); a durable one calls `agent.decide(tool_use_id, False, "system:timeout")`, and the model reads the plugin's rejection. |
+| `approval` | **Deny.** The call does not run. A classic session tells the model nobody decided (`approvals/service.ts:341`). A durable one calls `agent.decide(tool_use_id, False, "system:timeout")`. The plugin's `decide` takes no message, so the model reads its fixed rejection ("A human reviewer rejected this action. Do not retry it.", `_workflow.py:718-723`), not the classic *expired* wording. This is a known difference, listed in §9. It fails closed, since the call never runs, and the panel and audit still record `expired`. Letting the call through instead, as an `answer` does, is not possible: an approved `approval` runs the real tool. |
 | `answer`, a question | **Cancel.** The tool returns an error result, "nobody answered", which is never an answer. The window is a new `ai_settings` key, `question_expiry_seconds` (default 3600, bounded like `approval_expiry_seconds`, 10 to 86 400). |
-| `answer`, an attention request | **#815's rule, as written:** `on_timeout` is `proceed` (the default), `wait` or `stop`. `proceed` returns `timed_out` and the agent carries on with non-outward work only. Any outward call it then makes parks for its own approval, so `proceed` never lets anything outward run. `stop` ends the turn. `wait` keeps it parked to the 86 400 s ceiling, then stops. |
+| `answer`, an attention request | **#815's rule, as written:** `on_timeout` is `proceed` (the default), `wait` or `stop`. `proceed` returns `timed_out` and the agent carries on with non-outward work only. Any outward call it then makes parks for its own approval, so `proceed` never lets anything outward run. `stop` ends the turn: in a classic session as `interrupt` does; in a durable one by cancelling the turn's `agent.run` task, which the plugin turns into "This tool call was interrupted" for the open call (`_workflow.py:634-651`). Phase 5 verifies that the plugin ends the turn cleanly under that cancellation. Until it does, a durable `wait_for_user`'s input schema offers only `proceed`, so `stop` fails closed by not being offered. `wait` keeps it parked to the 86 400 s ceiling, then does what `stop` does. |
 | `answer`, flow `wait_for_human` | The host call raises in the script, which decides what to do. It never returns an answer. |
 
 - `proceed` exists only for attention requests. An approval or a question can never
@@ -970,7 +1004,8 @@ happens, and there is no separate request system.
   sends the Query or Update for a durable one. So the panel and the badge read one
   shape, whichever mode the session runs in.
   - `fetchPendingApprovals()` (`frontend/src/agent/attention.ts:26`) reads
-    `GET /api/v1/ai/pending-input` and counts every kind.
+    `GET /api/v1/ai/pending-input` and counts every kind, session-less MCP approvals
+    included.
   - The approval routes (`routes/approvals.ts:13-16`) and `sessions_approve` /
     `sessions_deny` stay as aliases of `respond` for the `approval` kind.
 - The session's status projection is the same in both modes: `waiting_approval` while an
@@ -1149,7 +1184,13 @@ happens, and there is no separate request system.
   - `respond` approve, deny, and expiry (deny); a question answered, timed out
     (cancelled, never answered) and answered after the timer (refused); each validator
     refusal (stale id, resolved, wrong responder, malformed, over 16 KiB);
-  - `pending_input` returns the same entry shape for a classic and a durable session;
+  - `pending_input` returns the same entry shape for a classic and a durable session,
+    and an `approval` entry never carries the call's raw input;
+  - an `answer` whose write activity fails returns to pending, can be answered again,
+    and still times out;
+  - `DurableSession` registers no Signal and no Update other than `send_message` and
+    `respond` that reaches `agent.decide`;
+  - the aggregate read includes a session-less MCP approval;
   - `mode` refused on an existing session;
   - an end-to-end test from the chat socket to a durable turn.
 - **Flows:**
@@ -1176,6 +1217,7 @@ None. The ones considered, and how each was resolved:
 | Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§7.2). |
 | Vendoring the unmerged `temporalio-claude-agent-sdk` | Not vendored, by the user's decision. The residual risk (an unreachable commit) is monitored by a scheduled `uv lock --check` (§6.2). This is not a deviation from Temporal. |
 | Encrypting session and flow payloads | Temporal's documented Payload Codec with serialization context (§6.5). Not a deviation. |
+| A durable approval's expiry reaches the model as the plugin's rejection text | Not a deviation: the plugin's `decide` takes no message. It fails closed, and the panel and audit record `expired` (§6.6). Phase 5 asks upstream for a reason on `decide`, and adopts it once released. |
 | Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
