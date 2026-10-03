@@ -982,6 +982,106 @@ describe('PrintPicker · Projects', () => {
     expect(bodies).toEqual([])
   })
 
+  /** A `POST` that waits until the returned function is called, then falls through. */
+  function hold(path: string): () => void {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post(path, async () => {
+        await gate
+        return undefined
+      }),
+    )
+    return release
+  }
+
+  it('refuses to close while its own "Create project" is in flight, and disables the select (#710 review)', async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <PrintPicker
+          open={open}
+          source={{ kind: 'output', output }}
+          onClose={() => setOpen(false)}
+          onRan={vi.fn()}
+        />
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await loaded()
+    await showAdvanced()
+
+    const picker = screen.getByTestId<HTMLSelectElement>('project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // The picker's own in-flight save must not look reselectable, mid-create.
+    await waitFor(() => expect(picker).toBeDisabled())
+    // Print would go out with the project selected before the create lands.
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    // Closing (Cancel here; Escape and the backdrop go through the same `close()`) would
+    // unmount the picker and drop its guard before the abandoned request lands. The new-project
+    // form has its own Cancel; the dialog's is the footer's, rendered last.
+    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!)
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(picker).toBeDisabled()
+
+    release()
+    await waitFor(() => expect(picker).toBeEnabled())
+    expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
+  })
+
+  it('holds the Advanced switch, and a picker behind it, mid-create (#710 review)', async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <PrintPicker
+          open={open}
+          source={{ kind: 'output', output }}
+          onClose={() => setOpen(false)}
+          onRan={vi.fn()}
+        />
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByTestId('project-select'), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    const release = hold('/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(screen.getByTestId('project-select')).toBeDisabled())
+
+    // Switching modes would unmount the picker running the create, so it is held.
+    const advanced = screen.getByRole('switch', { name: 'Advanced' })
+    expect(advanced).toBeDisabled()
+    await user.click(advanced)
+    expect(screen.getByTestId('project-select')).toBeDisabled()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!)
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+
+    release()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    expect(advanced).toBeEnabled()
+    // Remounted by a mode round-trip once the create has settled, the picker is usable again.
+    await user.click(advanced)
+    await user.click(advanced)
+    expect(screen.getByTestId('project-select')).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
+  })
+
   it('sends the last project in Simple mode, with no project from the page (#772 review)', async () => {
     const { bodies } = watch('POST', '/run')
     server.use(
@@ -1378,6 +1478,29 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  it('labels each plate by its name, with the number only as secondary text (#929)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Body' },
+          { index: 2, has_thumbnail: false, name: null },
+        ]),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    const plates = await screen.findByTestId('plate-choice')
+    const body = within(plates).getByRole('radio', { name: /Body/ })
+    expect(within(plates).getByRole('img', { name: 'Body' })).toBeInTheDocument()
+    const number = within(body.closest('label')!).getByText('Plate 1')
+    expect(number).toHaveClass('text-faint')
+    // No name from the 3MF: "Plate N" is the label itself, the last resort.
+    const unnamed = within(plates).getByRole('radio', { name: 'Plate 2' })
+    // Its number keeps the numeric face a named plate's secondary text has.
+    expect(within(unnamed.closest('label')!).getByText('2')).toHaveClass('sb-num')
   })
 
   it('queues every plate when asked for all of them', async () => {

@@ -161,8 +161,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   worker's bounded local copy), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
-  (`RemoteAssets`, uploads reaching workers). The API's `StoreBundle` that wires them
-  arrives with phase 3's #672; until then `getattr(state, "store", None)` is `None`.
+  (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
+  wires them, reading `store_backend` (a stored setting) at start.
+
+  `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
+  run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
@@ -187,6 +190,12 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
   up without editing `handlers.ts`, and must export `handlers` (and optionally
   `reset`) (#508).
+- `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
+  inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
+  reports a failure through `onFailure`; the Customize page then falls back to the generated form
+  with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
+  `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
+  `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
@@ -313,6 +322,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `openscad --version` writes to stderr.
 - Fonts: there is no family "Lobster" in the image, only "Lobster Two"; a missing
   family silently falls back to DejaVu and changes the geometry.
+  Fonts named only inside a library checkout are not mirrored to render workers on
+  the bambuddy store (`store/fonts.py` `wanted_families`); pass such a font as a
+  parameter or name it in the template's own source.
 - Bambu Studio only reads `project_settings.config` if the 3MF claims
   `Application: BambuStudio-…`, and then segfaults unless five options are present
   (spec §3). Keep them.

@@ -19,11 +19,14 @@ export type Param = Schemas['Parameter']
 export type ParamType = Param['type']
 export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
+/** A revision's schema, with that revision's own `ui` declaration (#425). */
+export type RevisionSchema = Schemas['RevisionSchema']
 
 /** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
 export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']
+export type StoreUsage = Schemas['StoreUsage']
 
 export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */

@@ -26,6 +26,7 @@ from scadbuddy.core.events import (
     ModelEvent,
     OutputEvent,
     PrintEvent,
+    PrintRunEvent,
     SessionBusEvent,
     SettingsChanged,
     Subscription,
@@ -344,6 +345,10 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             PrintEvent(kind="print.progress", output_id=OUTPUT_ID, slug="demo"),
             [f"print:{OUTPUT_ID}"],
         ),
+        (
+            PrintRunEvent(output_id="library:89", slug="library-89", run_id="r1"),
+            ["print:library:89"],
+        ),
         (LibraryRemoved(name="BOSL2", commits=["c" * 40]), ["libraries"]),
         (SettingsChanged(section="connection"), ["settings"]),
         (
@@ -369,6 +374,8 @@ def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
         ModelEvent(kind="model.created", slug="demo"),
         OutputEvent(kind="output.deleted", output_id=OUTPUT_ID, slug="demo"),
         PrintEvent(kind="print.settled", output_id=OUTPUT_ID, slug="demo"),
+        PrintRunEvent(output_id=OUTPUT_ID, slug="demo", run_id="r1"),
+        PrintRunEvent(output_id="library:89", slug="library-89", run_id="r2"),
         LibraryRemoved(name="BOSL2", commits=[]),
         FontInstalled(family="DejaVu Sans"),
         SettingsChanged(section="connection"),

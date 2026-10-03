@@ -79,6 +79,8 @@ class SettingsView(BaseModel):
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
     last_project_id: int | None = None
+    #: The domains an asset may be fetched from (#844), with their subdomains.
+    asset_fetch_domains: list[str] = Field(default_factory=list)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -275,6 +277,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         default_plate=stored.default_plate,
         display_unit=stored.display_unit,
         last_project_id=stored.last_project_id,
+        asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         sources=snapshot.sources,
         applies=dict(APPLIES),
@@ -305,6 +308,8 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = store.snapshot()
     apply_runtime(state, snapshot.runtime)
+    # This process sees its own write at once; workers within the source's TTL.
+    state.store.source.invalidate()
     return _view(snapshot, state)
 
 

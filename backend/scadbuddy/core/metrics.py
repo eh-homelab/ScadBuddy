@@ -216,6 +216,28 @@ class Metrics:
             ["result"],
             registry=r,
         )
+        self.store_blobs = Gauge(
+            "scadbuddy_store_blobs", "Distinct objects in the blob store.", registry=r
+        )
+        self.store_bytes = Gauge(
+            "scadbuddy_store_bytes", "Bytes in the blob store, by kind.", ["kind"], registry=r
+        )
+        self.store_max_blobs = Gauge(
+            "scadbuddy_store_max_blobs", "SCADBUDDY_STORE_MAX_COUNT; 0 is no limit.", registry=r
+        )
+        self.store_max_bytes = Gauge(
+            "scadbuddy_store_max_bytes",
+            "SCADBUDDY_STORE_MAX_TOTAL_BYTES; 0 is no limit.",
+            registry=r,
+        )
+        self.store_render_key_fallback = Gauge(
+            "scadbuddy_store_render_key_fallback",
+            "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+            registry=r,
+        )
+        self.worker_cache_bytes = Gauge(
+            "scadbuddy_worker_cache_bytes", "Bytes in this process's local piece cache.", registry=r
+        )
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the render queue's from the projection.

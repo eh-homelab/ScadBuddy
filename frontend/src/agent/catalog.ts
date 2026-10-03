@@ -104,7 +104,8 @@ export const TOOLS = {
   // ── Customize ─────────────────────────────────────────────────────────────────────
   get_params: tool({
     description:
-      "The open model's parameters: each one's type, group, limits, options, default and current value.",
+      "The open model's parameters: each one's type, group, limits, options, default and current value." +
+      " With a template's own interface, also its full inputs and the interface's own summary (`ui_summary`).",
     risk: 'read',
     scope: 'customize',
     input: none,

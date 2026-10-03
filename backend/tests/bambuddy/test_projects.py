@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.projects import (
     folder_for,
 )
 from scadbuddy.core.problems import ApiError
-from tests.bambuddy.conftest import BASE_URL, recording
+from tests.bambuddy.conftest import BASE_URL, recorded_schema, recording
 
 API = f"{BASE_URL}/api/v1"
 
@@ -117,6 +117,79 @@ async def test_only_the_fields_scadbuddy_has_an_opinion_about_are_sent(
 
 
 @respx.mock
+async def test_a_new_project_can_be_put_under_a_parent(bambuddy: BambuddyClient) -> None:
+    """``parent_id`` is the field Bambuddy's recorded ``ProjectCreate`` takes for the
+    nesting (#930), and the listing reports it back so the picker can indent."""
+    assert "parent_id" in recorded_schema("ProjectCreate")["properties"]
+    created = respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 1}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/1").mock(
+        return_value=httpx.Response(200, json=recording("folders-by-project.json"))
+    )
+    respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Tags", "project_id": 7})
+    )
+
+    view = await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1))
+    assert json.loads(created.calls.last.request.content)["parent_id"] == 1
+    assert view.parent_id == 1
+
+
+@respx.mock
+async def test_a_child_projects_folder_is_made_inside_its_parents_folder(
+    bambuddy: BambuddyClient,
+) -> None:
+    """The library mirrors the nesting: the new folder's ``parent_id`` is the parent
+    project's own folder (``FolderCreate.parent_id``), not the library's top level."""
+    assert "parent_id" in recorded_schema("FolderCreate")["properties"]
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 1}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/1").mock(
+        return_value=httpx.Response(200, json=recording("folders-by-project.json"))
+    )
+    folder = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "name": "Tags", "project_id": 7, "parent_id": 2}
+        )
+    )
+
+    await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1))
+    assert json.loads(folder.calls.last.request.content) == {
+        "name": "Tags",
+        "project_id": 7,
+        "parent_id": 2,
+    }
+
+
+@respx.mock
+async def test_a_parent_without_a_folder_is_not_given_one(bambuddy: BambuddyClient) -> None:
+    """Creating a child must not write to a project nobody touched: when the parent
+    has no folder of its own, the child's folder goes at the top level."""
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 4}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/4").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Tags", "project_id": 7})
+    )
+
+    await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=4))
+    assert folder.call_count == 1
+    assert json.loads(folder.calls.last.request.content) == {"name": "Tags", "project_id": 7}
+
+
+@respx.mock
 async def test_linking_a_project_that_already_has_a_folder_does_not_make_another(
     bambuddy: BambuddyClient,
 ) -> None:
@@ -131,6 +204,31 @@ async def test_linking_a_project_that_already_has_a_folder_does_not_make_another
     view = await ensure_project(bambuddy, ProjectRequest(project_id=1))
     assert view.folder_id == 2
     assert not made.called
+
+
+@respx.mock
+async def test_a_parent_on_a_link_is_refused_rather_than_ignored(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Linking never re-parents an existing project, so a ``parent_id`` sent with
+    ``project_id`` is a 400 the caller sees, not a nesting silently dropped (#930)."""
+    with pytest.raises(ApiError) as raised:
+        await ensure_project(bambuddy, ProjectRequest(project_id=1, parent_id=2))
+    assert raised.value.status == 400
+
+
+@respx.mock
+async def test_a_parent_with_an_existing_folder_is_refused_before_anything_is_made(
+    bambuddy: BambuddyClient,
+) -> None:
+    """``folder_id`` links a folder as it stands, wherever it is, so with ``parent_id``
+    the project would say nested while its folder is not. Refused before Bambuddy is
+    written to, rather than creating a project and then failing (#930)."""
+    created = respx.post(f"{API}/projects/").mock(return_value=httpx.Response(500))
+    with pytest.raises(ApiError) as raised:
+        await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1, folder_id=2))
+    assert raised.value.status == 400
+    assert not created.called
 
 
 @respx.mock

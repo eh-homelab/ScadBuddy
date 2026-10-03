@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
+from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.render.pg_store import migrate
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,12 @@ def _nullable(name: str) -> bool:
 #: The env-seeded fields a clear can hold (a JSON ``null`` row). The rest are numbers,
 #: switches or a level, which only a reset puts back.
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
+
+
+#: The settings `StoreNotReadyError` is decided from.
+STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
+#: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
+STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
 
 
 class StoreNotReadyError(ValueError):
@@ -164,6 +171,9 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
+    #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
+    #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
+    asset_fetch_domains: list[str] | None = None
 
     #: Model slug -> what the picker chose, set one model at a time
     #: (:meth:`SettingsStore.set_model_choices`).
@@ -187,6 +197,28 @@ class StoredSettings(BambuddyIds):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+
+    @field_validator("asset_fetch_domains")
+    @classmethod
+    def _normalised_domains(cls, domains: list[str] | None) -> list[str] | None:
+        """`host_allowed` compares against normalised entries. A save already
+        normalises them (`SettingsPatch`); a row written any other way is normalised
+        here, and an entry that is not a domain is dropped rather than failing the
+        load of every setting."""
+        if domains is None:
+            return None
+        kept: list[str] = []
+        for domain in domains:
+            try:
+                kept.append(normalise_domain(domain))
+            except ValueError:
+                logger.warning("ignoring a stored asset domain that is not a domain")
+        return list(dict.fromkeys(kept))
+
+    def allowed_asset_domains(self) -> tuple[str, ...]:
+        if self.asset_fetch_domains is None:
+            return DEFAULT_ASSET_FETCH_DOMAINS
+        return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
         """The key render workers use, and whether it is the full key by fallback. With
@@ -224,6 +256,9 @@ class SettingsPatch(BaseModel):
     display_unit: DisplayUnit | None = None
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
+    #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
+    #: it: no agent tool writes settings.
+    asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
@@ -273,6 +308,13 @@ class SettingsPatch(BaseModel):
                 f"{env_var(name)} cannot be cleared; reset it to follow the deployment's value"
             )
         return check_value(name, value)
+
+    @field_validator("asset_fetch_domains")
+    @classmethod
+    def _domains(cls, domains: list[str] | None) -> list[str] | None:
+        if domains is None:
+            return None
+        return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
 
     @field_validator("reset")
     @classmethod
@@ -440,6 +482,8 @@ class SettingsStore:
                     " saved first"
                 )
         with self._pool.connection() as conn, conn.transaction():
+            if (changes.keys() | set(reset)) & STORE_READINESS:
+                self._check_store_ready(conn, changes, reset)
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
                 # Back to following the environment, then the default.
@@ -454,6 +498,46 @@ class SettingsStore:
                     # Back to the default.
                     conn.execute("DELETE FROM settings WHERE name = %s", (name,))
         return self._written("connection")
+
+    def _check_store_ready(
+        self, conn: Connection[DictRow], changes: dict[str, Any], reset: list[str]
+    ) -> None:
+        """The merged result, not the patch: clearing the URL or the inbox while on the
+        Bambuddy store would leave a store the next start refuses (`build_store`). A
+        reset name is part of it: its row goes, and the value is the deployment's.
+
+        Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
+        safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
+        second sees the first. A row lock would not do: a value that follows the
+        environment has no row to lock."""
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
+        )
+        rows = conn.execute(
+            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
+        ).fetchall()
+        stored = {row["name"]: row["value"] for row in rows}
+
+        def merged(name: str) -> Any:
+            if name in changes:
+                return changes[name]
+            if name in reset or name not in stored:
+                # The deployment's own value: the environment's, else the default.
+                return getattr(self.defaults, name)
+            try:
+                return check_value(name, stored[name])
+            except ValueError:
+                # As `snapshot` reads it: a refused row follows the environment.
+                return getattr(self.defaults, name)
+
+        backend = merged("store_backend") or "local"
+        if backend == "bambuddy" and (
+            not merged("bambuddy_url") or merged("library_folder_id") is None
+        ):
+            raise StoreNotReadyError(
+                "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
+                " saved first"
+            )
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""

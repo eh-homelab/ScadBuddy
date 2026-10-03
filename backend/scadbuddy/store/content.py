@@ -15,10 +15,13 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+
+from psycopg.errors import DeadlockDetected
 
 from scadbuddy.store.content_models import (
     SWEPT_KINDS,
@@ -29,6 +32,7 @@ from scadbuddy.store.content_models import (
     BlobScope,
     BlobStat,
     RefusedDeleteError,
+    ReuseLostError,
     StoreFullError,
     StoreUsage,
 )
@@ -45,7 +49,7 @@ class ContentBackend(Protocol):
     backend: str
 
     async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str: ...
-    def download(self, backend_id: str) -> AsyncIterator[bytes]: ...
+    def download(self, backend_id: str) -> AsyncGenerator[bytes]: ...
     async def exists(self, backend_id: str) -> bool: ...
     async def remove(self, backend_id: str) -> None: ...
 
@@ -71,6 +75,8 @@ class ContentStore:
     ) -> None:
         self.backend = backend
         self.index = index
+        #: `_keep` tasks still running after the call that started them was cancelled.
+        self._keeping: set[asyncio.Task[None]] = set()
         self.max_total_bytes = max_total_bytes
         self.max_count = max_count
         self.metrics = metrics
@@ -84,6 +90,9 @@ class ContentStore:
             self.metrics.store_ops.labels(op, outcome).inc()
 
     def usage(self) -> StoreUsage:
+        """Synchronous, unlike the rest of the class: a Postgres aggregate over every
+        row of the backend. Call it from a thread (`_require_room` runs in one; the
+        usage route and `/metrics` call `store_usage` in one)."""
         count, total, by_kind = self.index.usage(self.name)
         return StoreUsage(
             backend=self.name,
@@ -107,21 +116,37 @@ class ContentStore:
                 f" past SCADBUDDY_STORE_MAX_TOTAL_BYTES ({self.max_total_bytes})"
             )
 
-    async def _store(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> BlobRef:
+    async def _store(
+        self,
+        kind: BlobKind,
+        data: bytes,
+        *,
+        name: str,
+        scope: BlobScope,
+        lost_reuse: bool = False,
+    ) -> tuple[BlobRef, bool]:
+        """The stored object, and whether it is an existing one reused. Its row must then
+        be written with ``reuse=True``, which fails if a release freed it meanwhile.
+        ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
+        like the re-put it replaces, no room check."""
         sha = hashlib.sha256(data).hexdigest()
-        existing = await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+        existing = (
+            None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+        )
         if existing is not None and await self.backend.exists(existing.backend_id):
-            return existing  # a re-put: never refused, never uploaded twice
-        try:
-            await asyncio.to_thread(self._require_room, len(data))
-        except StoreFullError:
-            self._count("put", "full")
-            raise
+            return existing, True  # a re-put: never refused, never uploaded twice
+        if not lost_reuse:
+            try:
+                await asyncio.to_thread(self._require_room, len(data))
+            except StoreFullError:
+                self._count("put", "full")
+                raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
-        return BlobRef(
+        ref = BlobRef(
             sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data)
         )
+        return ref, False
 
     async def _release(self, ref: BlobRef) -> None:
         """Remove the object unless an index row still names it. Refuses a ref on another
@@ -142,25 +167,49 @@ class ContentStore:
         key: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> BlobRef:
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
-        previous = await asyncio.to_thread(
-            self.index.put, key, ref, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            try:
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
+                )
+            except ReuseLostError:
+                # Freed between the lookup and this row: store this put's own copy.
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if previous is not None and previous.backend_id != ref.backend_id:
             await self._release_replaced(key, previous)
         return ref
+
+    async def _release_unindexed(self, ref: BlobRef, reused: bool) -> None:
+        """After the index gave up on a deadlock: remove what this call uploaded, which
+        no row will name. A reused object is another row's, and stays."""
+        if not reused:
+            await self._release(ref)
 
     async def _release_replaced(self, key: str, previous: BlobRef) -> None:
         if previous.backend != self.name:
             # The key now names this backend's object, so no row names the old one: it
             # is left untracked on the other backend rather than deleted from here.
+            # Nothing reclaims it later; that is a known gap, deferred (#811; the
+            # crash-window orphan beside it is #701).
             logger.warning(
                 "left a replaced blob on another backend",
                 extra={"key": key, "backend": previous.backend},
             )
             return
-        await self._release(previous)
+        try:
+            await self._release(previous)
+        except RefusedDeleteError:
+            # The new object is stored and indexed; the old one was moved out of a Work/
+            # folder, so it stays, untracked, as the sweep leaves a refused one.
+            logger.exception("the backend refused to delete a replaced blob", extra={"key": key})
 
     async def replace(
         self,
@@ -175,11 +224,27 @@ class ContentStore:
     ) -> BlobRef | None:
         """`put` under ``key`` only if the key still names ``expected``; None if it
         moved on, and this call's own upload is removed again."""
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         previous = await asyncio.to_thread(self.index.get, key)
-        landed = await asyncio.to_thread(
-            self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            try:
+                landed = await asyncio.to_thread(
+                    self.index.swap,
+                    key,
+                    ref,
+                    expected=expected,
+                    slug=scope.slug,
+                    meta=meta or {},
+                    reuse=reused,
+                )
+            except ReuseLostError:
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                landed = await asyncio.to_thread(
+                    self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if not landed:
             await self._release(ref)
             return None
@@ -187,14 +252,17 @@ class ContentStore:
             await self._release_replaced(key, previous.ref)
         return ref
 
-    async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
+    async def get(self, ref: BlobRef) -> AsyncGenerator[bytes]:
         """The object's bytes, sha-checked at the end. On `BlobMissingError` the index
         row is kept; a caller that gets it should `forget` the key."""
         digest = hashlib.sha256()
         try:
-            async for chunk in self.backend.download(ref.backend_id):
-                digest.update(chunk)
-                yield chunk
+            # Closed with this generator: a consumer that stops early (and closes it)
+            # closes the backend's download, and its HTTP stream, with it.
+            async with aclosing(self.backend.download(ref.backend_id)) as chunks:
+                async for chunk in chunks:
+                    digest.update(chunk)
+                    yield chunk
         except BlobMissingError:
             self._count("get", "missing")
             raise
@@ -204,7 +272,8 @@ class ContentStore:
         self._count("get", "ok")
 
     async def read(self, ref: BlobRef) -> bytes:
-        return b"".join([chunk async for chunk in self.get(ref)])
+        async with aclosing(self.get(ref)) as chunks:
+            return b"".join([chunk async for chunk in chunks])
 
     async def stat(self, key: str) -> BlobStat | None:
         stat = await asyncio.to_thread(self.index.get, key)
@@ -228,14 +297,52 @@ class ContentStore:
         """Remove ``key`` and its object. A row on another backend is left for it."""
         stat = await asyncio.to_thread(self.index.delete, key, backend=self.name)
         if stat is not None:
-            await self._release(stat.ref)
+            await self._release_or_keep(stat)
 
     async def delete_if_stale(self, key: str, cutoff: datetime) -> bool:
         stat = await asyncio.to_thread(self.index.delete_if_stale, key, cutoff, backend=self.name)
         if stat is None:
             return False
-        await self._release(stat.ref)
+        await self._release_or_keep(stat)
         return True
+
+    async def _release_or_keep(self, stat: BlobStat) -> None:
+        """Release a deleted row's object. If that fails for any reason but a refusal,
+        a cancellation included, the row is put back so the object stays tracked and a
+        later pass retries; a refused object is outside ScadBuddy's folders and is left
+        untracked on purpose."""
+        try:
+            await self._release(stat.ref)
+        except RefusedDeleteError:
+            raise
+        except BaseException:
+            # Shielded: a second cancellation must not stop the row going back.
+            keep = asyncio.create_task(self._keep(stat))
+            self._keeping.add(keep)
+            keep.add_done_callback(self._keeping.discard)
+            await asyncio.shield(keep)
+            raise
+
+    async def _keep(self, stat: BlobStat) -> None:
+        landed = await asyncio.to_thread(
+            self.index.swap, stat.key, stat.ref, expected=None, slug=stat.slug, meta=stat.meta
+        )
+        if landed:
+            return
+        # A put stored the key again meanwhile. If it names another object, nothing
+        # tracks this one any more: try the release once more rather than orphan it.
+        try:
+            await self._release(stat.ref)
+        except Exception:
+            logger.exception(
+                "a replaced object could not be removed and is untracked",
+                extra={"key": stat.key, "backend_id": stat.ref.backend_id},
+            )
+
+    async def aclose(self) -> None:
+        """Wait for the rows still going back: one dropped at shutdown orphans its object."""
+        if self._keeping:
+            await asyncio.gather(*self._keeping, return_exceptions=True)
 
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
         for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):
@@ -278,6 +385,7 @@ __all__ = [
     "ContentBackend",
     "ContentStore",
     "RefusedDeleteError",
+    "ReuseLostError",
     "StoreFullError",
     "StoreUsage",
     "sweep_content",

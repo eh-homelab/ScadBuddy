@@ -11,7 +11,9 @@ import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import body, run_routes
+from tests.api.test_print_run_choices import body, follow_run, run_routes
+from tests.api.test_print_runs import Gate, gated_slice_routes
+from tests.api.test_print_runs import gate as gate  # the fixture, shared
 from tests.api.test_send import BASE, configure
 from tests.bambuddy.conftest import recording
 
@@ -44,6 +46,19 @@ def one_color(file_id: int) -> None:
             200, json={**answer, "file_id": file_id, "filaments": answer["filaments"][:1]}
         )
     )
+
+
+def run_library(client: TestClient, file_id: int, *, json: dict[str, Any]) -> httpx.Response:
+    """``POST /print/library/{id}/run``, followed to its end (#742), answered as the
+    synchronous route was: a refusal before the 202 as it is, a run that succeeded as
+    its ``result`` with a 200, one that failed as its ``error``."""
+    started: httpx.Response = client.post(f"/api/v1/print/library/{file_id}/run", json=json)
+    if started.status_code not in (200, 202):
+        return started
+    run = follow_run(client, started.json()["id"])
+    if run["status"] == "succeeded":
+        return httpx.Response(200, json=run["result"])
+    return httpx.Response(run["error"]["status"], json=run["error"])
 
 
 def listing_routes(files: Any) -> respx.Route:
@@ -94,8 +109,9 @@ def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
     sliced = slice_routes()
     queue_route()
 
-    response = client.post(
-        "/api/v1/print/library/46/run",
+    response = run_library(
+        client,
+        46,
         json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
     )
 
@@ -138,8 +154,9 @@ def test_a_library_file_is_sliced_as_it_stands_and_queued(client: TestClient) ->
     queued = queue_route()
     upload = respx.post(f"{API}/library/files")
 
-    response = client.post(
-        "/api/v1/print/library/89/run",
+    response = run_library(
+        client,
+        89,
         json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
     )
 
@@ -198,8 +215,9 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
     sliced = slice_routes()
     queue_route()
 
-    response = client.post(
-        "/api/v1/print/library/70/run",
+    response = run_library(
+        client,
+        70,
         json={
             **body(),
             "all_plates": True,
@@ -212,6 +230,20 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
     sent = json.loads(sliced.calls.last.request.content)
     assert sent["plate"] == 1 and len(sent["filament_presets"]) == 1
     assert client.get("/api/v1/print/library/70/plates").json() == []
+
+
+@respx.mock
+def test_a_library_file_s_plates_carry_their_names(client: TestClient) -> None:
+    """#929: the dialog labels a plate by what it holds, so Bambuddy's name comes through."""
+    configure(client)
+    library_file(67, plates="library-plates-multi.json")
+
+    plates = client.get("/api/v1/print/library/67/plates").json()
+
+    assert [(plate["index"], plate["name"]) for plate in plates] == [
+        (1, "makerlab"),
+        (2, "quant_1_A"),
+    ]
 
 
 @respx.mock
@@ -274,3 +306,39 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
     assert check.status_code == 200, check.text
     assert check.json() == {"errors": [], "warnings": []}
     assert not sliced.called
+
+
+@respx.mock
+def test_a_library_run_answers_202_before_the_slice_finishes_and_a_retry_is_its_run(
+    client: TestClient, gate: Gate
+) -> None:
+    """#742: the run is followed like an output's, so a proxy's timeout cannot make a
+    retry queue the print twice."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    gated_slice_routes(gate)
+    queued = queue_route()
+    request = {
+        **body(),
+        "request_id": "press-1",
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    }
+
+    response = client.post("/api/v1/print/library/89/run", json=request)
+
+    assert response.status_code == 202, response.text
+    run = response.json()
+    assert run["status"] == "running" and run["output_id"] == "library:89"
+    assert not queued.called
+    again = client.post("/api/v1/print/library/89/run", json=request)
+    assert again.status_code == 200
+    assert again.json()["id"] == run["id"] and again.json()["repeated"] is True
+
+    gate.open()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "succeeded"
+    assert ended["result"]["library_file_id"] == 89
+    assert queued.call_count == 1

@@ -416,9 +416,9 @@ def test_upstream_changes_and_metadata_edits_racing_both_land(
 
     # Each write lingers after its read, so two unlocked read-modify-writes both
     # read before either writes, and the second write loses the first's update.
-    def slow_write(self: Catalogue, slug: str, meta: dict[str, Any]) -> None:
+    def slow_write(self: Catalogue, slug: str, meta: dict[str, Any], **kwargs: Any) -> None:
         time.sleep(0.3)
-        write(self, slug, meta)
+        write(self, slug, meta, **kwargs)
 
     monkeypatch.setattr(Catalogue, "write_raw_meta", slow_write)
 

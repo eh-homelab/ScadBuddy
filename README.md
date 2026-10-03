@@ -165,9 +165,12 @@ on shutdown.
     stored is never refused.
   - `SCADBUDDY_ASSET_SWEEP_GRACE` (default 604800 s, a week; at least 3600): a
     file that no saved output, preset or render job references is removed once
-    nothing has uploaded or used it for this long.
+    nothing has uploaded or used it for this long. The same grace applies to the
+    blob store's pieces and snapshots (see "Blob store and render workers").
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off.
+    after the one at startup; 0 turns it off. The same interval drives the blob
+    store's sweep, which 0 also turns off, and a render worker's piece-cache
+    eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
@@ -342,15 +345,21 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
-  running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
+  running. If its build is still (or again) the current one, as on a restart of the
+  same build (a manifest change, a node drain), it stops after 30 s instead, because
+  the next pod of that build serves its pinned runs; it logs "stopping without
+  draining" then, so a pod that never comes back is visible. The drain lasts at
+  most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
   workflows still pinned to its build then have no poller, and their jobs stay
   `running` until that build polls again. Set `terminationGracePeriodSeconds` ≥
   `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
-  (e.g. 30 s): **690 s** at the default 120 s timeout. While a single replica drains
-  it is still current, so new renders keep landing on it; a rollout that starts
-  the new pod first (surge) lets it drain promptly.
+  (e.g. 30 s): **690 s** at the default 120 s timeout. Roll a new build out with
+  `RollingUpdate` and `maxSurge >= 1`, so the new build is current before the old
+  pod drains. Under `Recreate` the old build is still current when it stops, so it
+  stops after the 30 s, and the new build's pod makes itself current only after it
+  starts: runs pinned to the old build then have no poller.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.
@@ -364,6 +373,114 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+
+### Blob store and render workers (#426)
+
+Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
+and PNGs, downloaded fonts) lives in the blob store. Settings → **Blob store** picks
+where. The choice is read at start, so it takes effect only when the API and the
+workers restart.
+
+- **`local`** (the default): this server's volume, phase 1's topology. There is **one**
+  render worker, and it shares the API's `/data` volume, as described under "Render
+  worker (#424)" above.
+- **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
+  and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
+  names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  To switch:
+  1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
+  2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
+     **Render key**.
+  3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
+     workers.
+
+  The workers then need no shared volume:
+  - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
+    and the snapshots, fonts, uploads and library checkouts it fetched.
+  - Previews (the catalogue's default renders) render on the workers too, from the
+    snapshot of the template's last commit, which the API stores before it asks.
+  - At start a worker seeds the image's libraries (BOSL2 and the rest of the curated
+    set) onto its volume, as the API does. A library a template pins outside the
+    image is cloned on **each worker pod**, the first time it renders that template,
+    so the workers need network access (egress) to those libraries' Git remotes.
+  - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
+    interval, and **only** then, a worker trims its cache to
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
+    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default), and
+    removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
+    hour; it fetches one again when a render names it). `0` (or unset) does not
+    stop that pass: the worker falls back to a fixed 300 s.
+  - Size the `emptyDir`'s `sizeLimit` for what bounds each part, plus one interval's
+    writes. Past it, the kubelet evicts the pod mid-render, with no drain.
+
+    | Part | What bounds it | Default bound |
+    |---|---|---|
+    | the cache after a trim | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
+    | one interval's new pieces | render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
+    | uploads fetched (`assets/`) | last use: those a render named within `SCADBUDDY_ASSET_SWEEP_GRACE`; in practice no more than the API's `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
+    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` | measure |
+    | fonts (`fonts/`) and library checkouts (`libraries/`) | nothing: the families and libraries the rendered templates name, kept for the pod's life | measure |
+    | **sum; `sizeLimit` with slack** | 10 + 1.2 + 0.93 (1 GB) ≈ 12.1 GiB, plus the measured rows (~1 GiB on a typical worker) ≈ 13.1 GiB | **`14Gi`: ~0.9 GiB of slack** |
+
+    Use your own render timings and piece sizes for the second row; a longer interval
+    scales it linearly. Measure the last two rows with
+    `du -sh /data/cache /data/fonts /data/libraries` on a running worker. A trim may
+    not bring the cache down to its cap while crash-left staging directories are
+    counted (follow-up #8), so watch `scadbuddy_worker_cache_bytes` against
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`.
+  - Scale the Deployment freely.
+
+  **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
+  A piece or snapshot that no job references is deleted from the
+  store (on `bambuddy`, from Bambuddy's library) once nothing has used it for
+  `SCADBUDDY_ASSET_SWEEP_GRACE` (a week by default). The API's own upload sweep uses the
+  same grace.
+
+  `/healthz` on the API and on each worker (port 9090) carries a `store` object:
+  - `multi_worker: true` says more than one replica is safe;
+  - `backend` differs from `configured_backend` until the restart;
+  - `render_key_fallback: true` means no render key is stored, so the workers hold the
+    full Bambuddy key and template code can print. The Settings page shows the same
+    warning.
+
+  If a `bambuddy` store cannot start (no URL or folder), see "Recovering an unready
+  blob store" below.
+
+**Environment:**
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
+| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
+| `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
+| `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
+
+The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
+each. **GET `/api/v1/store/usage`** and the Settings page's **Store** section show the
+count and size against them.
+
+**Metrics:**
+- `scadbuddy_store_*`: `operations_total{op,outcome}`, `blobs`, `bytes{kind}`,
+  `max_blobs`, `max_bytes` and `render_key_fallback`;
+- `scadbuddy_worker_cache_*`: `total{result}` (hit or miss) and `bytes`, per process.
+
+### Recovering an unready blob store
+
+With `store_backend` set to `bambuddy`, the API and the render worker refuse to start
+without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
+is out of reach. Settings no longer saves that state, but a stored `bambuddy` beats
+`SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
+database, in the schema `SCADBUDDY_DATABASE_URL` uses (the `settings` table is
+unqualified: on a custom schema, `SET search_path` to it first), then set the URL and
+folder in Settings and choose the Bambuddy store again:
+
+```sql
+UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
+```
+
+When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy`),
+set `SCADBUDDY_STORE_BACKEND=local` instead.
 
 ### The agent sidecar (AI, #261)
 

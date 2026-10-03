@@ -6,6 +6,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -31,8 +32,14 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
+from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.store import sweep_blobs
+from scadbuddy.store.assets import RemoteAssets
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import sweep_content
+from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import connect
@@ -97,6 +104,9 @@ async def _close_quietly(state: AppState) -> None:
         state.render.aclose,
         partial(asyncio.to_thread, state.projection.close),
     ]
+    store = getattr(state, "store", None)  # unset when the start failed before it
+    if store is not None:
+        closes.append(store.aclose)
     for close in closes:
         try:
             await close()
@@ -169,19 +179,35 @@ async def sweep_library_checkouts(state: AppState) -> list[str]:
     return removed
 
 
-async def drop_swept_assets(state: AppState, removed: list[str]) -> None:
-    """The store's copies of what `sweep_assets` just removed from the volume."""
-    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
-    if store is not None and store.remote_assets is not None and removed:
-        await store.remote_assets.drop(removed)
+def _remote_assets(state: AppState) -> RemoteAssets | None:
+    return state.store.remote_assets
 
 
-async def _sweep_assets_logged(state: AppState) -> None:
+async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: datetime) -> None:
+    """The store's copies of what `sweep_assets` just removed from the volume; only
+    those not stored again since ``cutoff``, the sweep's start."""
+    remote = _remote_assets(state)
+    if remote is not None and removed:
+        await remote.drop(removed, cutoff=cutoff)
+
+
+async def _sweep_assets_logged(state: AppState, *, converge: bool = True) -> None:
     # Best effort, like the boot's other sweeps: a store or volume error skips this
     # sweep (removing nothing it could not prove unused) and the next one retries.
+    # The boot's sweep does not converge: reconcile and backfill talk to Bambuddy at
+    # length, so they run from the periodic sweep and never hold up the start.
     try:
+        remote = _remote_assets(state)
+        cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
-        await drop_swept_assets(state, removed)
+        if remote is not None and cutoff is not None:
+            await drop_swept_assets(state, removed, cutoff=cutoff)
+            if not converge:
+                return
+            # What an earlier drop failed to remove, and what the store lost (a copy an
+            # `ensure` dropped, a race with a delete): both converge here, per sweep.
+            await remote.reconcile(state.assets, cutoff=cutoff)
+            await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
 
@@ -195,17 +221,37 @@ async def _sweep_duplicate_staging_logged(state: AppState) -> None:
 
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more."""
-    if state.blobs is None or state.refs is None:
-        return
     try:
-        removed = await asyncio.to_thread(
-            sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
-        )
+        if state.store.content is None:
+            removed = await asyncio.to_thread(
+                sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+            )
+        else:
+            removed = await sweep_content(
+                state.store.content, state.refs, grace=state.config.job_ttl
+            )
+            if isinstance(state.store.blobs, CachedBlobStore):
+                await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         return
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
+
+
+async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
+    """The boot's mirror of what predates the store, in the background and best effort:
+    an unreachable Bambuddy never holds up or fails the start. Uploads only when no
+    periodic asset sweep runs (`SCADBUDDY_ASSET_SWEEP_INTERVAL` 0); otherwise that
+    sweep backfills them. Fonts always: nothing else mirrors a family installed before."""
+    try:
+        if uploads and state.store.remote_assets is not None:
+            mirrored = await state.store.remote_assets.backfill(state.assets)
+            logger.info("mirrored uploads", extra={"count": mirrored})
+        if state.store.fonts is not None:
+            logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
+    except Exception:
+        logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
 async def _asset_sweeper(state: AppState) -> None:
@@ -284,36 +330,33 @@ async def _prepare_catalogue(state: AppState) -> None:
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
     queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure closes the projection again."""
+    pending, prune, and start the reconciler. A failure leaves the projection to the
+    lifespan's guard, which closes everything a failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
-    try:
-        await _prepare_catalogue(state)
-        # Before the reconciler: what a pre-Temporal release was running, nothing
-        # will finish (#546).
-        failed = await asyncio.to_thread(projection.fail_legacy_running)
-        if failed:
-            logger.warning(
-                "failed the renders a pre-Temporal release left running",
-                extra={"job_ids": [job.id for job in failed]},
-            )
-        if settings.temporal_worker_inprocess:
-            # Eager: a worker cannot run on the API's lazy client (dev and tests).
-            state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-        # Before the reconciler's first pass (`service.start`), which starts only rows
-        # that name a workflow: what a pre-Temporal release's queue left pending
-        # becomes this path's.
-        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-        if adopted:
-            logger.info(
-                "adopted the renders the legacy queue left pending",
-                extra={"count": len(adopted), "job_ids": adopted},
-            )
-        await service.prune()
-        await service.start()
-    except BaseException:
-        await asyncio.to_thread(projection.close)
-        raise
+    await _prepare_catalogue(state)
+    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # will finish (#546).
+    failed = await asyncio.to_thread(projection.fail_legacy_running)
+    if failed:
+        logger.warning(
+            "failed the renders a pre-Temporal release left running",
+            extra={"job_ids": [job.id for job in failed]},
+        )
+    if settings.temporal_worker_inprocess:
+        # Eager: a worker cannot run on the API's lazy client (dev and tests).
+        state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+    # Before the reconciler's first pass (`service.start`), which starts only rows
+    # that name a workflow: what a pre-Temporal release's queue left pending
+    # becomes this path's.
+    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+    if adopted:
+        logger.info(
+            "adopted the renders the legacy queue left pending",
+            extra={"count": len(adopted), "job_ids": adopted},
+        )
+    await service.prune()
+    await service.start()
 
 
 def _worker_exited(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
@@ -345,32 +388,60 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)
-    state.paths.ensure()
-    # Before the built-in sync: an existing models directory becomes revision 1,
-    # so what a newer image changes in a built-in is a commit on top of it rather
-    # than an unversioned overwrite.
-    await asyncio.to_thread(state.history.ensure_repo)
-    # Before anything shells out to openscad or fc-list: it is what points
-    # fontconfig at the fonts on the data volume.
-    state.fonts.prepare()
-    state.openscad_version = await probe_openscad_version(state.config)
-    await _start_render(state)
-    # After the projection, which migrated the database: the bus writes the event
-    # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
-    # was published before now (the built-in sync's commits) waited.
-    if isinstance(state.events, PgNotifyEventBus):
-        try:
+    # The blob store (#426): its index and the render settings live in the settings
+    # pool, open only from here on.
+    pool = state.settings_store.pool
+    source = RenderSettingsSource(pool, state.settings)
+    try:
+        current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+        source.seed(current)
+        state.store = build_store(
+            backend=current.store_backend,
+            current=current,
+            config=state.config,
+            paths=state.paths,
+            pool=pool,
+            source=source,
+            history=state.history,
+            fonts=state.fonts,
+            metrics=state.metrics,
+        )
+    except BaseException:
+        # A refused start (an unready store) closes the pool it opened, then propagates.
+        await asyncio.to_thread(state.settings_store.close)
+        raise
+    state.blobs = state.store.blobs
+    state.render.snapshots = state.store.snapshots
+    # From the store's construction to the `try` below, whose `finally` owns shutdown:
+    # a failure anywhere here (a refused OpenSCAD probe, a render service or bus that
+    # will not start) releases what is open, the store and its pool included, rather
+    # than leaking it for this failed boot.
+    try:
+        state.paths.ensure()
+        # Before the built-in sync: an existing models directory becomes revision 1,
+        # so what a newer image changes in a built-in is a commit on top of it rather
+        # than an unversioned overwrite.
+        await asyncio.to_thread(state.history.ensure_repo)
+        # Before anything shells out to openscad or fc-list: it is what points
+        # fontconfig at the fonts on the data volume.
+        state.fonts.prepare()
+        state.openscad_version = await probe_openscad_version(state.config)
+        await _start_render(state)
+        # After the projection, which migrated the database: the bus writes the event
+        # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
+        # was published before now (the built-in sync's commits) waited.
+        if isinstance(state.events, PgNotifyEventBus):
             await state.events.start()
-        except BaseException:
-            # Before the `try` below, so its `finally` never runs: release the
-            # render service that did start (reconciler, listener, pool) here.
-            await _close_quietly(state)
-            raise
+    except BaseException:
+        await _close_quietly(state)
+        await asyncio.to_thread(state.settings_store.close)
+        raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
     # its reconciler), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
+    backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
     components = AsyncExitStack()
@@ -392,8 +463,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.print_watcher.start()
         # After the projection has opened: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state)
+            await _sweep_assets_logged(state, converge=False)
             sweeper = asyncio.create_task(_asset_sweeper(state))
+        if state.store.content is not None:
+            backfill = asyncio.create_task(
+                _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
+            )
         if state.previews is not None:
             state.previews.start()
             # Every model without a thumbnail gets its default render, one at a time
@@ -423,10 +498,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
-        if sweeper is not None:
-            sweeper.cancel()
-            with suppress(asyncio.CancelledError):
-                await sweeper
+        for background in (sweeper, backfill):
+            if background is not None:
+                background.cancel()
+                with suppress(asyncio.CancelledError):
+                    await background
         # Before the watcher (a run starts one) and the queue (its pool records the
         # runs this process leaves unfinished as failed).
         await state.print_runs.aclose()
@@ -442,6 +518,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         grants = getattr(app.state, "agent_grants", None)
         if grants is not None:
             await grants.aclose()
+        await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
 

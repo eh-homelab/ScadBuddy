@@ -7,7 +7,9 @@ that model's directory rather than to the repository root.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -24,9 +26,10 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.models import announce_source_change, require_mine, require_model_exists
-from scadbuddy.core.paths import SOURCE_NAME, model_path
+from scadbuddy.core.paths import MODEL_META_NAME, SOURCE_NAME, model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import with_samples
+from scadbuddy.library.catalogue import ModelMeta, UiDeclaration
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     FileChange,
@@ -189,9 +192,32 @@ def get_version_source(
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
+class RevisionSchema(CustomizerSchema):
+    """A revision's schema, with that revision's own ``ui`` (spec 2026-09-27 §4.1): the
+    record carries only the current one, and an old revision may declare another or none."""
+
+    ui: UiDeclaration | None = None
+    ui_error: str | None = None
+
+
+def _revision_ui(directory: Path, slug: str) -> tuple[UiDeclaration | None, str | None]:
+    """The ``ui`` of the model.json in ``directory``, read as the catalogue reads it: only
+    that key, so a revision's other metadata cannot hide its interface."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError, RecursionError) as error:
+        return None, f"model.json could not be read: {error}"
+    if not isinstance(raw, dict) or raw.get("ui") is None:
+        return None, None
+    meta = ModelMeta.model_validate({"name": slug, "ui": raw["ui"]})
+    return meta.ui, meta.ui_error
+
+
 @router.get(
     "/models/{slug}/versions/{commit}/schema",
-    response_model=CustomizerSchema,
+    response_model=RevisionSchema,
     summary="A revision's customizer schema",
 )
 async def get_version_schema(
@@ -202,7 +228,7 @@ async def get_version_schema(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
-) -> CustomizerSchema:
+) -> RevisionSchema:
     require_model_exists(catalogue, slug)
     require_history(history)
     resolved = await _require_revision_async(history, commit)
@@ -220,8 +246,11 @@ async def get_version_schema(
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
         ) from None
-    # The revision's own samples: the export is the model directory at that commit.
-    return await asyncio.to_thread(with_samples, schema, source.scad.parent)
+    # The revision's own samples and ui: the export is the model directory at that commit.
+    directory = source.scad.parent
+    sampled = await asyncio.to_thread(with_samples, schema, directory)
+    ui, ui_error = await asyncio.to_thread(_revision_ui, directory, slug)
+    return RevisionSchema(**sampled.model_dump(), ui=ui, ui_error=ui_error)
 
 
 @router.get(

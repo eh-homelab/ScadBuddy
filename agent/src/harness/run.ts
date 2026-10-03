@@ -61,6 +61,16 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     Anthropic and to third-party services such as GitHub: version checks,
 //     telemetry, release notes" (same page, "Turn off traffic outside the
 //     gateway path"). The service has no use for any of it.
+//   - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (#946): an `Agent` call asked to
+//     `run_in_background` then runs inside the turn, as a foreground one does.
+//     Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
+//     input at a string prompt's first result, and after that Claude Code
+//     refused every permission request itself, with "The user doesn't want to
+//     take this action right now", asking neither canUseTool nor the user. Its
+//     calls, and those of the turn Claude Code starts when it reports back,
+//     were refused that way, read tools included (measured on Claude Code
+//     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
+//     through the permission seam below, and an outward one parks at the gate.
 //   - limits: `maxTurns`, `maxBudgetUsd` ("The query will stop if this budget is
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
@@ -389,6 +399,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...base.env,
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
     },
     mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,

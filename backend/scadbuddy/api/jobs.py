@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
@@ -22,6 +22,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     RenderDep,
     SlugPath,
+    StateDep,
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
@@ -36,6 +37,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
+from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
     Job,
     JobNotFoundError,
@@ -44,6 +46,7 @@ from scadbuddy.render.job_models import (
     PlateInfo,
     QueueFullError,
 )
+from scadbuddy.render.jobs import SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -57,6 +60,7 @@ from scadbuddy.render.thumbnail import (
     render_colour_breakdown,
     render_view,
 )
+from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 
 router = APIRouter(tags=["jobs"])
@@ -75,7 +79,10 @@ ViewSize = Annotated[
 
 
 class RenderRequest(BaseModel):
-    params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: Template inputs (spec 2026-09-27 §4.3). Their `params` are what is rendered.
+    inputs: dict[str, Any] | None = None
+    #: The body before inputs: still accepted, and read as `{"params": …, "v": 0}`.
+    params: dict[str, ParamValue] | None = None
     # #90's "Customize this version": render an old revision without restoring it.
     # Omitted means the revision the model is currently at.
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
@@ -88,6 +95,9 @@ class RenderRequest(BaseModel):
 class RenderAccepted(BaseModel):
     job_id: str
     status_url: str
+    #: The caller's own inputs, normalised. A submit that joined a waiting job (the
+    #: same `params`) shares that job, whose status keeps its creator's inputs.
+    inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobStatus(BaseModel):
@@ -98,6 +108,10 @@ class JobStatus(BaseModel):
     status: JobState
     model_version: str | None = None
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: The inputs of the submission that created the job (spec §4.3); a caller whose
+    #: submit coalesced keeps the inputs its own response returned. `{"params": …}` for
+    #: a row written before inputs existed.
+    inputs: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -145,6 +159,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         status=job.state,
         model_version=job.model_version,
         params=job.params,
+        inputs=job.inputs or legacy_inputs(job.params),
         created_at=job.created_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
@@ -222,14 +237,19 @@ async def render_model(
         version=body.version,
         fetcher=fetcher,
     )
-    require_valid_params(schema, body.params)
+    try:
+        normalized = normalize_inputs(body.inputs, body.params)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    params, inputs = normalized.params, normalized.data
+    require_valid_params(schema, params)
     # A family that is not installed is a 422 here, not a render in the default font.
-    await require_installed_fonts(schema, body.params, fonts)
+    await require_installed_fonts(schema, params, fonts)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
         # job that fails later or renders without it.
-        await asyncio.to_thread(file_assets, schema, body.params, assets, source.scad.parent)
+        await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
@@ -237,7 +257,11 @@ async def render_model(
     # the queue accepts every render and works through them.
     try:
         job = await render.submit(
-            slug, body.params, model_version=source.version, supersedes=body.supersedes
+            slug,
+            params,
+            inputs=inputs,
+            model_version=source.version,
+            supersedes=body.supersedes,
         )
     except QueueFullError as error:
         raise ApiError(
@@ -252,7 +276,14 @@ async def render_model(
             status.HTTP_507_INSUFFICIENT_STORAGE,
             f"the blob store has no room for this template's source: {error}",
         ) from None
-    return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
+    except SnapshotUnavailableError as error:
+        # The bambuddy store renders from a snapshot of a commit, and there is none.
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    return RenderAccepted(
+        job_id=job.id,
+        status_url=request.url_for("get_job", job_id=job.id).path,
+        inputs=inputs,
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus, summary="Render job state")
@@ -267,12 +298,15 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
 )
-def get_job_preview(job_id: JobIdPath, render: RenderDep, paths: PathsDep) -> FileResponse:
-    job = require_job(render, job_id)
+async def get_job_preview(
+    job_id: JobIdPath, render: RenderDep, paths: PathsDep, state: StateDep
+) -> FileResponse:
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     preview = paths.root / job.result.preview_glb
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
@@ -353,13 +387,15 @@ async def get_job_view(
     render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
+    state: StateDep,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    job = require_job(render, job_id)
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
     )
@@ -412,6 +448,7 @@ async def get_job_colours(
     render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
+    state: StateDep,
     view: ViewName = "iso",
     size: Annotated[
         int,
@@ -423,6 +460,7 @@ async def get_job_colours(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     glb = paths.root / job.result.preview_glb
     if not glb.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
