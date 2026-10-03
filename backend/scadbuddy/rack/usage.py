@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 #: As the decision store's: a request is told the store is unavailable rather than hang.
 CONNECT_TIMEOUT = 5.0
+#: Bounds every query on this store's connections, so a stuck read releases its thread
+#: and connection even after an awaiting caller has stopped waiting (#1086 review).
+STATEMENT_TIMEOUT_MS = 15_000
 
 
 class PickedHotend(BaseModel):
@@ -67,6 +70,10 @@ class RackUsage(Protocol):
     ) -> int: ...
 
 
+def _bound_statements(conn: Connection[DictRow]) -> None:
+    conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+
+
 class RackUsageStore:
     def __init__(
         self, conninfo: str, *, pool_size: int = 2, connect_timeout: float = CONNECT_TIMEOUT
@@ -83,6 +90,9 @@ class RackUsageStore:
                 "row_factory": dict_row,
                 "connect_timeout": max(1, int(connect_timeout)),
             },
+            # Set per connection rather than as ``options``, which would replace any the
+            # conninfo already carries (a search_path, say).
+            configure=_bound_statements,
             name="scadbuddy-rack-usage",
         )
         self._pool_open = False
@@ -381,8 +391,9 @@ def settle_hook(
     async def hook(meta: OutputMeta) -> None:
         if not links.available:
             return
-        # A settings read is a database read: off the event loop, so the watcher's
-        # timeout on this hook can cut it short (#1083).
+        # A settings read is a database read: off the event loop, so the watcher stops
+        # waiting on it at its timeout (#1083). The thread itself runs on; the store's
+        # statement timeout is what bounds a stuck query.
         settings = await asyncio.to_thread(load)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)

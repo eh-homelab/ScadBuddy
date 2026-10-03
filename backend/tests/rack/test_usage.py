@@ -138,3 +138,12 @@ async def test_an_item_with_no_picks_records_no_print(store: RackUsageStore) -> 
         )
         == 0
     )
+
+
+async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> None:
+    """#1086 review: a stuck read must release its thread even after the watcher's
+    timeout has stopped waiting on it."""
+    await store.seen(1, [A])  # opens the pool
+    with store._ready().connection() as conn:
+        row = conn.execute("SHOW statement_timeout").fetchone()
+    assert row is not None and row["statement_timeout"] == "15s"

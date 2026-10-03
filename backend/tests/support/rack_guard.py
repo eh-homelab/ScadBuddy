@@ -7,6 +7,7 @@ from collections.abc import Iterable
 
 import httpx
 
+from scadbuddy.bambuddy.print_run import RACK_FALLBACKS
 from scadbuddy.core.problems import ApiError
 
 #: The error type names a rack pick may legitimately fall back on: Bambuddy's answers
@@ -18,12 +19,10 @@ _EXPECTED = {ApiError.__name__} | {
     if isinstance(value, type) and issubclass(value, Exception)
 }
 
-MESSAGE = "rack pick left to Bambuddy"
 #: Every rack fallback that swallows an exception and logs its type (#1081): the pick,
-#: the /check preview, and a usage read ranked without.
-MESSAGES = frozenset(
-    {MESSAGE, "the rack preview could not be built", "rack usage unreadable; ranked without it"}
-)
+#: the /check preview, and a usage read ranked without. Production's own constants, so a
+#: reworded message cannot silently drop out of the guard.
+MESSAGES = RACK_FALLBACKS
 
 
 def foreign_rack_errors(records: Iterable[logging.LogRecord]) -> list[str]:

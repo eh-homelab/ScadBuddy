@@ -21,6 +21,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend
 from tests.rack.helpers import requirement, serial, slot, status
+from tests.support.rack_guard import foreign_rack_errors
 
 SPOOLS = {1: SpoolOption(spool_id=9, material="PLA")}
 
@@ -282,6 +283,8 @@ async def test_an_unreadable_usage_ranks_without_it_and_keeps_a_hand_pick(
         "RuntimeError",
     )
     assert serial(21) not in caplog.text
+    # The real fallback reaches the guard (#1086 review, finding 4).
+    assert foreign_rack_errors(caplog.records) == ["RuntimeError"]
 
 
 async def test_a_rack_with_no_eligible_position_says_so() -> None:

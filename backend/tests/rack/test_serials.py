@@ -12,7 +12,7 @@ import pytest
 from scadbuddy.bambuddy.filaments import FilamentWarning, SpoolOption
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink
-from scadbuddy.bambuddy.print_run import rack_chooser
+from scadbuddy.bambuddy.print_run import RACK_FALLBACKS, rack_chooser
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, record_seen, record_settled, save_picks
@@ -142,14 +142,7 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
     assert not [s for s in INVENTED_SERIALS if s in repr(warnings)]
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "rack pick left to Bambuddy",
-        "the rack preview could not be built",
-        "rack usage unreadable; ranked without it",
-    ],
-)
+@pytest.mark.parametrize("message", sorted(RACK_FALLBACKS))
 def test_the_guard_covers_every_rack_fallback(message: str) -> None:
     """#1081: the preview and the usage read swallow exceptions too."""
     made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
