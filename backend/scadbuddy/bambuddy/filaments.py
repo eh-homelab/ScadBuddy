@@ -74,6 +74,9 @@ WarningKind = Literal[
     "plate-differs",
     "hf-unsupported",
     "hf-mounted",
+    "rack-unsafe-material",
+    "rack-left-to-bambuddy",
+    "rack-manual-partial",
 ]
 
 

@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
+from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus, RackAlgorithm
 from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.rack.usage import RackUsage, record_seen
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,9 @@ class ChoicesView(BaseModel):
     filament_presets: dict[str, list[FilamentPresetOption]] = Field(default_factory=dict)
     #: What this model last printed with (#78), so the dialog reopens on those spools.
     model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
+    #: How the chosen printer's rack nozzle is ranked (#836): remembered per printer,
+    #: else Least used. The dialog's Advanced selector opens on it.
+    rack_algorithm: RackAlgorithm = "least_used"
 
 
 def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPresetOption]]:
@@ -101,6 +105,7 @@ async def choices_for(
     *,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
+    rack: RackUsage | None = None,
 ) -> ChoicesView:
     printers = [row for row in await client.printers() if row.is_active]
     active = {row.id for row in printers}
@@ -123,6 +128,7 @@ async def choices_for(
             status = await client.printer_status(printer_id)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; offering every nozzle size unmarked")
+        await record_seen(rack, printer_id, status)
         # Advisory, like the run's plate warning: an archive list that cannot be read or
         # ordered preselects nothing rather than failing the dialog.
         try:
@@ -162,6 +168,7 @@ async def choices_for(
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
         model_choices=remembered or ModelPrintChoices(),
+        rack_algorithm=settings.rack_algorithm(printer_id),
     )
 
 
@@ -173,6 +180,7 @@ async def choices_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None,
+    rack: RackUsage | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -180,4 +188,5 @@ async def choices_for_output(
         settings,
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
+        rack=rack,
     )

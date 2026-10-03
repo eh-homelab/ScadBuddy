@@ -58,6 +58,10 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'plate-differs': 'text-muted',
   'hf-unsupported': 'text-muted',
   'hf-mounted': 'text-warn',
+  // spec 2026-10-01 (#836) — the rack pick's own kinds; plate-wide, from PrintRunResult/check.
+  'rack-unsafe-material': 'text-warn',
+  'rack-left-to-bambuddy': 'text-muted',
+  'rack-manual-partial': 'text-muted',
 }
 
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {
