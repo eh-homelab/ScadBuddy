@@ -46,8 +46,10 @@ class Archives:
     def __init__(self, *archives: ArchiveDetail, failing: set[int] | None = None) -> None:
         self.by_id = {archive.id: archive for archive in archives}
         self.failing = failing or set()
+        self.reads: list[int] = []
 
     async def archive(self, archive_id: int) -> ArchiveDetail:
+        self.reads.append(archive_id)
         if archive_id in self.failing:
             raise ApiError(503, f"archive {archive_id} unreadable near {A}")
         return self.by_id[archive_id]
@@ -111,6 +113,17 @@ async def test_a_second_settle_of_the_same_print_changes_nothing(store: RackUsag
     await settle(store, Links(link(101, 51)), archives)
     assert await settle(store, Links(link(101, 51)), archives) == 0
     assert (await store.usage([A]))[A].prints == 1
+
+
+async def test_a_settle_reads_only_archives_not_yet_recorded(store: RackUsageStore) -> None:
+    """claude-review on #1043, finding 3.3: an output printed N times must not cost N
+    archive reads on every settle; an archive already counted is not read again."""
+    first = ArchiveDetail(id=101, status="completed", actual_time_seconds=60)
+    await settle(store, Links(link(101, 51)), Archives(first))
+    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    archives = Archives(first, ArchiveDetail(id=102, status="completed", actual_time_seconds=40))
+    assert await settle(store, Links(link(101, 51), link(102, 52)), archives) == 1
+    assert archives.reads == [102]
 
 
 async def test_an_archive_with_no_queue_item_or_no_picks_is_not_counted(

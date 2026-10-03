@@ -54,6 +54,8 @@ class RackUsage(Protocol):
 
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]: ...
 
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]: ...
+
     async def record_prints(
         self,
         *,
@@ -186,6 +188,22 @@ class RackUsageStore:
             ).fetchall()
         return {int(row["queue_item_id"]) for row in rows}
 
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]:
+        """Which of these archives already have print rows, so a settle need not read
+        them again (claude-review on #1043)."""
+        ids = sorted(set(archive_ids))
+        if not ids:
+            return set()
+        return await asyncio.to_thread(self._recorded_archives, ids)
+
+    def _recorded_archives(self, ids: list[int]) -> set[int]:
+        with self._ready().connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT archive_id FROM rack_nozzle_prints WHERE archive_id = ANY(%s)",
+                (ids,),
+            ).fetchall()
+        return {int(row["archive_id"]) for row in rows}
+
     async def record_prints(
         self,
         *,
@@ -306,6 +324,7 @@ async def record_settled(
             if link.queue_item_id is not None
         ]
         picked = await store.picked_items(item for _, item in linked)
+        recorded = await store.recorded_archives(archive for archive, _ in linked)
     except Exception as exc:
         logger.warning(
             "could not read a settled print's rack picks",
@@ -314,7 +333,7 @@ async def record_settled(
         return 0
     written = 0
     for archive_id, queue_item_id in linked:
-        if queue_item_id not in picked:
+        if queue_item_id not in picked or archive_id in recorded:
             continue
         try:
             archive = await client.archive(archive_id)

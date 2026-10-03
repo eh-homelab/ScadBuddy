@@ -42,6 +42,9 @@ class Leaky:
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
         return set(queue_item_ids)
 
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]:
+        return set()
+
     async def record_prints(
         self,
         *,
