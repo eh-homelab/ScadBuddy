@@ -22,7 +22,7 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 // "name"); Claude Code rewrites any other character to `_` (CLAUDE.md,
 // plugins). So the dot is an underscore: `sessions_list`, and so on.
 //
-// TIERS (spec §8.1). Reads (`sessions_list`, `sessions_get`,
+// TIERS (spec §8.1). Reads (`sessions_list`, `sessions_get`, `sessions_resources`,
 // `sessions_attach`, `sessions_list_approvals`) are `read`. Starting, sending,
 // forking, interrupting and handing off (offering, accepting, withdrawing or
 // declining one) change only ScadBuddy's own session state, so they are
@@ -413,6 +413,20 @@ export const sessionTools: Tool[] = [
         more: rows.length === limit,
       })
     },
+  }),
+
+  defineTool({
+    name: 'sessions_resources',
+    description:
+      'What a session this caller may see touched: every model, revision, preset, asset, render job, output, ' +
+      'print run and print (a Bambuddy queue item id) its tool calls created, changed or deleted, oldest first, with ' +
+      "the tool that did it and, where they exist, the before and after ids (a revision's new commit, and its parent when the call named one). A write ScadBuddy cannot classify " +
+      'yet is listed as `unclassified` with its tool.',
+    input: z.object({ session_id: sessionId }),
+    risk: 'read',
+    routes: [],
+    handler: async ({ session_id }, ctx) =>
+      json({ resources: await refusals(() => manager(ctx).resources(session_id, ownerOf(ctx.principal))) }),
   }),
 
   defineTool({

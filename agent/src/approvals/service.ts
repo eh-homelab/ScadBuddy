@@ -688,13 +688,20 @@ export class ApprovalService {
   }
 
   /**
-   * Sets a session that no longer waits on anything back from
-   * `waiting_approval`: to `running` while its turn is live, else `idle`.
+   * Sets a session that no longer waits on an approval back from
+   * `waiting_approval`: to `waiting_input` while a question of the turn is
+   * still unanswered (#940, questions/service.ts), to `running` while its turn
+   * is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {
-    const [row] = await this.deps.sql<{ status: 'running' | 'idle' }[]>`
+    const [row] = await this.deps.sql<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
-      SET status = CASE WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running' ELSE 'idle' END,
+      SET status = CASE
+            WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL)
+              THEN 'waiting_input'
+            WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
+            ELSE 'idle'
+          END,
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_approval'
         AND NOT EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
