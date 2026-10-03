@@ -871,10 +871,12 @@ async def test_a_coalesced_submit_links_to_the_render_it_joined(
     assert [link.context.span_id for link in joined.links] == [opened.context.span_id]
 
 
-async def test_a_row_without_a_traceparent_coalesces_without_a_link(
+async def test_a_row_without_a_traceparent_takes_the_trace_of_the_submit_that_joins_it(
     make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
 ) -> None:
-    # A pending row written before the migration.
+    # A pending row written before the migration, or by a caller the sampler dropped.
+    # Review 4 of #1064: a traced caller that joins it fills the column in, so the
+    # reconciler starts the row in a trace someone is looking at.
     old = Job(
         id=uuid.uuid4().hex,
         slug=SLUG,
@@ -890,6 +892,13 @@ async def test_a_row_without_a_traceparent_coalesces_without_a_link(
         await service.aclose()
     assert joined.id == old.id
     (submit,) = [s for s in spans.get_finished_spans() if s.name == "render.submit"]
+    stored = (await asyncio.to_thread(projection.read, old.id)).traceparent
+    assert stored is not None
+    assert stored.split("-")[1:3] == [
+        f"{submit.context.trace_id:032x}",
+        f"{submit.context.span_id:016x}",
+    ]
+    # Its own trace now, so no link to itself.
     assert list(submit.links) == []
 
 
