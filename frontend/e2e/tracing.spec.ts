@@ -43,6 +43,9 @@ test.describe('tracing', () => {
     if (!app) throw new Error('the ScadBuddy frame is missing')
 
     await expect.poll(() => sentWith(page, app, '/api/v1/models'), { timeout: 15_000 }).toMatch(TRACEPARENT)
+    // The origin check holds inside the frame too: a cross-origin fetch carries none.
+    await page.route('https://other-origin.test/**', (route) => route.fulfill({ status: 200, body: '' }))
+    expect(await sentWith(page, app, 'https://other-origin.test/x')).toBeUndefined()
     // The document-load span's batch, flushed on the processor's schedule.
     const posted = await relay
     expect(posted.method()).toBe('POST')
