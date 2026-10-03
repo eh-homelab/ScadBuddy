@@ -241,7 +241,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
   `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
   decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
-  a session they are denied as "needs approval");
+  a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
+  only to sessions the browser user owns, parks there too until the user answers in the
+  panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
+  #940, and never outlives its turn);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
