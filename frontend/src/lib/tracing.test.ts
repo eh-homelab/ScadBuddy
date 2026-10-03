@@ -1,0 +1,77 @@
+import { trace } from '@opentelemetry/api'
+import { HttpResponse, http } from 'msw'
+import { afterEach, describe, expect, it } from 'vitest'
+import { server } from '../mocks/server'
+import { traceAction } from './traceAction'
+import { startTracing } from './tracing'
+
+const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
+const CROSS_ORIGIN = 'https://fonts.googleapis.com/css2'
+
+/** The `traceparent` each request to `url` arrived with (null: none). */
+function capture(url: string): (string | null)[] {
+  const seen: (string | null)[] = []
+  server.use(
+    http.get(url, ({ request }) => {
+      seen.push(request.headers.get('traceparent'))
+      return HttpResponse.json({})
+    }),
+  )
+  return seen
+}
+
+describe('startTracing', () => {
+  let stop: (() => Promise<void>) | undefined
+  afterEach(async () => {
+    await stop?.()
+    stop = undefined
+  })
+
+  it('injects traceparent into a same-origin request', async () => {
+    const seen = capture('/api/v1/models')
+    stop = startTracing()
+    await fetch('/api/v1/models')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('never injects traceparent into a cross-origin request', async () => {
+    const foreign = capture(CROSS_ORIGIN)
+    const own = capture('/api/v1/models')
+    stop = startTracing()
+    await fetch(CROSS_ORIGIN)
+    await fetch('/api/v1/models')
+    expect(foreign).toEqual([null])
+    // The same page, the same moment, its own origin: injected, so the absence is the origin's doing.
+    expect(own[0]).toMatch(TRACEPARENT)
+  })
+
+  it('parents an action’s first request on the action’s span', async () => {
+    const seen = capture('/api/v1/outputs')
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('generate', {}, async () => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      await fetch('/api/v1/outputs')
+    })
+    expect(seen[0]?.split('-')[1]).toBe(actionTrace)
+  })
+
+  it('carries no baggage header', async () => {
+    let baggage: string | null = 'unset'
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        baggage = request.headers.get('baggage')
+        return HttpResponse.json([])
+      }),
+    )
+    stop = startTracing()
+    await fetch('/api/v1/models')
+    expect(baggage).toBeNull()
+  })
+
+  it('is started once however often it is called', () => {
+    stop = startTracing()
+    expect(startTracing()).toBe(stop)
+  })
+})
