@@ -499,6 +499,7 @@ class ModelRecord(ModelMeta):
         """Views, read as given: a record is read back from its JSON as an operation's
         answer (#1054), and model.json's leniency would turn each into a plain item."""
         return value
+
     #: A built-in's chosen cover (#722), listed first in ``media``; None while the
     #: shipped order decides it, and always for a template of mine, whose cover is
     #: simply its first item.
