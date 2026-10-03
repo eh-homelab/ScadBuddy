@@ -179,3 +179,27 @@ def test_a_file_deleted_while_the_list_is_read_is_left_out(
 
     assert response.status_code == 200, response.text
     assert [f["name"] for f in response.json()] == ["model.scad"]
+
+
+def test_a_sibling_write_against_a_stale_base_is_a_conflict_and_writes_nothing(
+    client: TestClient, paths: DataPaths
+) -> None:
+    base = upload(client)["version"]
+    moved = put(client, "parts.scad", PARTS).json()["version"]
+
+    stale = client.put(
+        f"/api/v1/models/{SLUG}/files/parts.scad",
+        json={"content": "module bar(w) {}\n", "base": base},
+    )
+
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["current"] == moved
+    assert stale.json()["base"] == base
+    assert (paths.model_dir(SLUG) / "parts.scad").read_text() == PARTS
+
+    fresh = client.put(
+        f"/api/v1/models/{SLUG}/files/parts.scad",
+        json={"content": "module bar(w) {}\n", "base": moved[:7]},
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["version"] != moved

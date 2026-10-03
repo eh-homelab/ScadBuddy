@@ -1903,6 +1903,7 @@ class Catalogue:
         *,
         message: str | None = None,
         max_files: int | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
         as one revision. ``name`` is a bare ``.scad`` file name other than the model's
@@ -1916,6 +1917,11 @@ class Catalogue:
         ``max_files``, counted and written under a lock of the catalogue's own (and
         the history's write lock, when there is one), so two new files at once cannot
         both pass (PR #752 review).
+
+        ``expected_version`` is as :meth:`write_source`'s (#813): unless the model is
+        still at it, :class:`StaleVersionError` with nothing written, checked under the
+        history's write lock. Without a history there is no revision to check, so
+        :class:`GitUnavailableError`.
         """
         if name == SOURCE_NAME:
             # The route refuses it with a 409 first; this keeps any other caller off
@@ -1924,7 +1930,15 @@ class Catalogue:
         self._require(slug)
         path = self.paths.model_dir(slug) / name
 
+        if expected_version is not None and (self.history is None or not self.history.available):
+            raise GitUnavailableError("model history is unavailable, so no base can be checked")
+
         def change() -> None:
+            if expected_version is not None:
+                assert self.history is not None  # checked above
+                current = self.history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
             if content is None:
                 if not path.is_file():
                     raise SidecarNotFoundError(name)
