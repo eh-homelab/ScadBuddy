@@ -170,10 +170,13 @@ def _job(revision: str | None = REVISION, **params: int) -> Job:
     )
 
 
-def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
+def _worker(
+    client: Client, queue: str, acts: FakeActivities, *, max_concurrent_activities: int = 100
+) -> Worker:
     return Worker(
         client,
         task_queue=queue,
+        max_concurrent_activities=max_concurrent_activities,
         workflows=[TemplatePipeline, RenderPiece],
         activities=[
             acts.cached_piece,
@@ -593,3 +596,74 @@ async def test_a_full_queue_answers_queue_full_and_fails_the_execution() -> None
                 await client.get_workflow_handle(wid).result()
         assert answer.queue_full == 3 and answer.job is None
         assert acts.projections == [] and acts.calls == []
+
+
+async def test_a_release_projects_cancelled_while_every_activity_slot_is_busy() -> None:
+    """The worker's one activity slot holds the piece's openscad run (ABANDONed, so it
+    goes on): the cancelled projection must not wait behind it (review I1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = FakeActivities(block_solids=gate)
+        async with _worker(client, queue, acts, max_concurrent_activities=1):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            while "render_solids" not in acts.calls:
+                await asyncio.sleep(0.05)
+            handle = client.get_workflow_handle(wid)
+            try:
+                answer = await asyncio.wait_for(
+                    handle.execute_update(RELEASE_UPDATE, "superseded", result_type=ReleaseAnswer),
+                    timeout=10,
+                )
+                await asyncio.wait_for(handle.result(), timeout=10)
+            finally:
+                gate.set()
+        assert answer.cancelled is not None
+        assert [p for p in acts.projections if p.state][-1].state == "cancelled"
+
+
+async def test_a_job_input_from_an_older_build_still_renders() -> None:
+    """An old API pod's start (a `Job`, its row already inserted) reaching the new
+    build during a rolling deploy (review I2)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            await client.execute_workflow(
+                TemplatePipeline.run,
+                job,
+                id=f"render-{job.id}",
+                task_queue=queue,  # type: ignore[arg-type]
+            )
+        assert acts.accepts == 0
+        last = [p for p in acts.projections if p.state][-1]
+        assert last.state == "done" and last.job_id == job.id
+
+
+async def test_a_release_right_after_the_start_cancels_the_job() -> None:
+    """The release lands while the job's first projection is in flight: that write
+    completing anyway must not swallow the release."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = FakeActivities(block_main=gate)
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            handle = client.get_workflow_handle(wid)
+            try:
+                answer = await asyncio.wait_for(
+                    handle.execute_update(RELEASE_UPDATE, "withdrawn", result_type=ReleaseAnswer),
+                    timeout=10,
+                )
+                await asyncio.wait_for(handle.result(), timeout=10)
+            finally:
+                gate.set()
+        assert answer.cancelled is not None
+        last = [p for p in acts.projections if p.state][-1]
+        assert last.state == "cancelled" and last.failure is not None
+        assert last.failure.error == CANCELLED_ERROR
