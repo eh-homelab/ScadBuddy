@@ -1192,7 +1192,7 @@ async def put_source(
     )
 
 
-def _stale(slug: str, base: str, current: str | None) -> ApiError:
+def stale_edit(slug: str, base: str, current: str | None) -> ApiError:
     """The 409 of an edit made against a revision the model has moved past (#252).
     ``current`` is an extension member (RFC 9457 §3.2), so a client can read the new
     source and rebuild its edit without another round trip to find the revision."""
@@ -1214,7 +1214,7 @@ def _require_base(slug: str, base: str, current: str | None) -> None:
             "model history is unavailable, so the edit's base cannot be checked",
         )
     if not current.startswith(base):
-        raise _stale(slug, base, current)
+        raise stale_edit(slug, base, current)
 
 
 async def _save_source(
@@ -1254,7 +1254,7 @@ async def _save_source(
             expected_version=expected_version,
         )
     except StaleVersionError as error:
-        raise _stale(slug, error.expected, error.current) from None
+        raise stale_edit(slug, error.expected, error.current) from None
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None

@@ -3,6 +3,7 @@ import { authoringTools } from './authoring.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { fileTools } from './files.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
@@ -29,6 +30,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...outputTools,
   ...historyTools,
   ...sourceFileTools,
+  ...fileTools,
   ...templateTools,
   ...authoringTools,
   ...inspectTools,
