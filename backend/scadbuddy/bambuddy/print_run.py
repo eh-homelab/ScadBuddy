@@ -9,7 +9,6 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -18,13 +17,14 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
+from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    QueueFilaments,
     across_plates,
     check,
     every_plate,
@@ -51,7 +51,7 @@ from scadbuddy.bambuddy.send import request_scope, resolve_print_options
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
-from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
@@ -367,34 +367,73 @@ async def prepare_run(
     )
 
 
-async def execute_run(
+class PreparedPlates(BaseModel):
+    """What :func:`prepare_run` checked, without the preset catalogue: the part that
+    crosses a workflow's history (#1052). :func:`plan_run` reads the catalogue again."""
+
+    plate_ids: list[int]
+    printer_id: int
+    printer_status: PrinterStatus | None = None
+
+    @classmethod
+    def of(cls, prepared: PreparedRun) -> PreparedPlates:
+        return cls(
+            plate_ids=prepared.plate_ids,
+            printer_id=prepared.printer_id,
+            printer_status=prepared.printer_status,
+        )
+
+
+class PlatePlan(BaseModel):
+    """One plate, resolved and ready to slice and queue."""
+
+    plate_id: int
+    plan: SlicePlan
+    filaments: QueueFilaments | None = None
+
+
+class PlannedRun(BaseModel):
+    """Everything a run decides before its first slice (:func:`plan_run`): what was
+    uploaded, each plate's plan, and every warning the result reports."""
+
+    library_file_id: int
+    folder_id: int | None = None
+    project_id: int | None = None
+    printer_id: int
+    nozzle_size: str
+    copies: int
+    options: PrintOptions
+    plates: list[PlatePlan]
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+
+
+async def plan_run(
     client: BambuddyClient,
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
-    prepared: PreparedRun,
-    before_enqueue: Callable[[], Awaitable[None]] | None = None,
-) -> PrintRunResult:
-    """Slice with presets derived from the dialog's choices, then queue (spec §4).
+    prepared: PreparedPlates,
+) -> PlannedRun:
+    """Upload, then resolve every plate, before anything is sliced (spec §4).
 
     A print into a project also records its printer and nozzle for that project
-    (:meth:`PrintSource.remember_project`), which is what the next Generate into it
-    lays its file out for.
+    (:meth:`PrintSource.remember_project`, in :func:`finish_run`), which is what the
+    next Generate into it lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
     (spec §6).
 
-    Runs after :func:`prepare_run`, in the background of a 202 for an output (#470):
-    it uploads, and waits on every slice. Every plate is resolved before any is sliced,
-    so a slot error is a 422 with nothing on Bambuddy's queue, however many plates the
-    print has. ``before_enqueue`` is awaited before each plate's ``POST /queue/``.
+    Every plate is resolved before any is sliced, so a slot error is a 422 with nothing
+    on Bambuddy's queue, however many plates the print has. The upload reuses a copy
+    Bambuddy already has (``ensure_uploaded``), so running this again uploads nothing
+    new.
     """
     plate_ids = prepared.plate_ids
     printer_id = prepared.printer_id
-    catalogue = prepared.catalogue
     printer_status = prepared.printer_status
     choices = request.choices
+    catalogue = await _catalogue(client)
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
     project_id = chosen_project(request, settings)
@@ -472,24 +511,8 @@ async def execute_run(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     hardware += high_flow_warnings(printer_status, choices.nozzles)
-    outcomes: list[QueueOutcome] = []
-    sent: list[PlateSend] = []
     warnings: list[FilamentWarning] = []
-    for plate_id, options, resolved, plan in planned:
-        outcome = await slice_and_queue(
-            client,
-            library_file_id=library_file_id,
-            plan=plan,
-            printer_id=printer_id,
-            filaments=queue_filaments(options, request.filament_plan),
-            plate_id=plate_id,
-            copies=copies,
-            project_id=project_id,
-            options=print_options,
-            before_enqueue=before_enqueue,
-        )
-        sent = await source.record(library_file_id, plate_id, outcome, project_id, sent)
-        outcomes.append(outcome)
+    for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
             # Checked once below, against what every plate needs together.
             if warning.kind != "low-filament" and warning not in warnings:
@@ -503,18 +526,45 @@ async def execute_run(
         )
         if warning.kind == "low-filament"
     ]
-    if project_id is not None:
+    return PlannedRun(
+        library_file_id=library_file_id,
+        folder_id=printed.folder_id,
+        project_id=project_id,
+        printer_id=printer_id,
+        nozzle_size=choices.nozzles[0].size,
+        copies=copies,
+        options=print_options,
+        plates=[
+            PlatePlan(
+                plate_id=plate_id,
+                plan=plan,
+                filaments=queue_filaments(options, request.filament_plan),
+            )
+            for plate_id, options, _, plan in planned
+        ],
+        warnings=warnings + hardware,
+    )
+
+
+async def finish_run(
+    client: BambuddyClient,
+    source: PrintSource,
+    planned: PlannedRun,
+    outcomes: list[QueueOutcome],
+) -> PrintRunResult:
+    """Remember the project's printer and nozzle, and report what was queued."""
+    if planned.project_id is not None:
         await source.remember_project(
-            project_id, printer_id=printer_id, nozzle_size=choices.nozzles[0].size
+            planned.project_id, printer_id=planned.printer_id, nozzle_size=planned.nozzle_size
         )
     return _queued(
         client,
         outcomes,
-        library_file_id,
-        project_id,
-        printed.folder_id,
-        copies=copies,
-        warnings=warnings + hardware,
+        planned.library_file_id,
+        planned.project_id,
+        planned.folder_id,
+        copies=planned.copies,
+        warnings=planned.warnings,
     )
 
 
