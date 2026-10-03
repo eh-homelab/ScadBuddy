@@ -1996,6 +1996,31 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     )
   })
 
+  it('forgets the chosen algorithm and its failed save when the dialog is closed', async () => {
+    // #1084: close() reset the hand pick but not the algorithm, so a reopen on the same
+    // printer sent the old session's choice and still said it was not remembered.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', () =>
+        HttpResponse.json({ title: 'Service Unavailable', status: 503 }, { status: 503 }),
+      ),
+    )
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await screen.findByTestId('rack-algorithm-unsaved')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await loaded()
+    expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies.length).toBe(1))
+    expect(runs.bodies[0]).toMatchObject({ rack_algorithm: null })
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')

@@ -346,6 +346,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setOwnProjectId(null)
     setOptions({})
     setRackPosition(null)
+    // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
+    setChosenAlgorithm(null)
+    setAlgorithmUnsaved(false)
     runPrint.reset()
     picker.reset()
     onClose()
