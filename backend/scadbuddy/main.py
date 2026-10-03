@@ -42,6 +42,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.model_operations import model_kinds
 from scadbuddy.library.operations import library_kinds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
@@ -709,6 +710,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The Bambuddy writes run as operations (#1053) on this process's `bambuddy` worker.
     state.operations.kinds.update(bambuddy_kinds(state))
     state.operations.kinds.update(library_kinds(state))
+    state.operations.kinds.update(model_kinds(state))
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)

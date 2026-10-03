@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
-def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+def answered_as_routes[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
     """A model.json that cannot be read, or a pin whose checkout is gone, as the 409
     every route answers it with (``api/models.py``, ``install_library_handlers``),
     rather than the operation's unexpected 500."""
@@ -220,20 +220,23 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
     kinds = [
         OperationKind(
             "library_pin",
-            _answered(model_check),
-            _answered(pin_run),
+            answered_as_routes(model_check),
+            answered_as_routes(pin_run),
             queue="library",
             run_timeout=PIN_TIMEOUT,
         ),
         OperationKind(
             "library_repin",
-            _answered(repin_check),
-            _answered(repin_run),
+            answered_as_routes(repin_check),
+            answered_as_routes(repin_run),
             queue="library",
             run_timeout=PIN_TIMEOUT,
         ),
         OperationKind(
-            "library_unpin", _answered(model_check), _answered(unpin_run), queue="library"
+            "library_unpin",
+            answered_as_routes(model_check),
+            answered_as_routes(unpin_run),
+            queue="library",
         ),
         OperationKind("library_remove", no_check, remove_run, queue="library"),
     ]
