@@ -723,8 +723,10 @@ the most constrained runtime in the system.
   `ai_durable_entries` (or `ai_session_entries`) and the session counters. For §6.6 it
   has exactly `SELECT, INSERT, UPDATE, DELETE` on `ai_pending_input` (the upsert and
   the guarded `DELETE … RETURNING` need all four), `SELECT, INSERT` on
-  `ai_input_responses`, and `INSERT` on `ai_audit`, with a row-level security policy
-  that admits only `kind = 'approval'` for it. It can do nothing else.
+  `ai_input_responses`, and `INSERT` on `ai_audit` under an RLS `INSERT` policy for
+  the `agent-durable` role, `WITH CHECK (kind = 'approval')`. The agent service's role,
+  which writes every other kind, gets its own permissive policy, so enabling RLS
+  blocks no existing writer. It can do nothing else.
 - **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
   DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
   blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
@@ -878,8 +880,9 @@ happens, and there is no separate request system.
   nothing to history.
 - Each entry is
   `{id, kind, tool, summary, input_hash, prompt, requested_by, responders, created_at, expires_at}`:
-  - `id` is the `request_id` that `respond` takes. It is opaque to clients: the row id
-    for a classic entry (an `ai_approvals` or `ai_questions` row, whose `tool_use_id`
+  - `id` is the `request_id` that `respond` takes. It is opaque to clients, and its
+    prefix names its store: `approval:<uuid>` or `question:<uuid>`, the row id, for a
+    classic entry (an `ai_approvals` or `ai_questions` row, whose `tool_use_id`
     is not unique, since cancelled, expired and re-asked rows are kept), and
     `durable:<session id>:<workflow run id>:<tool_use_id>` for a durable session's,
     where the plugin runs each `tool_use_id` once per run (§3.2). The run id makes a
@@ -935,50 +938,59 @@ happens, and there is no separate request system.
     is a UUID (`audit/log.ts:270-289`). A durable approval has no `ai_approvals` row and
     a non-UUID id, so that lookup finds nobody. For a durable call, the `agent-tools`
     activity passes its `request_id`, and the audit insert copies `approved_by_*` from
-    `ai_input_responses` (`outcome = 'approved'`, its `responder`). §8 asserts that the
-    `tool_call` row of an approved durable call names its approver.
+    `ai_input_responses` (`outcome = 'approved'`, its `responder`). `ai_audit.approval_id`
+    is a `uuid`, so phase 5's migration adds `ai_audit.request_id text`, written on both
+    the `kind = 'approval'` row and the `tool_call` row, which is how an auditor joins
+    them. §8 asserts that the `tool_call` row of an approved durable call names its
+    approver and joins to its decision on `request_id`.
   - **Ending without a decision**, as classic `cancelPending` does
     (`approvals/service.ts:87-95`). An interrupt, a handoff and a new turn that
     supersedes the call each first send `DurableSession` a `cancel_input(reason)`
     Update, from the agent service's interrupt, handoff and send paths, and proceed
-    once it returns. The Update needs the `agent-durable` worker, so each caller waits
-    at most 10 s, then:
+    once it returns. `cancel_input` resolves the parked entry as `cancelled` through
+    `resolve_input`, then lets the call end: an `approval` with `agent.decide(…, False,
+    "system:cancel")`, so it never runs, and an `answer` let through with the
+    `cancelled` outcome. So an interrupted turn leaves no entry, and a new owner after a
+    handoff never inherits an approval asked for in the previous owner's turn. The
+    attention `stop` path (Timeouts) is an interrupt and goes through it too.
+    The Update needs the `agent-durable` worker, so each caller waits at most 10 s,
+    then:
     - **interrupt** proceeds anyway, cancelling the turn when the worker returns, and
       leaves the entry to its timer and the sweep. Stop is what a person presses when
       a session is stuck, so it must not hang;
     - **handoff** is refused with a retryable error ("the session's worker is not
       answering; try again"), so a new owner never inherits a parked approval;
     - **a superseding send** is refused the same way, so the send can be retried once
-      the worker answers. It resolves the parked entry as `cancelled` through
-    `resolve_input`, then lets the call end: an `approval` with `agent.decide(…,
-    False, "system:cancel")`, so it never runs, and an `answer` let through with the
-    `cancelled` outcome. So an interrupted turn leaves no entry, and a new owner after a
-    handoff never inherits an approval asked for in the previous owner's turn. The
-    attention `stop` path (Timeouts) is an interrupt and goes through it too.
+      the worker answers.
   - **When the workflow ends some other way** (an operator's terminate, a Reset,
     `forgetSubject`), nothing in it runs. Two things clean up:
     - `forgetSubject` deletes the subject's `ai_pending_input` and `ai_input_responses`
       rows with its other rows (§6.5 step 3);
     - every entry has an `expires_at` of at most 86 400 s, so the agent service's
       periodic sweep, the one that runs `expireDue()` (`approvals/service.ts:100`),
-      also looks at `ai_pending_input` rows more than 10 minutes past `expires_at`.
-      For each one it first asks Temporal (`DescribeWorkflowExecution` on the row's
-      `workflow_id` and `workflow_run_id` columns). Only a run that is closed or not found is an orphan. A row whose run is
-      still open is left alone, because it is a live entry whose `resolve_input` is
-      still retrying (the worker or Postgres is down).
+      also looks at every `ai_pending_input` row older than 10 minutes, whatever its
+      `expires_at`. For each one it asks Temporal (`DescribeWorkflowExecution` on the
+      row's `workflow_id` and `workflow_run_id` columns). Only a run that is closed or
+      not found is an orphan, so a terminated run's entry leaves the badge within one
+      sweep, not at its expiry. A row whose run is still open is left alone, because
+      it is a live entry, perhaps one whose `resolve_input` is still retrying (the
+      worker or Postgres is down).
     - Both writers remove the row through one guarded `DELETE … WHERE request_id = $1
       RETURNING`. Whoever deletes it writes the outcome, the event and the audit, and
       the loser writes nothing. So a request never gets two `input.resolved` events.
-    - A Reset starts a new run. The pre-Reset run's open entry is an orphan for the
-      sweep, and the replayed park opens a new entry under the new run id. `open_input`
+    - A Reset starts a new run. `open_input` on the new run first deletes, in its own
+      transaction, the session's rows that carry another `workflow_run_id` (each with
+      `input.resolved`, outcome `cancelled`, reason `reset`), then opens the replayed
+      park under the new run id. So after a Reset the aggregate read shows exactly one
+      entry for the call. `open_input`
       is still an upsert on `request_id`, so a retried activity adds no second row.
   - `ai_pending_input(request_id primary key, session_id, workflow_id, workflow_run_id,
     kind, tool, summary, input_hash, prompt, requested_by, responders, created_at,
     expires_at)` and `ai_input_responses(request_id primary key, session_id, kind,
     outcome, response jsonb, responder, created_at)` are one new agent migration in
     phase 5, and the `agent-durable` role writes both (§6.3a). The workflow pair is the
-    one `workflow_runs` records too. The sweep reads it, and nothing parses
-    `request_id`.
+    one `workflow_runs` records too. The sweep reads it, and nothing but the route's
+    prefix dispatch parses `request_id`.
 - **Two reads, two sources.**
   - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
     one it sends the Query, which is the source of truth. It writes nothing. The
@@ -1007,7 +1019,9 @@ happens, and there is no separate request system.
 
 - `respond(request_id, response, responder)` answers one entry. The route is
   `POST /api/v1/ai/pending-input/{request_id}`, for a session's entry and a session-less
-  one alike; the route resolves `request_id` to its store or its workflow. In the HTTP
+  one alike; the route dispatches on the id's prefix (`approval:`, `question:`,
+  `durable:`, `flow:`) to its store or its workflow, and refuses an unknown prefix, or
+  a classic id with no row, as stale. In the HTTP
   request the principal is the authenticated caller, never a field of the body. The
   route then passes it to the Update as `responder`.
 - **The route is the Update's only legitimate caller, and the Update cannot tell.** A
@@ -1030,7 +1044,21 @@ happens, and there is no separate request system.
     responder even though the call was made in their own session;
   - a response that does not match the kind's shape, and any response over 16 KiB.
   For an `approval` it also runs the plugin's `validate_decision`, and it checks
-  `input_hash` when one is sent, as `approvals/service.ts:737` does. The agent's
+  `input_hash` when one is sent, as `approvals/service.ts:737` does.
+- **Authorization is the route's; the validator checks what the workflow knows.** An
+  Update validator must be deterministic and can read neither Postgres nor a grant
+  that changes. So the split is:
+  - the **route** decides who may answer, exactly as `authorize` does today
+    (`approvals/service.ts:705`): the session's current owner from `ai_sessions`, and
+    whether the principal holds the approval grant (`grants(principal)`). It passes
+    the result to the Update as `responder` plus `role` (`owner`, `grant`);
+  - the **validator** checks only what the workflow holds: staleness, *resolving*,
+    the kind's allowed roles, self-decision against the `requested_by` and session
+    starter it recorded at `open_input`, and the shape.
+  A handoff changes the owner in `ai_sessions`, which the route reads, and
+  `cancel_input` has already cleared the entry. So the workflow never needs to be told
+  the new owner. The shared vectors split the same way: grant and ownership vectors
+  run against the route in both modes, and the rest against both validators. The agent's
   `approvers` list is left unset: who may answer depends on the kind, which the
   plugin's single list cannot say, so our validator decides. With `approvers` unset the
   plugin accepts any approver name (`_workflow.py:360`), so the guard is structural:
@@ -1091,7 +1119,7 @@ happens, and there is no separate request system.
 | `approval` | **Deny.** The call does not run. A classic session tells the model nobody decided (`approvals/service.ts:341`). A durable one calls `agent.decide(tool_use_id, False, "system:timeout")`. The plugin's `decide` takes no message, so the model reads its fixed rejection ("A human reviewer rejected this action. Do not retry it.", `_workflow.py:718-723`), not the classic *expired* wording. This is a known difference, listed in §9. It fails closed, since the call never runs, and the panel and audit still record `expired`. Letting the call through instead, as an `answer` does, is not possible: an approved `approval` runs the real tool. |
 | `answer`, a question | **Cancel.** The tool returns an error result, "nobody answered", which is never an answer. The window is a new `ai_settings` key, `question_expiry_seconds` (default 3600, bounded like `approval_expiry_seconds`, 10 to 86 400). |
 | `answer`, an attention request | **#815's rule, as written:** `on_timeout` is `proceed` (the default), `wait` or `stop`. `proceed` returns `timed_out` and the agent carries on with non-outward work only. Any outward call it then makes parks for its own approval, so `proceed` never lets anything outward run. `stop` ends the turn: in a classic session as `interrupt` does; in a durable one by cancelling the turn's `agent.run` task, which the plugin turns into "This tool call was interrupted" for the open call (`_workflow.py:634-651`). Phase 5 verifies that the plugin ends the turn cleanly under that cancellation. Until it does, a durable `wait_for_user`'s input schema offers only `proceed`, so `stop` fails closed by not being offered. `wait` keeps it parked to the 86 400 s ceiling, then does what `stop` does. |
-| `answer`, flow `wait_for_human` | The host call raises in the script, which decides what to do. It never returns an answer. |
+| `answer`, flow `wait_for_human` | The host call raises in the script, which decides what to do. It never returns an answer. `timeout` defaults to 3600 s and is bounded to 10–86 400 s like `question_expiry_seconds`; a script asking for more is refused at type-check time (§7.2). |
 
 - `proceed` exists only for attention requests. An approval or a question can never
   proceed. #815's `approval_pending` reason is refused as malformed: the approval is
@@ -1356,7 +1384,12 @@ happens, and there is no separate request system.
   - `cancel_input` with the `agent-durable` worker down: an interrupt still stops the
     turn, and a handoff is refused with a retryable error;
   - `open_input` and `resolve_input` run as the `agent-durable` role itself, not as the
-    migration owner;
+    migration owner, and that role's insert of an `ai_audit` row of another kind is
+    refused;
+  - after a Reset the aggregate read shows exactly one entry for the call, and a
+    terminated run's entry leaves it within one sweep;
+  - a classic id with an unknown prefix, or with no row, is refused as stale;
+  - flow `wait_for_human` `timeout` outside 10–86 400 s is refused at type check;
   - one durable approval yields exactly one `approval.required`;
   - `forgetSubject` removes the subject's `ai_pending_input` and `ai_input_responses`
     rows;
