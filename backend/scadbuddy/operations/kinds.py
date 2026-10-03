@@ -6,7 +6,10 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+#: Which worker runs a kind (§4.3): the one that holds what its effect needs.
+Queue = Literal["bambuddy", "library"]
 
 #: The route's refusals: raises ``ApiError`` to refuse, writes nothing, and returns what
 #: ``run`` needs (JSON).
@@ -22,6 +25,7 @@ class OperationKind:
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     run_attempts: int = 1
+    queue: Queue = "bambuddy"
 
 
 def operation_key(kind: str, subject: str, request: dict[str, Any], request_id: str) -> str:

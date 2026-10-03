@@ -47,7 +47,7 @@ from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
@@ -228,12 +228,12 @@ class PrintCommands:
 
 @dataclass(frozen=True)
 class OperationCommands:
-    """What a route that starts an ``Operation`` needs (#1053): the record, the client
-    and queue, and the kinds the ``bambuddy`` worker serves (filled before it starts)."""
+    """What a route that starts an ``Operation`` needs (#1053): the record, the client,
+    each kind's task queue, and the kinds (filled before the workers start)."""
 
     store: OperationStore
     client: Client
-    task_queue: str
+    queues: dict[Queue, str]
     kinds: dict[str, OperationKind] = field(default_factory=dict)
     search_attributes: bool = False
 
@@ -408,7 +408,10 @@ def _build_core(settings: Settings) -> AppState:
         operations=OperationCommands(
             store=OperationStore(pool, events=_transactional(events)),
             client=temporal,
-            task_queue=settings.temporal_task_queue_bambuddy,
+            queues={
+                "bambuddy": settings.temporal_task_queue_bambuddy,
+                "library": settings.temporal_task_queue_library,
+            },
             search_attributes=settings.temporal_search_attributes,
         ),
         checkouts=checkouts,

@@ -15,6 +15,7 @@ import psycopg
 import pytest
 from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
+from temporalio import activity
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
 from scadbuddy.api.operations import IdempotencyKey, run_operation
@@ -53,17 +54,29 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return {"done": checked["checked"], "n": counts.runs}
 
     state: AppState = getattr(app.state, STATE_ATTR)
+
+    async def where(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return {"queue": activity.info().task_queue}
+
     state.operations.kinds["test"] = OperationKind("test", check, run)
+    state.operations.kinds["test_where"] = OperationKind("test_where", check, where)
+    state.operations.kinds["test_library"] = OperationKind(
+        "test_library", check, where, queue="library"
+    )
     router = APIRouter()
 
     @router.post("/api/v1/test-op")
     async def post(
-        body: dict[str, Any], response: Response, ops: OperationsDep, key: IdempotencyKey = None
+        body: dict[str, Any],
+        response: Response,
+        ops: OperationsDep,
+        key: IdempotencyKey = None,
+        kind: str = "test",
     ) -> Any:
         return await run_operation(
             ops,
             response,
-            kind=state.operations.kinds["test"],
+            kind=state.operations.kinds[kind],
             subject="s",
             request=body,
             idempotency_key=key,
@@ -156,3 +169,12 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.json()["type"].endswith("/temporal-unavailable")
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+
+
+def test_each_kind_runs_on_its_own_queue(client: TestClient) -> None:
+    """§4.3: a worker serves only the kinds whose effect it holds."""
+    library = client.post("/api/v1/test-op?kind=test_library", json={})
+    bambuddy = client.post("/api/v1/test-op?kind=test_where", json={})
+    assert library.status_code == bambuddy.status_code == 200, library.text
+    assert library.json()["queue"].endswith("-library")
+    assert not bambuddy.json()["queue"].endswith("-library")

@@ -20,7 +20,13 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import assets, health, libraries, media, metrics, models
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
-from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.deps import (
+    STATE_ATTR,
+    AppState,
+    OperationCommands,
+    build_state,
+    probe_openscad_version,
+)
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
@@ -38,6 +44,7 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
@@ -50,6 +57,7 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import bambuddy_worker, connect
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping, ensure_schedules
+from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -429,7 +437,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     activities = [
         *PrintActivities(deps).all(),
         FollowActivities(state.print_follower).follow_print,
-        *operation_activities(ops.store, state.settings_store, ops.kinds),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
     try:
         resumed = await resume_followed(
@@ -473,12 +481,19 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     schedules = asyncio.create_task(
         _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
     )
-    activities = _housekeeping_activities(state)
+    ops = state.operations
+    activities = [
+        *_housekeeping_activities(state),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+    ]
     try:
         while not stop.is_set():
             try:
                 async with Worker(
-                    client, task_queue=queue, workflows=[Housekeeping], activities=activities
+                    client,
+                    task_queue=queue,
+                    workflows=[Housekeeping, OperationWorkflow],
+                    activities=activities,
                 ):
                     await stop.wait()
             except Exception:
@@ -487,6 +502,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
+
+
+def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
+    """The kinds one worker serves (§4.3): only those whose effect it holds."""
+    return {name: kind for name, kind in ops.kinds.items() if kind.queue == queue}
 
 
 async def _set_up_housekeeping(
