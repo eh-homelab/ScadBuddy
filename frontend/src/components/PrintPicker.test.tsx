@@ -2058,6 +2058,44 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
 
+  it('shows a save that lands after a close and reopen, and sends it', async () => {
+    // #1086 review: the reopened dialog read the old algorithm before the save landed, so
+    // it labelled one the backend no longer used.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })),
+      http.put('/api/v1/print/printers/:id/rack-algorithm', async () => {
+        await held
+        return HttpResponse.json({ algorithm: 'oldest_first' })
+      }),
+    )
+    const saves: Promise<unknown>[] = []
+    const put = api.putPrinterRackAlgorithm.bind(api)
+    vi.spyOn(api, 'putPrinterRackAlgorithm').mockImplementation((...args) => {
+      const save = put(...args)
+      saves.push(save)
+      return save
+    })
+    const checks = watch('POST', '/check')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(saves.length).toBe(1))
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await loaded()
+    await showAdvanced()
+    const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
+    expect(select.value).toBe('least_used')
+    release()
+    await act(() => Promise.allSettled(saves))
+
+    await waitFor(() => expect(select.value).toBe('oldest_first'))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
+  })
+
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')

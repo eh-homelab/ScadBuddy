@@ -143,9 +143,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
    *  report its failure on the next one (#1086 review). */
   const algorithmSession = useRef(0)
+  /** The printer the dialog is on, for a save that lands after its session ended. */
+  const algorithmPrinter = useRef(printerId)
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
+    algorithmPrinter.current = printerId
     setChosenAlgorithm(null)
     setRackPosition(null)
     setAlgorithmUnsaved(false)
@@ -164,9 +167,18 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setAlgorithmUnsaved(false)
     const session = algorithmSession.current
     if (printerId !== null)
-      void api.putPrinterRackAlgorithm(printerId, next).catch(() => {
-        if (algorithmSession.current === session) setAlgorithmUnsaved(true)
-      })
+      void api.putPrinterRackAlgorithm(printerId, next).then(
+        () => {
+          // Saved after a close and reopen on this printer (#1086 review): it is now the
+          // printer's algorithm, which the reopened dialog read before it landed. Show it,
+          // unless this session has chosen its own.
+          if (algorithmSession.current !== session && algorithmPrinter.current === printerId)
+            setChosenAlgorithm((chosen) => chosen ?? next)
+        },
+        () => {
+          if (algorithmSession.current === session) setAlgorithmUnsaved(true)
+        },
+      )
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
