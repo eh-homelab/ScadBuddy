@@ -655,7 +655,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
   **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`
-  holds one envelope per credential kind (`anthropic_api_key`, `gateway`) and per
+  holds one envelope per credential kind (`anthropic_api_key`, `claude_oauth_token`,
+  `gateway`) and per
   version. A TypeScript script writes it with `seal` under a fixed KEK, data key and IV.
   - The agent's test suite regenerates it and fails if the committed file differs. So a
     change to `secrets.ts`'s format or AAD cannot land without new vectors.
@@ -664,8 +665,9 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - The `agent-durable` CI job runs whenever `agent/src/secrets.ts`,
     `agent/src/credentials.ts` or the vectors change.
 
-  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`, or
-  `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
+  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN` for a `claude_oauth_token`, or `ANTHROPIC_BASE_URL` plus
+  `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
   `agent/src/harness/run.ts:185`). It never enters history.
 - **Limits.** `max_turns` and `budget_usd` are the session row's. Each segment gets the
   remaining budget as `max_budget_usd`, and the row's `cost_usd` and `turns` are updated

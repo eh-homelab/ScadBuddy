@@ -8,8 +8,9 @@ import path from 'node:path'
 // Why it matters here: the harness passes the Claude credential to Claude Code
 // through the SDK's `env` (run.ts), and every process Claude Code starts for a
 // plugin inherits that environment. A plugin that runs a program of its own
-// therefore gets ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN. `tools: []` removes
-// Bash, but not these, which Claude Code starts itself.
+// therefore gets ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN /
+// ANTHROPIC_AUTH_TOKEN. `tools: []` removes Bash, but not these, which Claude
+// Code starts itself.
 //
 // What starts a process, per the plugin manifest reference
 // (https://code.claude.com/docs/en/plugins-reference, "Fields", "Component

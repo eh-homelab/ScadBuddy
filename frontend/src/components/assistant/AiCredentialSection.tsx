@@ -11,12 +11,37 @@ import { Spinner } from '../ui/Spinner'
 
 const KIND_LABEL: Record<AiCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API key',
+  claude_oauth_token: 'Claude Code OAuth token',
   gateway: 'Gateway',
 }
 
 const KIND_OPTION: Record<AiCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API',
+  claude_oauth_token: 'Claude Code OAuth token',
   gateway: 'Gateway (base URL and token)',
+}
+
+/** The secret field's label and placeholder for each kind. */
+const SECRET_FIELD: Record<AiCredentialKind, { label: string; placeholder: string }> = {
+  anthropic_api_key: { label: 'Anthropic API key', placeholder: 'sk-ant-api03-…' },
+  // What `claude setup-token` prints.
+  claude_oauth_token: { label: 'OAuth token', placeholder: 'sk-ant-oat01-…' },
+  gateway: { label: 'Gateway token', placeholder: 'token' },
+}
+
+/**
+ * A warning, not a refusal, when the secret has the other Anthropic kind's prefix: saved
+ * as the wrong kind it is sent in the wrong header, refused, and the credential disabled.
+ */
+function kindMismatch(kind: AiCredentialKind, secret: string): string | null {
+  const typed = secret.trim()
+  if (kind === 'anthropic_api_key' && typed.startsWith('sk-ant-oat01-')) {
+    return 'This looks like a Claude Code OAuth token. Choose “Claude Code OAuth token” to save it as one.'
+  }
+  if (kind === 'claude_oauth_token' && typed.startsWith('sk-ant-api03-')) {
+    return 'This looks like an Anthropic API key. Choose “Anthropic API” to save it as one.'
+  }
+  return null
 }
 
 function describeError(cause: unknown, fallback: string): string {
@@ -241,19 +266,30 @@ export function AiCredentialSection() {
           </label>
         )}
         <label className="flex flex-col gap-1">
-          {kindValue === 'gateway' ? 'Gateway token' : 'Anthropic API key'}
+          {SECRET_FIELD[kindValue].label}
           <input
             type="password"
             required
             value={secret}
             onChange={(event) => setSecret(event.target.value)}
-            placeholder={kindValue === 'gateway' ? 'token' : 'sk-ant-…'}
+            placeholder={SECRET_FIELD[kindValue].placeholder}
             className="sb-field max-w-md"
             autoComplete="new-password"
             spellCheck={false}
             aria-describedby="ai-credential-help"
           />
         </label>
+        {kindMismatch(kindValue, secret) && (
+          <p data-testid="ai-credential-kind-warning" className="text-[12px] text-warn">
+            {kindMismatch(kindValue, secret)}
+          </p>
+        )}
+        {kindValue === 'claude_oauth_token' && (
+          <p className="text-[12px] text-muted">
+            Run <code>claude setup-token</code> on a machine signed in to your Claude subscription, and paste the
+            token it prints. Its use is subject to Anthropic&rsquo;s terms for your plan.
+          </p>
+        )}
         <p id="ai-credential-help" className="text-[12px] text-muted">
           Sent once to ScadBuddy&rsquo;s agent service, which stores it encrypted. It is never shown again; only
           its last four characters are.

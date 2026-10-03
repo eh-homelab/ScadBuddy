@@ -6,7 +6,7 @@
  */
 
 /** agent `credentials.ts` `CREDENTIAL_KINDS`. */
-export type AiCredentialKind = 'anthropic_api_key' | 'gateway'
+export type AiCredentialKind = 'anthropic_api_key' | 'claude_oauth_token' | 'gateway'
 
 /** The stored credential as reads give it. The secret itself is never returned. */
 export interface AiCredentialView {

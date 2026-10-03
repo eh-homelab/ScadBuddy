@@ -54,8 +54,10 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     https://code.claude.com/docs/en/llm-gateway-connect ("Each variable sends
 //     the credential in a different HTTP header: `ANTHROPIC_AUTH_TOKEN` in
 //     `Authorization: Bearer`, `ANTHROPIC_API_KEY` in `x-api-key`"):
-//       anthropic_api_key → ANTHROPIC_API_KEY
-//       gateway           → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+//       anthropic_api_key  → ANTHROPIC_API_KEY
+//       claude_oauth_token → CLAUDE_CODE_OAUTH_TOKEN, the token `claude setup-token`
+//                            prints (an sk-ant-oat01- token in x-api-key is a 401)
+//       gateway            → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 //   - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1: without it Claude Code "also
 //     sends nonessential background traffic outside the gateway path, to
 //     Anthropic and to third-party services such as GitHub: version checks,
@@ -215,6 +217,8 @@ export function credentialEnv(credential: Credential): Record<string, string> {
   switch (credential.kind) {
     case 'anthropic_api_key':
       return { ANTHROPIC_API_KEY: credential.secret }
+    case 'claude_oauth_token':
+      return { CLAUDE_CODE_OAUTH_TOKEN: credential.secret }
     case 'gateway':
       return { ANTHROPIC_BASE_URL: credential.baseUrl, ANTHROPIC_AUTH_TOKEN: credential.secret }
   }
