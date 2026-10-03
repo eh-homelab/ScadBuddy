@@ -35,6 +35,7 @@ import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents
 import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
+import { shutdownTelemetry } from './telemetry/setup.js'
 import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -402,5 +403,8 @@ async function stop(): Promise<void> {
     timeoutMs: 10_000,
   })
   if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
+  // The last spans (this shutdown's turns among them), within 2 s of the
+  // pod's grace period. Without --import no SDK started and this is a no-op.
+  await shutdownTelemetry()
   process.exit(result === 'clean' ? 0 : 1)
 }
