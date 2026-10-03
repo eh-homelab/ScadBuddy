@@ -955,8 +955,18 @@ async def test_with_no_valid_span_rows_carry_no_traceparent(
     assert stored.split("-")[1] == f"{submit_span.context.trace_id:032x}"
 
 
-async def test_the_reconciler_roots_a_row_with_no_traceparent_in_a_span_of_its_own(
-    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+@pytest.mark.parametrize(
+    "traceparent",
+    # Review 3 of #1064: an invalid value (a hand-edited row, a version the propagator
+    # does not accept) has no trace to rejoin either, exactly like NULL.
+    [None, "00-garbage-xx-01"],
+    ids=["null", "invalid"],
+)
+async def test_the_reconciler_roots_a_row_with_no_valid_traceparent_in_a_span_of_its_own(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
+    traceparent: str | None,
 ) -> None:
     old = Job(
         id=uuid.uuid4().hex,
@@ -964,7 +974,7 @@ async def test_the_reconciler_roots_a_row_with_no_traceparent_in_a_span_of_its_o
         params={"width": 10},
         inputs={"params": {"width": 10}},
         created_at=now(),
-        traceparent=None,
+        traceparent=traceparent,
     )
     await asyncio.to_thread(projection.submit, old, render_key(SLUG, {"width": 10}, None))
     async with temporal_client() as plain:
@@ -978,6 +988,7 @@ async def test_the_reconciler_roots_a_row_with_no_traceparent_in_a_span_of_its_o
     finished = spans.get_finished_spans()
     (root,) = [s for s in finished if s.name == "render.reconcile"]
     assert root.parent is None
+    assert root.context.trace_flags.sampled
     assert (root.attributes or {})["scadbuddy.job_id"] == old.id
     (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
     assert start.parent is not None
