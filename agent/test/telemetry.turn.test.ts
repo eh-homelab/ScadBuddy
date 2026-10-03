@@ -40,7 +40,7 @@ function decision() {
 const approved = (id: string, decisionTraceparent: string | null) => ({ id, decision: 'approved' as const, decisionTraceparent })
 const execution = (toolUseId: string) => trace.getSpan(toolContextFor({ _meta: { 'claudecode/toolUseId': toolUseId } }))!.spanContext()
 
-describe('TurnTrace', async () => {
+describe('TurnTrace', () => {
   it('a parked call ends its tool span and the turn at once, outcome parked', async () => {
     const t = turn()
     t.toolStarted('toolu_1', 'mcp__scadbuddy__print')
@@ -286,5 +286,120 @@ describe('TurnTrace', async () => {
     expect(named('agent.turn.resume')).toHaveLength(0)
     expect(named('agent.tool/late')).toHaveLength(0)
     expect(trace.getSpan(t.context())!.isRecording()).toBe(false)
+  })
+
+  // Parallel parks (decision 14: only here, not end to end).
+  function twoParked() {
+    const t = turn()
+    const pa = t.park('toolu_a', 'x')
+    const pb = t.park('toolu_b', 'x')
+    pa.parked('a')
+    pb.parked('b')
+    return { t, pa, pb }
+  }
+  const ranFor = (toolUseId: string) =>
+    named('agent.tool/x').filter((s) => s.attributes['scadbuddy.tool_use_id'] === toolUseId && s.attributes['scadbuddy.outcome'] !== 'parked')
+
+  it('decided in reverse order: the earlier runs under its own decision, the resume is the last decision’s child', async () => {
+    const { t, pa, pb } = twoParked()
+    const db = decision()
+    pb.decided(approved('b', db.traceparent), true)
+    t.toolEnded('toolu_b', true)
+    const da = decision()
+    pa.decided(approved('a', da.traceparent), true)
+    t.toolEnded('toolu_a', true)
+    t.finish(success)
+    await flushTracing()
+    const resume = one('agent.turn.resume')
+    expect(resume.parentSpanContext?.spanId).toBe(da.spanId)
+    expect(resume.links.map((l) => l.context.spanId)).toEqual([db.spanId])
+    expect(ranFor('toolu_b').map((s) => s.parentSpanContext?.spanId)).toEqual([db.spanId])
+    expect(ranFor('toolu_a').map((s) => s.parentSpanContext?.spanId)).toEqual([resume.spanContext().spanId])
+  })
+
+  it('an earlier decision denied runs nothing, and the resume links to it', async () => {
+    const { t, pa, pb } = twoParked()
+    const da = decision()
+    pa.decided({ id: 'a', decision: 'denied', decisionTraceparent: da.traceparent }, false)
+    const db = decision()
+    pb.decided(approved('b', db.traceparent), true)
+    t.toolEnded('toolu_b', true)
+    t.finish(success)
+    await flushTracing()
+    const resume = one('agent.turn.resume')
+    expect(resume.parentSpanContext?.spanId).toBe(db.spanId)
+    expect(resume.links.map((l) => l.context.spanId)).toEqual([da.spanId])
+    expect(ranFor('toolu_a')).toEqual([])
+    expect(ranFor('toolu_b').map((s) => s.parentSpanContext?.spanId)).toEqual([resume.spanContext().spanId])
+  })
+
+  it('the last decision denied still opens the resume, and nothing runs for it', async () => {
+    const { t, pa, pb } = twoParked()
+    const da = decision()
+    pa.decided(approved('a', da.traceparent), true)
+    t.toolEnded('toolu_a', true)
+    const db = decision()
+    pb.decided({ id: 'b', decision: 'denied', decisionTraceparent: db.traceparent }, false)
+    t.finish(success)
+    await flushTracing()
+    const resume = one('agent.turn.resume')
+    expect(resume.parentSpanContext?.spanId).toBe(db.spanId)
+    expect(resume.links.map((l) => l.context.spanId)).toEqual([da.spanId])
+    expect(resume.attributes['scadbuddy.outcome']).toBe('success')
+    expect(ranFor('toolu_a').map((s) => s.parentSpanContext?.spanId)).toEqual([da.spanId])
+    expect(ranFor('toolu_b')).toEqual([])
+  })
+
+  it('parked twice for one call counts it once', async () => {
+    const t = turn()
+    const park = t.park('toolu_1', 'x')
+    park.parked('a1')
+    park.parked('a1')
+    const d = decision()
+    park.decided(approved('a1', d.traceparent), true)
+    t.toolEnded('toolu_1', true)
+    t.finish(success)
+    await flushTracing()
+    expect(one('agent.turn.resume').parentSpanContext?.spanId).toBe(d.spanId)
+    expect(named('agent.tool/x').filter((s) => s.attributes['scadbuddy.outcome'] === 'parked')).toHaveLength(1)
+  })
+
+  it('a call parks in the segment it started in, even if a sibling is decided before its row exists', async () => {
+    const t = turn()
+    const pa = t.park('toolu_a', 'x')
+    const pb = t.park('toolu_b', 'x')
+    pa.parked('a')
+    const da = decision()
+    pa.decided(approved('a', da.traceparent), true)
+    t.toolEnded('toolu_a', true)
+    pb.parked('b')
+    const db = decision()
+    pb.decided(approved('b', db.traceparent), true)
+    t.toolEnded('toolu_b', true)
+    t.finish(success)
+    await flushTracing()
+    expect(one('agent.turn').attributes).toMatchObject({ 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': 'a' })
+    const resume = one('agent.turn.resume')
+    expect(resume.attributes['scadbuddy.outcome']).toBe('success')
+    expect(resume.parentSpanContext?.spanId).toBe(db.spanId)
+    expect(resume.links.map((l) => l.context.spanId)).toEqual([da.spanId])
+  })
+
+  it('an earlier decision with no trace context runs as a root linked to where it parked', async () => {
+    const { t, pa, pb } = twoParked()
+    pa.decided(approved('a', null), true)
+    t.toolEnded('toolu_a', true)
+    const db = decision()
+    pb.decided(approved('b', db.traceparent), true)
+    t.toolEnded('toolu_b', true)
+    t.finish(success)
+    await flushTracing()
+    const parkedA = named('agent.tool/x').find(
+      (s) => s.attributes['scadbuddy.tool_use_id'] === 'toolu_a' && s.attributes['scadbuddy.outcome'] === 'parked',
+    )!
+    const [ranA] = ranFor('toolu_a')
+    expect(ranA!.parentSpanContext).toBeUndefined()
+    expect(ranA!.links.map((l) => l.context.spanId)).toEqual([parkedA.spanContext().spanId])
+    expect(one('agent.turn.resume').links).toEqual([])
   })
 })

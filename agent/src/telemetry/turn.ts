@@ -23,9 +23,14 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 //     (the harness continues only then): a child of that decision, linked to
 //     the segment's other decisions. Names never nest (`.resume.resume`);
 //     every segment carries `scadbuddy.turn_id` and `scadbuddy.segment`.
+//   - A call belongs to the segment its span started in, and counts as
+//     undecided there from park() on, before its row exists: a sibling decided
+//     while this call's row is still being written does not open the resume
+//     early, and this call's parked() ends its own segment, not the resume.
 //   - An approved call's execution is a new `agent.tool/<name>` span: under
 //     the new segment when its decision opened one, else under its own
-//     decision. Denied and expired calls run nothing.
+//     decision (a root linked to its parked span when the decision has no
+//     trace context). Denied and expired calls run nothing.
 //
 // Tool spans start at whichever comes first of the PreToolUse hook, the
 // mapped `tool.call` event and a park, and end at PostToolUse(Failure) or the
@@ -50,7 +55,7 @@ export type TurnTraceOptions = {
 }
 
 type Segment = { span: Span; index: number; ended: boolean; undecided: number; decisions: SpanContext[]; tools: number }
-type Call = { name: string; span: Span; ended: boolean; parkedIn?: Segment }
+type Call = { name: string; span: Span; ended: boolean; segment: Segment; parkedIn?: Segment }
 
 function outcomeOf(outcome: TurnOutcome): string {
   return outcome.kind === 'result' ? outcome.subtype : outcome.kind
@@ -108,7 +113,7 @@ export class TurnTrace implements GateTrace {
     return trace.setSpan(ROOT_CONTEXT, this.#segment.span)
   }
 
-  #startTool(toolUseId: string, name: string, parent: Context, attributes: Attributes = {}): Span {
+  #startTool(toolUseId: string, name: string, parent: Context, attributes: Attributes = {}, links: Link[] = []): Span {
     const span = tracer().startSpan(
       toolSpanName(name),
       {
@@ -119,6 +124,7 @@ export class TurnTrace implements GateTrace {
           'scadbuddy.tool_use_id': toolUseId,
           ...attributes,
         },
+        links,
       },
       parent,
     )
@@ -131,7 +137,8 @@ export class TurnTrace implements GateTrace {
     if (known) return known
     const segment = this.#segment
     segment.tools += 1
-    const call: Call = { name, ended: false, span: this.#startTool(toolUseId, name, trace.setSpan(ROOT_CONTEXT, segment.span)) }
+    const span = this.#startTool(toolUseId, name, trace.setSpan(ROOT_CONTEXT, segment.span))
+    const call: Call = { name, ended: false, span, segment }
     this.#calls.set(toolUseId, call)
     return call
   }
@@ -198,22 +205,30 @@ export class TurnTrace implements GateTrace {
   park(toolUseId: string, toolName: string): ParkTrace {
     if (this.#finished) return { traceparent: undefined, parked: () => {}, decided: () => {} }
     const call = this.#call(toolUseId, toolName)
+    // Undecided from now on, in the segment the call started in (see the header).
+    const segment = call.segment
+    if (!call.parkedIn) {
+      segment.undecided += 1
+      call.parkedIn = segment
+    }
+    const parkedSpan = call.span.spanContext()
+    let parked = false
     return {
       traceparent: traceparentOf(call.span),
       parked: (approvalId) => {
+        if (parked || this.#finished) return
+        parked = true
         if (!call.ended) this.#endCall(toolUseId, call, 'parked', { 'scadbuddy.approval_id': approvalId })
-        const segment = this.#segment
-        segment.undecided += 1
-        call.parkedIn = segment
         this.#endSegment(segment, { 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
       },
-      decided: (approval, runs) => this.#decided(toolUseId, call, approval, runs),
+      decided: (approval, runs) => this.#decided(toolUseId, call, parkedSpan, approval, runs),
     }
   }
 
   #decided(
     toolUseId: string,
     call: Call,
+    parkedSpan: SpanContext,
     approval: Pick<ApprovalRecord, 'id' | 'decision' | 'decisionTraceparent'>,
     runs: boolean,
   ): void {
@@ -225,6 +240,7 @@ export class TurnTrace implements GateTrace {
     if (decision) segment.decisions.push(decision)
     const decisionContext = decision ? trace.setSpanContext(ROOT_CONTEXT, decision) : ROOT_CONTEXT
     let parent = decisionContext
+    let links: Link[] = []
     if (segment.undecided === 0 && segment === this.#segment) {
       const links = segment.decisions.filter((d) => d !== decision).map((context) => ({ context }))
       this.#segment = this.#open(RESUME_SPAN, segment.index + 1, decisionContext, links)
@@ -232,7 +248,9 @@ export class TurnTrace implements GateTrace {
     }
     if (!runs) return
     if (parent !== decisionContext) this.#segment.tools += 1
-    call.span = this.#startTool(toolUseId, call.name, parent, { 'scadbuddy.approval_id': approval.id })
+    // Run under its own decision with no trace context: a root, so link it to where it parked.
+    else if (!decision) links = [{ context: parkedSpan }]
+    call.span = this.#startTool(toolUseId, call.name, parent, { 'scadbuddy.approval_id': approval.id }, links)
     call.ended = false
   }
 
