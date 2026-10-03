@@ -1,6 +1,8 @@
 import { trace } from '@opentelemetry/api'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api, printRunPoll } from '../api/client'
+import { queuedResult } from '../mocks/choices'
 import { server } from '../mocks/server'
 import { RELAY_PATH } from './relayExporter'
 import { TRACER_NAME, traceAction } from './traceAction'
@@ -56,6 +58,53 @@ describe('startTracing', () => {
       await fetch('/api/v1/outputs')
     })
     expect(seen[0]?.split('-')[1]).toBe(actionTrace)
+  })
+
+  it('parents the real createOutput write on the generate action', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/outputs', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return HttpResponse.json({})
+      }),
+    )
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('generate', {}, () => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      return api.createOutput('box', 'job-1')
+    })
+    expect(seen[0]).toMatch(TRACEPARENT)
+    expect(seen[0]?.split('-')[1]).toBe(actionTrace)
+  })
+
+  it('parents the real runPrint POST, and its retry, on the print action', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out1/run', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return seen.length === 1
+          ? new HttpResponse(null, { status: 502 })
+          : HttpResponse.json({ id: 'r1', status: 'succeeded', result: queuedResult })
+      }),
+    )
+    stop = startTracing()
+    const saved = printRunPoll.intervalMs
+    printRunPoll.intervalMs = 1
+    let actionTrace: string | undefined
+    try {
+      await traceAction('print', {}, (within) => {
+        actionTrace = trace.getActiveSpan()?.spanContext().traceId
+        return api.runPrint('out1', {} as never, undefined, within)
+      })
+    } finally {
+      printRunPoll.intervalMs = saved
+    }
+    expect(seen).toHaveLength(2)
+    for (const header of seen) {
+      expect(header).toMatch(TRACEPARENT)
+      expect(header?.split('-')[1]).toBe(actionTrace)
+    }
   })
 
   it('carries no baggage header', async () => {

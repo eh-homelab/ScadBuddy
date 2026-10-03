@@ -144,9 +144,9 @@ export function useRunPrint({
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),
       }
-      // The run's POST is the action's child; the polls that follow it are not (traceAction).
-      const ran = await traceAction('print', printAttributes(source, body), () =>
-        sourceApi(source).run(body, controller.signal),
+      // The run's POST, retries included, is the action's child; the polls are not (traceAction).
+      const ran = await traceAction('print', printAttributes(source, body), (within) =>
+        sourceApi(source).run(body, controller.signal, within),
       )
       if (attempt !== runAttempt.current) return
       setResult(ran)
