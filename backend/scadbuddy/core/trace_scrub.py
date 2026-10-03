@@ -40,6 +40,9 @@ _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: string can carry anything a user typed, a user agent is a header value.
 _DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
 _CUT_AT_QUERY: Final = frozenset({"http.url", "url.full", "http.target"})
+#: Headers the instrumentation captures when a deployment sets
+#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything.
+_HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
 
 
 @lru_cache(maxsize=256)
@@ -133,7 +136,7 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
     kept: dict[str, AttributeValue] = {}
     for key, value in (attributes or {}).items():
-        if key in _DROPPED:
+        if key in _DROPPED or key.startswith(_HEADER_PREFIXES):
             continue
         if key in _CUT_AT_QUERY and isinstance(value, str):
             value = value.split("?", 1)[0]

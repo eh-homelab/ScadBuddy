@@ -535,6 +535,8 @@ before it leaves the process. It:
   `<module>`, a lambda or comprehension, or a `def`/`class` name in that file's
   source (a `<frozen …>`, `<string>` or `<stdin>` frame keeps only path and line);
 - keeps `exception.type`;
+- drops every captured header (`http.request.header.*`,
+  `http.response.header.*`), whatever the instrumentation's capture variables say;
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 

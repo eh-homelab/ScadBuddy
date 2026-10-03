@@ -224,3 +224,15 @@ def test_a_frozen_module_must_be_one() -> None:
         "ValueError: boom"
     )
     assert frames_only(text) == ""
+
+
+def test_no_captured_header_survives() -> None:
+    kept = _exported_attributes(
+        {
+            "http.request.header.cookie": SENTINEL,
+            "http.request.header.authorization": SENTINEL,
+            "http.response.header.set_cookie": SENTINEL,
+            "http.route": "/api/v1/x",
+        }
+    )
+    assert kept == {"http.route": "/api/v1/x"}
