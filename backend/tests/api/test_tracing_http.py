@@ -45,11 +45,15 @@ def test_its_queries_are_children_of_the_request(
         assert missing not in repr(query.attributes)
 
 
-@pytest.mark.parametrize("path", ["/healthz", "/metrics"])
+@pytest.mark.parametrize(
+    ("path", "status"),
+    # The relay route (spec §5.2) does not exist yet: its 404 is still not traced.
+    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 404)],
+)
 def test_the_infrastructure_paths_are_not_traced(
-    client: TestClient, spans: InMemorySpanExporter, path: str
+    client: TestClient, spans: InMemorySpanExporter, path: str, status: int
 ) -> None:
-    assert client.get(path).status_code == 200
+    assert client.get(path).status_code == status
     assert _server_spans(spans) == []
 
 
