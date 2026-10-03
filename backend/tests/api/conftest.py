@@ -101,11 +101,13 @@ def settings(
             "temporal_namespace": "default",
             "temporal_task_queue_render": queue,
             "temporal_task_queue_bambuddy": f"{queue}-bambuddy",
+            "temporal_task_queue_library": f"{queue}-library",
             "temporal_worker_inprocess": True,
         }
     )
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")
+    workflow_reaper.terminate(f"{queue}-library")
 
 
 @pytest.fixture

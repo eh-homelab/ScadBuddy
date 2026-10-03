@@ -484,7 +484,9 @@ class TemplatePipeline:
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 )
             except WorkflowAlreadyStartedError:
-                piece = workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
+                    workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                )
                 try:
                     await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                 except FailureError as error:
