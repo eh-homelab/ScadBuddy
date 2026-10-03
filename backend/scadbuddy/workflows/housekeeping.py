@@ -50,6 +50,9 @@ def prune_schedule_id_for(task_queue: str) -> str:
     return f"{PRUNE_SCHEDULE}-{task_queue}"
 
 
+#: The shortest interval a Temporal Schedule takes ("interval is too small" below it).
+MIN_INTERVAL = 1.0
+
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -88,7 +91,9 @@ def _schedule(
         action=ScheduleActionStartWorkflow(
             HOUSEKEEPING_WORKFLOW, list(sweeps), id=schedule_id, task_queue=task_queue
         ),
-        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=interval))]),
+        spec=ScheduleSpec(
+            intervals=[ScheduleIntervalSpec(every=timedelta(seconds=max(interval, MIN_INTERVAL)))]
+        ),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
     )
 
