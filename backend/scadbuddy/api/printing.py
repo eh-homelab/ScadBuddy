@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from contextlib import suppress
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -26,7 +27,6 @@ from scadbuddy.api.deps import (
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
-    PrintWatcherDep,
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
@@ -68,6 +68,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     start_command,
 )
+from scadbuddy.workflows.follow import follow
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
     PRINT_RUN_WORKFLOW,
@@ -456,7 +457,7 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
+    runs: PrintRunsDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
@@ -472,11 +473,23 @@ async def get_progress(
         )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
-    # (#268). The watcher may not be, after a restart without a database, for a print
-    # sent before the watcher existed, or once it gave up on a quiet print.
+    # (#268), and read now (#1053: a poke). Its follow may have given up on a quiet
+    # print, or been sent before there was one. In the background: a Temporal that
+    # does not answer never holds this read up.
     if progress is not None and not progress.settled:
-        watcher.watch(meta.id)
+        _following(follow(runs.client, runs.task_queue, meta.id))
     return progress
+
+
+#: The follows the progress route started, kept until they finish (a task nothing
+#: references may be collected mid-flight).
+_FOLLOWS: set[asyncio.Task[None]] = set()
+
+
+def _following(start: Coroutine[Any, Any, None]) -> None:
+    task = asyncio.create_task(start)
+    _FOLLOWS.add(task)
+    task.add_done_callback(_FOLLOWS.discard)
 
 
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")

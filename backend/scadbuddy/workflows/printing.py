@@ -18,18 +18,25 @@ Bambuddy, so they give up and the run is recorded as failed.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    FailureError,
+    WorkflowAlreadyStartedError,
+)
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
+    from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         PRINT_RUN_WORKFLOW,
@@ -229,7 +236,28 @@ class PrintRunWorkflow:
             start_to_close_timeout=SHORT,
             retry_policy=BOUNDED_RETRY,
         )
+        if input.source.kind == "output" and input.source.output_id is not None:
+            await self._follow(input.source.output_id)
         return finished
+
+    async def _follow(self, output_id: str) -> None:
+        """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
+        this run, or a poke to the one already following the output (a child start has
+        no id-conflict policy)."""
+        try:
+            await workflow.start_child_workflow(
+                FOLLOW_WORKFLOW,
+                output_id,
+                id=follow_id(output_id),
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+            )
+        except WorkflowAlreadyStartedError:
+            # It may have closed in between: the print it followed has ended.
+            with suppress(FailureError):
+                await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
+                    POKE_SIGNAL
+                )
 
     def _upsert(
         self,

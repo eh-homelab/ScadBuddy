@@ -16,11 +16,11 @@ from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import Follower
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
@@ -146,7 +146,8 @@ class AppState:
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
-    print_watcher: PrintWatcher
+    #: What `FollowPrint`'s activity reads with (#1053), on the `bambuddy` worker.
+    print_follower: Follower
     #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
     #: start them.
     print_runs: PrintCommands
@@ -360,7 +361,7 @@ def _build_core(settings: Settings) -> AppState:
     print_links = PrintLinkStore(pool)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
-        # The watcher links archives too (#306), so a print nobody watches is found.
+        # The follow links archives too (#306), so a print nobody watches is found.
         async with client_for(settings_store.load()) as client:
             return await progress_for(
                 client,
@@ -392,13 +393,11 @@ def _build_core(settings: Settings) -> AppState:
         metrics=metrics,
         events=events,
         print_progress=print_progress,
-        print_watcher=PrintWatcher(
+        print_follower=Follower(
             outputs=outputs,
             observer=print_progress,
             read=read_progress,
             events=events,
-            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
-            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
         print_runs=PrintCommands(
             store=PrintRunStore(pool, events=_transactional(events)),
@@ -547,10 +546,6 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
-def get_print_watcher(state: StateDep) -> PrintWatcher:
-    return state.print_watcher
-
-
 #: Problem ``type`` for a route that needs the database when none is configured.
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
@@ -612,7 +607,6 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
-PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
 OperationsDep = Annotated[OperationCommands, Depends(require_operations)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]

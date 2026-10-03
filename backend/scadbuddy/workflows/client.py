@@ -15,6 +15,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
 from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.follow import FollowPrint
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 from scadbuddy.workflows.printing import PrintRunWorkflow
@@ -85,7 +86,7 @@ def bambuddy_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[PrintRunWorkflow, OperationWorkflow],
+        workflows=[PrintRunWorkflow, OperationWorkflow, FollowPrint],
         activities=activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
