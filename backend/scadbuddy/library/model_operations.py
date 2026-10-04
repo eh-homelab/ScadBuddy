@@ -118,6 +118,42 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         await models_api.delete_template(request["slug"], request["force"], state)
         return {}
 
+    async def source_put_check(request: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+        models_api.require_model_exists(state.catalogue, slug)
+        if request["base"] is not None:
+            # The early stale refusal; `write_source` makes it again under the lock.
+            current = await asyncio.to_thread(state.catalogue.version, slug)
+            models_api._require_base(slug, request["base"], current)
+        return {}
+
+    async def source_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        source = await _claimed(request["source"])
+        assert source is not None  # every save claims its source
+        record = await models_api.save_source_run(
+            request["slug"],
+            source.decode(),
+            message=request["message"],
+            force=request["force"],
+            merge_base=request["merge_base"],
+            expected_version=request["base"],
+            state=state,
+        )
+        return _record(record)
+
+    async def source_patch_check(request: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+        models_api.require_model_exists(state.catalogue, slug)
+        current = await asyncio.to_thread(state.catalogue.version, slug)
+        models_api._require_base(slug, request["base"], current)
+        return {}
+
+    async def source_patch_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        claimed = await _claimed(request["body"])
+        assert claimed is not None  # every patch claims its body
+        body = models_api.SourcePatch.model_validate_json(claimed)
+        return _record(await models_api.patch_source_run(request["slug"], body, state))
+
     def kind(name: str, check: Any, run: Any, **options: Any) -> OperationKind:
         return OperationKind(
             name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
@@ -130,5 +166,8 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         kind("model_patch", patch_check, patch_run),
         kind("model_duplicate", duplicate_check, duplicate_run),
         kind("model_delete", delete_check, delete_run),
+        # A save parse-checks the source and may clone the checkouts it includes.
+        kind("model_source_put", source_put_check, source_put_run, run_timeout=PIN_TIMEOUT),
+        kind("model_source_patch", source_patch_check, source_patch_run, run_timeout=PIN_TIMEOUT),
     ]
     return {each.name: each for each in kinds}

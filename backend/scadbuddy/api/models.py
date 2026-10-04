@@ -1243,16 +1243,14 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
         "otherwise, writing nothing), and the duplicate's `base` becomes it in the same "
         "commit, `Merge <upstream id> into <slug>` unless `message` names it."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def put_source(
     slug: SlugPath,
     body: SourceUpdate,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
     paths: PathsDep,
-    config: ConfigDep,
-    checks: ChecksDep,
-    events: EventsDep,
-    fetcher: FetcherDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -1261,12 +1259,9 @@ async def put_source(
             description="The upstream revision this resolves a merge of: the 409's `merge_base`",
         ),
     ] = None,
-) -> ModelRecord:
-    # `require_model_exists`, not `require_model`: building a record costs a
-    # `git log` for the model's revision, and this handler is `async def`. The
-    # record `write_source` returns carries the new revision anyway.
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
     if merge_base is not None and has_conflict_markers(body.source):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1277,22 +1272,51 @@ async def put_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "`base` and `merge_base` cannot be combined: a merge is checked against its upstream",
         )
-    if body.base is not None:
-        _require_base(slug, body.base, await asyncio.to_thread(catalogue.version, slug))
+    # By claim: a source may be 1M characters, past a workflow payload's limit (#1054).
+    source = await asyncio.to_thread(ClaimStore(paths.claims).put, body.source.encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_source_put"],
+        subject=slug,
+        request={
+            "slug": slug,
+            "source": source,
+            "message": body.message,
+            # Either spelling forces, as on `POST /models`.
+            "force": force or body.force,
+            "merge_base": merge_base,
+            "base": body.base,
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def save_source_run(
+    slug: str,
+    source: str,
+    *,
+    message: str | None,
+    force: bool,
+    merge_base: str | None,
+    expected_version: str | None,
+    state: AppState,
+) -> ModelRecord:
+    """The ``model_source_put`` operation's run (#1054)."""
     return await _save_source(
         slug,
-        body.source,
-        message=body.message,
-        # Either spelling forces, as on `POST /models`.
-        force=force or body.force,
+        source,
+        message=message,
+        force=force,
         merge_base=merge_base,
-        expected_version=body.base,
-        catalogue=catalogue,
-        paths=paths,
-        config=config,
-        checks=checks,
-        events=events,
-        fetcher=fetcher,
+        expected_version=expected_version,
+        catalogue=state.catalogue,
+        paths=state.paths,
+        config=state.config,
+        checks=state.checks,
+        events=state.events,
+        fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
     )
 
 
@@ -1406,24 +1430,41 @@ def announce_source_change(events: EventBus, slug: str) -> None:
         "the history's write lock. A hunk or edit that does not apply is a 422 naming it, "
         "with nothing written (#252)."
     ),
-    responses={409: {"description": "The model is no longer at `base`; `current` names it"}},
+    responses={
+        **OPERATION_RESPONSES,
+        409: {"description": "The model is no longer at `base`; `current` names it"},
+    },
 )
 async def patch_source(
     slug: SlugPath,
     body: SourcePatch,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
     paths: PathsDep,
-    config: ConfigDep,
-    checks: ChecksDep,
-    events: EventsDep,
-    fetcher: FetcherDep,
-) -> ModelRecord:
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
+    # The whole body by claim: up to MAX_EDITS edits of a source's size each (#1054).
+    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.model_dump_json().encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_source_patch"],
+        subject=slug,
+        request={"slug": slug, "base": body.base, "body": claimed},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def patch_source_run(slug: str, body: SourcePatch, state: AppState) -> ModelRecord:
+    """The ``model_source_patch`` operation's run (#1054): the patch applied to the
+    source as it stands, then saved as `PUT /source` saves."""
+    catalogue = state.catalogue
     current = await asyncio.to_thread(catalogue.version, slug)
     _require_base(slug, body.base, current)
     try:
-        source = await asyncio.to_thread(paths.model_source(slug).read_text, encoding="utf-8")
+        source = await asyncio.to_thread(state.paths.model_source(slug).read_text, encoding="utf-8")
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except UnicodeDecodeError:
@@ -1443,7 +1484,7 @@ async def patch_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"the patch does not apply: {error}"
         ) from None
     _require_within_cap(patched, "the patched source")
-    return await _save_source(
+    return await save_source_run(
         slug,
         patched,
         message=body.message,
@@ -1451,12 +1492,7 @@ async def patch_source(
         merge_base=None,
         # The full id the base matched, so the check under the lock is exact.
         expected_version=current,
-        catalogue=catalogue,
-        paths=paths,
-        config=config,
-        checks=checks,
-        events=events,
-        fetcher=fetcher,
+        state=state,
     )
 
 
