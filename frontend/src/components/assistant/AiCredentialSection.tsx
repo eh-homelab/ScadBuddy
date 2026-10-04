@@ -196,7 +196,8 @@ export function AiCredentialSection() {
   const [stale, setStale] = useState(false)
   // Every re-read goes through here with the same handlers. Whichever read turns out the
   // newest (the timer's, or an action's that overtook it) either changes `listed` or bumps
-  // `missed`, so the timer below is always scheduled again.
+  // `missed`, so the timer below is always scheduled again. An action that answers with the
+  // list sets it directly and clears `missed` (`act`).
   const reread = useCallback(
     () =>
       refresh(
@@ -274,6 +275,7 @@ export function AiCredentialSection() {
       if ('credentials' in answer) {
         list.setData(answer, { supersede: true })
         setStale(false)
+        setMissed(0)
       } else reread()
       if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
       if (done) setNotice(typeof done === 'function' ? done(answer) : done)
@@ -429,8 +431,9 @@ export function AiCredentialSection() {
                 )}
                 {!entry.usable && (
                   <p className="text-[12px] text-warn">
-                    The agent cannot decrypt this key (it was saved under another encryption key, or in an old
-                    format). Replace it.
+                    {current.can_save
+                      ? 'The agent cannot decrypt this key (it was saved under another encryption key, or in an old format). Replace it.'
+                      : 'The agent cannot decrypt this key: no key-encryption key is mounted. Mount it, then replace the key if it still cannot be decrypted.'}
                   </p>
                 )}
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -703,6 +706,11 @@ export function AiCredentialSection() {
 
 function StatusBadge({ entry }: { entry: AiCredentialEntry }) {
   const base = 'rounded-[4px] border px-1 py-px text-[12px]'
+  // Stored status and decryptability are separate (agent `entryView`): a key no mounted
+  // key-encryption key opens is skipped whatever its status says.
+  if (!entry.usable) {
+    return <span className={`${base} border-warn/50 text-warn`}>Cannot decrypt</span>
+  }
   if (entry.status === 'cooling_down') {
     return (
       <span className={`${base} border-warn/50 text-warn`} title={entry.cooldown_until ?? undefined}>

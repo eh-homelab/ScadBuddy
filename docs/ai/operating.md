@@ -295,10 +295,11 @@ the query read, so a query that started with an old secret cannot disable a new 
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way to use them is Settings → Assistant →
-**Claude credentials** (`AiCredentialSection`,
-[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx), #1000, #1093),
-a list over the `/entries` and `/order` routes in the order queries try the credentials.
+bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way
+to use them is Settings → Assistant → **Claude credentials** (`AiCredentialSection`,
+[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx),
+#1000, #1093), a list over the `/entries` and `/order` routes in the order queries try
+the credentials.
 Each row shows the kind, base URL, last four and status (active, rate limited until a
 time, or disabled with the last error), and can be moved up or down, tested (showing
 `Retry-After` on a `429`), reset when not active, given a new key, or deleted after a

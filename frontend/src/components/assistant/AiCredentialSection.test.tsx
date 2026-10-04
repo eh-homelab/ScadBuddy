@@ -607,6 +607,50 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(reads).toBeGreaterThanOrEqual(3)
   }, 10_000)
 
+  it('waits for the cooldown again after an action answers with the list, even after a failed read', async () => {
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA' }),
+      credentialEntry({
+        id: 'c2',
+        kind: 'gateway',
+        base_url: 'https://gateway.example/anthropic',
+        last4: 'GW99',
+        status: 'cooling_down',
+        cooldown_until: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      credentialEntry({ id: 'c3', last4: 'K333', status: 'disabled' }),
+    ])
+    let failing = false
+    let reads = 0
+    server.use(
+      http.get(entries, () => {
+        reads += 1
+        return failing ? HttpResponse.json({ detail: 'Bad Gateway' }, { status: 502 }) : undefined
+      }),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    failing = true
+    await user.click(screen.getByRole('button', { name: 'Reset Anthropic API key ••••K333' }))
+    expect(await screen.findByTestId('ai-credentials-stale')).toBeInTheDocument()
+    failing = false
+    await user.click(screen.getByRole('button', { name: 'Move Anthropic API key ••••K333 up' }))
+    await waitFor(() => expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument())
+    const after = reads
+    // Backing off would read again after 1 s; the cooldown has a minute left.
+    await new Promise((resolve) => setTimeout(resolve, 1600))
+    expect(reads).toBe(after)
+  }, 10_000)
+
+  it('badges a key the agent cannot decrypt as such, not Active', async () => {
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', usable: false })])
+    renderPage(<AiCredentialSection />)
+    const [row] = await screen.findAllByTestId('ai-credential')
+    expect(row).toHaveTextContent('Cannot decrypt')
+    expect(row).not.toHaveTextContent('Active')
+    expect(row).toHaveTextContent('Replace it.')
+  })
+
   it('says why it cannot save, and disables Add and Replace', async () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })], false)
     const { user } = renderPage(<AiCredentialSection />)
@@ -622,6 +666,8 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(await screen.findByTestId('ai-credentials-none-usable')).toHaveTextContent(
       'until its key-encryption key is mounted',
     )
+    expect(rows()[0]).toHaveTextContent('no key-encryption key is mounted')
+    expect(rows()[0]).not.toHaveTextContent('Replace it.')
   })
 
   it('warns about a key the agent cannot decrypt', async () => {
