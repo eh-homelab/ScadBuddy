@@ -36,7 +36,6 @@ from scadbuddy.core.tracing import (
     link_to,
     span,
     use_traceparent,
-    valid_traceparent,
 )
 from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import legacy_inputs
@@ -243,18 +242,19 @@ class RenderService:
         started: list[str] = []
         for job in stale:
             try:
-                if not valid_traceparent(job.traceparent):
-                    # No trace to rejoin (NULL, or a value the propagator rejects): a
-                    # root span, or the default sampler drops the parentless
-                    # StartWorkflow CLIENT span and the workflow with it.
-                    with span(
+                # A child of the row's first request when it has a valid traceparent,
+                # else a root (NULL, or a value the propagator rejects): without a span
+                # here the default sampler would drop the parentless StartWorkflow
+                # CLIENT span and the workflow with it. Either way the trace shows the
+                # start came from the reconciler.
+                with (
+                    use_traceparent(job.traceparent),
+                    span(
                         "render.reconcile",
                         attributes={"scadbuddy.slug": job.slug, "scadbuddy.job_id": job.id},
-                    ):
-                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
-                else:
-                    with use_traceparent(job.traceparent):
-                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
+                    ),
+                ):
+                    await self._start(job, WorkflowIDConflictPolicy.FAIL)
             except WorkflowAlreadyStartedError:
                 continue
             except Exception as error:

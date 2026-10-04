@@ -31,6 +31,11 @@ def test_a_failed_stage_is_an_error_with_its_class(spans: InMemorySpanExporter) 
         raise OpenSCADError("openscad exited with 1", ["SECRET LINE"], 1, [], 0)
     (failed,) = spans.get_finished_spans()
     assert (failed.attributes or {})["scadbuddy.failure_class"] == "OpenSCADError"
+    # The stderr line is what must never be exported (spec §6), in any part of the span.
+    assert [event.name for event in failed.events] == ["exception"]
+    for part in (failed.attributes, [e.attributes for e in failed.events], failed.status):
+        assert "SECRET LINE" not in repr(part)
+    assert "SECRET LINE" not in str(failed.status.description)
 
 
 async def test_an_openscad_call_is_an_export_span(
@@ -40,7 +45,14 @@ async def test_an_openscad_call_is_an_export_span(
     scad.write_text("cube(1);")
     config = Config(openscad=fake_openscad, data_dir=tmp_path / "data")
     await run_openscad(
-        ["--backend=Manifold", "-o", str(tmp_path / "out.3mf"), scad.name],
+        [
+            "--backend=Manifold",
+            "-o",
+            str(tmp_path / "out.3mf"),
+            "-D",
+            'label="s3ntinel"',
+            scad.name,
+        ],
         cwd=tmp_path,
         config=config,
     )
@@ -49,7 +61,9 @@ async def test_an_openscad_call_is_an_export_span(
     assert attributes["scadbuddy.openscad.format"] == "3mf"
     assert attributes["scadbuddy.openscad.backend"] == "Manifold"
     assert attributes["scadbuddy.openscad.exit_code"] == 0
-    assert "cube" not in repr(attributes)
+    # A define carries a parameter value, which is never recorded (spec §6).
+    assert "s3ntinel" not in repr(attributes)
+    assert "s3ntinel" not in repr([e.attributes for e in export.events])
 
 
 async def test_a_failed_export_records_its_exit_code(

@@ -72,7 +72,11 @@ async def get_library_thumbnail(
     file_id: FileIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/library/files/{file_id}/thumbnail", what="show the file's thumbnail"
+        store,
+        request,
+        f"/library/files/{file_id}/thumbnail",
+        operation="library.thumbnail",
+        what="show the file's thumbnail",
     )
 
 
@@ -92,6 +96,7 @@ async def get_library_plate_thumbnail(
         store,
         request,
         f"/library/files/{file_id}/plate-thumbnail/{index}",
+        operation="library.plate_thumbnail",
         what="show the plate image",
     )
 

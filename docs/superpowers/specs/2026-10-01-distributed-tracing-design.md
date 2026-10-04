@@ -47,7 +47,9 @@ cluster does not run and which covers neither the browser nor Temporal context.
   configured before the database is reachable, and it is infrastructure, like
   `SCADBUDDY_DATABASE_URL`.
 - **No endpoint, no export.** With neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` nor
-  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER=none`), each
+  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER` naming anything
+  but `otlp`: `none`, or an exporter the services do not ship, which also logs
+  a warning), each
   service installs a provider with no exporter: spans are created (so context
   still propagates) and dropped. Tests, CI and a local `docker run` need nothing.
 - **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
@@ -82,8 +84,10 @@ needs it, and its values travel as plain text to whatever is called next.
 process-wide (no `HTTPXClientInstrumentor().instrument()`).
 `HTTPXClientInstrumentor.instrument_client` is applied only to clients that
 call ScadBuddy's own services. The Bambuddy client (`bambuddy/client.py`)
-instead gets a manual client span per call (`bambuddy.<operation>`, with the
-status code and the client's `Scope`) and **injects no headers**. A test
+instead gets a manual client span per call (`bambuddy.<operation>`, the
+operation one of a closed set the client names, such as `printers.list` or
+`library.download`, never an id or free text; with the method, the status
+code and the client's `Scope`) and **injects no headers**. A test
 asserts that a Bambuddy request carries no `traceparent`. The relay's
 forwarder to the collector is not instrumented at all (§6).
 
@@ -109,7 +113,8 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   from the returned job and adds a **span link** to it on its own submit span,
   not a parent. The reconciler starts a stale row's workflow under that same
   `traceparent`, so a render started late still lands in its first caller's
-  trace. The column is written whenever the submit span's context is valid
+  trace, under a `render.reconcile` span that shows the reconciler started it
+  (a row with no valid `traceparent` gets that span as a root). The column is written whenever the submit span's context is valid
   and sampled. That includes a process with no exporter, which still creates
   and propagates spans (§3); persisting a context nobody exports is harmless.
   A row gets no `traceparent`, and a coalesced request no link, only when:
@@ -162,8 +167,13 @@ forwarder (§5.2) is not one, since it must stay untraced.
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
 `render.solids`, `render.thumbnail`, `render.write`. Each `openscad` invocation
-(`render/runner.py`) is an `openscad.export` span with format, backend, exit
-code and, for `solids`, the colour index.
+(`render/runner.py`) is an `openscad.export` span with format, backend and exit
+code. Under `render.solids`, each colour is a `render.solid` span carrying
+`scadbuddy.colour_index` (1-based, in the template's colour order): the parent
+of that colour's `openscad.export` and of its mesh parse, so the index lives
+there rather than on the export. A colour whose `openscad` fails falls back to
+the split mesh (`scadbuddy.solid.fallback`) without failing the span; a failed
+mesh parse fails the job, and the span with it.
 
 ### 5.2 Browser relay route
 
@@ -472,12 +482,17 @@ not copied from that module, which has no such list:
 - OpenSCAD source and its stderr (only the exit code and a failure class);
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
-  is configured; URLs are recorded without the query);
+  is configured; URLs are recorded without the query). That includes the
+  `Host` header: `http.host`, `http.server_name` and `server.address` are
+  dropped, and a server span exports no `http.url` or `url.full`, whose host is
+  that header's (the server's own port, `net.host.port`/`server.port`, stays);
+- the client's address: `net.peer.ip`/`net.peer.port`, `client.address`/
+  `client.port`, `net.sock.peer.*` and `network.peer.*`;
 - the request path: a segment is data (a file path a user chose, a photo
   filename Bambuddy returned, whatever the SPA fallback was asked for), so the
-  route's template stands in for it (`http.target`, `url.path`, and after the
-  `scheme://host` of `http.url`, `url.full`), and a request with no route
-  records no path at all;
+  route's template stands in for it (`http.target`, `url.path`, and, on any
+  span but a server span, after the `scheme://host` of `http.url` and
+  `url.full`), and a request with no route records no path at all;
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.trace import Link, Status
+from opentelemetry.trace import Link, SpanKind, Status
 
 if TYPE_CHECKING:
     # tracing imports this module at run time; the alias is needed only by mypy.
@@ -38,12 +38,33 @@ _ANONYMOUS: Final = frozenset(
 )
 _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
-#: string can carry anything a user typed, a user agent is a header value.
-_DROPPED: Final = frozenset({"url.query", "http.user_agent", "user_agent.original"})
+#: string can carry anything a user typed, a user agent and a host name are header
+#: values (the Host header). The client's address is never recorded either; the
+#: server's own port is kept.
+_DROPPED: Final = frozenset(
+    {
+        "url.query",
+        "http.user_agent",
+        "user_agent.original",
+        "http.host",
+        "http.server_name",
+        "server.address",
+        "net.peer.ip",
+        "net.peer.port",
+        "client.address",
+        "client.port",
+        "net.sock.peer.addr",
+        "net.sock.peer.port",
+        "network.peer.address",
+        "network.peer.port",
+    }
+)
 #: Attributes that hold the request's path, which is data too: a file path a user
 #: chose, a photo filename Bambuddy returned, whatever the SPA fallback was asked for.
 #: The route's template stands in for it; with no route, the attribute is dropped.
 _PATH_ONLY: Final = frozenset({"http.target", "url.path"})
+#: An absolute URL keeps its origin, then the route, except on a server span: there the
+#: host is the request's Host header, so the URL is not exported at all.
 _WITH_ORIGIN: Final = frozenset({"http.url", "url.full"})
 #: An absolute URL's ``scheme://host[:port]``, kept in front of the route.
 _ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
@@ -185,12 +206,16 @@ def _exception_type(events: Sequence[Event]) -> str | None:
     return None
 
 
-def _scrub_attributes(attributes: Mapping[str, AttributeValue] | None) -> dict[str, AttributeValue]:
+def _scrub_attributes(
+    attributes: Mapping[str, AttributeValue] | None, *, server: bool = False
+) -> dict[str, AttributeValue]:
     attributes = attributes or {}
     route = attributes.get("http.route")
     kept: dict[str, AttributeValue] = {}
     for key, value in attributes.items():
         if key in _DROPPED or key.startswith(_HEADER_PREFIXES):
+            continue
+        if server and key in _WITH_ORIGIN:
             continue
         if key in _PATH_ONLY or key in _WITH_ORIGIN:
             if not isinstance(route, str) or not isinstance(value, str):
@@ -215,7 +240,7 @@ def scrub(span: ReadableSpan) -> ReadableSpan:
         context=span.context,
         parent=span.parent,
         resource=span.resource,
-        attributes=_scrub_attributes(span.attributes),
+        attributes=_scrub_attributes(span.attributes, server=span.kind is SpanKind.SERVER),
         events=events,
         links=[_scrub_link(link) for link in span.links],
         kind=span.kind,
