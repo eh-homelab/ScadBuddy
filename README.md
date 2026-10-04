@@ -168,12 +168,18 @@ on shutdown.
     file that no saved output, preset or render job references is removed once
     nothing has uploaded or used it for this long. The same grace applies to the
     blob store's pieces and snapshots (see "Blob store and render workers").
-  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off. It is the interval of the Temporal
-    Schedule `scadbuddy-housekeeping-library`, on the API's own `library` queue
-    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Settled render
-    jobs are pruned every 300 s by a second Schedule, `scadbuddy-prune-library`, which
-    0 leaves alone. The same interval drives the blob
+  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs;
+    0 turns it off. It is the interval of the Temporal Schedule
+    `scadbuddy-housekeeping-library`, on the API's own `library` queue
+    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
+    also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
+    converges the uploads with the store (reconcile and backfill), so expect that
+    Bambuddy traffic right after a deploy. Settled render jobs are pruned every 300 s by a second
+    Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
+    library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
+    old two Schedules starting runs on a queue nothing serves, so delete them by hand
+    (`temporal schedule delete --schedule-id scadbuddy-housekeeping-<old queue>`, and
+    the same for `scadbuddy-prune-<old queue>`). The same interval drives the blob
     store's sweep, which 0 also turns off, and a render worker's piece-cache
     eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
