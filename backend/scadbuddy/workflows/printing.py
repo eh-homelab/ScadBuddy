@@ -314,6 +314,9 @@ class PrintRunWorkflow:
                 return
             except FailureError:
                 continue
+        # Only a log, so no command: no `patched` (review #1091 3). The progress route
+        # starts the follow again once someone opens the output.
+        workflow.logger.warning("could not follow the print", extra={"output_id": output_id})
 
     def _upsert(
         self,
