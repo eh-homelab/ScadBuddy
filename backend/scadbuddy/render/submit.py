@@ -190,7 +190,7 @@ class RenderService:
         assert answer.job is not None
         # Started first, so a refused submit supersedes nothing.
         if previous is not None:
-            await self._supersede(previous)
+            await self._supersede(previous, request_id)
         if answer.coalesced:
             self.metrics.render_coalesced.inc()
         else:
@@ -236,20 +236,11 @@ class RenderService:
                     await self.client.get_workflow_handle(workflow_id).result()
         raise CommandStillAcceptingError(workflow_id)
 
-    async def cancel(self, job_id: str, *, slug: str) -> Job | None:
-        """Withdraw one request for the job; the last one cancels it. Raises
-        `TemporalUnavailableError` or `CommandStillAcceptingError` when Temporal did not
-        answer the release, which is not "nothing to cancel" (review #1066 3.1)."""
-        job = await self._superseded(job_id, slug)
-        if job is None:
-            return None
-        return await self._release(job, "withdrawn")
-
-    async def _supersede(self, job: Job) -> None:
+    async def _supersede(self, job: Job, request_id: str | None) -> None:
         """Release the job a new render replaces. The new render is started either way:
         a release that fails is a warning, never the submit's failure."""
         try:
-            await self._release(job, "superseded")
+            await self._release(job, "superseded", request_id)
         except Exception as error:
             logger.warning(
                 "could not release a render's claim",
@@ -257,8 +248,10 @@ class RenderService:
                 exc_info=True,
             )
 
-    async def _release(self, job: Job, reason: str) -> Job | None:
-        """Take one claim off ``job``: the cancelled job when it was the last."""
+    async def _release(self, job: Job, reason: str, request_id: str | None) -> Job | None:
+        """Take one claim off ``job``: the cancelled job when it was the last. With
+        ``request_id`` the Update id is the request's, so a re-sent request releases
+        once (review #1066 finding 1)."""
         outcome: RenderOutcome = "superseded" if reason == "superseded" else "cancelled"
         if job.workflow_run_id is None:
             # A row an older release inserted, whose workflow is `render-<id>`.
@@ -274,7 +267,11 @@ class RenderService:
         handle = self.client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
         try:
             answer: ReleaseAnswer = await handle.execute_update(
-                RELEASE_UPDATE, reason, result_type=ReleaseAnswer, rpc_timeout=RPC_TIMEOUT
+                RELEASE_UPDATE,
+                reason,
+                id=f"{request_id}:release:{job.id}" if request_id is not None else None,
+                result_type=ReleaseAnswer,
+                rpc_timeout=RPC_TIMEOUT,
             )
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
