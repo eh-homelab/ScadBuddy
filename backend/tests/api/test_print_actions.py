@@ -13,6 +13,10 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import operations
+from scadbuddy.bambuddy.archive_cache import ArchiveCache
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
 from tests.api.test_print_history import link, mock_archive
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -167,6 +171,43 @@ def test_pull_timelapse_drops_the_cached_archive(client: TestClient, model: str)
     client.get("/api/v1/prints/35")
 
     assert before.call_count == 2, "the detail after a pull reads the archive again"
+
+
+@respx.mock
+def test_the_api_drops_its_cached_archive_when_the_print_worker_changed_it(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1060: on the print worker the kinds keep their own `ArchiveCache`, so the API
+    drops its entry itself once a pull or a reprint ran."""
+    over = operations.bambuddy_kinds_over
+    monkeypatch.setattr(
+        operations,
+        "bambuddy_kinds_over",
+        lambda **deps: over(**{**deps, "archive_cache": ArchiveCache()}),
+    )
+    with TestClient(create_app(settings)) as client:
+        configure(client)
+        output_id = make_output(client, model)
+        link(client, output_id, 35, printer_id=1)
+        before = mock_archive(35, timelapse_path=None)
+        respx.get(f"{API}/archives/35/runs").mock(
+            return_value=httpx.Response(200, json={"items": [], "total": 0})
+        )
+        respx.post(f"{API}/archives/35/timelapse/select").mock(
+            return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
+        )
+        mock_enqueue()
+        client.get("/api/v1/prints/35")
+        reads = before.call_count
+
+        pulled = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+        assert pulled.status_code == 204, pulled.text
+        client.get("/api/v1/prints/35")
+        assert before.call_count == reads + 2, "the detail after a pull reads the archive again"
+
+        assert client.post("/api/v1/prints/35/reprint").status_code == 201
+        client.get("/api/v1/prints/35")
+        assert before.call_count == reads + 4, "the detail after a reprint reads it again"
 
 
 @respx.mock
