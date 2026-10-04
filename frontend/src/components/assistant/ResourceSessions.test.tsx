@@ -46,8 +46,9 @@ describe('ResourceSessions', () => {
     const toggle = await screen.findByRole('button', { name: 'Changed by assistant (2)' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     await user.click(toggle)
-    const menu = screen.getByRole('menu', { name: 'Assistant sessions that changed this' })
-    const items = within(menu).getAllByRole('menuitem')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const menu = screen.getByRole('list', { name: 'Assistant sessions that changed this' })
+    const items = within(menu).getAllByRole('button')
     expect(items.map((i) => i.textContent)).toEqual([
       expect.stringMatching(/^Untitled session.*Working/),
       expect.stringMatching(/^Make the bin.*Idle/),
@@ -56,20 +57,47 @@ describe('ResourceSessions', () => {
 
     await user.click(items[1]!)
     expect(openSession).toHaveBeenCalledWith('sess-old')
-    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+  })
+
+  it('closes on Escape, giving focus back to the toggle, and when focus leaves it', async () => {
+    setSessionResources('sess-a', [row({ type: 'model', id: 'my-bin', model: 'my-bin' })], { title: 'A' })
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <ResourceSessions resource={{ type: 'model', id: 'my-bin' }} />
+        <button type="button">elsewhere</button>
+      </AssistantOpenerContext.Provider>,
+    )
+    const toggle = await screen.findByRole('button', { name: 'Changed by assistant (1)' })
+    await user.click(toggle)
+    await user.tab()
+    expect(screen.getByRole('button', { name: /^A/ })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    expect(toggle).toHaveFocus()
+
+    await user.click(toggle)
+    await user.tab()
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'elsewhere' })).toHaveFocus()
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
   it('looks an output up by its own id, under the label given', async () => {
     setSessionResources('sess-out', [row({ type: 'output', id: 'out/7', model: 'my-bin' })], { title: 'Saved it' })
     const requests: string[] = []
-    server.events.on('request:start', ({ request }) => {
+    const onStart = ({ request }: { request: Request }) => {
       if (request.url.includes('/ai/resources/')) requests.push(new URL(request.url).pathname)
-    })
-    const { user } = renderWith({ type: 'output', id: 'out/7' }, vi.fn(), 'Output changed by assistant')
-    await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
-    expect(screen.getByRole('menuitem', { name: /Saved it/ })).toBeInTheDocument()
-    expect(requests).toEqual(['/api/v1/ai/resources/output/out%2F7/sessions'])
-    server.events.removeAllListeners()
+    }
+    server.events.on('request:start', onStart)
+    try {
+      const { user } = renderWith({ type: 'output', id: 'out/7' }, vi.fn(), 'Output changed by assistant')
+      await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
+      expect(screen.getByRole('button', { name: /Saved it/ })).toBeInTheDocument()
+      expect(requests).toEqual(['/api/v1/ai/resources/output/out%2F7/sessions'])
+    } finally {
+      server.events.removeListener('request:start', onStart)
+    }
   })
 
   it('shows nothing when no session touched it, or the agent cannot say', async () => {

@@ -36,13 +36,13 @@ interface Props {
   focusKey: number
   /** Inside Bambuddy's iframe, where the microphone may be blocked (#257). */
   embedded?: boolean
-  /** #931 — a session a page asked to open; a new request (`n`) selects it again. */
+  /** #931 — a session a page asked to open; selected once, then `onOpenHandled` clears it. */
   openRequest?: OpenRequest | null
+  onOpenHandled?: () => void
 }
 
 export interface OpenRequest {
   sessionId: string
-  n: number
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -58,7 +58,7 @@ function readAdvanced(): boolean {
   }
 }
 
-export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest }: Props) {
+export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -123,7 +123,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     if (!openRequest) return
     setPickerOpen(false)
     select(openRequest.sessionId)
-  }, [openRequest, select])
+    onOpenHandled?.()
+  }, [openRequest, select, onOpenHandled])
 
   // Follow the stream. Instant when the user asked for reduced motion.
   const lastText = active?.items.at(-1)

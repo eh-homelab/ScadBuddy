@@ -11,9 +11,10 @@ interface Props {
   factory?: ChatTransportFactory
   /** #931 — a session a page asked to open (AppShell's AssistantOpener). */
   openRequest?: OpenRequest | null
+  onOpenHandled?: () => void
 }
 
-export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest }: Props) {
+export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest, onOpenHandled }: Props) {
   const loaded = useAsync(async () => factory ?? (await loadChatTransportFactory()), [factory])
   if (loaded.loading) {
     return <p className="p-3 text-[12.5px] text-muted">Connecting to the assistant…</p>
@@ -32,6 +33,7 @@ export function AssistantPanel({ onClose, focusKey, factory, embedded, openReque
       focusKey={focusKey}
       embedded={embedded}
       openRequest={openRequest}
+      onOpenHandled={onOpenHandled}
     />
   )
 }

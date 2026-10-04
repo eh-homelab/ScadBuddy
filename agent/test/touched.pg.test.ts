@@ -307,8 +307,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       expect(body.sessions.map((s) => s.id).sort()).toEqual([edit.id, preset.id].sort())
       expect(body.sessions.find((s) => s.id === edit.id)).toMatchObject({ title: 'edit box', owner: { kind: 'bearer', id: 'token:a' } })
 
-      const encoded = await app().request(`/api/v1/ai/resources/output/${encodeURIComponent('out-1')}/sessions?limit=1`, { headers: UI_READ })
-      expect(((await encoded.json()) as { sessions: unknown[] }).sessions).toHaveLength(1)
+      const limited = await app().request('/api/v1/ai/resources/model/box/sessions?limit=1', { headers: UI_READ })
+      expect(((await limited.json()) as { sessions: unknown[] }).sessions).toHaveLength(1)
+
+      // An id with reserved characters arrives percent-encoded and is matched decoded.
+      const odd = (await m.start(browser, { origin: 'chat' })).session
+      await touch(odd.id, 'save_output', { slug: 'box' }, { id: 'out/7 a', slug: 'box' })
+      const encoded = await app().request(`/api/v1/ai/resources/output/${encodeURIComponent('out/7 a')}/sessions`, { headers: UI_READ })
+      expect(((await encoded.json()) as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual([odd.id])
 
       for (const type of ['unclassified', 'nope']) {
         const bad = await app().request(`/api/v1/ai/resources/${type}/box/sessions`, { headers: UI_READ })

@@ -30,20 +30,27 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
   )
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
-  const menuId = useId()
+  const toggle = useRef<HTMLButtonElement>(null)
+  const listId = useId()
 
+  // A disclosure, not a menu: Tab moves through the sessions, and a click or focus
+  // outside, or Escape (focus back on the toggle), closes it.
   useEffect(() => {
     if (!open) return
-    const onDown = (event: MouseEvent) => {
+    const outside = (event: Event) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false)
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      toggle.current?.focus()
     }
-    document.addEventListener('mousedown', onDown)
+    document.addEventListener('mousedown', outside)
+    document.addEventListener('focusin', outside)
     document.addEventListener('keydown', onKey)
     return () => {
-      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('mousedown', outside)
+      document.removeEventListener('focusin', outside)
       document.removeEventListener('keydown', onKey)
     }
   }, [open])
@@ -54,41 +61,40 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
   return (
     <div ref={root} className="relative">
       <button
+        ref={toggle}
         type="button"
         onClick={() => setOpen((was) => !was)}
-        aria-haspopup="menu"
         aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
+        aria-controls={open ? listId : undefined}
         className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
       >
         {label} ({sessions.length})
       </button>
       {open && (
-        <div
-          id={menuId}
-          role="menu"
+        <ul
+          id={listId}
           aria-label="Assistant sessions that changed this"
           className="absolute right-0 top-full z-30 mt-1 max-h-72 w-72 overflow-y-auto rounded-[6px] border border-line bg-surface py-1 shadow-xl"
         >
           {sessions.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              role="menuitem"
-              title={s.id}
-              className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
-              onClick={() => {
-                setOpen(false)
-                opener.openSession(s.id)
-              }}
-            >
-              <span className="block truncate">{s.title || 'Untitled session'}</span>
-              <span className="block text-[11px] text-faint">
-                {statusLabel(s.status)} · {new Date(s.updated_at).toLocaleString()}
-              </span>
-            </button>
+            <li key={s.id}>
+              <button
+                type="button"
+                title={s.id}
+                className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
+                onClick={() => {
+                  setOpen(false)
+                  opener.openSession(s.id)
+                }}
+              >
+                <span className="block truncate">{s.title || 'Untitled session'}</span>
+                <span className="block text-[11px] text-faint">
+                  {statusLabel(s.status)} · {new Date(s.updated_at).toLocaleString()}
+                </span>
+              </button>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
     </div>
   )

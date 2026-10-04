@@ -93,14 +93,15 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setFocusKey((k) => k + 1)
   }, [])
   // #931 — a page asked for one session ("Changed by assistant"): the panel opens on it.
-  // `n` makes asking for the same session again a new request.
-  const [openRequest, setOpenRequest] = useState<{ sessionId: string; n: number } | null>(null)
+  // Cleared once the panel has selected it, so a later remount does not select it again.
+  const [openRequest, setOpenRequest] = useState<{ sessionId: string } | null>(null)
+  const openHandled = useCallback(() => setOpenRequest(null), [])
   const opener = useMemo<AssistantOpener | null>(
     () =>
       shown
         ? {
             openSession: (sessionId) => {
-              setOpenRequest((was) => ({ sessionId, n: (was?.n ?? 0) + 1 }))
+              setOpenRequest({ sessionId })
               openPanel()
             },
           }
@@ -249,6 +250,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   factory={assistantTransport}
                   embedded={embedded}
                   openRequest={openRequest}
+                onOpenHandled={openHandled}
                 />
               </Suspense>
             </aside>
