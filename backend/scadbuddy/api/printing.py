@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -78,7 +77,6 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     start_command,
 )
-from scadbuddy.workflows.follow import follow
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
     PRINT_RUN_WORKFLOW,
@@ -528,20 +526,8 @@ async def get_progress(
     # there was one. In the background: a Temporal that does not answer never holds this
     # read up. It needs only the client and queue, never the print runs' store.
     if progress is not None and not progress.settled:
-        runs = state.print_runs
-        _following(follow(runs.client, runs.task_queue, meta.id))
+        state.print_follows.ensure(meta.id)
     return progress
-
-
-#: The follows the progress route started, kept until they finish (a task nothing
-#: references may be collected mid-flight).
-_FOLLOWS: set[asyncio.Task[bool]] = set()
-
-
-def _following(start: Coroutine[Any, Any, bool]) -> None:
-    task = asyncio.create_task(start)
-    _FOLLOWS.add(task)
-    task.add_done_callback(_FOLLOWS.discard)
 
 
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")

@@ -168,6 +168,8 @@ const toolServices: ToolServices = {
   pending: new PendingActionStore(),
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
+  // Past the longest operation kind's run_timeout plus its cancel grace (registry.ts).
+  operationFollowMs: 15 * 60_000,
   publicBaseUrl: config.publicUrl,
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over

@@ -242,6 +242,22 @@ def test_the_migration_keeps_heartbeat_at_for_pods_that_still_write_it(
         conn.execute("UPDATE print_runs SET heartbeat_at = now() WHERE id = 'old'")
 
 
+async def test_a_pre_1052_pods_expiry_never_matches_a_temporal_owned_row(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1061 (2) 1: a pre-#1052 pod's ``_expire_lost`` fails a ``running`` row
+    whose ``heartbeat_at`` is older than its ``LOST_AFTER`` (60 s). Nothing beats a
+    Temporal-owned row, so it must never match, however long the workflow runs."""
+    run = await accept(store)
+    with jobs.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT heartbeat_at < now() + interval '100 years' - interval '60 seconds' AS lost"
+            " FROM print_runs WHERE id = %s",
+            (run.id,),
+        ).fetchone()
+    assert row is not None and not row["lost"]
+
+
 async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
     store: PrintRunStore,
 ) -> None:

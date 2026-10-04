@@ -174,7 +174,9 @@ on shutdown.
     (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
     also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
     converges the uploads with the store (reconcile and backfill), so expect that
-    Bambuddy traffic right after a deploy. Settled render jobs are pruned every 300 s by a second
+    Bambuddy traffic right after a deploy. A run still open from before the start
+    goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
+    paused across restarts, and a start does not trigger it. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
@@ -397,10 +399,14 @@ print runs and every other Bambuddy write (send, project files, projects, reprin
 timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
 **not** versioned: any replica polling the queue may take any task on it.
 
-- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
-  activities to that queue. A replica still on the old build takes those tasks and
-  fails them as unregistered; nothing is corrupted (the task is retried), but each
-  Bambuddy write that lands there stalls until the old pod is gone. Roll this release
+- **Upgrading to the release with #1053** adds two workflow types (`Operation`,
+  `FollowPrint`) and their activities to that queue, and a second queue beside it,
+  `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
+  `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
+  slot a print run or an operation needs. A replica still on the old build takes the
+  new tasks on the `bambuddy` queue and fails them as unregistered; nothing is
+  corrupted (the task is retried), but each Bambuddy write that lands there stalls
+  until the old pod is gone. Roll this release
   out with `Recreate`, or scale the old replicas to 0 before the new ones start.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   should be at least the Temporal namespace's retention. A retry of an operation whose
