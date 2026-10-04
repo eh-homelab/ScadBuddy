@@ -127,3 +127,24 @@ async def test_a_worker_that_fails_while_running_is_started_again(
     assert len(built) == 2
     assert built[1].stopped.is_set()  # shut down on stop, not abandoned
     assert "the print worker failed" in caplog.text
+
+
+async def test_a_worker_still_connecting_stops_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connect to a Temporal that never answers retries for a long time; the app's
+    shutdown must not wait it out (each test's teardown did, 40 s)."""
+    connecting = asyncio.Event()
+
+    async def never(*args: Any, **kwargs: Any) -> Any:
+        connecting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "connect", never)
+    state = _state()
+    state.temporal = None
+    state.settings.temporal_address = "unused:7233"
+    state.settings.temporal_namespace = "default"
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_print_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(connecting.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 1)
