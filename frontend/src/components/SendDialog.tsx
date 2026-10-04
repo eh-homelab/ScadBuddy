@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { Output, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { traceAction } from '../lib/traceAction'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -44,7 +45,9 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
     setSending(true)
     setError(null)
     try {
-      const sent = await api.sendOutput(output.id, { mode: 'library' })
+      const sent = await traceAction('send', { 'scadbuddy.output_id': output.id }, () =>
+        api.sendOutput(output.id, { mode: 'library' }),
+      )
       setResult(sent)
       onSent(sent)
     } catch (cause) {

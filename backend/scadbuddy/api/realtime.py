@@ -219,14 +219,22 @@ class RateLimit:
         self._tokens = float(burst)
         self._at = clock()
 
-    def take(self) -> bool:
+    def _refill(self) -> None:
         now = self._clock()
         self._tokens = min(self.burst, self._tokens + (now - self._at) * self.per_second)
         self._at = now
+
+    def take(self) -> bool:
+        self._refill()
         if self._tokens < 1:
             return False
         self._tokens -= 1
         return True
+
+    def retry_after(self) -> float:
+        """Seconds until one more frame is allowed; 0 when one is now (a ``Retry-After``)."""
+        self._refill()
+        return max(0.0, (1 - self._tokens) / self.per_second)
 
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
