@@ -243,6 +243,7 @@ async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
     [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
     assert getattr(record, "output_id", None) == OUTPUT
     assert getattr(record, "archive_ids", None) == [101, 102]
+    assert getattr(record, "stage", None) == "archives"
     assert A not in repr(record.__dict__) and record.exc_info is None
     assert await store.recorded_archives([101, 102]) == set()
 
@@ -261,8 +262,9 @@ class HangingLinks(Links):
 async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#1113 review: a cut-off before any archive is known still leaves a record, so a
-    missing RACK_SETTLE_CUT_OFF line means nothing was skipped."""
+    """#1113 review: a cut-off before the loop still leaves a record, marked as the
+    read stage: its ids are the links read so far, candidates not yet filtered to the
+    unrecorded ones."""
     links = HangingLinks()
     with caplog.at_level(logging.DEBUG):
         hook = asyncio.ensure_future(
@@ -276,6 +278,7 @@ async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
     [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
     assert getattr(record, "output_id", None) == OUTPUT
     assert getattr(record, "archive_ids", None) == []
+    assert getattr(record, "stage", None) == "read"
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 
