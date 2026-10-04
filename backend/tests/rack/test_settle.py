@@ -22,7 +22,13 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
+from scadbuddy.rack.usage import (
+    RACK_SETTLE_CUT_OFF,
+    PickedHotend,
+    RackUsageStore,
+    record_settled,
+    settle_hook,
+)
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.bambuddy.test_watcher import OUTPUT as WATCHED
 from tests.bambuddy.test_watcher import (
@@ -204,6 +210,38 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
         getattr(record, "error", None),
     ) == (OUTPUT, 101, "ApiError")
     assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113: a settle cut off by the watcher's timeout is not retried (spec §4), so it
+    logs, by id only, the archives it had not recorded, the one in flight included."""
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
+    )
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(
+                OUTPUT,
+                client=archives,
+                links=Links(link(101, 51), link(102, 51)),
+                store=store,
+                now=lambda: AT,
+                archive_timeout=10,
+            )
+        )
+        while archives.reads != [101]:
+            await asyncio.sleep(0.01)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "archive_ids", None) == [101, 102]
+    assert A not in repr(record.__dict__) and record.exc_info is None
+    assert await store.recorded_archives([101, 102]) == set()
 
 
 async def test_an_archive_that_stalls_costs_only_itself(
