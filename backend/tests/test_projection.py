@@ -467,3 +467,17 @@ def test_a_resubmit_that_supersedes_its_twin_adopts_a_traceparent_the_row_lacks(
     later.traceparent = "00-1af7651916cd43dd8448eb211c80319c-c7ad6b7169203331-01"
     projection.submit(later, key, supersedes=first.id)
     assert projection.read(first.id).traceparent == again.traceparent
+
+
+def test_a_resubmit_of_a_running_twin_adopts_no_traceparent(projection: JobProjection) -> None:
+    """A running row's workflow already has its parent; the coalesce writes nothing."""
+    key = render_key("demo", {"width": 2}, None)
+    first = _job(width=2)
+    projection.submit(first, key)
+    projection.mark_started(first.id)
+    again = _job(width=2)
+    again.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    joined = projection.submit(again, key, supersedes=first.id)
+    assert joined.coalesced
+    assert joined.job.traceparent is None
+    assert projection.read(first.id).traceparent is None

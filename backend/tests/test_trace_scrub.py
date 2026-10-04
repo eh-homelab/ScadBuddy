@@ -130,6 +130,7 @@ def test_no_query_string_or_user_agent_survives() -> None:
             "url.query": f"q={SENTINEL}",
             "http.user_agent": SENTINEL,
             "user_agent.original": SENTINEL,
+            "http.status_text": SENTINEL,
             "http.route": "/api/v1/x",
         }
     )
