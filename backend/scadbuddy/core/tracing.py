@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Final
@@ -104,6 +105,10 @@ def traces_export_enabled() -> bool:
     )
 
 
+#: The providers `build_provider` made: every exporter on them is behind the scrub.
+_OWN_PROVIDERS: Final[weakref.WeakSet[TracerProvider]] = weakref.WeakSet()
+
+
 def build_provider(
     service_name: str,
     *,
@@ -128,6 +133,7 @@ def build_provider(
     resource = Resource.create(attributes)
     sampler = None if os.environ.get("OTEL_TRACES_SAMPLER") else DEFAULT_SAMPLER
     provider = TracerProvider(resource=resource, sampler=sampler)
+    _OWN_PROVIDERS.add(provider)
     if (unsupported := _unsupported_exporter()) is not None:
         logger.warning(
             "OTEL_TRACES_EXPORTER=%r names no exporter ScadBuddy ships (only otlp); "
@@ -155,11 +161,20 @@ def configure_tracing(
     service_name: str, *, version: str, revision: str, inprocess_worker: bool = False
 ) -> None:
     """Once per process, before anything that traces is built. A provider already set
-    (the tests' own, or an earlier `create_app` in the same process) is kept."""
+    (the tests' own, or an earlier `create_app` in the same process) is kept. One that
+    `build_provider` did not make (``opentelemetry-instrument``, an auto-configurator)
+    exports without ScadBuddy's scrub (spec §6), which is warned about, never silent."""
     propagate.set_global_textmap(_PROPAGATOR)
     if tracing_disabled():
         return
-    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+    current = trace.get_tracer_provider()
+    if isinstance(current, TracerProvider) and current not in _OWN_PROVIDERS:
+        logger.warning(
+            "a TracerProvider ScadBuddy did not build is already installed (for example "
+            "by opentelemetry-instrument); its exporters do not scrub spans (spec §6). "
+            "Run the process without it"
+        )
+    if not isinstance(current, TracerProvider):
         trace.set_tracer_provider(
             build_provider(
                 service_name,
