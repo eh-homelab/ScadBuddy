@@ -162,7 +162,14 @@ def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> 
 
 
 def test_get_operation_404s_an_unknown_id(client: TestClient) -> None:
-    assert client.get("/api/v1/operations/nope").status_code == 404
+    assert client.get(f"/api/v1/operations/{'0' * 32}").status_code == 404
+
+
+def test_get_operation_422s_a_malformed_id(client: TestClient) -> None:
+    """Review #1063 4: an id is always ``uuid4().hex``; anything else never reaches
+    Postgres or the 404's detail."""
+    for bad in ("nope", "A" * 32, "0" * 33):
+        assert client.get(f"/api/v1/operations/{bad}").status_code == 422
 
 
 def test_temporal_unreachable_is_a_503_and_writes_nothing(

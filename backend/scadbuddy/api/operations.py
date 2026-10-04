@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
+from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
@@ -171,7 +172,7 @@ OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 
 @router.get("/{operation_id}", responses={404: {"description": "No such operation"}})
-async def get_operation(operation_id: str, ops: OperationsDep) -> Operation:
+async def get_operation(operation_id: OperationIdPath, ops: OperationsDep) -> Operation:
     """One operation (§4.2 "Our record"): follow a 202 here until it is not ``running``."""
     op = await ops.store.get(operation_id)
     if op is None:
