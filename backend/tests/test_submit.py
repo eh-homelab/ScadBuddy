@@ -1173,6 +1173,34 @@ async def test_settled_jobs_past_their_ttl_are_pruned(
     assert (await asyncio.to_thread(projection.read, fresh.id)).state == "done"
 
 
+
+async def test_a_prune_that_fails_still_settles_the_rows_nothing_will_settle(
+    projection: JobProjection, deps: WorkerDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1095b 1: a prune whose delete fails (a Postgres error, a read-only
+    volume) still fails the rows whose run closed, then fails its activity."""
+    orphan = _accepted(projection, finished_ago=timedelta(0))  # its run never existed
+
+    def failing(ttl: float, **_: object) -> list[str]:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(projection, "prune", failing)
+    async with temporal_client() as client:
+        service = RenderService(
+            projection=projection,
+            client=client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            config=deps.config,
+            paths=deps.paths,
+            metrics=Metrics(),
+        )
+        with pytest.raises(OSError, match="read-only"):
+            await service.prune()
+
+    settled = await asyncio.to_thread(projection.read, orphan.id)
+    assert (settled.state, settled.error) == ("failed", CLOSED_ERROR)
+
+
 def _accepted(projection: JobProjection, *, finished_ago: timedelta) -> Job:
     params: dict[str, ParamValue] = {"width": _w()}
     job = Job(
