@@ -123,15 +123,23 @@ export async function loadKek(file: string | undefined, variable = 'SCADBUDDY_SE
   }
 }
 
-function seal(key: Buffer, plaintext: Buffer, context: string): Buffer {
-  const iv = randomBytes(IV_BYTES)
+/** Source of random bytes; tests and the vector generator inject a deterministic one. */
+export type RandomBytes = (n: number) => Buffer
+
+/**
+ * Seals under `key` in the current version. Exported for the payload codec
+ * (agent-durable's session payloads are sealed with the same format); `random`
+ * defaults to the system CSPRNG and is injectable only for test vectors.
+ */
+function seal(key: Buffer, plaintext: Buffer, context: string, random: RandomBytes = randomBytes): Buffer {
+  const iv = random(IV_BYTES)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
   cipher.setAAD(aadFor(SEAL_VERSION, context))
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
   return Buffer.concat([Buffer.from([SEAL_VERSION]), iv, cipher.getAuthTag(), ciphertext])
 }
 
-/** Decrypts. The caller owns the returned Buffer and zeroes it. */
+/** Decrypts. The caller owns the returned Buffer and zeroes it. Exported for the payload codec. */
 function open(key: Buffer, sealed: Buffer, context: string): Buffer {
   const version = sealedVersion(sealed)
   if (sealed.length < 1 + IV_BYTES + TAG_BYTES || version === undefined || !KNOWN_VERSIONS.has(version)) {
@@ -159,6 +167,9 @@ function open(key: Buffer, sealed: Buffer, context: string): Buffer {
   return out
 }
 
+export const sealBytes = seal
+export const openBytes = open
+
 /** What a row stores for one secret. */
 export type Envelope = {
   /** The secret, sealed under the data key. */
@@ -169,13 +180,13 @@ export type Envelope = {
   kekId: string
 }
 
-export function sealSecret(kek: Kek, plaintext: string, aad: string): Envelope {
-  const dek = randomBytes(KEK_BYTES)
+export function sealSecret(kek: Kek, plaintext: string, aad: string, random: RandomBytes = randomBytes): Envelope {
+  const dek = random(KEK_BYTES)
   const bytes = Buffer.from(plaintext, 'utf8')
   try {
     return {
-      secretSealed: seal(dek, bytes, aad),
-      dekSealed: seal(kek.key, dek, `dek:${aad}`),
+      secretSealed: seal(dek, bytes, aad, random),
+      dekSealed: seal(kek.key, dek, `dek:${aad}`, random),
       kekId: kek.id,
     }
   } finally {

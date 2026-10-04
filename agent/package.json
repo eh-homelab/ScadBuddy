@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "evals": "vitest run --config vitest.evals.config.ts",
     "gen:api": "node scripts/gen-api.mjs",
+    "gen:vectors": "tsc -p tsconfig.vectors.json && node dist/vectors-gen/scripts/gen-secret-vectors.js",
     "gen:tools": "pnpm build && node dist/export-tools.js"
   },
   "dependencies": {
