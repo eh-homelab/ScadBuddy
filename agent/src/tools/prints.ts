@@ -107,7 +107,7 @@ export const printHistoryTools: Tool[] = [
     description:
       "Read a Bambuddy write (a send, a reprint, project filing, a timelapse pull) that was still running when its " +
       'tool returned: its status, and its result or error once it ended.',
-    input: z.object({ operation_id: z.string().min(1).max(64).describe('The operation id the tool named') }),
+    input: z.object({ operation_id: z.string().regex(/^[0-9a-f]{32}$/).describe('The operation id the tool named') }),
     risk: 'read',
     routes: ['GET /api/v1/operations/{operation_id}'],
     handler: async ({ operation_id }, { backend }) =>

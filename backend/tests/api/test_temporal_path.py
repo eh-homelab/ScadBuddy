@@ -15,12 +15,13 @@ from fastapi.testclient import TestClient
 from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
 from temporalio.service import RPCError
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.main import create_app
+from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.workflows.housekeeping import schedule_id_for
@@ -144,10 +145,18 @@ def test_a_failing_start_on_temporal_still_closes_the_projection(
 
 
 def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
-    settings: Settings, model: str
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#1054: the sweeps are a Temporal Schedule on the `library` queue this process
-    serves, triggered once at start."""
+    serves, triggered once at start. The boot itself does not walk the uploads too
+    (review #1095 1): the triggered run is the start's one sweep."""
+    walks: list[object] = []
+
+    def counted(state: AppState) -> list[str]:
+        walks.append(state)
+        return sweep_assets(state)
+
+    monkeypatch.setattr(main, "sweep_assets", counted)
     settings = settings.model_copy(update={"asset_sweep_interval": 3600.0})
     app = create_app(settings)
     queue = settings.temporal_task_queue_library
@@ -178,3 +187,4 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
         every, result = asyncio.run(described())
     assert every == timedelta(seconds=3600)
     assert result == "[]"  # every sweep ran, none failed
+    assert len(walks) == 1
