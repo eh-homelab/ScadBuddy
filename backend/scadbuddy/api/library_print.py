@@ -18,7 +18,7 @@ from scadbuddy.api.outputs import OutputPlate
 from scadbuddy.api.printing import accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.print_run import (
@@ -27,10 +27,11 @@ from scadbuddy.bambuddy.print_run import (
     check_for_library,
     filament_options_for_library,
 )
-from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
+from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
 
@@ -73,7 +74,11 @@ async def get_library_thumbnail(
     file_id: FileIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/library/files/{file_id}/thumbnail", what="show the file's thumbnail"
+        store,
+        request,
+        f"/library/files/{file_id}/thumbnail",
+        operation="library.thumbnail",
+        what="show the file's thumbnail",
     )
 
 
@@ -93,6 +98,7 @@ async def get_library_plate_thumbnail(
         store,
         request,
         f"/library/files/{file_id}/plate-thumbnail/{index}",
+        operation="library.plate_thumbnail",
         what="show the plate image",
     )
 
@@ -166,27 +172,19 @@ async def post_library_run(
     file_id: FileIdPath,
     body: PrintRunRequest,
     response: Response,
-    store: SettingsStoreDep,
     runs: PrintRunsDep,
-    rack: RackUsageDep,
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
     202 and any slice. The run's ``output_id`` is ``library:<file id>``."""
-
-    async def source_for(client: BambuddyClient) -> PrintSource:
-        return await LibrarySource.load(client, file_id)
-
     return await accept_run(
         runs,
         response,
         subject=f"library:{file_id}",
         slug=f"library-{file_id}",
-        settings=store.load(),
         request=body,
-        source_for=source_for,
-        rack=rack,
+        source=SourceSpec(kind="library", file_id=file_id),
     )
 
 

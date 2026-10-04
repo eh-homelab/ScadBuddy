@@ -424,9 +424,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
-              Open in queue
-            </Button>
+            {result.bambuddy_url && (
+              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+                Open in queue
+              </Button>
+            )}
           </>
         ) : unanswered !== null ? (
           <>

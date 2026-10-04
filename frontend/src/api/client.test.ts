@@ -16,6 +16,12 @@ import type { MediaView } from './types'
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
 const picture = media[GALLERY_SLUG]![0]!
 
+describe('printRunPoll still-accepting budget (#1061)', () => {
+  it('is the backend CLIENT_ACCEPTING (printing.py), as the agent ACCEPTING_MS is', () => {
+    expect(printRunPoll.acceptingMs).toBe(240_000)
+  })
+})
+
 describe('media URLs (#274)', () => {
   it('addresses an item by its id, with the slug encoded', () => {
     expect(api.mediaUrl(BUILTIN_SLUG, picture)).toBe(
@@ -195,6 +201,22 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     server.resetHandlers()
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
+    printRunPoll.acceptingMs = 240_000
+    printRunPoll.followMs = 3_600_000
+  })
+
+  it('stops following a run that never ends, saying to check before printing again', async () => {
+    // Review #1061: a run whose execution is gone would otherwise spin the dialog forever.
+    printRunPoll.intervalMs = 1
+    printRunPoll.followMs = 30
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json(started)),
+    )
+    const failure = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).detail).toMatch(/still preparing this print/)
+    expect((failure as ApiError).problem.may_have_queued).toBe(true)
   })
 
   it('reads the run until it succeeds and returns its result', async () => {
@@ -213,6 +235,75 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
 
     await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
     expect(reads).toBe(2)
+  })
+
+  // No Retry-After unless a test sets one: a real one is whole seconds (review #1061 4a).
+  const stillAccepting = (retryAfter?: string) =>
+    HttpResponse.json(
+      {
+        type: 'https://scadbuddy.dev/problems/command-still-accepting',
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy is still checking this print.',
+      },
+      { status: 503, headers: retryAfter ? { 'Retry-After': retryAfter } : {} },
+    )
+
+  it("waits the still-accepting answer's Retry-After before sending again (review #1061 4a)", async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: number[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        sent.push(Date.now())
+        return sent.length < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+  })
+
+  it('keeps sending while still accepting, past the re-sends for an unanswered request (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return posts <= printRunPoll.reattempts + 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+  })
+
+  it('says a print still being accepted when it gave up may have started (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.acceptingMs = 20
+    server.use(http.post('/api/v1/print/outputs/out-1/run', () => stillAccepting()))
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('sends the same request again while the server is still accepting it (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return posts < 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(posts).toBe(2)
   })
 
   it("follows a library file's run the same way (#742)", async () => {
@@ -688,15 +779,15 @@ describe('render and createOutput (spec 2026-09-27 §4.3)', () => {
 describe('Retry-After on problems (#1000)', () => {
   it("keeps a 429's or 503's delay in seconds, and nothing on other statuses", async () => {
     server.use(
-      http.post('/api/v1/ai/credentials/test', () =>
+      http.post('/api/v1/ai/credentials/entries/default/test', () =>
         HttpResponse.json({ detail: 'a connection test ran moments ago' }, { status: 429, headers: { 'Retry-After': '7' } }),
       ),
-      http.get('/api/v1/ai/credentials', () =>
+      http.get('/api/v1/ai/credentials/entries', () =>
         HttpResponse.json({ detail: 'nope' }, { status: 400, headers: { 'Retry-After': '7' } }),
       ),
     )
-    await expect(api.testAiCredential()).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
-    const other = await api.getAiCredential().catch((cause: unknown) => cause)
+    await expect(api.testAiCredential('default')).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
+    const other = await api.listAiCredentials().catch((cause: unknown) => cause)
     expect((other as ApiError).problem).not.toHaveProperty('retry_after')
   })
 })

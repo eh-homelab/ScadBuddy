@@ -15,10 +15,18 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import RackChoice, SlicePlan, slice_and_queue
+from scadbuddy.bambuddy.dispatch import (
+    RackChoice,
+    SlicePlan,
+    enqueue_plate,
+    slice_and_queue,
+    start_slice,
+    wait_slice,
+)
 from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.usage import PickedHotend
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -115,6 +123,48 @@ async def test_the_item_names_the_printer_and_carries_the_options(
     assert sent["required_filament_types"] == ["PETG"]
     assert (outcome.slice_job_id, outcome.sliced_library_file_id) == (9, 52)
     assert outcome.printer_id == 1
+
+
+# The pieces `PrintRun` runs as activities (#1052, spec 2026-10-01 §5.3).
+
+
+@respx.mock
+async def test_start_slice_posts_once_and_returns_the_job(bambuddy: BambuddyClient) -> None:
+    sliced, queued = routes()
+    started = await start_slice(bambuddy, library_file_id=41, plan=PLAN, plate_id=2)
+    assert (started.job_id, sliced.call_count, queued.called) == (9, 1, False)
+    assert started.preset_key
+
+
+@respx.mock
+async def test_wait_slice_returns_the_sliced_file(bambuddy: BambuddyClient) -> None:
+    routes()
+    assert await wait_slice(bambuddy, 9) == 52
+
+
+@respx.mock
+async def test_wait_slice_raises_bambuddys_words_on_failure(bambuddy: BambuddyClient) -> None:
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "failed", "error": "object floats above the bed"}
+        )
+    )
+    with pytest.raises(ApiError) as raised:
+        await wait_slice(bambuddy, 9)
+    assert raised.value.status == 502
+    assert "object floats above the bed" in raised.value.detail
+    assert raised.value.extensions == {"slice_job_id": 9}
+
+
+@respx.mock
+async def test_enqueue_plate_sends_the_item_once(bambuddy: BambuddyClient) -> None:
+    _, queued = routes()
+    item = await enqueue_plate(
+        bambuddy, sliced=52, printer_id=1, plate_id=2, copies=3, project_id=None, options=None
+    )
+    sent = json.loads(queued.calls.last.request.read())
+    assert (item, queued.call_count) == (recording("queue-item.json")["id"], 1)
+    assert (sent["library_file_id"], sent["plate_id"], sent["quantity"]) == (52, 2, 3)
 
 
 @respx.mock
