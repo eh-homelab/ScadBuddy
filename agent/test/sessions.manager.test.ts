@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
+import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
@@ -145,6 +146,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(runs[0]!.sessionStore).toBe(m.store)
       expect(runs[0]!.includePartialMessages).toBe(true)
       expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false, turns: 2 })
+    })
+
+    it('shows a synthetic API-error message the turn went on from, as it came (#1101)', async () => {
+      const paths = await tempPaths()
+      const say = (id: string, text: string, error?: string) =>
+        ({
+          type: 'assistant',
+          message: { id, content: [{ type: 'text', text }] },
+          parent_tool_use_id: null,
+          ...(error ? { error } : {}),
+        }) as unknown as SDKMessage
+      const runner = (): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          yield say('msg_syn', 'API Error: 529 Overloaded', 'server_error')
+          yield say('msg_2', 'Carried on.')
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'Carried on.', total_cost_usd: 0.01, num_turns: 1 } as unknown as SDKMessage
+        })()
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+      const said = (await m.events.read(session.id, 0, 1000))
+        .map((e) => e.event)
+        .flatMap((e) => (e.type === 'assistant.text.delta' ? [e.delta] : []))
+      expect(said).toEqual(['API Error: 529 Overloaded', 'Carried on.'])
+      expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
     })
 
     it("passes ScadBuddy's own plugin to each turn, and says so when Claude Code did not load it (#896)", async () => {
@@ -428,6 +454,26 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = (await m.events.read(session.id)).map((e) => e.event)
       expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: 'spawn failed' })
       expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+    })
+
+    it('says when a credential is usable again when none is now, and starts no query (#1093)', async () => {
+      const paths = await tempPaths()
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'never' }))
+      const why = 'no Claude credential is usable: credential 1 (API key …aaaa) is rate limited until 2026-10-03T12:05:00.000Z. The first is usable again at 2026-10-03T12:05:00.000Z'
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        credentials: {
+          candidates: () => Promise.reject(new NoUsableCredentialError(why, new Date('2026-10-03T12:05:00Z'))),
+          reporter: () => () => Promise.resolve(),
+        },
+      })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      expect(await (await m.send(session.id, agentA, 'x')).done).toEqual({ kind: 'failed', message: why })
+      expect(runs).toHaveLength(0)
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: why })
     })
 
     it('gives a turn memory hooks only when it loaded an enabled hindsight plugin, recalling the user’s words', async () => {

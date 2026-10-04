@@ -145,6 +145,18 @@ class JobProjection:
                     (supersedes, job.slug),
                 ).fetchone()
                 if previous is not None and previous["render_key"] == key:
+                    # Like ON CONFLICT: a pending row with no trace adopts this one. A
+                    # running row's workflow already has its parent.
+                    if (
+                        previous["state"] == "pending"
+                        and previous["traceparent"] is None
+                        and job.traceparent is not None
+                    ):
+                        previous = conn.execute(
+                            "UPDATE render_jobs SET traceparent = %s WHERE id = %s RETURNING *",
+                            (job.traceparent, previous["id"]),
+                        ).fetchone()
+                        assert previous is not None
                     return Submitted(_job(previous), coalesced=True)
                 if previous is not None:
                     superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)

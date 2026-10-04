@@ -40,12 +40,14 @@ _DEFINITION: Final = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
 #: Attributes the HTTP instrumentation fills from the request's own text: a query
 #: string can carry anything a user typed, a user agent and a host name are header
 #: values (the Host header). The client's address is never recorded either; the
-#: server's own port is kept.
-_DROPPED: Final = frozenset(
+#: server's own port is kept. The browser relay applies the same set to the page's
+#: spans (`telemetry/payload.py`).
+DROPPED_ATTRIBUTES: Final = frozenset(
     {
         "url.query",
         "http.user_agent",
         "user_agent.original",
+        "http.status_text",
         "http.host",
         "http.server_name",
         "server.address",
@@ -66,11 +68,15 @@ _PATH_ONLY: Final = frozenset({"http.target", "url.path"})
 #: An absolute URL keeps its origin, then the route, except on a server span: there the
 #: host is the request's Host header, so the URL is not exported at all.
 _WITH_ORIGIN: Final = frozenset({"http.url", "url.full"})
+#: Every attribute that holds a path. The browser relay reduces each on a page's
+#: spans to the backend route its path names, or its origin (`telemetry/payload.py`).
+URL_ATTRIBUTES: Final = _PATH_ONLY | _WITH_ORIGIN
 #: An absolute URL's ``scheme://host[:port]``, kept in front of the route.
 _ORIGIN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 #: Headers the instrumentation captures when a deployment sets
-#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything.
-_HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
+#: ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*``: cookies, credentials, anything. The
+#: relay drops them from the page's spans too.
+HEADER_PREFIXES: Final = ("http.request.header.", "http.response.header.")
 
 
 #: A source file larger than this is not read: its frames are dropped.
@@ -213,7 +219,7 @@ def _scrub_attributes(
     route = attributes.get("http.route")
     kept: dict[str, AttributeValue] = {}
     for key, value in attributes.items():
-        if key in _DROPPED or key.startswith(_HEADER_PREFIXES):
+        if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue
         if server and key in _WITH_ORIGIN:
             continue
@@ -265,4 +271,11 @@ class ScrubbingSpanExporter(SpanExporter):
         return self._inner.force_flush(timeout_millis)
 
 
-__all__ = ["ScrubbingSpanExporter", "frames_only", "scrub"]
+__all__ = [
+    "DROPPED_ATTRIBUTES",
+    "HEADER_PREFIXES",
+    "URL_ATTRIBUTES",
+    "ScrubbingSpanExporter",
+    "frames_only",
+    "scrub",
+]

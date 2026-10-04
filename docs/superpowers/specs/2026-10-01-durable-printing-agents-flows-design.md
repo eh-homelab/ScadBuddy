@@ -345,7 +345,7 @@ each queue's worker holds only what its commands need.
 | `render` | `scadbuddy-render` | renders, previews, Arrange | store key; runs template code |
 | `library` | `scadbuddy-library`, a container in the API pod (it needs `scadbuddy-data`, which is RWO) | model create/import/patch/duplicate/delete, source and file writes, thumbnail/readme/media writes, preset writes that need `openscad`, version restore, upstream merge/dismiss/detach, library pin/repin/unpin/remove, font install, the sweeps | the data volume and git; no Bambuddy key; runs no template code |
 | `bambuddy` | `scadbuddy-print` (§5.5) | prints, send, project file, create project, file into project, Bambuddy part of output delete, reprint, timelapse pull, sidebar registration, analyzer fix apply | full Bambuddy key |
-| `agent-tools`, `agent` | `agent-tools`: the agent service's sidecar; `agent`: the `scadbuddy-agent-durable` Deployment (§6.2) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
+| `agent-tools`, `agent` | `agent-tools`: the agent service's sidecar; `agent`: the `agent-durable` sidecar beside it (§6.2) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
 | `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward; the KEK, read-only, only to encrypt flow payloads (§6.5) |
 
 Git writes to one model's history still take the catalogue's existing lock inside the
@@ -600,13 +600,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 - `DurableSession`, workflow ID `session-<ai_sessions.id>`, on queue `agent`, in a new
   Python package `agent-durable/`. It is shipped as the Dockerfile target
-  `agent-durable` and runs as **its own Deployment, `scadbuddy-agent-durable`**. It is
-  not a container in the ScadBuddy pod, because a NetworkPolicy selects pods, not
-  containers.
-  - The ScadBuddy pod already holds the backend and the `agent` sidecar (AI spec
-    §4.1). Both need egress that this runtime must not have: Bambuddy, DO Spaces,
-    remote MCP plugins.
-  - With its own pod, §6.3a's NetworkPolicy applies to this runtime alone.
+  `agent-durable` and runs as **a sidecar in the ScadBuddy pod**, beside the `agent`
+  sidecar (AI spec §4.1), with the same trust.
   - It needs nothing on `localhost`: tool calls reach the agent service as activities
     on `agent-tools` (§6.3), events go to Postgres (`ai_session_events`), and it reads
     nothing from the data volume.
@@ -649,13 +644,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   (`/srv/agent`), as the store keys sessions by it.
 - **The credential** is read from `ai_credentials` and decrypted in Python with a port of
   `openSecret` (`agent/src/secrets.ts:187`):
+  - There may be several rows (#1093). A query takes them in the pool's fallback order
+    (`CredentialPool`, `agent/src/harness/fallback.ts`): by `priority`, skipping any
+    that are cooling down, disabled, or not openable with the mounted key.
   - AES-256-GCM, sealed format `version | IV(12) | tag(16) | ciphertext`;
-  - AAD `v2|ai_credentials:default:{"kind":…,"base_url":…}` for the secret, and
-    `dek:` + that for the data key;
+  - AAD `v2|ai_credentials:<row id>:{"kind":…,"base_url":…}` for the secret, as
+    `credentialAad` (`agent/src/credentials.ts`) builds it. The row id is `default`
+    for the row migrated from the single-credential table. The data key's AAD is
+    `dek:` + that;
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
   **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`
-  holds one envelope per credential kind (`anthropic_api_key`, `gateway`) and per
+  holds one envelope per credential kind (`anthropic_api_key`, `claude_oauth_token`,
+  `gateway`) and per
   version. A TypeScript script writes it with `seal` under a fixed KEK, data key and IV.
   - The agent's test suite regenerates it and fails if the committed file differs. So a
     change to `secrets.ts`'s format or AAD cannot land without new vectors.
@@ -664,8 +665,9 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - The `agent-durable` CI job runs whenever `agent/src/secrets.ts`,
     `agent/src/credentials.ts` or the vectors change.
 
-  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`, or
-  `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
+  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN` for a `claude_oauth_token`, or `ANTHROPIC_BASE_URL` plus
+  `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
   `agent/src/harness/run.ts:185`). It never enters history.
 - **Limits.** `max_turns` and `budget_usd` are the session row's. Each segment gets the
   remaining budget as `max_budget_usd`, and the row's `cost_usd` and `turns` are updated
@@ -700,39 +702,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 ### 6.3a The `agent-durable` container
 
-It holds the Anthropic credential and runs a git-pinned, pre-release package, so it is
-the most constrained runtime in the system.
+It is trusted like the `agent` sidecar, including the git-pinned plugin package, and is
+configured the same way.
 
 - **Image.** The Dockerfile stage `agent-durable` runs as `USER 10001:10001`, like the
-  `agent` stage (`Dockerfile:271`). There are no build tools in the final
-  stage, and its only writable path is `/srv/agent`, an `emptyDir`. The pod sets
-  `readOnlyRootFilesystem`, `runAsNonRoot`, drops all capabilities and uses
-  `seccompProfile: RuntimeDefault`.
-- **Secrets.** It mounts exactly what it needs, read-only:
-  - `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation),
-    from the same Secret the `agent` container mounts, as files rather than
-    environment variables;
-  - `SCADBUDDY_DATABASE_URL` for the `ai_*` tables;
-  - the Temporal address.
-
-  It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
-  `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`) and the session counters. It can do
-  nothing else.
-- **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
-  DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
-  blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
-  `base_url` host. Nothing is fetched at run time: the pinned package is installed at
-  build.
-  - A plain `NetworkPolicy` cannot name a host, only pods, namespaces and CIDRs. The
-    cluster's CNI is Cilium (the existing `applications/scadbuddy/networkpolicy-agent.yaml`
-    relies on it), so this is a `CiliumNetworkPolicy`: `toEndpoints` for Postgres and
-    Temporal, and `toFQDNs` (`matchName`) for the endpoint, with the DNS rule's
-    `rules.dns` that Cilium's DNS proxy needs to learn the names' addresses. Addresses
-    rotating behind a CDN are followed by the proxy, not pinned in the manifest.
-  - The host is named in the manifest, so pointing the credential at a new gateway
-    is also a clusters change. Until it lands, the new host is refused: the policy
-    fails closed, and the session's error names the blocked endpoint.
+  `agent` stage (`Dockerfile:271`), with the same pod security settings as the `agent`
+  container.
+- **Configuration.** It mounts the `agent` container's Secret and reads the same
+  infrastructure variables: `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), plus the Temporal address. It holds
+  no Bambuddy key.
+- **Network.** No policy of its own: it is in the ScadBuddy pod, and the existing
+  ingress policy (`applications/scadbuddy/networkpolicy-agent.yaml`) covers only the
+  `agent` port. It opens no port besides its health check.
 - **The credential** is decrypted per segment, passed to the runner's `env`, and never
   logged, written to disk or put in history (§6.2).
 

@@ -1,7 +1,7 @@
 ---
 name: print-analyst
 description: Runs a print-analyzer session on a ScadBuddy print job, checking the geometry, materials, plate and Bambuddy history against the job's base print request, and returns cited diagnostics and proposed setting diffs. It never sends or prints. Use before a print, or when asked why a print might fail or what settings to change.
-tools: mcp__scadbuddy, mcp__plugin_scadbuddy_scadbuddy
+tools: mcp__scadbuddy, mcp__plugin_scadbuddy_scadbuddy, mcp__scadbuddy_questions
 skills:
   - scadbuddy:print
 maxTurns: 30
@@ -21,6 +21,11 @@ analyzer session runs as a `flow` principal, limited to the analyzer skill's
 declared `permissions` (AI spec §8.1). The job's tools and resources come from
 issues #251 and #264. If one you need is missing, report that as a finding.
 Don't guess around it.
+
+To ask the user a question in ScadBuddy's harness (a choice, or a draft to approve),
+use `mcp__scadbuddy_questions__ask_user`. It takes the same input as
+`AskUserQuestion`, which is not available to a subagent. It is there only in a
+session the user is in; without it, return the question to the session instead.
 
 ## What you analyze
 

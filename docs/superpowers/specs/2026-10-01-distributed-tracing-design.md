@@ -223,8 +223,9 @@ path except `/api/v1/ai/*` to the backend.
   `POST /telemetry/v1/traces` beside the media upload's in `main.py`, so an
   oversized body is refused on its headers, or as it streams when it has no
   `Content-Length`, before the handler runs. Without one the
-  `application/json` default (8 MiB) would apply. The 512-span cap is checked
-  after parsing; over it is also 413.
+  `application/json` default (8 MiB) would apply. The 512-span cap, and the
+  caps of 16 `resourceSpans` and 64 `scopeSpans`, are checked after parsing;
+  over any of them is also 413, its detail naming the cap.
 - **Rate limits**, in memory with `RateLimit` (`api/realtime.py`'s token
   bucket). Over a limit is 429; the client drops the batch and does not retry.
   - A **per-process** bucket caps the relay's total rate whatever the
@@ -266,7 +267,7 @@ path except `/api/v1/ai/*` to the backend.
     the entry and its reason.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
-  attribute dropped except `service.version` and `user_agent.original`. Then
+  attribute dropped except `service.version` (no user agent: §6). Then
   per-span caps; beyond them the excess is dropped (truncated, for strings) and
   the span counts it in `otel.dropped_attributes_count` (OTel's own field):
   - 64 attributes;
@@ -278,6 +279,14 @@ path except `/api/v1/ai/*` to the backend.
 
   These match the SDK limits `RelayExporter`'s provider is configured with
   (`spanLimits`), so a well-behaved page never hits them.
+- A page span's URL (`url.full`, `http.url`, `http.target`, `url.path`, on the
+  span, its events and its links) is reduced to the backend route template its
+  path matches, after the `scheme://host` of an absolute URL, or else to that
+  origin alone; a relative URL on no route is dropped. Only a relative URL, or
+  one on ScadBuddy's own origins (the public URL, `SCADBUDDY_ALLOWED_ORIGINS`
+  or loopback, as the `Origin` check takes them), is matched against the
+  routes: any other host has none of them, so its URL keeps only its origin.
+  The SPA's routes are the browser's own, so a page's URL keeps only its origin.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
@@ -314,9 +323,10 @@ path except `/api/v1/ai/*` to the backend.
   else's render or turn in Tempo. This is accepted:
   - the harm is to what the trace view shows, never to data;
   - the relay never reads anything back;
-  - the forged spans are always `service.name=scadbuddy-web` and carry the
-    relay's client address, so they can be told apart from the backend's
-    own;
+  - the forged spans are always `service.name=scadbuddy-web`, so they can be
+    told apart from the backend's own, and the relay's per-client rate limit
+    bounds how many one client can post. They do not carry the client's
+    address: an IP in traces is personal data;
   - an attacker who can already run script on the origin can call the API
     directly, which is far worse.
 
@@ -331,7 +341,8 @@ path except `/api/v1/ai/*` to the backend.
   - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
   - A refusal's `detail` names the rule ("Origin not allowed", "the relay
     accepts application/json only"), never the request's own values.
-- **Tracing off** (no endpoint, or `OTEL_SDK_DISABLED=true`): `204` with
+- **Tracing off** (no endpoint, `OTEL_TRACES_EXPORTER` naming anything but
+  `otlp`, or `OTEL_SDK_DISABLED=true`: the backend's own export rule, §3): `204` with
   `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
@@ -492,7 +503,9 @@ not copied from that module, which has no such list:
   filename Bambuddy returned, whatever the SPA fallback was asked for), so the
   route's template stands in for it (`http.target`, `url.path`, and, on any
   span but a server span, after the `scheme://host` of `http.url` and
-  `url.full`), and a request with no route records no path at all;
+  `url.full`), and a request with no route records no path at all; a page
+  span's URLs are reduced by the relay to the backend route template or to the
+  origin (§5.2);
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
@@ -561,7 +574,13 @@ before it leaves the process. It:
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 
-The relay applies the same scrub to browser spans before forwarding. Our own
+The relay applies the same scrub to browser spans before forwarding, and since a
+page's input is not the SDK's, applies it wherever the page put a value:
+`exception.message` is dropped from the span, every event and every link, not
+only from an `exception` event, and no user agent (`user_agent.original`,
+`http.user_agent`) is kept anywhere, the rebuilt resource included. A page
+span loses the same host and client-address attributes as a backend span
+(§6's list above). Our own
 spans set `scadbuddy.failure_class` (the problem `type_` for an `ApiError`,
 plus the client's `Scope` for a Bambuddy call) as the readable cause. Where
 the message is needed, it is already in the job row or the response the user

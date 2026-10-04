@@ -232,37 +232,106 @@ If the previous file cannot be loaded, the log says so and nothing is re-wrapped
 
 ## 4. Setting up the Claude credential
 
-There is one credential row (`id = 'default'`, `ai_credentials`). It is of one of two
-kinds (`CREDENTIAL_KINDS`, [`agent/src/credentials.ts`](../../agent/src/credentials.ts);
-spec D2):
+There can be several credentials, one row each in `ai_credentials`, in priority order
+(#1093). Each is of one of three kinds (`CREDENTIAL_KINDS`,
+[`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
 
-- `anthropic_api_key`: passed to Claude Code as `ANTHROPIC_API_KEY`.
+- `anthropic_api_key`: a Console key (`sk-ant-api03-…`), passed to Claude Code as
+  `ANTHROPIC_API_KEY`.
+- `claude_oauth_token`: the token `claude setup-token` prints (`sk-ant-oat01-…`),
+  passed as `CLAUDE_CODE_OAUTH_TOKEN`. Saved as an API key instead, it goes in
+  `x-api-key` and Anthropic answers 401. Spec D2 records this kind as a reversal;
+  read Anthropic's terms for subscription credentials before using it.
 - `gateway`: a `base_url` plus a token, passed as `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_AUTH_TOKEN`.
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)
 ("`ANTHROPIC_AUTH_TOKEN` in `Authorization: Bearer`, `ANTHROPIC_API_KEY` in
-`x-api-key`"), quoted in that file. The Agent SDK does not allow claude.ai
-subscription login for third-party products ([Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview),
-quoted in spec §3.1).
+`x-api-key`"), quoted in that file. `CLAUDE_CODE_OAUTH_TOKEN` is the variable Claude
+Code reads a `claude setup-token` token from. Anthropic does not allow claude.ai login
+in third-party products ([Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview),
+quoted in spec §3.1). `claude_oauth_token` is for a deployment owner using their own
+token on their own deployment (spec D2).
+
+Each query uses the first credential that is usable now, and falls back to the next
+when a call fails for a reason that is the credential's (`runWithFallback()` in
+[`agent/src/harness/fallback.ts`](../../agent/src/harness/fallback.ts); the classifier
+is `classifyFailure()` in
+[`agent/src/harness/credentialErrors.ts`](../../agent/src/harness/credentialErrors.ts)):
+
+| Failure | Examples | What happens |
+|---|---|---|
+| Permanent | 401, 403, 402, a billing or credit message | First confirmed: the agent asks the endpoint once more with that credential (`probeCredential()`, a one-token request on `claude-haiku-4-5`, not the turn's model, so a refusal of that model or of a feature the turn used does not confirm itself). Refused again with a 401, a 402, or a 400/403 that names the key, the organisation or billing (`refusesTheKey()`), the credential becomes `disabled`, with the reason in `last_error`, and is not tried again until someone resets it or saves a new secret for it. Answered, the refusal was about the request (a gateway or WAF refusing one body, say), so the turn ends there with no fallback and nothing recorded. With no clear answer it falls back for this call without being marked. |
+| Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. It is recorded at once with the default 60 s and the turn moves on; Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential in the background (`probeCredential()`, a one-token request; a refused one is not billed) and replaces that time with what its 429 names (`retry-after`, then the `anthropic-ratelimit-*-reset` headers). A probe that is answered makes it usable again in 1 s; one refused the same way as above (`refusesTheKey()`) disables it instead. Every probe stops with the turn: when the user stops it, the agent does not wait for a probe still running, and records nothing from it. |
+| Transient | 5xx, 529, network errors | Claude Code retries on the same credential, at most twice when there is another to fall back to (`CLAUDE_CODE_MAX_RETRIES`), then the turn moves on for this call only. The credential is not marked. |
+| Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. |
+
+No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
+fails mid-way (after tool calls ran) resumes the session on the next
+credential with a short "continue" prompt, so no tool runs twice and the prompt is not
+sent twice. Each credential is tried at most once per turn. Every disable, cooldown,
+recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
+like `credential 2 (API key …abcd)`, never with the secret. When no credential is
+usable, a turn fails with a message naming each one's state and the soonest time one
+is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
+`ai` set to one of:
+
+- `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
+  credential is cooling down and will be usable again on its own;
+- `unavailable (no Claude credential is usable now)`: some are disabled or cannot be
+  opened with the mounted key-encryption key (sealed under another one, or in the old
+  format, which a Reset does not fix: save the secret again); `recovers_at` is set when
+  any of the others is cooling down;
+- `unavailable (every Claude credential is disabled)`: every one is disabled and opens
+  with the mounted key, so a Reset of any of them makes it usable.
+
+A reset, or a new secret, clears `last_error` and `last_error_at` as well as the status.
+
+Several pods share this state. A cooldown that has passed reads as `active` on the
+database's clock without a write; a rate limit never downgrades a disabled credential;
+of two cooldowns the later wins; and a failure is recorded only against the `epoch`
+the query read, so a query that started with an old secret cannot disable a new one.
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`. There is no Settings UI for them on `main` yet, so
-these are the interface.
+bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way
+to use them is Settings → Assistant → **Claude credentials** (`AiCredentialSection`,
+[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx),
+#1000, #1093), a list over the `/entries` and `/order` routes in the order queries try
+the credentials.
+Each row shows the kind, base URL, last four and status (active, rate limited until a
+time, or disabled with the last error), and can be moved up or down, tested (showing
+`Retry-After` on a `429`), reset when not active, given a new key, or deleted after a
+confirmation; a form adds one last. The list is read again just after the earliest
+cooldown ends, since the status is worked out at read time. The `curl` below is the
+fallback when there is no UI.
+
+The routes without `/entries` are the single-credential routes from #1000: they act on
+the first credential by priority, for scripts written against them. The UI no longer
+uses them; the `/entries` and `/order` routes manage every credential (#1093).
 
 | Route | Guarded | What it does |
 |---|---|---|
 | `GET /api/v1/ai/credentials` | No | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
-| `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
-| `DELETE /api/v1/ai/credentials` | Yes | Deletes the row. |
+| `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` and `claude_oauth_token` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
+| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
+| `GET /api/v1/ai/credentials/entries` | No | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
+| `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret }`; adds a credential last in priority and answers `201` with its entry. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
+| `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
+| `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
+| `DELETE /api/v1/ai/credentials/entries/{id}` | Yes | Deletes one credential and answers with the list. |
+| `POST /api/v1/ai/credentials/entries/{id}/reset` | Yes | Makes a `disabled` or `cooling_down` credential `active` again. |
+| `POST /api/v1/ai/credentials/entries/{id}/test` | Yes | Tests one credential, as below. A test does not change its status. |
 | `POST /api/v1/ai/credentials/test` | Yes | Runs a one-turn query (`maxTurns: 1`, `maxBudgetUsd: 0.05`, 60 s timeout, prompt `Reply with the single word: ok`) and returns `{ ok, detail, duration_ms, model }` (`testConnection()`, [`agent/src/harness/testConnection.ts`](../../agent/src/harness/testConnection.ts)). Only one test runs at a time, with at most one per 10 s (`DEFAULT_TEST_COOLDOWN_MS`); otherwise it answers `429` with `Retry-After`. The first `api_retry` is treated as the verdict, so a bad key fails fast. The model comes from `ai_settings.model` when set (`main.ts`). A gateway host is re-checked at test time. |
 
 "Guarded" means the request must pass `uiRequestProblem()` in
 [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts) or it gets `403` (§6).
-Every route answers `503` while there is no database, or while migrations have not
-applied (`store()` in `routes/credentials.ts`).
+Every route, the `/entries` and `/order` ones included, answers `503` while there is no
+database, or while migrations have not applied (`store()` in `routes/credentials.ts`).
+The no-database `503` also carries
+`"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
+the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
 Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
 
@@ -495,7 +564,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_migrations`: the ledger, one row per applied file (its id is the file name
   without `.sql`), with a checksum each. `version` and `story` are set only for the
   two files that predate #491, so an older image can still read the ledger.
-- `ai_credentials`: the sealed credential.
+- `ai_credentials`: the sealed credentials, with their priority and health (#1093).
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
   The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and

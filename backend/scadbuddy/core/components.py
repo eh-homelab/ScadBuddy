@@ -25,6 +25,8 @@ import scadbuddy
 if TYPE_CHECKING:
     import asyncio
 
+    from scadbuddy.bambuddy.print_links import PrintLinkStore
+    from scadbuddy.bambuddy.watcher import PrintWatcher
     from scadbuddy.core.config import Config
     from scadbuddy.core.events import EventBus
     from scadbuddy.core.metrics import Metrics
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
     from scadbuddy.library.history import ModelHistory
     from scadbuddy.library.libraries import CheckoutGate
     from scadbuddy.library.outputs import OutputStore
+    from scadbuddy.library.settings_store import SettingsStore
     from scadbuddy.render.submit import RenderService
 
 #: The module a feature package names its component in, and what it exports.
@@ -57,6 +60,9 @@ class Core(Protocol):
     checkouts: CheckoutGate
     installs: asyncio.Semaphore
     checks: asyncio.Semaphore
+    settings_store: SettingsStore
+    print_links: PrintLinkStore
+    print_watcher: PrintWatcher
 
 
 @dataclass(frozen=True)

@@ -305,3 +305,23 @@ def test_either_endpoint_variable_turns_export_on(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://general:4318")
     assert tracing.traces_export_enabled()
+
+
+def test_a_provider_scadbuddy_did_not_build_is_warned_about(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``opentelemetry-instrument`` installs its own SDK provider, whose exporters skip
+    the scrub (spec §6): kept, but never silently."""
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.setattr(tracing, "_instrument_libraries", lambda: None)
+    foreign = TracerProvider()
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: foreign)
+    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+        tracing.configure_tracing("scadbuddy", version="v", revision="r")
+    assert "do not scrub spans" in caplog.text
+    caplog.clear()
+    own = tracing.build_provider("scadbuddy", version="v", revision="r")
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
+    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+        tracing.configure_tracing("scadbuddy", version="v", revision="r")
+    assert "do not scrub spans" not in caplog.text

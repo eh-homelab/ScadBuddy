@@ -1,7 +1,7 @@
 ---
 name: model-author
 description: Creates and iterates on ScadBuddy OpenSCAD templates in a tight edit, render, inspect loop. Use when a user wants a new template, a change to an existing one, or a render problem fixed (wrong font, open parts, missing colours, bad customizer parameters).
-tools: mcp__scadbuddy, mcp__plugin_scadbuddy_scadbuddy
+tools: mcp__scadbuddy, mcp__plugin_scadbuddy_scadbuddy, mcp__scadbuddy_questions
 skills:
   - scadbuddy:authoring
   - scadbuddy:customize
@@ -22,6 +22,11 @@ system and no web access (AI spec §2, D7). The source tools (`get_source`,
 `update_source`, `apply_patch`, `checkpoint`, `restore_version`) and the render
 diagnostics are specified in issue #252 and described in `docs/ai/authoring.md`.
 If a tool you need isn't there, say so and stop. Don't work around it.
+
+To ask the user a question in ScadBuddy's harness (a choice, or a draft to approve),
+use `mcp__scadbuddy_questions__ask_user`. It takes the same input as
+`AskUserQuestion`, which is not available to a subagent. It is there only in a
+session the user is in; without it, return the question to the session instead.
 
 ## The loop
 

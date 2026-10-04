@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -64,7 +65,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     return manager({
       sql: pool.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...extra,
     })
@@ -118,6 +119,231 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.status',
     ])
   })
+
+  it('falls back to the next credential when the first is refused, resuming through the Postgres store (#1093)', async () => {
+    const TOKEN_A = 'gw-sessions-revoked-aaaa'
+    const TOKEN_B = 'gw-sessions-working-bbbb'
+    let revoked = true
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}` && revoked
+        ? { error: { status: 401, type: 'authentication_error', message: 'invalid token' } }
+        : { text: conversation(r).includes('second') ? 'second answer' : 'first answer' }
+    const outcomes: string[] = []
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => (attempt, outcome) => {
+          outcomes.push(`${attempt.id}:${outcome.class}`)
+          return Promise.resolve()
+        },
+      },
+    })
+
+    // The session's first turn: credential A fails before Claude Code has
+    // answered anything, and B picks the new session up from the store.
+    const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(outcomes).toEqual(['a:permanent', 'b:ok'])
+    const firstSent = conversation(fake.messageCalls().at(-1))
+    expect(firstSent.split('make a box').length - 1).toBe(1)
+
+    // A later turn on A, now working again, sees the whole conversation.
+    revoked = false
+    expect(await (await m.send(session.id, agentA, 'second question')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(fake.messageCalls().at(-1)?.headers.authorization).toBe(`Bearer ${TOKEN_A}`)
+    expect(sent).toContain('make a box')
+    expect(sent).toContain('first answer')
+    expect(sent).toContain('second question')
+
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type === 'error')).toEqual([])
+    expect(JSON.stringify(events)).not.toMatch(/API Error|Not logged in|gw-sessions/)
+  }, 60_000)
+
+  // #1101: Claude Code reports a request the API refused as a `success`
+  // result with `is_error: true`, and its text as a synthetic assistant
+  // message. Neither a 429 with a long retry-after nor a 400 is retried, so
+  // the single credential's attempt ends with exactly those. A 401 is
+  // retried, and fallback.ts stops the attempt at the first retry and throws.
+  it.each([
+    {
+      status: 429,
+      type: 'rate_limit_error',
+      message: 'This request would exceed your rate limit',
+      headers: { 'retry-after': '120' },
+      code: 'api_error',
+      says: /rate limited \(HTTP 429\); try again later: .*exceed your rate limit/,
+    },
+    {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'messages: text content blocks must be non-empty (sent by gw-sessions-test-token)',
+      code: 'api_error',
+      says: /refused the request \(HTTP 400\): .*text content blocks must be non-empty/,
+    },
+    {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'Your credit balance is too low to access the Anthropic API',
+      // The probe confirms it: refused again.
+      confirmed: true,
+      code: 'api_error',
+      says: /the Claude credential was rejected \(HTTP 400\); check it under Settings → AI: .*credit balance is too low/i,
+    },
+    // A guard for the #1093 path: fallback.ts stops a 401 at its first retry and throws.
+    {
+      status: 401,
+      type: 'authentication_error',
+      message: 'invalid x-api-key',
+      code: 'turn_failed',
+      says: /the Claude credential \(.*\) was refused: HTTP 401/,
+    },
+  ])('a $status ($type) from the API ends the turn as an error ($code), not as a reply, and counts no turn (#1101)', async (c) => {
+    script = (r) =>
+      conversation(r).includes('second')
+        ? { text: 'second answer' }
+        : { error: { status: c.status, type: c.type, message: c.message, headers: c.headers ?? {} } }
+    const m = await replica({
+      probe: () =>
+        Promise.resolve(
+          c.status === 401 || ('confirmed' in c && c.confirmed)
+            ? { verdict: 'refused', reason: `the probe was refused (HTTP ${c.status})` }
+            : { verdict: 'unknown', until: new Date(Date.now() + 60_000) },
+        ),
+    })
+
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(c.says) })
+    // An API message that echoes the credential is redacted from the outcome too.
+    expect(JSON.stringify(done)).not.toContain('gw-sessions-test-token')
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, turnActive: false })
+
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    const errors = events.filter((e) => e.type === 'error')
+    expect(errors).toEqual([expect.objectContaining({ code: c.code, message: expect.stringMatching(c.says) })])
+    expect(JSON.stringify(events)).not.toContain('gw-sessions-test-token')
+    expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+
+    // The session is not spent: the next message is answered as usual.
+    expect(await (await m.send(session.id, browser, 'second question')).done).toMatchObject({
+      kind: 'result',
+      subtype: 'success',
+      turns: 1,
+    })
+  }, 60_000)
+
+  it('a refusal on every credential counts no turn for any of them, and names the last one’s failure (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-refused-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    expect(fake.messageCalls().map((c) => c.headers.authorization)).toEqual([`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'api_error' })])
+  }, 60_000)
+
+  it('a refusal the probe finds is not the credential’s says so, and does not send the user to Settings (#1101)', async () => {
+    script = () => ({ error: { status: 403, type: 'permission_error', message: 'blocked by policy' } })
+    const m = await replica({ probe: () => Promise.resolve({ verdict: 'answered', until: new Date(Date.now() + 1000) }) })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused this request \(HTTP 403\); the credential itself works/) })
+    expect(JSON.stringify(done)).not.toContain('Settings')
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    // fallback.ts throws after yielding the held result on this path: the
+    // manager's catch must neither replace the refusal nor show its message.
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([
+      expect.objectContaining({ code: 'api_error', message: expect.stringMatching(/the credential itself works/) }),
+    ])
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 0 })])
+  }, 60_000)
+
+  it('a refused request on one credential is not a turn when the next one answers (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-working-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { text: 'a box' }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+  }, 60_000)
+
+  it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
+    script = (r) =>
+      conversation(r).includes('tool_result')
+        ? { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+        : { toolUse: { name: 'mcp__stub__lookup', input: { q: 'box' } } }
+    const lookup = tool('lookup', 'Look something up', { q: z.string() }, (args) =>
+      Promise.resolve({ content: [{ type: 'text' as const, text: `found ${args.q}` }] }),
+    )
+    const m = await replica({
+      mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [lookup] }) }),
+      tierOf: (name) => (name === 'mcp__stub__lookup' ? 'read' : undefined),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    // Two model requests: the tool call, which counts, and the refused one, which does not.
+    expect(fake.messageCalls()).toHaveLength(2)
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 1 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    // The panel's count follows the row's.
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 1 })])
+    expect(events.map((e) => e.type).filter((t) => t.startsWith('tool.') || t.startsWith('assistant.') || t === 'error')).toEqual([
+      'tool.call',
+      'tool.result',
+      'error',
+    ])
+  }, 60_000)
 
   it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
     script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })

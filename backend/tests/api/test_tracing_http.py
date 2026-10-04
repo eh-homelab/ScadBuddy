@@ -13,7 +13,7 @@ from tests.conftest import wait_for_span
 #: semconv). The scrub (`core/trace_scrub.py`) is a denylist of exact names, so a
 #: release that renames one (the query string moving to a new key) would export it
 #: unscrubbed: this set makes that rename fail here instead, and the bump that
-#: changes it is reviewed alongside `_DROPPED`, `_PATH_ONLY` and `_WITH_ORIGIN`
+#: changes it is reviewed alongside `DROPPED_ATTRIBUTES`, `_PATH_ONLY` and `_WITH_ORIGIN`
 #: (review 2 of #1064).
 KNOWN_SERVER_ATTRIBUTES = frozenset(
     {
@@ -87,8 +87,8 @@ def test_a_server_span_carries_only_known_attributes(
 
 @pytest.mark.parametrize(
     ("path", "status"),
-    # The relay route (spec §5.2) does not exist yet: its 404 is still not traced.
-    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 404)],
+    # The relay route (spec §5.2) takes only POST: a GET's 405 is not traced either.
+    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 405)],
 )
 def test_the_infrastructure_paths_are_not_traced(
     client: TestClient, spans: InMemorySpanExporter, path: str, status: int

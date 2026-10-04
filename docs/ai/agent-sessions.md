@@ -18,7 +18,7 @@ so the dot is an underscore.
 
 | Tool | Tier | What it does |
 |---|---|---|
-| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin` |
+| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
 | `sessions_send` | `write` | A user turn in a session the caller owns; refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
@@ -205,6 +205,33 @@ branch `docs/durable-printing-agents-flows` until it merges). Rows go with their
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 
+The assistant panel shows this list for the active session: **Touched** in the session
+strip opens it (`frontend/src/components/assistant/SessionTouched.tsx`), one entry per
+resource with every way it was touched, grouped by kind, and reads it again whenever
+the session's status moves or one of its tool calls finishes, so a running turn's
+changes show as they land. Each entry links to its page: a model to `/m/{slug}`, a
+revision to `/m/{slug}?version={commit}`, a preset, asset or render to its model's
+page, an output to `/edit/{id}`, a print run or print to `/prints`. A deleted
+resource, anything of a model the session deleted after last touching it (even if it
+made one of that slug again), and an `unclassified` row (shown by its tool) link
+nowhere.
+
+The reverse direction answers which sessions touched a resource:
+`GET /api/v1/ai/resources/{type}/{id}/sessions` (`?status=`, `?limit=` as on the list),
+the same filter as `GET /api/v1/ai/sessions?resource_type=&resource_id=`, and
+`sessions_list`'s `resource` (`ResourceRef` in `touched.ts`; `listQuery()` in
+`manager.ts`). `{type}` is any kind but `unclassified`. A `model` matches every row of
+that model (`model_slug`: the model itself, its revisions, presets, assets, renders and
+outputs); any other kind matches its own id. Prints, print runs and deleted outputs
+carry no model, so a model's lookup misses them. The filter is one `EXISTS` beside the
+visibility filter, so each caller sees only the sessions it may see (§2), each once
+however often it touched the resource. A model's page shows **Changed by assistant
+(N)** in its toolbar, and **Output changed by assistant (N)** too when it reopened an
+output (`/edit/{id}`); picking a session opens it in the assistant panel
+(`frontend/src/components/assistant/ResourceSessions.tsx`, through `AppShell`'s
+`AssistantOpener`). It shows nothing when no session touched the resource, or the
+assistant is off.
+
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
@@ -215,5 +242,5 @@ session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 - **A2A** is deferred (spec §6).
 - **The rest of #931**: extractors for the remaining tools (libraries, fonts, Bambuddy
   projects, settings and remembered choices, `browser_*` param changes), a backfill
-  from `ai_audit`, the session view's "Touched" panel and resource-to-session links,
-  filtering sessions by resource, and "restore to before this session".
+  from `ai_audit`, a resource filter in the panel's own session picker, and
+  "restore to before this session".

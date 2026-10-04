@@ -193,6 +193,12 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   descriptions before anything is exported; never record a parameter value, a log
   line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
   fixture `spans`); the Bambuddy client injects no trace headers.
+  The browser relay (`POST /telemetry/v1/traces`, route `api/telemetry.py`, feature
+  `scadbuddy/telemetry/`): `admission.py` (same-origin checks and the rate limits; the
+  client by `core/proxies.py` and `SCADBUDDY_TRUSTED_PROXIES`, the agent's rules),
+  `payload.py` (rebuilds, caps and scrubs the page's spans), `forwarder.py` (the queue
+  and the one uninstrumented httpx client; never retries), `target.py` (the collector URL
+  and headers from the `OTEL_*` variables, `None` unless `traces_export_enabled()`).
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
@@ -201,6 +207,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
   up without editing `handlers.ts`, and must export `handlers` (and optionally
   `reset`) (#508).
+- `frontend/src/lib/tracing.ts` — the browser's OpenTelemetry (#988), a lazy chunk
+  `main.tsx` loads after the first paint; spans leave through `traceScrub.ts` and
+  `relayExporter.ts` to the backend relay `/telemetry/v1/traces`, and stop for the
+  page's life when it answers `X-ScadBuddy-Tracing: off` (`startTracing` then undoes
+  itself, so no `traceparent` is sent; msw always answers off,
+  `src/mocks/features/telemetry.ts`). A user action is `traceAction`
+  (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
+  the action's trace only inside its `within`. `traceparent` goes on same-origin
+  requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
+  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
+  reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
