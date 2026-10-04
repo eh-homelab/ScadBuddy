@@ -129,9 +129,9 @@ class PrintActivities:
         if spec.kind == "library":
             assert spec.file_id is not None
             return await LibrarySource.load(client, spec.file_id)
-        return self._output_source(spec, settings)
+        return await self._output_source(spec, settings)
 
-    def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
+    async def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
         assert spec.output_id is not None
         return OutputSource(
             self.d.outputs,
@@ -291,14 +291,13 @@ class PrintActivities:
         # A library file's project is not remembered (``LibrarySource.remember_project``).
         if planned.project_id is not None and spec.kind == "output":
             try:
-                await asyncio.wait_for(
-                    self._output_source(spec, settings).remember_project(
+                async with asyncio.timeout(REMEMBER_BUDGET):
+                    source = await self._output_source(spec, settings)
+                    await source.remember_project(
                         planned.project_id,
                         printer_id=planned.printer_id,
                         nozzle_size=planned.nozzle_size,
-                    ),
-                    REMEMBER_BUDGET,
-                )
+                    )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
         try:
