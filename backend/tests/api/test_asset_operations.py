@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -112,4 +113,18 @@ def test_a_fetch_url_refused_on_its_shape_is_refused_before_any_record(
     response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
     assert response.status_code == 422, response.text
     assert "https" in response.json()["detail"]
+    assert _workflow_ids(app, "asset_fetch") == []
+
+
+def test_a_fetch_refused_on_a_full_budget_leaves_no_url_claim(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3e final I1: the 503 is the route's own refusal, made before anything
+    started, so the URL's claim (its query may carry a token) is released."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
+    monkeypatch.setattr(_state(app).imports, "full", lambda: True)
+    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    assert response.status_code == 503, response.text
+    claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
+    assert not claim.exists()
     assert _workflow_ids(app, "asset_fetch") == []

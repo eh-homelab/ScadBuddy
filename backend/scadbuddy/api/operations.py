@@ -179,7 +179,19 @@ async def run_operation(
     ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
     the operation may still run. ``before_start`` is a route's own refusal, made only
     when no record answers and the same request is not still running: a repeat is its
-    first answer whatever has changed since (§4.2)."""
+    first answer whatever has changed since (§4.2). Its refusal, 503 included, releases
+    ``claimed`` too: nothing started (review 3e final I1)."""
+    refused = False
+
+    async def refuse() -> None:
+        nonlocal refused
+        assert before_start is not None
+        try:
+            await before_start()
+        except ApiError:
+            refused = True
+            raise
+
     try:
         result = await _run_operation(
             ops,
@@ -188,10 +200,12 @@ async def run_operation(
             subject=subject,
             request=request,
             idempotency_key=idempotency_key,
-            before_start=before_start,
+            before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+        if claimed is not None and (
+            refused or error.status != status.HTTP_503_SERVICE_UNAVAILABLE
+        ):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
