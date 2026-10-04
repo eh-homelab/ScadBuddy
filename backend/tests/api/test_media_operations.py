@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.operations.claims import ClaimStore, Held
 from tests.api.conftest import PNG_BYTES
+from tests.api.test_media import WEBM
 from tests.api.test_model_operations import _commits, _history_bytes, _state, _workflow_ids
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
@@ -111,3 +115,27 @@ def test_a_keyed_media_edit_resent_after_the_model_went_answers_as_first(
     again = client.patch(url, json={"caption": "x"}, headers=headers)
     assert again.status_code == 200, again.text
     assert again.json() == first.json()
+
+
+def test_a_poster_that_cannot_be_held_releases_the_files_claim(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3e final M6: a failed second hold leaves no claim of the first."""
+    hold_file = ClaimStore.hold_file
+    holds: list[str] = []
+
+    def failing(store: ClaimStore, path: Path, digest: str) -> Held:
+        holds.append(digest)
+        if len(holds) == 2:
+            path.unlink()
+            raise OSError("disk full")
+        return hold_file(store, path, digest)
+
+    monkeypatch.setattr(ClaimStore, "hold_file", failing)
+    with pytest.raises(OSError, match="disk full"):
+        client.post(
+            f"/api/v1/models/{model}/media",
+            files={"file": ("v.webm", WEBM, "video/webm"), "poster": ("p.png", PNG, "image/png")},
+        )
+    assert holds[0] == hashlib.sha256(WEBM).hexdigest()
+    assert not (_state(app).paths.claims / holds[0]).exists()

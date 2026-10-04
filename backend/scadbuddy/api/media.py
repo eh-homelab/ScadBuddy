@@ -451,9 +451,17 @@ async def upload_media(
             )
             is None
         ):
-            held.append(await asyncio.to_thread(claims.hold_file, upload.path, named["file"]))
-            if poster is not None:
-                held.append(await asyncio.to_thread(claims.hold_file, poster.path, named["poster"]))
+            try:
+                held.append(await asyncio.to_thread(claims.hold_file, upload.path, named["file"]))
+                if poster is not None:
+                    held.append(
+                        await asyncio.to_thread(claims.hold_file, poster.path, named["poster"])
+                    )
+            except Exception:
+                # No operation names them yet (review 3e final M6).
+                for each in held:
+                    await asyncio.to_thread(claims.release, each)
+                raise
     finally:
         # What was not claimed: a part not sent, or all of it for a repeat.
         received.discard()
