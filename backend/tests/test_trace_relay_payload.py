@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 import pytest
 
@@ -567,6 +568,65 @@ def test_an_exception_message_is_removed_from_a_span_every_event_and_a_link() ->
     assert SENTINEL not in _prepared(body).decode()
     result = only_span(body)
     for scrubbed in (result, *result["events"], result["links"][0]):
+        assert scrubbed["attributes"] == [string("http.method", "GET")]
+        assert scrubbed["droppedAttributesCount"] == 0
+
+
+def _leaky_stack() -> str:
+    return f"TypeError: {SENTINEL}\n{_FRAMES}"
+
+
+def _frames_only() -> str:
+    return "\n".join(line.strip() for line in _FRAMES.splitlines())
+
+
+@pytest.mark.parametrize("place", ["span", "other_event", "link"])
+def test_a_stacktrace_outside_an_exception_event_loses_its_message(place: str) -> None:
+    """Review 6 of #1090: the stack repeats the message in its V8 head, wherever the
+    page puts it (spec §6)."""
+    attributes = [
+        string("exception.type", "TypeError"),
+        string("exception.message", SENTINEL),
+        string("exception.stacktrace", _leaky_stack()),
+    ]
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": attributes}
+    event = {"name": "fetch", "attributes": attributes}
+    kwargs: dict[str, Any] = {
+        "span": {"attributes": attributes},
+        "other_event": {"events": [event]},
+        "link": {"links": [link]},
+    }[place]
+    body = export(span(**kwargs))
+    assert SENTINEL not in _prepared(body).decode()
+    result = only_span(body)
+    holders = {"span": [result], "other_event": result["events"], "link": result["links"]}
+    (target,) = holders[place]
+    assert target["attributes"] == [
+        string("exception.type", "TypeError"),
+        string("exception.stacktrace", _frames_only()),
+    ]
+
+
+def test_a_stacktrace_with_no_message_beside_it_keeps_frames_only() -> None:
+    attributes = [string("exception.stacktrace", _leaky_stack())]
+    result = only_span(export(span(attributes=attributes)))
+    assert result["attributes"] == [string("exception.stacktrace", _frames_only())]
+
+
+def test_a_non_string_stacktrace_is_not_forwarded() -> None:
+    attributes = [{"key": "exception.stacktrace", "value": {"intValue": 1}}]
+    assert only_span(export(span(attributes=attributes)))["attributes"] == []
+
+
+def test_http_status_text_is_removed_from_a_span_an_event_and_a_link() -> None:
+    """A status line's text is the server's words, not the page's: dropped everywhere."""
+    attributes = [string("http.status_text", SENTINEL), string("http.method", "GET")]
+    event = {"name": "fetch", "attributes": attributes}
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": attributes}
+    body = export(span(attributes=attributes, events=[event], links=[link]))
+    assert SENTINEL not in _prepared(body).decode()
+    result = only_span(body)
+    for scrubbed in (result, result["events"][0], result["links"][0]):
         assert scrubbed["attributes"] == [string("http.method", "GET")]
         assert scrubbed["droppedAttributesCount"] == 0
 

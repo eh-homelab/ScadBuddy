@@ -8,6 +8,7 @@ from starlette.datastructures import Headers
 
 from scadbuddy.api.realtime import RateLimit
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.proxies import Network
 from scadbuddy.core.settings import Settings
 from scadbuddy.telemetry.admission import (
     RelayLimits,
@@ -18,6 +19,10 @@ from scadbuddy.telemetry.admission import (
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 PUBLIC = "https://scadbuddy.example"
+
+
+def networks(trusted_proxies: str = "") -> tuple[Network, ...]:
+    return settings(trusted_proxies).trusted_proxy_networks
 
 
 def settings(trusted_proxies: str = "") -> Settings:
@@ -129,8 +134,8 @@ def test_the_client_buckets_are_bounded() -> None:
 
 def test_an_untrusted_peer_is_its_own_client() -> None:
     forwarded = headers(("x-forwarded-for", "203.0.113.9"))
-    assert relay_client(forwarded, "10.43.0.5", settings("10.42.0.0/16")) == "10.43.0.5"
-    assert relay_client(forwarded, "10.42.0.5", settings()) == "10.42.0.5"
+    assert relay_client(forwarded, "10.43.0.5", networks("10.42.0.0/16")) == "10.43.0.5"
+    assert relay_client(forwarded, "10.42.0.5", networks()) == "10.42.0.5"
 
 
 def test_a_loopback_peer_is_not_believed_when_no_proxy_is_trusted() -> None:
@@ -139,11 +144,11 @@ def test_a_loopback_peer_is_not_believed_when_no_proxy_is_trusted() -> None:
     caller (``kubectl port-forward``, a sidecar) cannot pick its own bucket."""
     forwarded = headers(("x-forwarded-for", "203.0.113.9"))
     for peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-        assert relay_client(forwarded, peer, settings()) == peer
+        assert relay_client(forwarded, peer, networks()) == peer
 
 
 def test_a_trusted_proxy_names_the_client_by_its_last_value() -> None:
-    trusted = settings("10.42.0.0/16")
+    trusted = networks("10.42.0.0/16")
     forwarded = headers(("x-forwarded-for", "198.51.100.1, 203.0.113.9"))
     assert relay_client(forwarded, "10.42.0.5", trusted) == "203.0.113.9"
     # Two header lines read as one list, as Node joins them for the agent.
@@ -153,8 +158,8 @@ def test_a_trusted_proxy_names_the_client_by_its_last_value() -> None:
 
 def test_an_empty_last_value_falls_back_to_the_peer() -> None:
     forwarded = headers(("x-forwarded-for", "203.0.113.9, "))
-    assert relay_client(forwarded, "10.42.0.5", settings("10.42.0.0/16")) == "10.42.0.5"
-    assert relay_client(headers(), None, settings()) == "unknown"
+    assert relay_client(forwarded, "10.42.0.5", networks("10.42.0.0/16")) == "10.42.0.5"
+    assert relay_client(headers(), None, networks()) == "unknown"
 
 
 def test_a_refusal_by_the_process_bucket_does_not_spend_the_clients_own() -> None:

@@ -76,7 +76,7 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
         raise ApiError(503, "the relay is shutting down")
     check_content_type(request.headers)
     peer = request.client.host if request.client is not None else None
-    relay.limits.take(relay_client(request.headers, peer, settings))
+    relay.limits.take(relay_client(request.headers, peer, relay.trusted_proxies))
     try:
         batch = await asyncio.to_thread(
             prepare,

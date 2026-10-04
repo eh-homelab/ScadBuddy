@@ -34,7 +34,7 @@ from starlette.datastructures import Headers
 
 from scadbuddy.api.realtime import RateLimit, origin_allowed
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.proxies import client_address
+from scadbuddy.core.proxies import Network, client_address
 from scadbuddy.core.settings import Settings
 
 #: Per process, so per pod rather than cluster-wide: with N API replicas the ceiling is
@@ -76,11 +76,11 @@ def check_content_type(headers: Headers) -> None:
         raise ApiError(415, "the relay accepts application/json only")
 
 
-def relay_client(headers: Headers, peer: str | None, settings: Settings) -> str:
+def relay_client(headers: Headers, peer: str | None, trusted_proxies: tuple[Network, ...]) -> str:
     """The client a rate limit counts against. Every ``X-Forwarded-For`` line, joined as
     Node joins them for the agent, so a proxy that sends two gives the same answer."""
     forwarded_for = ", ".join(headers.getlist("x-forwarded-for")) or None
-    return client_address(peer, forwarded_for, settings.trusted_proxy_networks) or UNKNOWN_CLIENT
+    return client_address(peer, forwarded_for, trusted_proxies) or UNKNOWN_CLIENT
 
 
 def _too_many(detail: str, limit: RateLimit) -> ApiError:

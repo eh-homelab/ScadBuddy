@@ -7,7 +7,8 @@ rebuilt from the OTLP/JSON fields it may carry; every list and string is capped 
 limits the browser SDK's provider is configured with (the frontend ``RelayExporter``'s
 ``spanLimits``), so a well-behaved page never meets them; and the backend's own scrub
 (`core/trace_scrub.py`) is applied, wherever the page put the value rather than only
-where the SDK would: no ``exception.message`` on a span, an event or a link, no query
+where the SDK would: no ``exception.message`` nor ``http.status_text`` on a span, an
+event or a link, an ``exception.stacktrace`` there reduced to its frames, no query
 string, no user agent (nor on the resource), no captured header. A URL keeps no path of
 its own either, as a server span keeps none: a path on one of the app's routes becomes
 that route's template, when the URL is relative or on one of ScadBuddy's own origins
@@ -54,7 +55,8 @@ WEB_SERVICE_NAME: Final = "scadbuddy-web"
 KEPT_RESOURCE_ATTRIBUTES: Final = ("service.version",)
 #: The backend's scrub, and the message wherever a page puts it: the SDK writes it only
 #: on an ``exception`` event, but the page's input is not the SDK's (spec §6).
-_DROPPED: Final = DROPPED_ATTRIBUTES | {"exception.message"}
+#: ``http.status_text`` is the server's words, which can carry a message.
+_DROPPED: Final = DROPPED_ATTRIBUTES | {"exception.message", "http.status_text"}
 
 _MAX_UINT32: Final = 2**32 - 1
 _MAX_INT64: Final = 2**63 - 1
@@ -262,7 +264,7 @@ def _attributes(raw: object, limit: int, reduce_url: _UrlReducer) -> tuple[list[
     URL that reduces to nothing (`_reduced_url`)."""
     kept: list[Json] = []
     dropped = 0
-    for item in raw if isinstance(raw, list) else []:
+    for item in _scrub_exception(raw):
         key = item.get("key") if isinstance(item, dict) else None
         if not isinstance(key, str):
             dropped += 1
@@ -309,8 +311,9 @@ def _without_message(stack: str, error_type: str | None, message: str | None) ->
 
 
 def _scrub_exception(raw: object) -> list[Any]:
-    """An ``exception`` event's attributes without the message, and with only the frame
-    lines of the stack (spec §6)."""
+    """An attribute list without ``exception.message``, and with only the frame lines of
+    an ``exception.stacktrace`` (spec §6), wherever the page put them: the message and
+    type come from the same list."""
     scrubbed: list[Any] = []
     attributes = raw if isinstance(raw, list) else []
     message = _string_attribute(attributes, "exception.message")
@@ -336,10 +339,7 @@ def _name(value: object) -> str:
 
 def _event(raw: Json, reduce_url: _UrlReducer) -> Json:
     name = _name(raw.get("name"))
-    attributes = raw.get("attributes")
-    if name == "exception":
-        attributes = _scrub_exception(attributes)
-    kept, dropped = _attributes(attributes, MAX_EVENT_ATTRIBUTES, reduce_url)
+    kept, dropped = _attributes(raw.get("attributes"), MAX_EVENT_ATTRIBUTES, reduce_url)
     event: Json = {"name": name, "attributes": kept}
     _set_valid(event, "timeUnixNano", _uint(raw.get("timeUnixNano"), _MAX_INT64))
     event["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)

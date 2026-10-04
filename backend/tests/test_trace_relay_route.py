@@ -84,6 +84,7 @@ def make_relay(
         ),
         limits=limits or RelayLimits(),
         settings=lambda: settings,
+        trusted_proxies=settings.trusted_proxy_networks,
     )
 
 
