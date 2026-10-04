@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from functools import partial
 from typing import Any
@@ -106,3 +107,41 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
         op = client.get(f"/api/v1/operations/{op['id']}").json()
     assert op["status"] == "succeeded", op
     assert op["result"]["slug"] == slug
+
+
+def test_sidecar_and_file_edits_are_operations(client: TestClient, app: FastAPI) -> None:
+    slug, _ = _model(client, "Sidecars")
+    png = models_api.PNG_MAGIC + b"\0" * 64
+    steps: list[tuple[str, Callable[[], Any]]] = [
+        (
+            "model_thumbnail_put",
+            lambda: client.put(
+                f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", png, "image/png")}
+            ),
+        ),
+        ("model_thumbnail_delete", lambda: client.delete(f"/api/v1/models/{slug}/thumbnail")),
+        (
+            "model_readme_put",
+            lambda: client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"}),
+        ),
+        ("model_readme_delete", lambda: client.delete(f"/api/v1/models/{slug}/readme")),
+        (
+            "model_file_put",
+            lambda: client.put(
+                f"/api/v1/models/{slug}/files/part.scad", json={"content": "module p() {}\n"}
+            ),
+        ),
+        ("model_file_delete", lambda: client.delete(f"/api/v1/models/{slug}/files/part.scad")),
+    ]
+    for kind, call in steps:
+        answered = call()
+        assert answered.status_code == 200, (kind, answered.text)
+        assert answered.json()["slug"] == slug
+        assert _workflow_ids(app, kind), kind
+
+
+def test_removing_a_missing_readme_is_still_404(client: TestClient) -> None:
+    slug, _ = _model(client, "No Readme")
+    response = client.delete(f"/api/v1/models/{slug}/readme")
+    assert response.status_code == 404, response.text
+    assert "has no README" in response.json()["detail"]

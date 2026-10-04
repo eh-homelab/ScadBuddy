@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.api import library_pins
+from scadbuddy.api import library_pins, model_files
 from scadbuddy.api import models as models_api
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelMeta, ModelPatch, ModelRecord
@@ -154,6 +154,43 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         body = models_api.SourcePatch.model_validate_json(claimed)
         return _record(await models_api.patch_source_run(request["slug"], body, state))
 
+    async def exists_check(request: dict[str, Any]) -> dict[str, Any]:
+        models_api.require_model_exists(state.catalogue, request["slug"])
+        return {}
+
+    async def _text(name: str) -> str:
+        claimed = await _claimed(name)
+        assert claimed is not None  # the route claims every text it sends
+        return claimed.decode()
+
+    async def thumbnail_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        png = await _claimed(request["png"])
+        assert png is not None  # every set claims its image
+        return _record(await models_api.thumbnail_put_run(request["slug"], png, state))
+
+    async def thumbnail_delete_run(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _record(await models_api.thumbnail_delete_run(request["slug"], state))
+
+    async def readme_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        content = await _text(request["content"])
+        return _record(await models_api.readme_put_run(request["slug"], content, state))
+
+    async def readme_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return _record(await models_api.readme_delete_run(request["slug"], state))
+
+    async def file_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        content = await _text(request["content"])
+        record = await model_files.file_put_run(
+            request["slug"], request["name"], content, request["message"], state
+        )
+        return _record(record)
+
+    async def file_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        record = await model_files.file_delete_run(request["slug"], request["name"], state)
+        return _record(record)
+
     def kind(name: str, check: Any, run: Any, **options: Any) -> OperationKind:
         return OperationKind(
             name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
@@ -169,5 +206,11 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         # A save parse-checks the source and may clone the checkouts it includes.
         kind("model_source_put", source_put_check, source_put_run, run_timeout=PIN_TIMEOUT),
         kind("model_source_patch", source_patch_check, source_patch_run, run_timeout=PIN_TIMEOUT),
+        kind("model_thumbnail_put", exists_check, thumbnail_put_run),
+        kind("model_thumbnail_delete", exists_check, thumbnail_delete_run),
+        kind("model_readme_put", exists_check, readme_put_run),
+        kind("model_readme_delete", exists_check, readme_delete_run),
+        kind("model_file_put", exists_check, file_put_run),
+        kind("model_file_delete", exists_check, file_delete_run),
     ]
     return {each.name: each for each in kinds}

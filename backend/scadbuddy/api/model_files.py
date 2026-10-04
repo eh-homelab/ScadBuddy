@@ -20,15 +20,21 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Path, status
+from fastapi import APIRouter, Path, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.deps import AppState, CatalogueDep, OperationsDep, PathsDep, SlugPath
 from scadbuddy.api.models import (
     MAX_SOURCE_CHARS,
     announce_source_change,
     require_mine,
-    require_model_exists,
+)
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
 )
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
@@ -39,6 +45,7 @@ from scadbuddy.library.catalogue import (
     TooManySourceFilesError,
 )
 from scadbuddy.library.history import MAX_SUBJECT, GitError
+from scadbuddy.operations.claims import ClaimStore
 
 router = APIRouter(tags=["models"])
 
@@ -111,29 +118,48 @@ def list_source_files(slug: SlugPath, catalogue: CatalogueDep) -> list[SourceFil
         f"check the model with `POST /models/check` and its `slug`. At most "
         f"{MAX_SOURCE_FILES} `.scad` files per model (#252)."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def put_source_file(
     slug: SlugPath,
     name: FileNamePath,
     body: SourceFileUpdate,
-    catalogue: CatalogueDep,
-    events: EventsDep,
-) -> ModelRecord:
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
     _require_sibling(name)
     if "\x00" in body.content:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the file contains a NUL byte, so it is binary, not OpenSCAD text",
         )
+    # By claim: a file may be as long as a source (#1054).
+    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.content.encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_file_put"],
+        subject=slug,
+        request={"slug": slug, "name": name, "content": claimed, "message": body.message},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def file_put_run(
+    slug: str, name: str, content: str, message: str | None, state: AppState
+) -> ModelRecord:
+    """The ``model_file_put`` operation's run (#1054)."""
     try:
         record = await asyncio.to_thread(
-            catalogue.write_file,
+            state.catalogue.write_file,
             slug,
             name,
-            body.content,
-            message=body.message,
+            content,
+            message=message,
             max_files=MAX_SOURCE_FILES,
         )
     except ModelNotFoundError:
@@ -145,7 +171,7 @@ async def put_source_file(
         ) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    announce_source_change(events, slug)
+    announce_source_change(state.events, slug)
     return record
 
 
@@ -154,23 +180,37 @@ async def put_source_file(
     response_model=ModelRecord,
     summary="Remove one of a model's other .scad files as one revision",
     description="`model.scad` itself is a 409; a file that is not there is a 404 (#252).",
+    responses=OPERATION_RESPONSES,
 )
 async def delete_source_file(
     slug: SlugPath,
     name: FileNamePath,
-    catalogue: CatalogueDep,
-    events: EventsDep,
-) -> ModelRecord:
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
     _require_sibling(name)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_file_delete"],
+        subject=slug,
+        request={"slug": slug, "name": name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def file_delete_run(slug: str, name: str, state: AppState) -> ModelRecord:
+    """The ``model_file_delete`` operation's run (#1054)."""
     try:
-        record = await asyncio.to_thread(catalogue.write_file, slug, name, None)
+        record = await asyncio.to_thread(state.catalogue.write_file, slug, name, None)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no file {name!r}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    announce_source_change(events, slug)
+    announce_source_change(state.events, slug)
     return record
