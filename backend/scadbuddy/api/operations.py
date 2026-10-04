@@ -11,10 +11,12 @@ with the operation when it has not within the deadline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
@@ -23,9 +25,10 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from scadbuddy.api.deps import OperationCommands, OperationsDep
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
@@ -108,6 +111,46 @@ def _author() -> OperationAuthor | None:
     return None if author is None else OperationAuthor(**vars(author))
 
 
+@dataclass(frozen=True)
+class Claimed:
+    """The claims a request wrote (``operations/claims.py``), released once its answer
+    is final (review 3c 1.2)."""
+
+    store: ClaimStore
+    held: list[Held]
+
+
+async def _release(ops: OperationCommands, claimed: Claimed) -> None:
+    """Release ``claimed``: what this request's puts created and nothing has put since,
+    and no operation still running names (another request holding the same bytes)."""
+    created = [held for held in claimed.held if held.created]
+    if not created:
+        return
+    running = await ops.store.named_by_running([held.name for held in created])
+    for held in created:
+        if held.name not in running:
+            await asyncio.to_thread(claimed.store.release, held)
+
+
+async def recorded(
+    ops: OperationCommands,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+) -> Operation | None:
+    """The operation a keyed request already started, which ``run_operation`` answers
+    from; None without a client key, since each such request is its own command."""
+    if idempotency_key is None:
+        return None
+    return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
+
+
+def _body(request: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    return request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+
+
 async def run_operation(
     ops: OperationCommands,
     response: Response,
@@ -116,13 +159,45 @@ async def run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    claimed: Claimed | None = None,
     before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | Operation:
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
     A refusal or a recorded failure is raised as the problem the route answers with.
-    ``before_start`` is a route's own refusal, made only when no record answers: a
-    repeat is its first answer whatever has changed since (§4.2)."""
-    body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
+    the operation may still run. ``before_start`` is a route's own refusal, made only
+    when no record answers: a repeat is its first answer whatever has changed since
+    (§4.2)."""
+    try:
+        result = await _run_operation(
+            ops,
+            response,
+            kind=kind,
+            subject=subject,
+            request=request,
+            idempotency_key=idempotency_key,
+            before_start=before_start,
+        )
+    except ApiError as error:
+        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+            await _release(ops, claimed)
+        raise
+    if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
+        await _release(ops, claimed)
+    return result
+
+
+async def _run_operation(
+    ops: OperationCommands,
+    response: Response,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+    before_start: Callable[[], Awaitable[None]] | None,
+) -> dict[str, Any] | Operation:
+    body = _body(request)
     size = len(json.dumps(body, separators=(",", ":")).encode())
     if size > MAX_REQUEST_BYTES:
         # The request rides in every input of the operation's history; past this it
@@ -162,9 +237,12 @@ async def run_operation(
     except AlreadyClosedError:
         recorded = await ops.store.find(key)
         if recorded is None:
+            # Its record was pruned while Temporal still keeps the closed execution
+            # (review #1063 8): it may have been done, so this never invites a repeat.
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "This request's operation has ended and left no record. Try again.",
+                "This request already ran, and its record has since been deleted, so it "
+                "may have been done. Check Bambuddy before sending it again.",
             ) from None
         return _answer(recorded, response, repeated=True)
     except CommandStillAcceptingError:

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { commandAnswer } from '../api/command.js'
+import { commandAnswer } from './command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'

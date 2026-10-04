@@ -3,13 +3,14 @@ create, import, patch, duplicate and delete. Each route keeps the refusals that 
 its request; the kind's check makes the ones that read the volume, and its run is the
 route's former body.
 
-A create's source, thumbnail and README arrive as claims (``operations/claims.py``),
-never as workflow payloads.
+A create's source, thumbnail and README, a patch's presets and an import's URL arrive
+as claims (``operations/claims.py``), never as workflow payloads.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -29,8 +30,9 @@ if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
 
 
-def model_kinds(state: AppState) -> dict[str, OperationKind]:
-    """The model kinds, bound to this process's state."""
+def model_kinds(state: AppState) -> list[OperationKind]:
+    """The model kinds, bound to this process's state; ``library/operations.py`` exports
+    them with the pins."""
 
     def _record(record: ModelRecord) -> dict[str, Any]:
         dumped: dict[str, Any] = record.model_dump(mode="json")
@@ -84,7 +86,9 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         return {}
 
     async def import_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        body = models_api.UrlImport.model_validate(request)
+        url = await _claimed(request["url"])
+        assert url is not None  # every import claims its URL
+        body = models_api.UrlImport.model_validate({**request, "url": url.decode()})
         return _record(await models_api.import_url(body, state))
 
     async def patch_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -92,7 +96,11 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         return {}
 
     async def patch_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        patch = ModelPatch.model_validate(request["patch"])
+        fields = request["patch"]
+        presets = await _claimed(request["presets"])
+        if presets is not None:
+            fields = {**fields, "presets": json.loads(presets)}
+        patch = ModelPatch.model_validate(fields)
         return _record(await models_api.patch_template(request["slug"], patch, state))
 
     async def duplicate_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -222,7 +230,7 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
             name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
         )
 
-    kinds = [
+    return [
         # A create may clone the libraries it names, as a pin does.
         kind("model_create", create_check, create_run, run_timeout=PIN_TIMEOUT),
         kind("model_import", import_check, import_run),
@@ -243,4 +251,3 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         kind("model_upstream_dismiss", exists_check, dismiss_run),
         kind("model_upstream_detach", exists_check, detach_run),
     ]
-    return {each.name: each for each in kinds}

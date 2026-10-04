@@ -5,6 +5,8 @@ by claim check (``operations/claims.py``)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import subprocess
 import time
 import uuid
@@ -21,6 +23,8 @@ from scadbuddy.api import models as models_api
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.library.presets import MAX_PRESETS
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
 
 SOURCE = "cube(10);\n"
@@ -43,7 +47,7 @@ def _commits(app: FastAPI) -> int:
 
 
 def _workflow_ids(app: FastAPI, kind: str) -> list[str]:
-    pool = _state(app).operations.store._require()
+    pool = _state(app).components.get(OPERATIONS).store._require()
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT workflow_id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)
@@ -188,3 +192,125 @@ def test_a_request_too_large_for_history_is_refused_before_any_operation(
     response = client.patch(f"/api/v1/models/{slug}", json={"description": "x" * 300_000})
     assert response.status_code == 413, response.text
     assert _workflow_ids(app, "model_patch") == []
+
+
+def _claims(app: FastAPI) -> set[str]:
+    root = _state(app).paths.claims
+    return {path.name for path in root.iterdir()} if root.exists() else set()
+
+
+def test_a_full_list_of_large_presets_is_patched_by_claim(
+    client: TestClient, model: str, app: FastAPI
+) -> None:
+    """Review 3c 1.1: MAX_PRESETS presets with a few text values each are far past the
+    inline cap, and still a valid edit."""
+    presets = [
+        {
+            "name": f"Preset {index}",
+            "params": {"width": index, "label": f"{index} " + "x" * 500},
+            "description": "d" * 150,
+            "tags": ["tag"],
+        }
+        for index in range(MAX_PRESETS)
+    ]
+    assert len(json.dumps(presets)) > operations_api.MAX_REQUEST_BYTES
+    response = client.patch(f"/api/v1/models/{model}", json={"presets": presets})
+    assert response.status_code == 200, response.text
+    written = json.loads(_state(app).paths.model_meta(model).read_text(encoding="utf-8"))
+    assert len(written["presets"]) == MAX_PRESETS
+
+
+def test_a_refused_keyed_upload_writes_no_claims(client: TestClient, app: FastAPI) -> None:
+    """Review 3c 1.2, 1.3: a keyed upload over a taken slug is refused before its
+    parts are claimed, and starts nothing."""
+    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE})
+    assert taken.status_code == 201, taken.text
+    before = _claims(app)
+    refused = client.post(
+        "/api/v1/models",
+        files={
+            "file": ("taken.scad", b"cube(2);\n", "text/plain"),
+            "thumbnail": ("t.png", models_api.PNG_MAGIC + b"\0" * 1000, "image/png"),
+        },
+        headers={"Idempotency-Key": uuid.uuid4().hex},
+    )
+    assert refused.status_code == 409, refused.text
+    assert _claims(app) == before == set()
+    assert len(_workflow_ids(app, "model_create")) == 1
+
+
+def test_a_request_refused_by_the_cap_drops_its_claims(
+    client: TestClient, model: str, app: FastAPI
+) -> None:
+    response = client.patch(
+        f"/api/v1/models/{model}",
+        json={"description": "x" * 300_000, "presets": [{"name": "One"}]},
+    )
+    assert response.status_code == 413, response.text
+    assert _claims(app) == set()
+
+
+def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_names(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3c 1.2: a final answer drops the request's claims, except the bytes an
+    operation still running holds by the same name."""
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    create = models_api._create
+
+    async def slow_for_slow(*args: Any, **kwargs: Any) -> Any:
+        if kwargs["slug"] == "slow":
+            await asyncio.sleep(3)
+        return await create(*args, **kwargs)
+
+    monkeypatch.setattr(models_api, "_create", slow_for_slow)
+    slow = client.post("/api/v1/models", json={"name": "Slow", "source": SOURCE})
+    assert slow.status_code == 202, slow.text
+    quick = client.post(
+        "/api/v1/models",
+        files={
+            "file": ("quick.scad", SOURCE.encode(), "text/plain"),
+            "thumbnail": ("t.png", models_api.PNG_MAGIC + b"\0" * 1000, "image/png"),
+        },
+    )
+    assert quick.status_code == 201, quick.text
+    assert _claims(app) == {hashlib.sha256(SOURCE.encode()).hexdigest()}
+    op = slow.json()
+    deadline = time.monotonic() + 60
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+
+
+def test_a_duplicate_made_between_the_check_and_the_run_refuses_the_delete(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3c 3.1: the run refuses again just before the delete, and the problem it
+    records keeps `duplicates` and `slugs`."""
+    assert client.post("/api/v1/models", json={"name": "Base", "source": SOURCE}).status_code == 201
+    refuse = models_api.refuse_delete
+    calls = 0
+
+    def duplicated_after_the_check(*args: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            refuse(*args)
+            _state(app).catalogue.duplicate("base", "copy", "Copy")
+            return
+        refuse(*args)
+
+    monkeypatch.setattr(models_api, "refuse_delete", duplicated_after_the_check)
+    key = {"Idempotency-Key": uuid.uuid4().hex}
+    refused = client.delete("/api/v1/models/base", headers=key)
+    assert refused.status_code == 409, refused.text
+    assert calls == 2
+    assert refused.json()["slugs"] == ["copy"]
+    assert refused.json()["duplicates"] == 1
+    again = client.delete("/api/v1/models/base", headers=key)
+    assert again.status_code == 409 and again.json() == refused.json()
+    assert len(_workflow_ids(app, "model_delete")) == 1
+    assert client.get("/api/v1/models/base").status_code == 200

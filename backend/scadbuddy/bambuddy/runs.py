@@ -16,9 +16,10 @@ Idempotency
 A run's key is the subject plus the parsed request body (:func:`run_key`), including
 the caller's ``request_id``: one per deliberate Print, reused by every retry of it. The
 workflow ID is ``print-<key>``, so a repeat while the run is in flight attaches to it.
-With a ``request_id`` a repeat at any later time answers with the recorded run
-(:meth:`PrintRunStore.find`); without one, #470's rule holds: for ``REPEAT_WINDOW``
-after a success, or after a failure once it had tried to queue (``may_have_queued``).
+With a ``request_id`` a repeat answers with the recorded run for as long as the row is
+kept (``print_run_retention_seconds``, :meth:`PrintRunStore.find`); without one, #470's
+rule holds: for ``REPEAT_WINDOW`` after a success, or after a failure once it had tried
+to queue (``may_have_queued``).
 
 Once a run has tried to queue (``enqueue_attempted``, set by :meth:`PrintRunStore.
 start_enqueue` before the first ``POST /queue/``) the print may be on Bambuddy's queue
@@ -172,8 +173,9 @@ class PrintRunStore:
 
     async def find(self, key: str, *, has_request_id: bool) -> PrintRun | None:
         """The run a request with ``key`` repeats. With a ``request_id`` that is the key's
-        newest run, however old: one press is one print. Without, one in flight, or one
-        that succeeded or may have queued within ``repeat_window`` (#470)."""
+        newest run, for as long as ``print_run_retention_seconds`` keeps it: one press is
+        one print. Without, one in flight, or one that succeeded or may have queued
+        within ``repeat_window`` (#470)."""
         return await asyncio.to_thread(self._find, key, has_request_id)
 
     async def get(self, run_id: str) -> PrintRun | None:

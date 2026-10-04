@@ -525,7 +525,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`print_runs` is our system of record**, written only by the workflow's activities,
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
-  - drops `heartbeat_at`;
+  - leaves `heartbeat_at`, which a pre-#1052 pod still writes during the rolling update;
+    a later migration drops it (expand/contract);
   - adds `workflow_id text` and `workflow_run_id text`, with a unique index on the pair
     (§4.2 step 3).
 
@@ -1019,8 +1020,10 @@ Each phase is its own implementation plan and ships alone.
      it closed in between). The progress route only starts it when none is running,
      never pokes. A poke cancels the attempt (`TRY_CANCEL`) and starts a fresh one that
      reads at once, then backs off as usual. A worker shutdown ends an attempt at once. `bambuddy/watcher.py` and its lock and
-     rescan are gone; a boot pass hands the prints in `print_watches` to `FollowPrint`
-     and empties it (the table is dropped later).
+     rescan are gone; each boot hands the prints in `print_watches` to `FollowPrint`,
+     deleting a row once its follow is running (the migration that drops the table
+     removes that pass). An old pod still writes the table, so this upgrade needs a
+     `Recreate` rollout: old replicas at 0 before the new one starts.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.
@@ -1047,15 +1050,21 @@ Each phase is its own implementation plan and ships alone.
      model create (all three bodies), import, patch, duplicate and delete are `library`
      kinds (`library/model_operations.py`). Each route keeps the refusals that read only
      the request. The check makes the ones that read the volume, and the run makes them
-     again just before the effect. A create's source, thumbnail and README travel by
-     claim check (`operations/claims.py`): the route writes them to `cache/claims/`,
-     named by their sha256, and the operation carries only the names, because a source
-     may be 1M characters and a thumbnail 10 MB, past Temporal's payload limits. Since
-     the name is the digest, a re-send reaches the same operation key. A claim is
-     removed by the claim sweep (`housekeeping_sweep_claims`, on the prune Schedule
-     every 300 s whatever the sweep interval, a day after the last request put it), not
-     by its run, because two requests may share the same bytes. An operation's inline
-     request is capped at 128 KB (413 past it), and an import's subject is the URL's host. The UI's and the agent's calls to these routes go through `command()`.
+     again just before the effect. A create's source, thumbnail and README, a patch's
+     presets and an import's URL travel by claim check (`operations/claims.py`): the
+     route writes them to `cache/claims/`, named by their sha256, and the operation
+     carries only the names, because a source may be 1M characters and a thumbnail
+     10 MB, past Temporal's payload limits. Since the name is the digest, a re-send
+     reaches the same operation key. The route drops a request's claims once its answer
+     is final (a refusal, the record's failure or its result), unless an operation
+     still running names the same digest; a request answered 202 leaves them to the
+     claim sweep (`housekeeping_sweep_claims`, on the prune Schedule every 300 s
+     whatever the sweep interval, a day after the last request put it). An operation's
+     inline request is capped at 128 KB (413 past it). An import's subject is the URL's
+     host; its request, and the model's `origin_url`, hold the URL as scheme, host,
+     port and path only. A release removes only a claim its own put created and no put
+     has written since. The UI's and the agent's calls to these routes go through
+     `command()`.
    - As built so far (3d, #1054, plan `2026-10-03-durable-phase-3d-model-edits.md`): a
      model's edits are `library` kinds too (`library/model_operations.py`): source save
      and patch, thumbnail and README set and remove, a sibling `.scad` file's write and
@@ -1066,7 +1075,7 @@ Each phase is its own implementation plan and ships alone.
      only) as a 409 with the merged text, and starts no operation, so the merged text
      never enters a workflow history. An operation's run commits as the request's
      agent author (`OperationInput.author`, `core/authorship.py` `authored_as`). The
-     agent's `commandAnswer` (`agent/src/api/command.ts`) returns a followed
+     agent's `commandAnswer` (`agent/src/tools/command.ts`) returns a followed
      operation's failure as the route's problem, so `apply_patch` still reads
      `current`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in

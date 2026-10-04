@@ -23,7 +23,6 @@ from scadbuddy.api.deps import (
     ConfigDep,
     FetcherDep,
     HistoryDep,
-    OperationsDep,
     PathsDep,
     SlugPath,
 )
@@ -47,6 +46,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     RevisionRange,
 )
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema

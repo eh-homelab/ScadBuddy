@@ -6,6 +6,7 @@ loaded inside each activity and never passed in or out of one.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer
@@ -58,6 +59,9 @@ class PrintRunInput(BaseModel):
     repeat_window_s: float = 600.0
     #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
     search_attributes: bool = False
+    #: When the route accepted the request: ``print_check`` refuses a run no client is
+    #: waiting for any more (review #1061 1b). None in histories written before it.
+    accepted_at: datetime | None = None
 
     @field_serializer("request")
     def _keep_what_was_left_out(self, request: PrintRunRequest) -> dict[str, Any]:

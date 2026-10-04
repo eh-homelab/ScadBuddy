@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 from fastapi import (
@@ -37,8 +37,6 @@ from scadbuddy.api.deps import (
     HistoryDep,
     ImportPermits,
     ImportsDep,
-    OperationCommands,
-    OperationsDep,
     PathsDep,
     SlugPath,
 )
@@ -46,8 +44,10 @@ from scadbuddy.api.library_pins import require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    Claimed,
     IdempotencyKey,
     operation_answer,
+    recorded,
     run_operation,
 )
 from scadbuddy.api.params import require_valid_presets
@@ -122,7 +122,8 @@ from scadbuddy.library.url_import import (
     ResolverBusyError,
     fetch_model,
 )
-from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -479,7 +480,7 @@ async def create_model(
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
-    create = partial(_create_command, ops, response, paths, idempotency_key)
+    create = partial(_create_command, ops, response, paths, catalogue, idempotency_key)
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
 
     if content_type == "application/json":
@@ -555,7 +556,8 @@ async def create_model(
         ) from None
     # Before the parts are read, and so before any library is cloned (#436). The
     # operation's check makes it again: this one spares a taken slug the reads. Not
-    # for a keyed re-send, whose slug its own first send took (review 3c I1).
+    # for a keyed re-send, whose slug its own first send took (review 3c I1): its key
+    # needs the parts, and `_create_command` refuses it before they are claimed.
     if idempotency_key is None:
         _require_new(catalogue, slug)
 
@@ -625,6 +627,7 @@ async def _create_command(
     ops: OperationCommands,
     response: Response,
     paths: DataPaths,
+    catalogue: Catalogue,
     idempotency_key: str | None,
     *,
     slug: str,
@@ -638,29 +641,47 @@ async def _create_command(
 ) -> ModelRecord | JSONResponse:
     """A create as the ``model_create`` operation (#1054). The source, thumbnail and
     README go by claim check: together they may be far past a workflow payload's
-    limit, and the claim's name is their digest, so a re-send reaches the same key."""
-    claims = ClaimStore(paths.claims)
-
-    def claim(data: bytes | None) -> str | None:
-        return None if data is None else claims.put(data)
-
+    limit, and the claim's name is their digest, so a re-send reaches the same key.
+    Nothing is claimed for a request refused for a taken slug, or answered from its
+    record (review 3c 1.2, 1.3)."""
+    parts = {
+        "source": source.encode(),
+        "thumbnail": thumbnail,
+        "readme": None if readme is None else readme.encode(),
+    }
+    named = {
+        part: None if data is None else hashlib.sha256(data).hexdigest()
+        for part, data in parts.items()
+    }
     request = {
         "slug": slug,
-        "source": await asyncio.to_thread(claim, source.encode()),
-        "thumbnail": await asyncio.to_thread(claim, thumbnail),
-        "readme": await asyncio.to_thread(claim, None if readme is None else readme.encode()),
+        **named,
         "meta": _meta_request(meta),
         "libraries": libraries,
         "force": force,
         "fetch": fetch,
     }
+    kind = ops.kinds["model_create"]
+    claims = ClaimStore(paths.claims)
+    held: list[Held] = []
+    if (
+        await recorded(
+            ops, kind=kind, subject=slug, request=request, idempotency_key=idempotency_key
+        )
+        is None
+    ):
+        _require_new(catalogue, slug)
+        for data in parts.values():
+            if data is not None:
+                held.append(await asyncio.to_thread(claims.hold, data))
     result = await run_operation(
         ops,
         response,
-        kind=ops.kinds["model_create"],
+        kind=kind,
         subject=slug,
         request=request,
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, held),
     )
     return operation_answer(result, ModelRecord)
 
@@ -855,7 +876,8 @@ class UrlImport(BaseModel):
         "Fetches the source on the server -- https only, from public internet addresses "
         f"only, at most {MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds "
         "-- then creates the model exactly as a paste does, recording the URL as "
-        "`origin_url`. A direct link to the file works; a MakerWorld model page is "
+        "`origin_url` (its scheme, host, port and path; never a query, fragment or "
+        "userinfo). A direct link to the file works; a MakerWorld model page is "
         "refused, because MakerWorld only serves files to a signed-in account. Every "
         "refusal is a 422, and an address that is not public reads the same as one that "
         "did not answer."
@@ -876,21 +898,47 @@ async def import_model(
     response: Response,
     ops: OperationsDep,
     imports: ImportsDep,
+    paths: PathsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     # Here as well as in the run, so a full budget answers with its Retry-After header
     # and starts no operation.
     _require_import_permit(imports)
+    # The URL by claim, so its query, which may carry a token, is in neither the
+    # operation's record nor its history; they hold it without (review 3c 1.5).
+    claims = ClaimStore(paths.claims)
+    url = await asyncio.to_thread(claims.hold, body.url.encode())
+    parts = urlsplit(body.url)
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_import"],
         # The host, never the URL: the subject is a search attribute (review 3c M6).
-        subject=urlsplit(body.url).hostname or "url",
-        request=body.model_dump(mode="json"),
+        subject=parts.hostname or "url",
+        request={
+            **body.model_dump(mode="json"),
+            "url": url.name,
+            "shown": shown_url(body.url),
+        },
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [url]),
     )
     return operation_answer(result, ModelRecord)
+
+
+def shown_url(url: str) -> str:
+    """``url`` as an import records it: scheme, host, port and path. Never its userinfo,
+    query or fragment, any of which may carry a token (review 3c 1.5)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # not a number; the fetch refuses the URL
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _require_import_permit(imports: ImportPermits) -> None:
@@ -929,7 +977,8 @@ async def import_url(body: UrlImport, state: AppState) -> ModelRecord:
         state.events,
         slug=_slug_from_name(name),
         source=imported.source,
-        meta=ModelMeta(name=name, origin_url=imported.origin_url),
+        # Never the URL as given: its query may carry a token (review 3c 1.5).
+        meta=ModelMeta(name=name, origin_url=shown_url(imported.origin_url)),
         force=body.force,
     )
 
@@ -997,17 +1046,28 @@ async def patch_model(
     patch: ModelPatch,
     response: Response,
     ops: OperationsDep,
+    paths: PathsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    # Unset is not null: a field left out is left alone.
+    fields = patch.model_dump(mode="json", exclude_unset=True)
+    # The presets by claim: a full list of them is past the inline cap (review 3c 1.1).
+    claims = ClaimStore(paths.claims)
+    presets = fields.pop("presets", None)
+    held = (
+        None
+        if presets is None
+        else await asyncio.to_thread(claims.hold, json.dumps(presets).encode())
+    )
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_patch"],
         subject=slug,
-        # Unset is not null: a field left out is left alone.
-        request={"slug": slug, "patch": patch.model_dump(mode="json", exclude_unset=True)},
+        request={"slug": slug, "patch": fields, "presets": None if held is None else held.name},
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [] if held is None else [held]),
     )
     return operation_answer(result, ModelRecord)
 

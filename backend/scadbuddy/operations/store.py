@@ -69,6 +69,11 @@ class OperationStore:
     async def get(self, op_id: str) -> Operation | None:
         return await asyncio.to_thread(self._get, op_id)
 
+    async def named_by_running(self, names: list[str]) -> set[str]:
+        """Those of ``names`` that the request of an operation still running contains
+        (a claim's name, #1054)."""
+        return await asyncio.to_thread(self._named_by_running, names)
+
     async def insert(
         self,
         op_id: str,
@@ -106,6 +111,11 @@ class OperationStore:
         """End a running operation; a retried end finds it ended and changes nothing."""
         return await asyncio.to_thread(self._finish, op_id, result, error)
 
+    async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        """``(operation id, workflow id, workflow run id)`` of each operation still
+        ``running`` that was accepted more than ``older_than`` ago."""
+        return await asyncio.to_thread(self._running_executions, older_than)
+
     def _announce(self, conn: Connection[DictRow], op: Operation) -> None:
         if self.events is not None:
             self.events.publish_in(
@@ -127,6 +137,16 @@ class OperationStore:
                 f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)
             ).fetchone()
         return Operation.model_validate(row) if row else None
+
+    def _named_by_running(self, names: list[str]) -> set[str]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT name FROM unnest(%s::text[]) AS name WHERE EXISTS ("
+                " SELECT 1 FROM operations"
+                " WHERE status = 'running' AND strpos(request::text, name) > 0)",
+                (names,),
+            ).fetchall()
+        return {row["name"] for row in rows}
 
     def _insert(
         self,
@@ -186,3 +206,12 @@ class OperationStore:
         if current is None:
             raise LookupError(f"there is no operation {op_id}")
         return Operation.model_validate(current)
+
+    def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT id, workflow_id, workflow_run_id FROM operations"
+                " WHERE status = 'running' AND created_at <= now() - %s ORDER BY created_at",
+                (older_than,),
+            ).fetchall()
+        return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]

@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { ACCEPTING_MS } from '../src/api/command.js'
+import { ACCEPTING_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -210,12 +210,14 @@ describe('render_model', () => {
     expect(posts).toBe(1)
   })
 
-  it('re-sends a render the backend is still accepting (#1053)', async () => {
+  it('re-sends a render the backend is still accepting, with the same key (#1053)', async () => {
     let posts = 0
+    const keys: (string | null)[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
-      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
         posts += 1
+        keys.push(request.headers.get('Idempotency-Key'))
         return posts === 1
           ? HttpResponse.json(
               {
@@ -234,6 +236,9 @@ describe('render_model', () => {
     expect(result.isError).toBeFalsy()
     expect(firstText(result)).toMatchObject({ status: 'done' })
     expect(posts).toBe(2)
+    // One request to the backend, so one claim on the job (review #1066 2.1).
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
   })
 
   it('refuses invalid parameters before queueing anything', async () => {
@@ -490,20 +495,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
+    // No Retry-After unless a test sets one: a real one is whole seconds (review #1061 4a).
+    const accepting = (retryAfter?: string) => () =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/command-still-accepting',
+          title: 'Service Unavailable',
+          status: 503,
+          detail: 'ScadBuddy is still checking this print.',
+        },
+        { status: 503, headers: retryAfter ? { 'Retry-After': retryAfter } : {} },
+      )
+
     it('re-sends while the backend is still accepting the same request (#1052)', async () => {
-      const { ids, handler } = posts([
-        () =>
-          HttpResponse.json(
-            {
-              type: 'https://scadbuddy.dev/problems/command-still-accepting',
-              title: 'Service Unavailable',
-              status: 503,
-              detail: 'ScadBuddy is still checking this print.',
-            },
-            { status: 503, headers: { 'Retry-After': '2' } },
-          ),
-        () => HttpResponse.json(running, { status: 202 }),
-      ])
+      const { ids, handler } = posts([accepting(), () => HttpResponse.json(running, { status: 202 })])
       server.use(handler, done)
       const result = await tool('print_output').execute(args, ctx())
       expect(result.isError).toBeFalsy()
@@ -511,19 +516,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
-    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
-      const accepting = () =>
-        HttpResponse.json(
-          {
-            type: 'https://scadbuddy.dev/problems/command-still-accepting',
-            title: 'Service Unavailable',
-            status: 503,
-            detail: 'ScadBuddy is still checking this print.',
-          },
-          { status: 503, headers: { 'Retry-After': '2' } },
-        )
+    it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
+      const sent: number[] = []
       const { ids, handler } = posts([
-        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting),
+        () => (sent.push(Date.now()), accepting('0.2')()),
+        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    })
+
+    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
+      const { ids, handler } = posts([
+        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting()),
         () => HttpResponse.json(running, { status: 202 }),
       ])
       server.use(handler, done)
@@ -1304,14 +1312,17 @@ describe('Bambuddy writes as operations (#1053)', () => {
 describe('library pins as operations (#1054)', () => {
   const op = { id: 'op-7', kind: 'library_pin', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
   const model = { slug: 'w', name: 'W', libraries: [] }
+  const pinned = { name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', commit: 'a'.repeat(40) }
+  const CATALOGUE = [{ name: 'BOSL2', url: pinned.url, ref: 'v2.0.0', homepage: '', licence: '' }]
 
   it.each([
-    ['pin_library', { slug: 'w', name: 'BOSL2' }, 'put', '/api/v1/models/w/libraries/BOSL2'],
-    ['pin_library_from_url', { slug: 'w', name: 'X', url: 'https://g.example/x.git', ref: 'v1' }, 'put', '/api/v1/models/w/libraries/X'],
-    ['repin_library_from_pinned_url', { slug: 'w', name: 'X' }, 'patch', '/api/v1/models/w/libraries/X'],
-    ['unpin_library', { slug: 'w', name: 'BOSL2' }, 'delete', '/api/v1/models/w/libraries/BOSL2'],
-    ['remove_library_checkout', { name: 'BOSL2' }, 'delete', '/api/v1/libraries/BOSL2'],
-  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    ['pin_library', { slug: 'w', name: 'BOSL2' }, 'put', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['pin_library_from_url', { slug: 'w', name: 'X', url: 'https://g.example/x.git', ref: 'v1' }, 'put', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['repin_library', { slug: 'w', name: 'BOSL2' }, 'patch', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['repin_library_from_pinned_url', { slug: 'w', name: 'X' }, 'patch', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['unpin_library', { slug: 'w', name: 'BOSL2' }, 'delete', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['remove_library_checkout', { name: 'BOSL2' }, 'delete', '/api/v1/libraries/BOSL2', { removed: 'BOSL2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, expected) => {
     let key: string | null = null
     server.use(
       http[method](`${BACKEND}${path}`, ({ request }) => {
@@ -1319,10 +1330,17 @@ describe('library pins as operations (#1054)', () => {
         return HttpResponse.json(op, { status: 202 })
       }),
       http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+      // repin_library's two reads before its PATCH.
+      http.get(`${BACKEND}/api/v1/models/w`, () => HttpResponse.json({ ...model, libraries: [pinned] })),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
     )
     const result = await runTool({ ...tool(name), gated: false }, args, ctx())
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+    // The operation's result, not the 202's body.
+    const answer = firstText(result)
+    expect(answer).toMatchObject(expected)
+    expect(answer).not.toHaveProperty('status')
   })
 })
 
@@ -1348,6 +1366,19 @@ describe("a model's lifecycle as operations (#1054)", () => {
       http.get(`${BACKEND}/api/v1/operations/op-8`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
     )
     const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('delete_model accepts a 204 at once', async () => {
+    let key: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, { slug: 'w' }, ctx())
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })

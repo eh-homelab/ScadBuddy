@@ -29,7 +29,11 @@ from scadbuddy.workflows.operation_models import (
     RunOp,
 )
 from scadbuddy.workflows.print_models import FAILED, REFUSED
-from scadbuddy.workflows.problems import OPERATION_CANCELLED, OPERATION_UNEXPECTED_DETAIL
+from scadbuddy.workflows.problems import (
+    OPERATION_CANCELLED,
+    OPERATION_CANCELLED_RUNNING,
+    OPERATION_UNEXPECTED_DETAIL,
+)
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -47,6 +51,8 @@ class Fake:
         self.hold.set()
         #: Set, the check waits on it, so a test can act while it is in flight.
         self.check_gate: asyncio.Event | None = None
+        #: Set, the insert waits on it.
+        self.insert_gate: asyncio.Event | None = None
 
     def _op(self, status: str = "running", **fields: Any) -> Operation:
         return Operation(
@@ -70,6 +76,8 @@ class Fake:
     @activity.defn(name="op_insert")
     async def insert(self, input: InsertOp) -> Operation:
         self.calls.append("insert")
+        if self.insert_gate is not None:
+            await self.insert_gate.wait()
         return self._op()
 
     @activity.defn(name="op.test.run")
@@ -243,3 +251,42 @@ async def test_a_cancel_during_the_check_answers_the_update_before_the_execution
         assert fake.calls == ["check"]
     finally:
         fake.check_gate.set()
+
+
+async def test_a_cancel_during_the_insert_still_records_and_ends_the_operation(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 1: the insert may commit after the workflow saw the cancel, so it is
+    waited out and its row ended, never left ``running``. Nothing ran."""
+    fake.insert_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    while "insert" not in fake.calls:
+        await asyncio.sleep(0.05)
+    await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+    await asyncio.sleep(0.5)
+    fake.insert_gate.set()
+    answer = await accepting
+    assert answer.operation is not None and answer.operation.error == OPERATION_CANCELLED
+    assert (await ended(client, arg)).status == "failed"
+    assert fake.calls == ["check", "insert", "finish:409"]
+
+
+async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 2: not the unexpected failure, which points at logs that say
+    nothing: the effect may have reached Bambuddy, so check there first."""
+    fake.hold.clear()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "run" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        answer = await accepting
+    finally:
+        fake.hold.set()
+    assert answer.operation is not None
+    assert answer.operation.error == OPERATION_CANCELLED_RUNNING
+    assert (await ended(client, arg)).status == "failed"

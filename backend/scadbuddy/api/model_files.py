@@ -24,7 +24,7 @@ from fastapi import APIRouter, Path, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import AppState, CatalogueDep, OperationsDep, PathsDep, SlugPath
+from scadbuddy.api.deps import AppState, CatalogueDep, PathsDep, SlugPath
 from scadbuddy.api.models import (
     MAX_SOURCE_CHARS,
     announce_source_change,
@@ -46,6 +46,7 @@ from scadbuddy.library.catalogue import (
 )
 from scadbuddy.library.history import MAX_SUBJECT, GitError
 from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OperationsDep
 
 router = APIRouter(tags=["models"])
 

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import AppState, CatalogueDep, OperationsDep, SlugPath
+from scadbuddy.api.deps import AppState, CatalogueDep, SlugPath
 from scadbuddy.api.models import announce_source_change, require_mine
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -29,6 +29,7 @@ from scadbuddy.library.upstream import (
     UpstreamStateError,
     UpstreamStatus,
 )
+from scadbuddy.operations.component import OperationsDep
 
 router = APIRouter(tags=["models"])
 

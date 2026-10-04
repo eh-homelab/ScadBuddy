@@ -17,6 +17,26 @@ OPERATION_CANCELLED = PrintRunError(
     title="Conflict",
     detail="This was cancelled before it started. Nothing was done; try again.",
 )
+#: An operation cancelled while its effect ran (review #1063 2): the effect may have
+#: reached Bambuddy before the cancel did.
+OPERATION_CANCELLED_RUNNING = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail=(
+        "This was cancelled while it was running, so it may have been done. "
+        "Check Bambuddy before trying again."
+    ),
+)
+#: An operation whose execution ended without recording an outcome (review #1063 1):
+#: terminated in the Temporal UI, say. Its effect may or may not have happened.
+OPERATION_LOST = PrintRunError(
+    status=500,
+    title="Internal Server Error",
+    detail=(
+        "ScadBuddy stopped running this before it recorded how it ended, so it may have "
+        "been done. Check Bambuddy before trying again."
+    ),
+)
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:

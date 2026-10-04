@@ -6,8 +6,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 from temporalio import activity
@@ -41,8 +41,10 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.follow import FollowPrint, follow_id
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
@@ -102,6 +104,7 @@ class Fake:
         self.succeed_failures = 0
         #: Set, the check waits on it, so a test can act while it is in flight.
         self.check_gate: asyncio.Event | None = None
+        self.project_id: int | None = None
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -138,6 +141,7 @@ class Fake:
             raise self.plan_error
         return PlannedRun(
             library_file_id=41,
+            project_id=self.project_id,
             printer_id=1,
             nozzle_size="0.4",
             copies=1,
@@ -604,3 +608,81 @@ def test_the_clients_still_accepting_budget_outlasts_the_check() -> None:
     worst = attempts * ACCEPT_TIMEOUT.total_seconds() + backoff
     assert CLIENT_ACCEPTING.total_seconds() == 240
     assert CLIENT_ACCEPTING.total_seconds() > worst
+
+
+class _ForgetfulSource:
+    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+        raise RuntimeError("the data volume is gone")
+
+
+class _Settings:
+    def load(self) -> StoredSettings:
+        return StoredSettings(bambuddy_url="http://bambuddy.test", bambuddy_api_key="bb_test")
+
+
+async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeeded(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 1a: the real `print_finish`; remembering the project's printer is
+    best effort, so a run with every plate queued never ends `failed`."""
+
+    async def source(*_: object) -> _ForgetfulSource:
+        return _ForgetfulSource()
+
+    unused: Any = None
+    real = PrintActivities(
+        PrintDeps(
+            settings_store=cast(Any, _Settings()),
+            outputs=unused,
+            uploads=unused,
+            catalogue=unused,
+            store=unused,
+            observer=unused,
+        )
+    )
+    monkeypatch.setattr(real, "_source", source)
+    fake.project_id = 7
+    activities = [real.finish if a == fake.finish else a for a in fake.all()]
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client, task_queue=queue, workflows=[PrintRunWorkflow], activities=activities
+    ):
+        arg = run_input()
+        await start(client, queue, arg)
+        run = await asyncio.wait_for(ended(client, arg), timeout=60)
+    assert run.status == "succeeded" and run.result is not None
+    assert run.result.queue_item_ids == [51]
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
+    client: Client, fake: Fake
+) -> None:
+    """Review #1061 1b: a run whose worker picked it up after every client stopped
+    re-sending it (`CLIENT_ACCEPTING`) is refused, never printed with nobody watching."""
+    unused: Any = None
+    real = PrintActivities(
+        PrintDeps(
+            settings_store=unused,
+            outputs=unused,
+            uploads=unused,
+            catalogue=unused,
+            store=unused,
+            observer=unused,
+        )
+    )
+    activities = [real.check if a == fake.check else a for a in fake.all()]
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    arg = run_input().model_copy(
+        update={"accepted_at": datetime.now(UTC) - CLIENT_ACCEPTING - timedelta(seconds=1)}
+    )
+    async with Worker(
+        client, task_queue=queue, workflows=[PrintRunWorkflow], activities=activities
+    ):
+        answer = await start(client, queue, arg)
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+    assert answer.run is None and answer.refusal is not None
+    assert answer.refusal.status == 409
+    assert "Nothing was queued" in answer.refusal.detail
+    assert fake.calls == []

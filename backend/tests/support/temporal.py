@@ -16,7 +16,7 @@ from pathlib import Path
 
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -121,6 +121,16 @@ async def terminate_open_workflows(client: Client, task_queue: str) -> None:
             await handle.terminate("the test that started it ended")
 
 
+async def delete_schedules(client: Client, *schedule_ids: str) -> None:
+    """Delete each Schedule a test's app made; one that never got made is fine."""
+    for schedule_id in schedule_ids:
+        try:
+            await client.get_schedule_handle(schedule_id).delete()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+
+
 class WorkflowReaper:
     """Terminates what a test left open, for a whole session on ONE client: a
     temporalio `Client` has no close, so one per teardown would leak a connection per
@@ -148,6 +158,10 @@ class WorkflowReaper:
     def terminate(self, task_queue: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
         self._run(terminate_open_workflows(self.client, task_queue))
+
+    def delete_schedules(self, *schedule_ids: str) -> None:
+        assert self.client is not None, "use the reaper as a context manager"
+        self._run(delete_schedules(self.client, *schedule_ids))
 
     def _run[T](self, coro: Coroutine[object, object, T]) -> T:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=60)

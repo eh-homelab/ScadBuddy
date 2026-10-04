@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
-import { command } from '../api/command.js'
+import { command } from './command.js'
 import { ok } from './call.js'
 import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'

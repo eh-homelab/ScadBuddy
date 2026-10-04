@@ -183,6 +183,21 @@ def test_a_render_still_being_accepted_is_a_503_to_send_again(
     assert response.headers["retry-after"] == "2"
 
 
+def test_a_render_passes_its_idempotency_key_as_the_request_id(
+    client: TestClient, model: str
+) -> None:
+    """Review #1066 2.1: a re-send keeps its key, so it is the same claim on the job."""
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "a" * 32},
+        )
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == "a" * 32
+
+
 def test_a_render_whose_execution_ended_before_it_answered_is_a_503_to_send_again(
     client: TestClient, model: str
 ) -> None:

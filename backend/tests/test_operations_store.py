@@ -3,6 +3,7 @@ record, written only by its `Operation` workflow's activities."""
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
@@ -10,11 +11,15 @@ from typing import Any
 import psycopg
 import pytest
 from psycopg import Connection
+from temporalio.client import WorkflowHandle
 
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.events import Event, OperationEvent
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.client import reconcile_lost_operations
+from scadbuddy.workflows.problems import OPERATION_LOST
+from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -124,3 +129,78 @@ async def test_insert_prunes_operations_finished_before_the_retention(
     await insert(store, "new", key="k2", run="r2", retention=timedelta(days=1))
     assert await store.get("old") is None
     assert await store.get("new") is not None
+
+
+async def test_named_by_running_finds_names_only_in_running_requests(
+    store: OperationStore,
+) -> None:
+    """Review 3c 1.2: a claim a running operation names is not dropped under it."""
+    held, done, loose = "a" * 64, "b" * 64, "c" * 64
+    for op_id, name in (("x", held), ("y", done)):
+        await store.insert(
+            op_id,
+            kind="model_create",
+            subject="w",
+            key=op_id,
+            request={"source": name},
+            workflow_id=f"op-model_create-{op_id}",
+            workflow_run_id="r1",
+            retention=None,
+        )
+    await store.finish("y", result={})
+    assert await store.named_by_running([held, done, loose]) == {held}
+
+
+async def test_running_executions_names_each_running_rows_execution(
+    store: OperationStore,
+) -> None:
+    running = await insert(store, "a", key="k1", run="w1")
+    await insert(store, "b", key="k2", run="w2")
+    await store.finish("b", result={})
+    assert await store.running_executions(timedelta(0)) == [(running.id, "op-reprint-k1", "w1")]
+    assert await store.running_executions(timedelta(hours=1)) == []
+
+
+async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
+    store: OperationStore,
+) -> None:
+    """Review #1063 1: an execution terminated after ``op_insert`` never runs
+    ``op_finish``; its row ends ``failed``, not ``running`` forever. One still running,
+    or whose workflow still runs under a later run id (a reset), is left alone."""
+    async with temporal_client() as client:
+        queue = f"unserved-{uuid.uuid4().hex[:8]}"
+
+        async def started(name: str) -> WorkflowHandle[Any, Any]:
+            return await client.start_workflow(
+                "Operation", "x", id=f"op-{name}-{uuid.uuid4().hex[:8]}", task_queue=queue
+            )
+
+        live, killed = await started("live"), await started("killed")
+        await killed.terminate("an operator ended it")
+        reset_first = await started("reset")
+        await reset_first.terminate("reset")
+        reset = await client.start_workflow("Operation", "x", id=reset_first.id, task_queue=queue)
+        for op_id, handle in (("live", live), ("killed", killed), ("reset", reset_first)):
+            await store.insert(
+                op_id,
+                kind="reprint",
+                subject="archive:5",
+                key=op_id,
+                request={},
+                workflow_id=handle.id,
+                workflow_run_id=handle.result_run_id or "",
+                retention=None,
+            )
+        await insert(store, "gone", key="gone", run=str(uuid.uuid4()))
+        try:
+            ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+        finally:
+            await live.terminate("test over")
+            await reset.terminate("test over")
+    assert ended == 2
+    assert (await store.get("live")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
+    killed_op = await store.get("killed")
+    assert killed_op is not None and killed_op.status == "failed"
+    assert killed_op.error == OPERATION_LOST
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]

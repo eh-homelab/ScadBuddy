@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, OperationsDep, SettingsStoreDep, StateDep, UploadsDep
+from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
@@ -39,6 +39,7 @@ from scadbuddy.library.settings_store import (
     StoredSettings,
     StoreNotReadyError,
 )
+from scadbuddy.operations.component import OperationsDep
 
 router = APIRouter(tags=["settings"])
 

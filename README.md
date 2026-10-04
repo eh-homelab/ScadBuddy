@@ -168,12 +168,18 @@ on shutdown.
     file that no saved output, preset or render job references is removed once
     nothing has uploaded or used it for this long. The same grace applies to the
     blob store's pieces and snapshots (see "Blob store and render workers").
-  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off. It is the interval of the Temporal
-    Schedule `scadbuddy-housekeeping-library`, on the API's own `library` queue
-    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Settled render
-    jobs are pruned every 300 s by a second Schedule, `scadbuddy-prune-library`, which
-    0 leaves alone. The same interval drives the blob
+  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs;
+    0 turns it off. It is the interval of the Temporal Schedule
+    `scadbuddy-housekeeping-library`, on the API's own `library` queue
+    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
+    also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
+    converges the uploads with the store (reconcile and backfill), so expect that
+    Bambuddy traffic right after a deploy. Settled render jobs are pruned every 300 s by a second
+    Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
+    library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
+    old two Schedules starting runs on a queue nothing serves, so delete them by hand
+    (`temporal schedule delete --schedule-id scadbuddy-housekeeping-<old queue>`, and
+    the same for `scadbuddy-prune-<old queue>`). The same interval drives the blob
     store's sweep, which 0 also turns off, and a render worker's piece-cache
     eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
@@ -379,6 +385,30 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading from a release with the in-process print watcher** (before #1053): roll
+  it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
+  `print_watches` after the new one hands that log to `FollowPrint` at start, and
+  those prints would go unfollowed until someone opens their progress.
+
+### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
+
+The API process also polls the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`):
+print runs and every other Bambuddy write (send, project files, projects, reprint,
+timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
+**not** versioned: any replica polling the queue may take any task on it.
+
+- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
+  activities to that queue. A replica still on the old build takes those tasks and
+  fails them as unregistered; nothing is corrupted (the task is retried), but each
+  Bambuddy write that lands there stalls until the old pod is gone. Roll this release
+  out with `Recreate`, or scale the old replicas to 0 before the new ones start.
+- **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
+  should be at least the Temporal namespace's retention. A retry of an operation whose
+  record was deleted while Temporal still holds its closed execution answers 409 "may
+  have been done" instead of its outcome.
+- **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
+  a rolling update stays safe; a release that adds a workflow or activity type to the
+  queue says so here and needs the same `Recreate` rollout.
 
 ### Blob store and render workers (#426)
 

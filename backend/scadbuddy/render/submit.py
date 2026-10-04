@@ -21,7 +21,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowUpdateRPCTimeoutOrCancelledError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
@@ -47,14 +47,20 @@ from scadbuddy.render.jobs import (
     prune_revision_exports,
 )
 from scadbuddy.render.projection import (
+    LEGACY_GRACE,
     LEGACY_UNSTARTED_ERROR,
     JobProjection,
+    legacy_unrun,
     workflow_id_for,
     workflow_id_for_key,
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.commands import CommandStillAcceptingError, start_command
+from scadbuddy.workflows.commands import (
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+    start_command,
+)
 from scadbuddy.workflows.models import RELEASE_UPDATE, ReleaseAnswer, RenderAnswer, RenderStart
 from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
@@ -132,9 +138,11 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
-        and answer the row its first activity wrote."""
+        and answer the row its first activity wrote. ``request_id`` (the request's
+        `Idempotency-Key`) makes a re-sent request the same claim, not another."""
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
@@ -166,14 +174,14 @@ class RenderService:
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.inc()
             return previous
-        answer = await self._accepted(start)
+        answer = await self._accepted(start, request_id)
         if answer.queue_full is not None:
             self.metrics.render_rejected.inc()
             raise QueueFullError(answer.queue_full, self.retry_after())
         assert answer.job is not None
         # Started first, so a refused submit supersedes nothing.
         if previous is not None:
-            await self._release(previous, "superseded")
+            await self._supersede(previous)
         if answer.coalesced:
             self.metrics.render_coalesced.inc()
         else:
@@ -189,7 +197,7 @@ class RenderService:
             return None
         return job
 
-    async def _accepted(self, start: RenderStart) -> RenderAnswer:
+    async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:
         """The `accepted` answer of ``render-<render_key>``, started or joined. An
         execution closing on its last release is waited out once and started again."""
         workflow_id = workflow_id_for_key(start.render_key)
@@ -205,6 +213,7 @@ class RenderService:
                     result_type=RenderAnswer,
                     reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                     memo=self._memo(),
+                    update_id=request_id,
                 )
             except RPCError as error:
                 # An Update that reached the execution as it completed is aborted.
@@ -219,14 +228,29 @@ class RenderService:
         raise CommandStillAcceptingError(workflow_id)
 
     async def cancel(self, job_id: str, *, slug: str) -> Job | None:
-        """Withdraw one request for the job; the last one cancels it."""
+        """Withdraw one request for the job; the last one cancels it. Raises
+        `TemporalUnavailableError` or `CommandStillAcceptingError` when Temporal did not
+        answer the release, which is not "nothing to cancel" (review #1066 3.1)."""
         job = await self._superseded(job_id, slug)
         if job is None:
             return None
         return await self._release(job, "withdrawn")
 
+    async def _supersede(self, job: Job) -> None:
+        """Release the job a new render replaces. The new render is started either way:
+        a release that fails is a warning, never the submit's failure."""
+        try:
+            await self._release(job, "superseded")
+        except Exception as error:
+            logger.warning(
+                "could not release a render's claim",
+                extra={"job_id": job.id, "error_type": type(error).__name__},
+                exc_info=True,
+            )
+
     async def _release(self, job: Job, reason: str) -> Job | None:
         """Take one claim off ``job``: the cancelled job when it was the last."""
+        outcome: RenderOutcome = "superseded" if reason == "superseded" else "cancelled"
         if job.workflow_run_id is None:
             # A row an older release inserted, whose workflow is `render-<id>`.
             error = SUPERSEDED_ERROR if reason == "superseded" else CANCELLED_ERROR
@@ -234,7 +258,7 @@ class RenderService:
                 self.store.release_claim, job.id, slug=job.slug, error=error
             )
             if legacy is not None:
-                self._settled(legacy, "superseded")
+                self._settled(legacy, outcome)
                 await self._cancel_workflow(legacy)
             return legacy
         assert job.workflow_id is not None
@@ -246,48 +270,32 @@ class RenderService:
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
                 return None  # it has closed: settled, nothing to release
-            logger.warning(
-                "could not release a render's claim",
-                extra={"job_id": job.id, "status": error.status.name},
-            )
             self.metrics.store_errors.labels("cancel_workflow").inc()
-            return None
-        except Exception as error:
-            # The new render is started either way: this never fails its submit.
-            logger.warning(
-                "could not release a render's claim",
-                extra={"job_id": job.id, "error_type": type(error).__name__},
-                exc_info=True,
-            )
+            raise TemporalUnavailableError(job.workflow_id) from error
+        except WorkflowUpdateRPCTimeoutOrCancelledError as error:
+            # The Update reached the execution and may still release the claim.
             self.metrics.store_errors.labels("cancel_workflow").inc()
-            return None
+            raise CommandStillAcceptingError(job.workflow_id) from error
         if answer.cancelled is not None:
-            self._settled(answer.cancelled, "superseded")
+            self._settled(answer.cancelled, outcome)
         return answer.cancelled
 
     async def settle_legacy(self) -> list[str]:
         """Once at start: fail the pending rows an older release inserted that no
-        workflow will run (none named, or none Temporal knows). A row whose workflow
-        still runs on its pinned build is left to it."""
+        workflow will run. Only a row past `LEGACY_GRACE` is judged: a younger one may
+        be between the older API's insert and its start (review #1066 1.2)."""
         failed: list[str] = []
-        for job in await asyncio.to_thread(self.store.legacy_pending):
-            if job.workflow_id is not None:
-                try:
-                    described = await self.client.get_workflow_handle(job.workflow_id).describe(
-                        rpc_timeout=RPC_TIMEOUT
-                    )
-                    # A closed run (terminated, failed) that retention still keeps will
-                    # never settle its row either.
-                    if described.status == WorkflowExecutionStatus.RUNNING:
-                        continue
-                except RPCError as error:
-                    if error.status != RPCStatusCode.NOT_FOUND:
-                        logger.warning(
-                            "could not ask Temporal about the renders an older release left"
-                            " pending; the next start tries again",
-                            extra={"status": error.status.name},
-                        )
-                        break
+        for job in await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE):
+            try:
+                if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
+                    continue
+            except RPCError as error:
+                logger.warning(
+                    "could not ask Temporal about the renders an older release left"
+                    " pending; the next start tries again",
+                    extra={"status": error.status.name},
+                )
+                break
             failed.append(job.id)
         if failed:
             settled = await asyncio.to_thread(

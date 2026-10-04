@@ -48,6 +48,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
+from tests.support.temporal import WorkflowReaper
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -448,6 +449,52 @@ def test_a_request_id_retry_after_a_recorded_failure_returns_that_run(
     assert retry.json()["id"] == first.json()["id"]
     assert retry.json()["repeated"] is True
     assert uploaded.call_count == calls
+
+
+@respx.mock
+def test_a_request_id_retry_after_retention_pruned_its_run_does_not_invite_a_reprint(
+    client: TestClient,
+    model: str,
+    app: FastAPI,
+    pg_conninfo: str,
+    workflow_reaper: WorkflowReaper,
+    gate: Gate,
+) -> None:
+    """Review #1061 2a: a request_id's run answers its retries only while its row is
+    kept (``print_run_retention_seconds``). Past that, a retry that finds the closed
+    execution says the record expired and points at Bambuddy's queue, never "print
+    again", and queues nothing."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    gate.open()
+    queued = queue_route()
+    request = {**body(), "request_id": uuid.uuid4().hex}
+    store = getattr(app.state, STATE_ATTR).print_runs.store
+    window, store.repeat_window = store.repeat_window, timedelta(0)
+    try:
+        first = start(client, output_id, request)
+        assert first.status_code == 202, first.text
+        assert follow_run(client, first.json()["id"])["status"] == "succeeded"
+    finally:
+        store.repeat_window = window
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute(
+            "SELECT workflow_id FROM print_runs WHERE id = %s", (first.json()["id"],)
+        ).fetchone()
+        assert row is not None
+        assert workflow_reaper.client is not None
+        workflow_reaper._run(workflow_reaper.client.get_workflow_handle(row[0]).result())
+        conn.execute("DELETE FROM print_runs WHERE id = %s", (first.json()["id"],))
+
+    retry = start(client, output_id, request)
+
+    assert retry.status_code == 409, retry.text
+    detail = retry.json()["detail"]
+    assert "expired" in detail and "Bambuddy's queue" in detail
+    assert "Print again" not in detail
+    assert queued.call_count == 1
 
 
 def test_temporal_unreachable_is_a_503_and_writes_nothing(
