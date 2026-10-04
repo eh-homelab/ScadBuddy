@@ -266,6 +266,32 @@ describe('the harness projection', () => {
   })
 })
 
+describe('the harness projection waits for the tab (#815)', () => {
+  it("hands the turn's waitForTab the call's tool_use id from Claude Code's _meta", async () => {
+    const hub = new TabHub()
+    const seen: (string | undefined)[] = []
+    const servers = harnessTools(services({ browser: hub })).mcpServers(
+      { id: 's1', owner: { kind: 'browser', id: 'browser', label: 'You' } },
+      undefined,
+      {
+        waitForTab: ({ toolUseId }) => {
+          seen.push(toolUseId)
+          return Promise.resolve({ back: false, message: 'nobody came back.' })
+        },
+      },
+    )
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await servers.scadbuddy!.instance.connect(serverSide)
+    const client = new Client({ name: 'harness-test', version: '0' })
+    await client.connect(clientSide)
+    const result = await client.callTool({ name: 'browser_snapshot', arguments: {}, _meta: { 'claudecode/toolUseId': 'toolu_meta1' } })
+    await client.close()
+    expect(result.isError).toBe(true)
+    expect(text(result as { content: unknown[] })).toMatch(/nobody came back\.$/)
+    expect(seen).toEqual(['toolu_meta1'])
+  })
+})
+
 describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   function fakeSessions() {
     const sends: string[] = []
@@ -399,5 +425,96 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_pair')).text).toMatch(/needs the "write" tier/)
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
+  })
+})
+
+// #815 §2: a call that finds no tab, in a session the user owns, waits for the
+// tab as an attention request (sessions/manager.ts `waitForTab`) and runs once
+// more when it is back. The Postgres side is test/attention.pg.test.ts.
+describe('waiting for the tab (#815)', () => {
+  it('tells the hub listener when a session has a connected tab again: a reconnect, or a pairing to a live tab', async () => {
+    const hub = new TabHub()
+    const back: string[] = []
+    hub.onSessionTab = (sessionId) => {
+      back.push(sessionId)
+      return Promise.resolve()
+    }
+    hub.pairSession('s1', TAB)
+    expect(back).toEqual([])
+    const first = await tab(hub)
+    expect(back).toEqual(['s1'])
+    first.conn.close()
+    await tab(hub, OTHER_TAB)
+    hub.pairSession('s2', OTHER_TAB)
+    expect(back).toEqual(['s1', 's2'])
+  })
+
+  it('logs a listener that fails, and pairs anyway', async () => {
+    const logged: string[] = []
+    const hub = new TabHub({ log: (m) => logged.push(m) })
+    hub.onSessionTab = () => Promise.reject(new Error('db down'))
+    await tab(hub)
+    hub.pairSession('s1', TAB)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(logged.join('\n')).toMatch(/db down/)
+    expect(hub.sessionHasTab('s1')).toBe(true)
+  })
+
+  it('waits on no tab, then runs the call once the tab is back', async () => {
+    const hub = new TabHub()
+    const waits: { tool: string; toolUseId: string | undefined }[] = []
+    const c: ToolContext = {
+      ...ctx(hub.forSession('s1'), browser),
+      toolUseId: 'toolu_b1',
+      waitForTab: async ({ tool, toolUseId }) => {
+        waits.push({ tool, toolUseId })
+        await tab(hub, TAB, () => ({ ok: true, result: { snapped: true } }))
+        hub.pairSession('s1', TAB)
+        return { back: true }
+      },
+    }
+    const result = await runTool(tool('browser_snapshot'), {}, c)
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ snapped: true })
+    expect(waits).toEqual([{ tool: 'browser_snapshot', toolUseId: 'toolu_b1' }])
+  })
+
+  it('fails with the wait\'s outcome when the tab did not come back, and retries only once', async () => {
+    const hub = new TabHub()
+    let waited = 0
+    const timedOut = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: false, message: 'timed_out: the user did not reply within 300 s.' })
+      },
+    })
+    expect(text(timedOut)).toMatch(/^no browser attached: .*timed_out: the user did not reply within 300 s\.$/s)
+    // "Back" on a replica the tab is not on: the second call fails as usual, with no second wait.
+    const stillGone = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: true })
+      },
+    })
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session/)
+    expect(waited).toBe(2)
+  })
+
+  it('only no_browser waits: a tab that does not answer fails as before', async () => {
+    const hub = new TabHub({ callTimeoutMs: 20 })
+    await tab(hub, TAB, () => undefined)
+    hub.pairSession('s1', TAB)
+    let waited = false
+    const result = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited = true
+        return Promise.resolve({ back: true })
+      },
+    })
+    expect(text(result)).toMatch(/did not answer/)
+    expect(waited).toBe(false)
   })
 })

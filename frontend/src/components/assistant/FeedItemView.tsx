@@ -366,7 +366,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                 ? 'Not connected: your answer goes first when the assistant reconnects.'
               : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
-                : item.attention
+                : item.reconnected
+                  ? 'The tab is back; the assistant carries on there.'
+                  : item.attention
                   ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
                   : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
           </p>

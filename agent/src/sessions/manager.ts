@@ -54,7 +54,9 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { isQuestionTool } from '../harness/questions.js'
+import { attentionCard, attentionSpec, parseAttention, timedOutText } from '../harness/attention.js'
+import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -164,6 +166,54 @@ export function cents(amount: number): number {
 
 /** abortAll()'s abort reason: a shutdown, which leaves pending approvals pending. */
 export const SHUTTING_DOWN = 'shutting down'
+
+/**
+ * #815 §2: how a turn's browser_* call that found no tab waits for it, as a
+ * `tab_disconnected` attention request on the turn's question gate: shown on the
+ * panel and the badge, resolved `reconnected` when the session's tab is back
+ * (bridge/hub.ts `onSessionTab`), or by the user's reply, or by its timer, which
+ * lets the agent carry on without the tab (never approving anything). Calls that
+ * fail together wait on one request, not one each (#815 §5 would supersede them).
+ */
+export const TAB_WAIT_S = 300
+const CARRY_ON = 'Carry on without the tab'
+
+export function waitForTab(gate: QuestionGate): WaitForTab {
+  let open: Promise<TabWait> | undefined
+  return ({ tool, toolUseId, signal }) => {
+    open ??= (async (): Promise<TabWait> => {
+      const parsed = parseAttention({
+        reason: 'tab_disconnected',
+        message:
+          `I need your ScadBuddy tab for ${tool}, but it is not connected. Open ScadBuddy (or reload it) and open ` +
+          'this chat in the assistant panel, and I will carry on there. Without it I carry on with what needs no tab.',
+        options: ["I'm back", CARRY_ON],
+        timeout_s: TAB_WAIT_S,
+      })
+      if (!parsed.ok) throw new Error(parsed.error)
+      const card = attentionCard(parsed.input)
+      const verdict = await gate({
+        tool: `mcp__scadbuddy__${tool}`,
+        questions: [card],
+        toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
+        signal,
+        attention: attentionSpec(parsed.input),
+      })
+      if ('reconnected' in verdict && verdict.reconnected) return { back: true }
+      // Any reply but "carry on" means try again (it costs one call, which says if it still finds no tab).
+      if (verdict.answered) {
+        const reply = verdict.answers[card.question] ?? ''
+        if (reply !== CARRY_ON) return { back: true }
+        return { back: false, message: `The user replied ${JSON.stringify(reply)}: carry on without the tab.` }
+      }
+      if ('timedOut' in verdict && verdict.timedOut) return { back: false, message: timedOutText(TAB_WAIT_S) }
+      return { back: false, message: verdict.message }
+    })().finally(() => {
+      open = undefined
+    })
+    return open
+  }
+}
 
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
@@ -322,7 +372,12 @@ export type SessionManagerDeps = {
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
-  mcpServers?: (session: SessionRecord, turn: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers?: (
+    session: SessionRecord,
+    turn: TurnPrincipal,
+    /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
+    extras?: { waitForTab?: WaitForTab },
+  ) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
   ownPlugin?: string
@@ -1074,6 +1129,19 @@ export class SessionManager {
             }
           : undefined
       browserDirs = browser !== undefined
+      // AskUserQuestion (#940): only the user in the panel answers, so only a
+      // session the browser user owns is given the tool. Any other owner's turn
+      // would wait on someone who is not asked.
+      const questionGate = asksUser
+        ? this.questions.gate({
+            sessionId: id,
+            turnId,
+            secrets: () => secrets,
+            signal: controller.signal,
+            // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
+            stopTurn: (why) => controller.abort(new Error(why)),
+          })
+        : undefined
       const run: Omit<HarnessRun, 'credential'> = {
         paths: this.deps.paths,
         prompt,
@@ -1088,18 +1156,7 @@ export class SessionManager {
         // AskUserQuestion (#940): only the user in the panel answers, so only
         // a session the browser user owns is given the tool. Any other
         // owner's turn would wait on someone who is not asked.
-        ...(asksUser
-          ? {
-              questionGate: this.questions.gate({
-                sessionId: id,
-                turnId,
-                secrets: () => secrets,
-                signal: controller.signal,
-                // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-                stopTurn: (why) => controller.abort(new Error(why)),
-              }),
-            }
-          : {}),
+        ...(questionGate ? { questionGate } : {}),
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
         // user's messages are instructions; tool results are data. Then which
         // browser each browser_* tool drives.
@@ -1111,7 +1168,9 @@ export class SessionManager {
         ...(this.deps.mcpServers || browser || http
           ? {
               mcpServers: {
-                ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
+                ...(this.deps.mcpServers
+                  ? this.deps.mcpServers(session, principal, questionGate ? { waitForTab: waitForTab(questionGate) } : {})
+                  : {}),
                 ...(http ? { [HTTP_SERVER]: http } : {}),
                 // The one way past the backend's agent-actor gate: a human
                 // approves one exact outward request (harness/headlessGrants.ts).

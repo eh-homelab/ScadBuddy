@@ -59,6 +59,12 @@ function detailOf(run: ToolRun): { detail?: string } {
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
 }
 
+/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283, harness/questions.ts). */
+function toolUseIdFrom(extra: unknown): string | undefined {
+  const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.['claudecode/toolUseId']
+  return typeof id === 'string' && id ? id : undefined
+}
+
 function signalFrom(extra: unknown): AbortSignal {
   return (extra as ExtraLike | undefined)?.signal ?? new AbortController().signal
 }
@@ -107,6 +113,7 @@ export function createHarnessServer(
             ...services,
             principal,
             session,
+            toolUseId: toolUseIdFrom(extra),
             progress: progressFrom(extra),
             signal: signalFrom(extra),
             lookup,

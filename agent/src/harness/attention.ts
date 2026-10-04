@@ -140,6 +140,10 @@ export function timedOutText(seconds: number): string {
   )
 }
 
+/** The result the model reads when the session's tab came back (#815 §2): not a reply, but the wait is over. */
+export const RECONNECTED_TEXT =
+  'reconnected: the ScadBuddy tab is connected again (the user has not replied). Retry the browser_* call that failed.'
+
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
@@ -167,7 +171,8 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
   try {
     const verdict = await gate({ tool, questions: [card], toolUseId, signal: context.data.signal, attention })
     if (verdict.answered) return text(answeredText(verdict.answers[card.question] ?? ''))
-    if (verdict.timedOut) return text(timedOutText(attention.timeoutS))
+    if ('timedOut' in verdict && verdict.timedOut) return text(timedOutText(attention.timeoutS))
+    if ('reconnected' in verdict && verdict.reconnected) return text(RECONNECTED_TEXT)
     return text(verdict.message, true)
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)

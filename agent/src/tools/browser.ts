@@ -104,10 +104,17 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
     handler: async (args, ctx) => {
       const input = args as Record<string, unknown>
       const wait = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : undefined
-      const outcome = await tabs(ctx).call(target(ctx), spec.tool, input, {
-        signal: ctx.signal,
-        ...(wait === undefined ? {} : { timeoutMs: wait }),
-      })
+      const call = () =>
+        tabs(ctx).call(target(ctx), spec.tool, input, { signal: ctx.signal, ...(wait === undefined ? {} : { timeoutMs: wait }) })
+      let outcome = await call()
+      // #815 §2: in a session the user owns, a call that finds no tab waits for
+      // it as an attention request, and runs once more when the tab is back.
+      // Once only: a tab that came back on another replica is still not here.
+      if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
+        const waited = await ctx.waitForTab({ tool: `browser_${spec.tool}`, toolUseId: ctx.toolUseId, signal: ctx.signal })
+        if (waited.back) outcome = await call()
+        else throw new ToolError(`${outcome.error.message} ${waited.message}`)
+      }
       if (outcome.ok) return json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).

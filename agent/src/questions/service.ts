@@ -92,7 +92,7 @@ export type QuestionGateContext = {
 type Row = {
   id: string
   session_id: string
-  outcome: 'answered' | 'cancelled' | 'timed_out' | null
+  outcome: 'answered' | 'cancelled' | 'timed_out' | 'reconnected' | null
   answers: string[] | null
   reason: string | null
 }
@@ -339,6 +339,53 @@ export class QuestionService {
   }
 
   /**
+   * #815 §2: the session has a connected ScadBuddy tab again (bridge/hub.ts), so
+   * its open `tab_disconnected` attention requests are over: resolved as
+   * `reconnected` by the system, never as an answer. Returns how many. Called on
+   * whichever replica saw the tab; a turn parked on another replica sees the row
+   * on its next poll.
+   */
+  async reconnected(sessionId: string): Promise<number> {
+    const reason = 'the ScadBuddy tab is connected again'
+    const rows = await this.atomically(sessionId, async (tx) => {
+      const resolved = await tx<Resolved[]>`
+        UPDATE ai_questions SET outcome = 'reconnected', reason = ${reason}, resolved_at = now()
+        WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'tab_disconnected'
+          AND outcome IS NULL
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
+      return {
+        value: resolved,
+        events: resolved.map((r) =>
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
+        ),
+      }
+    })
+    if (rows.length === 0) return 0
+    for (const r of rows) this.wake(r.id)
+    try {
+      await this.refreshStatus(sessionId)
+    } finally {
+      await this.audited(
+        rows.map((r) => ({
+          kind: 'question',
+          action: 'reconnected',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'ok',
+          detail: safeDetail(`${r.tool} attention request ${r.id}: ${reason}`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+    }
+    return rows.length
+  }
+
+  /**
    * The audit rows of resolved questions (#1075), after the state they report
    * is committed and the session's status set: AuditLog never throws, but a
    * sink that did must not leave the session showing a wait that is over, nor
@@ -553,6 +600,9 @@ export class QuestionService {
         // (A turn that stopped cancels its questions as it finishes.)
         if (!context.signal.aborted) await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
         return { answered: false, message: 'The user did not answer: the turn stopped first.' }
+      }
+      if (resolved.outcome === 'reconnected') {
+        return { answered: false, reconnected: true, message: resolved.reason ?? 'the ScadBuddy tab is connected again' }
       }
       if (resolved.outcome === 'timed_out' && attention) {
         if (attention.onTimeout === 'proceed') return { answered: false, timedOut: true, message: resolved.reason ?? 'timed out' }

@@ -346,3 +346,31 @@ describe('the attention card (#815)', () => {
     expect(screen.getByRole('status')).toHaveTextContent('No reply: nobody replied in time (on_timeout: proceed).')
   })
 })
+
+describe('the tab-disconnected card (#815)', () => {
+  it('says the tab is back once the agent resolved it as reconnected', () => {
+    const item: FeedItem = {
+      kind: 'question',
+      id: 'att2',
+      tool: 't2',
+      questions: [
+        {
+          question: 'I need your ScadBuddy tab for browser_snapshot, but it is not connected.',
+          header: 'Tab disconnected',
+          multiSelect: false,
+          options: [
+            { label: "I'm back", description: '' },
+            { label: 'Carry on without the tab', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date().toISOString() },
+      state: 'cancelled',
+      reason: 'the ScadBuddy tab is connected again',
+      reconnected: true,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back; the assistant carries on there.')
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+  })
+})

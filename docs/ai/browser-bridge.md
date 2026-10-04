@@ -186,6 +186,15 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
   the paired tab is not connected, or no database for pairing), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
+  In a session the browser user owns, `no browser attached` does not fail the call at
+  once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
+  card and the Assistant badge), and calls that fail together share one request. When
+  the session has a connected tab again (its tab reconnects, or the user opens the chat
+  from another tab, which pairs it), the hub resolves the request as `reconnected` and
+  the call runs once more. A reply other than "Carry on without the tab" also retries.
+  After 5 minutes with no reply the call fails with `timed_out`, and the agent carries on
+  with what needs no tab; a timeout never approves anything. Only once per call: a tab
+  that came back on another replica is still not here, and the retry says so.
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.
