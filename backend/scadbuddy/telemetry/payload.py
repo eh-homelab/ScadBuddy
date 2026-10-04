@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import string
+from collections import deque
 from collections.abc import Callable
 from functools import partial
 from typing import Any, Final, Protocol
@@ -86,8 +88,17 @@ class _UrlReducer(Protocol):
     def __call__(self, url: str, /, *, frame: bool = False) -> str | None: ...
 
 
-#: A script URL inside a stack frame, up to its ``:line:col``.
-_FRAME_URL: Final = re.compile(r"(?P<url>[a-z][a-z0-9+.-]*://\S+):(?P<position>\d+:\d+)", re.I)
+#: A stack line longer than this is dropped before any pattern sees it, and frames stop
+#: once they fill a string's cap: the stack is the page's, as long as the body allows.
+MAX_FRAME_LINE_CHARS: Final = 512
+#: What separates a frame line's tokens; a frame URL is one token (no whitespace).
+_WHITESPACE: Final = re.compile(r"(\s+)")
+#: A URL scheme's characters (RFC 3986), and those of them that cannot start one.
+_SCHEME_TAIL_CHARS: Final = string.digits + "+.-"
+_SCHEME_CHARS: Final = string.ascii_letters + _SCHEME_TAIL_CHARS
+#: Each ``:line:col`` in a token, overlapping ones too: the lookahead's two digit runs
+#: are split by a colon, so each run is read at most twice whatever the token holds.
+_POSITION: Final = re.compile(r":(?=(\d+:\d+))")
 
 
 def _id(value: object, pattern: re.Pattern[str]) -> str | None:
@@ -181,21 +192,66 @@ def parse(body: bytes) -> Json:
     return payload
 
 
+def _frame_url(token: str) -> tuple[int, int, int] | None:
+    """Where a script URL sits in one token of a frame line: ``(start, colon, end)``, the
+    URL being ``token[start:colon]`` and its ``line:col`` ``token[colon + 1 : end]``.
+    The URL starts at a scheme (a letter, then scheme characters, then ``://``) and runs
+    to the last ``:line:col`` in the token. Linear in the token: each stretch between
+    two ``://`` is stripped once, and `_POSITION` reads each run of digits at most twice."""
+    floor = 0
+    separator = token.find("://")
+    while separator != -1:
+        # A scheme holds no colon, so it lies after the previous ``://``.
+        before = token[floor:separator]
+        run = before[len(before.rstrip(_SCHEME_CHARS)) :]
+        scheme = run.lstrip(_SCHEME_TAIL_CHARS)
+        if scheme:
+            start = separator - len(scheme)
+            break
+        floor = separator + 3
+        separator = token.find("://", floor)
+    else:
+        return None
+    # At least one character of the URL follows the ``://``.
+    positions = deque(_POSITION.finditer(token, separator + 4), maxlen=1)
+    if not positions:
+        return None
+    last = positions[0]
+    return start, last.start(), last.end(1)
+
+
+def _reduced_frame(line: str, reduce_url: _UrlReducer) -> str:
+    """A frame line with each script URL in it reduced, keeping its ``:line:col``."""
+    tokens = _WHITESPACE.split(line)
+    for index in range(0, len(tokens), 2):
+        found = _frame_url(tokens[index])
+        if found is None:
+            continue
+        token = tokens[index]
+        start, colon, end = found
+        reduced = reduce_url(token[start:colon], frame=True) or "<anonymous>"
+        tokens[index] = f"{token[:start]}{reduced}:{token[colon + 1 : end]}{token[end:]}"
+    return "".join(tokens)
+
+
 def browser_frames_only(stack: str, reduce_url: _UrlReducer) -> str:
     """The frame lines of a browser stack, and nothing else: the message is the rest.
     A frame's URL is the page's own for an inline script or an ``eval``, so it is
     reduced as a URL attribute is, keeping its ``:line:col`` (a bundle script under
-    ``/assets/`` keeps its path)."""
-
-    def reduce_frame(match: re.Match[str]) -> str:
-        reduced = reduce_url(match["url"], frame=True) or "<anonymous>"
-        return f"{reduced}:{match['position']}"
-
-    return "\n".join(
-        _FRAME_URL.sub(reduce_frame, line.strip())
-        for line in stack.splitlines()
-        if _BROWSER_FRAME.fullmatch(line)
-    )
+    ``/assets/`` keeps its path). A line over :data:`MAX_FRAME_LINE_CHARS` is dropped
+    unread, and frames stop once they fill :data:`MAX_STRING_CHARS`, where the string is
+    cut anyway: every step is linear in the stack, which the page writes."""
+    frames: list[str] = []
+    length = 0
+    for line in stack.splitlines():
+        if length > MAX_STRING_CHARS:
+            break
+        if len(line) > MAX_FRAME_LINE_CHARS or not _BROWSER_FRAME.fullmatch(line):
+            continue
+        frame = _reduced_frame(line.strip(), reduce_url)
+        frames.append(frame)
+        length += len(frame) + 1
+    return "\n".join(frames)
 
 
 def _count(value: object) -> int:
@@ -528,6 +584,7 @@ __all__ = [
     "MAX_ATTRIBUTES",
     "MAX_EVENTS",
     "MAX_EVENT_ATTRIBUTES",
+    "MAX_FRAME_LINE_CHARS",
     "MAX_LINKS",
     "MAX_LINK_ATTRIBUTES",
     "MAX_NAME_CHARS",

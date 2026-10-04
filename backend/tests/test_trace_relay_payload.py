@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import re
+import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -820,3 +823,88 @@ def test_a_bundle_frame_keeps_its_asset_path_without_the_query() -> None:
 def test_a_frame_url_on_another_host_keeps_only_its_origin() -> None:
     out = _stack_after_prepare(f"    at f (https://cdn.example/assets/{SENTINEL}.js?q=1:1:2)")
     assert out == "at f (https://cdn.example:1:2)"
+
+
+#: The pattern the frame URLs were found with before #1090's gate: right, but
+#: quadratic on a long token, so it is the oracle on short ones only.
+_QUADRATIC_FRAME_URL = re.compile(r"(?P<url>[a-z][a-z0-9+.-]*://\S+):(?P<position>\d+:\d+)", re.I)
+#: Generous for linear work on a few hundred kilobytes; the quadratic pattern took
+#: seconds on a fifth of the first input below.
+_LINEAR_BUDGET_SECONDS = 0.1
+
+
+def _timed(work: Callable[[], object]) -> float:
+    started = time.perf_counter()
+    work()
+    return time.perf_counter() - started
+
+
+def _reduce_all(url: str, *, frame: bool = False) -> str:
+    return "R"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "a" * 100_000 + ":1:1",
+        "@" + "a://" * 25_000 + ":1",
+        "a://" + ":1" * 50_000,
+        "a://x" + ":" + "1" * 50_000 + ":" * 50_000,
+        "(" + "1://" * 25_000 + "a",
+    ],
+    ids=["letters", "schemes", "positions", "digits-then-colons", "no-scheme-letter"],
+)
+def test_finding_a_frame_url_is_linear_in_the_token(token: str) -> None:
+    """The gate's ReDoS finding on #1090: the URL in a frame line was found by a pattern
+    that rescanned the rest of the token from every letter."""
+    assert _timed(lambda: payload._reduced_frame(token, _reduce_all)) < _LINEAR_BUDGET_SECONDS
+
+
+def test_frame_urls_are_found_where_the_pattern_found_them() -> None:
+    rng = random.Random(1090)
+    alphabet = "ab1:/ ()@.-+é"
+    for _ in range(20_000):
+        line = "".join(rng.choice(alphabet) for _ in range(rng.randrange(1, 30)))
+        expected = _QUADRATIC_FRAME_URL.sub(lambda match: f"R:{match['position']}", line)
+        assert payload._reduced_frame(line, _reduce_all) == expected, line
+
+
+def _stack_body(stack: str) -> bytes:
+    event = {"name": "exception", "attributes": [string("exception.stacktrace", stack)]}
+    return export(span(events=[event]))
+
+
+def test_a_pathological_stack_line_is_dropped_in_linear_time() -> None:
+    body = _stack_body("    at " + "a" * 100_000 + ":1:1")
+    assert _timed(lambda: prepare(body)) < _LINEAR_BUDGET_SECONDS
+    assert _stack_after_prepare("    at " + "a" * 100_000 + ":1:1") == ""
+
+
+def test_a_stack_of_long_frame_lines_is_read_in_linear_time() -> None:
+    line = "    at " + "a" * (payload.MAX_FRAME_LINE_CHARS - 11) + ":1:1"
+    body = _stack_body("\n".join([line] * 500))
+    assert _timed(lambda: prepare(body)) < _LINEAR_BUDGET_SECONDS
+
+
+def test_a_frame_line_over_the_cap_is_dropped_and_one_at_it_kept() -> None:
+    url = "https://cdn.example/"
+    at_cap = "    at f (" + url + "a" * (payload.MAX_FRAME_LINE_CHARS - 15 - len(url)) + ":1:2)"
+    assert len(at_cap) == payload.MAX_FRAME_LINE_CHARS
+    over = at_cap.replace("(", "((", 1)
+    assert _stack_after_prepare(f"{over}\n{at_cap}") == "at f (https://cdn.example:1:2)"
+
+
+def test_frames_stop_where_the_string_is_cut() -> None:
+    frame = "g@https://scadbuddy.example/assets/index-a1b2.js:30:9"
+    out = _stack_after_prepare("\n".join([frame] * 10_000))
+    assert out == "\n".join([frame] * 10_000)[: payload.MAX_STRING_CHARS]
+
+
+def test_a_long_url_attribute_is_reduced_in_linear_time() -> None:
+    urls = [
+        "https://scadbuddy.example/" + "a" * 200_000,
+        "https://" + "a@" * 100_000 + "x/y",
+        "a" * 200_000 + "://x",
+    ]
+    body = export(span(attributes=[string("url.full", url) for url in urls]))
+    assert _timed(lambda: prepare(body)) < _LINEAR_BUDGET_SECONDS
