@@ -1,6 +1,14 @@
 """The library pin writes as operations (#1054, spec 2026-10-01 §4.3, the ``library``
-row): each route's refusals as its kind's check, and its effect as its run, moved here
-unchanged.
+row): each route's effect as its kind's run, moved here unchanged, and the refusals
+that need no clone, no lookup and no lock as its check, which records nothing.
+
+The rest arrive as the run's failure, recorded as a failed operation: a pin's 502 and
+503 (the clone, the lookup), its 422 for a host name that is not public, its 409 for a
+re-pin whose entry changed while it cloned, an unpin's 409 and 404 (the entry is not
+the invalid one named, or there is none), and the 409 for a model.json that cannot be
+read. A removal's refusals (a render's lease, a model's pin, no checkout) are its
+check, and are made again under the gate in its run, where one that a pin or a render
+caused in between is recorded as a failure.
 
 They run on the ``library`` worker, which is in the API process and holds the data
 volume (phase 3a), so they share the API's checkout gate and install semaphore. Every
@@ -16,6 +24,7 @@ tracks the leases a separate render worker takes).
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from functools import partial, wraps
@@ -23,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.api.library_pins import resolve_pin
+from scadbuddy.api.library_pins import check_pin, resolve_pin
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -37,6 +46,7 @@ from scadbuddy.library.catalogue import (
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import (
     CLONE_TIMEOUT,
+    COMMIT_PATTERN,
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
@@ -53,6 +63,8 @@ if TYPE_CHECKING:
 #: A pin's run: the clone's own limit, plus waiting its turn (installs, a removal holding
 #: the gate) and the commit. Past it the run is cancelled before its next step; a clone
 #: or commit already in its thread finishes (holding the gate) and a commit can land.
+#: The browser and the agent follow a 202 for 15 minutes (#1063), so this plus the run's
+#: ``CANCEL_GRACE`` (`workflows/operation_activities.py`) must stay under that.
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
@@ -139,6 +151,13 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         require_model_exists(state.catalogue, request["slug"])
         return {}
 
+    async def pin_check(request: dict[str, Any]) -> dict[str, Any]:
+        require_model_exists(state.catalogue, request["slug"])
+        check_pin(
+            request["name"], url=request["url"], ref=request["ref"], libraries=state.libraries
+        )
+        return {}
+
     async def pin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         return await _pin(request["slug"], request["name"], url=request["url"], ref=request["ref"])
 
@@ -179,7 +198,43 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         library_changed(state.events, slug, name)
         return _record(record)
 
-    async def no_check(request: dict[str, Any]) -> dict[str, Any]:
+    async def _refuse_removal(name: str, commit: str | None) -> None:
+        """A removal's refusals: a render reading the checkout, a model pinning it, or
+        no such checkout."""
+        libraries = state.libraries
+        what = name if commit is None else f"{name} at {commit[:7]}"
+        directory = libraries.paths.libraries / name
+        if commit is not None:
+            directory /= commit
+        jobs = state.checkouts.leased(directory)
+        if jobs:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{what} is being read by render job {', '.join(jobs)}; "
+                "try again once it has finished",
+                jobs=jobs,
+            )
+        users = await asyncio.to_thread(state.catalogue.library_users, name, commit)
+        if users:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{what} is still pinned by {', '.join(users)}; remove it from "
+                f"{'that model' if len(users) == 1 else 'those models'} first",
+                models=users,
+            )
+        if commit is not None and not re.fullmatch(COMMIT_PATTERN, commit):
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{commit!r} is not a full commit id"
+            )
+        try:
+            installed = await asyncio.to_thread(libraries.installed, name)
+        except LibraryError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        if not any(commit is None or found == commit for _, found in installed):
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume")
+
+    async def remove_check(request: dict[str, Any]) -> dict[str, Any]:
+        await _refuse_removal(request["name"], request["commit"])
         return {}
 
     async def remove_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -187,28 +242,11 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         commit: str | None = request["commit"]
         libraries, checkouts = state.libraries, state.checkouts
         what = name if commit is None else f"{name} at {commit[:7]}"
-        directory = libraries.paths.libraries / name
-        if commit is not None:
-            directory /= commit
         # Alone: no pin can find this checkout and record it while it goes, and no
-        # render can take a lease on it.
+        # render can take a lease on it. The check's refusals again, now that nothing
+        # can get in between.
         async with checkouts.removing():
-            jobs = checkouts.leased(directory)
-            if jobs:
-                raise ApiError(
-                    status.HTTP_409_CONFLICT,
-                    f"{what} is being read by render job {', '.join(jobs)}; "
-                    "try again once it has finished",
-                    jobs=jobs,
-                )
-            users = await asyncio.to_thread(state.catalogue.library_users, name, commit)
-            if users:
-                raise ApiError(
-                    status.HTTP_409_CONFLICT,
-                    f"{what} is still pinned by {', '.join(users)}; remove it from "
-                    f"{'that model' if len(users) == 1 else 'those models'} first",
-                    models=users,
-                )
+            await _refuse_removal(name, commit)
             try:
                 removed = await to_thread_to_end(partial(libraries.remove, name, commit))
             except LibraryCheckoutNotFoundError:
@@ -225,7 +263,7 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
     return [
         OperationKind(
             "library_pin",
-            _answered(model_check),
+            _answered(pin_check),
             _answered(pin_run),
             queue="library",
             run_timeout=PIN_TIMEOUT,
@@ -240,7 +278,9 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         OperationKind(
             "library_unpin", _answered(model_check), _answered(unpin_run), queue="library"
         ),
-        OperationKind("library_remove", no_check, _answered(remove_run), queue="library"),
+        OperationKind(
+            "library_remove", _answered(remove_check), _answered(remove_run), queue="library"
+        ),
     ]
 
 
