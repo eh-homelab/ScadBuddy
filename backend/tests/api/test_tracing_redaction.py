@@ -161,7 +161,8 @@ def test_a_path_parameter_never_appears(
     )
     attributes = server.attributes or {}
     assert attributes["http.target"] == route
-    assert attributes["http.url"] == f"http://testserver{route}"
+    # A server span's URL would carry the Host header: it is not exported.
+    assert "http.url" not in attributes
     assert SENTINEL not in _everything(spans)
     assert SENTINEL not in "\n".join(s.name for s in spans.get_finished_spans())
 
