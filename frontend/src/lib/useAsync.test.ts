@@ -138,3 +138,35 @@ it('never asks accept about an answer a newer read has overtaken', async () => {
   expect(result.current.data).toBe('newest')
   expect(asked).toEqual([])
 })
+
+it('never lets a read in flight overwrite data set since', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.setData('set'))
+  await act(async () => resolvers[1]?.('stale'))
+  expect(result.current.data).toBe('set')
+})
+
+it('settles with data set before the first read answers', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, []))
+  await waitFor(() => expect(resolvers).toHaveLength(1))
+  act(() => result.current.setData('set'))
+  expect(result.current).toMatchObject({ data: 'set', loading: false })
+  await act(async () => resolvers[0]?.('stale'))
+  expect(result.current.data).toBe('set')
+})
+
+it('tells refresh when its read fails', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const failed = vi.fn()
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(failed).toHaveBeenCalledOnce())
+  expect(result.current.data).toBe(1)
+})
