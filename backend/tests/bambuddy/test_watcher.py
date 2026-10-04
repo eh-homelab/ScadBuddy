@@ -627,6 +627,36 @@ def test_a_failing_settle_hook_still_settles_and_forgets_the_print(
     assert "TEST-HOTEND" not in repr(record.__dict__) and record.exc_info is None
 
 
+def test_a_settle_hook_that_hangs_is_cut_off_and_the_print_still_settles(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1083: a hook is awaited inline in the watch loop, so one that never returns
+    (a slow Bambuddy, a stuck pool) is bounded and logged like any other failure."""
+
+    async def scenario() -> tuple[MemoryPrintLog, list[Event]]:
+        write_output(paths)
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, seen = watcher_for(
+            paths, Script(progress("done", settled=True, done=1)), prints=log
+        )
+        watcher.settle_timeout = 0.05
+
+        async def hook(meta: OutputMeta) -> None:
+            await asyncio.Event().wait()
+
+        watcher.on_settled.append(hook)
+        watcher.watch(OUTPUT)
+        await asyncio.wait_for(until_idle(watcher), timeout=5)
+        return log, seen
+
+    with caplog.at_level(logging.DEBUG):
+        log, seen = asyncio.run(scenario())
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    assert asyncio.run(log.printed_at(OUTPUT)) is None
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "TimeoutError"
+
+
 def test_an_output_never_printed_through_the_queue_never_reaches_the_hook(
     paths: DataPaths,
 ) -> None:
