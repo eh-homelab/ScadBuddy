@@ -110,7 +110,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
   const outputId = source?.kind === 'output' ? source.output.id : undefined
   const picker = usePrintChoices(open, source)
-  const { choices, loading, loadError, printers, printerId, printer, selection, size } = picker
+  const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
+    picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
   const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
     source,
@@ -138,18 +139,18 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
   /**
    * A printer's algorithm as an earlier session's save left it, when that save landed
-   * after this dialog read the choices (#1086 review). Shown only, never sent, and only
-   * on that printer; the next choices read supersedes it.
+   * after this dialog started reading the choices (#1086 review). Shown only, never sent,
+   * and only on that printer. A choices read started after the save landed supersedes it;
+   * one started before it may still answer with the old algorithm, so it does not.
    */
   const [savedAlgorithm, setSavedAlgorithm] = useState<{
     printerId: number
     algorithm: RackAlgorithm
+    /** The last choices read started when the save landed. */
+    afterRead: number
   } | null>(null)
-  useEffect(() => {
-    setSavedAlgorithm(null)
-  }, [choices])
   const storedAlgorithm =
-    savedAlgorithm && savedAlgorithm.printerId === printerId
+    savedAlgorithm && savedAlgorithm.printerId === printerId && choicesRead <= savedAlgorithm.afterRead
       ? savedAlgorithm.algorithm
       : choices?.rack_algorithm
   const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
@@ -192,7 +193,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           // printer without carrying it in as a choice, and without re-reading the
           // choices, which would reset the bed type and filament plan set since.
           if (algorithmSession.current !== session)
-            setSavedAlgorithm({ printerId: savedOn, algorithm: next })
+            setSavedAlgorithm({
+              printerId: savedOn,
+              algorithm: next,
+              afterRead: picker.readsStarted.current,
+            })
         },
         () => {
           if (algorithmSave.current === save && algorithmSession.current === session)
