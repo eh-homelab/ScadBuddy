@@ -480,14 +480,12 @@ async def patch_media(
     item_id: MediaIdPath,
     body: MediaCaption,
     response: Response,
-    catalogue: CatalogueDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     return await _edit(
         ops,
         response,
-        catalogue,
         "model_media_patch",
         {"slug": slug, "item_id": item_id, "caption": body.caption},
         idempotency_key,
@@ -497,14 +495,12 @@ async def patch_media(
 async def _edit(
     ops: OperationCommands,
     response: Response,
-    catalogue: Catalogue,
     kind: str,
     request: dict[str, Any],
     idempotency_key: str | None,
 ) -> ModelRecord | JSONResponse:
-    """A media edit as its operation (#1054); the check makes the 404 and the 503."""
-    require_model_exists(catalogue, request["slug"])
-    require_media_store(catalogue)
+    """A media edit as its operation (#1054); the check makes the 404 and the 503, so a
+    re-send gets its recorded answer whatever has changed since (review 3e final M1)."""
     result = await run_operation(
         ops,
         response,
@@ -532,14 +528,12 @@ async def reorder_media(
     slug: SlugPath,
     body: MediaOrder,
     response: Response,
-    catalogue: CatalogueDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     return await _edit(
         ops,
         response,
-        catalogue,
         "model_media_order",
         {"slug": slug, "ids": body.ids},
         idempotency_key,
@@ -564,14 +558,12 @@ async def put_media_cover(
     slug: SlugPath,
     body: MediaCover,
     response: Response,
-    catalogue: CatalogueDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     return await _edit(
         ops,
         response,
-        catalogue,
         "model_media_cover",
         {"slug": slug, "id": body.id},
         idempotency_key,
@@ -593,14 +585,12 @@ async def delete_media(
     slug: SlugPath,
     item_id: MediaIdPath,
     response: Response,
-    catalogue: CatalogueDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     return await _edit(
         ops,
         response,
-        catalogue,
         "model_media_delete",
         {"slug": slug, "item_id": item_id},
         idempotency_key,

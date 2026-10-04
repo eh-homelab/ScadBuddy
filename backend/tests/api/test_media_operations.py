@@ -95,3 +95,19 @@ def test_too_many_items_is_still_409(
     # Refused by the check: nothing recorded, nothing left on the volume.
     assert len(_workflow_ids(app, "model_media_upload")) == 1
     assert _leftovers(app) == []
+
+
+def test_a_keyed_media_edit_resent_after_the_model_went_answers_as_first(
+    client: TestClient, model: str
+) -> None:
+    """Review 3e final M1: the route makes no refusal of its own, so a re-send gets its
+    recorded answer, not a 404 made since."""
+    item = _upload(client, model, PNG).json()["media"][0]["id"]
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    url = f"/api/v1/models/{model}/media/{item}"
+    first = client.patch(url, json={"caption": "x"}, headers=headers)
+    assert first.status_code == 200, first.text
+    assert client.delete(f"/api/v1/models/{model}").status_code in (200, 204)
+    again = client.patch(url, json={"caption": "x"}, headers=headers)
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
