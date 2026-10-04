@@ -184,4 +184,20 @@ test.describe('assistant panel (#256)', () => {
     await page.keyboard.press('Control+Backquote')
     await expect(panel.getByText(/so it reads from across the room/)).toBeVisible()
   })
+
+  // #931: what a session touched, each entry a link to its page.
+  test('Touched lists what a session changed and opens its page', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /Tune the gridfinity bin/ }).click()
+    await expect(panel.getByText('Done: the bin is now 3 units (21 mm) tall.')).toBeVisible()
+
+    await panel.getByRole('button', { name: 'Touched' }).click()
+    const touched = panel.getByRole('region', { name: 'What this session touched' })
+    await expect(touched.getByRole('group', { name: 'Presets' })).toContainText('preset-tall')
+    await touched.getByRole('group', { name: 'Revisions' }).getByRole('link', { name: /3f9c2a1/ }).click()
+    await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e$/)
+  })
 })

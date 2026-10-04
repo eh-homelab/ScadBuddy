@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -56,6 +57,8 @@ export type QuestionServiceDeps = {
   /** The session event log the question events go to. */
   events: EventLog
   pollMs?: number
+  /** The AI audit log (#1075): one `question` row per answer. */
+  audit?: Pick<AuditLog, 'record' | 'hash'>
 }
 
 /** What `gate()` needs to know about the turn it parks. */
@@ -152,8 +155,16 @@ export class QuestionService {
     })
   }
 
-  /** The panel's `question.answer`, from the user in the panel. */
-  async answer(principal: Owner, message: QuestionAnswerMessage): Promise<void> {
+  /**
+   * The panel's `question.answer`, from the user in the panel. `where` is for
+   * the audit log, as for an approval decision: the answerer's address and the
+   * surface ('http', the panel, when omitted).
+   */
+  async answer(
+    principal: Owner,
+    message: QuestionAnswerMessage,
+    where: { clientIp?: string | undefined; surface?: AuditSurface } = {},
+  ): Promise<void> {
     if (message.v !== PROTOCOL_VERSION || message.type !== 'question.answer') {
       throw new QuestionError('invalid', 'not a question.answer message')
     }
@@ -170,19 +181,42 @@ export class QuestionService {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
     }
     const answered = await this.atomically(sessionId, async (tx) => {
-      const [row] = await tx<{ id: string }[]>`
+      const [row] = await tx<{ turn_id: string; tool: string; tool_use_id: string; created_at: Date }[]>`
         UPDATE ai_questions
         SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
             answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
         WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
-        RETURNING id`
+        RETURNING turn_id, tool, tool_use_id, created_at`
       return row
-        ? { value: true, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
-        : { value: false, events: [] }
+        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
+        : { value: undefined, events: [] }
     })
     if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     this.wake(id)
-    await this.refreshStatus(sessionId)
+    try {
+      await this.refreshStatus(sessionId)
+    } finally {
+      // The answer is committed: its row is written even if the status refresh failed.
+      // Hashed, never stored as text: an answer may be anything the user typed.
+      await this.audited([
+        {
+          kind: 'question',
+          action: 'answered',
+          surface: where.surface ?? 'http',
+          actor: principal,
+          clientIp: where.clientIp,
+          sessionId,
+          turnId: answered.turn_id,
+          toolUseId: answered.tool_use_id,
+          tier: 'read',
+          inputHash: this.deps.audit?.hash(answered.tool, { answers }),
+          outcome: 'ok',
+          detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+          startedAt: answered.created_at,
+          finishedAt: new Date(),
+        },
+      ])
+    }
   }
 
   /**
@@ -199,12 +233,12 @@ export class QuestionService {
     const turnId = options.turnId ?? null
     const questionId = options.questionId ?? null
     const rows = await this.atomically(sessionId, async (tx) => {
-      const cancelled = await tx<{ id: string }[]>`
+      const cancelled = await tx<{ id: string; turn_id: string; tool: string; tool_use_id: string; created_at: Date }[]>`
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
-        RETURNING id`
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
         events: cancelled.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
@@ -212,8 +246,41 @@ export class QuestionService {
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
-    if (options.refresh !== false) await this.refreshStatus(sessionId)
+    try {
+      if (options.refresh !== false) await this.refreshStatus(sessionId)
+    } finally {
+      // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
+      // approval cancelled the same way is audited the same way.
+      await this.audited(
+        rows.map((r) => ({
+          kind: 'question',
+          action: 'cancelled',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'refused',
+          detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+    }
     return rows.length
+  }
+
+  /**
+   * The audit rows of resolved questions (#1075), after the state they report
+   * is committed and the session's status set: AuditLog never throws, but a
+   * sink that did must not leave the session showing a wait that is over, nor
+   * cost the other rows theirs.
+   */
+  private async audited(entries: AuditEntry[]): Promise<void> {
+    const audit = this.deps.audit
+    if (!audit) return
+    await Promise.allSettled(entries.map((entry) => audit.record(entry)))
   }
 
   // -- waiting -----------------------------------------------------------------
@@ -274,8 +341,8 @@ export class QuestionService {
         if (owner?.owner_kind !== 'browser') return { value: false, events: [] }
         const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
         await tx`
-          INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
-          VALUES (${id}, ${sessionId}, ${turnId}, ${request.toolUseId}, ${tx.json(questions)})`
+          INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
+          VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)})`
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
         // shown; each refreshStatus hands back to whichever is still pending).

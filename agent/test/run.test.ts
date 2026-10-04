@@ -28,12 +28,21 @@ import { startFakeHindsight } from './support/fakeHindsight.js'
 const API_KEY = 'sk-ant-api03-unit-test-key-000011112222'
 const GATEWAY_TOKEN = 'gw-unit-test-token-3333444455556666'
 
+const OAUTH_TOKEN = 'sk-ant-oat01-test-token-0000'
+
 describe('buildHarnessOptions', () => {
   const paths = { stateDir: '/var/lib/scadbuddy-agent' }
   const base: HarnessRun = { paths, credential: { kind: 'anthropic_api_key', secret: API_KEY }, prompt: 'hi' }
 
   it('passes an API key as ANTHROPIC_API_KEY and nothing else', () => {
     expect(credentialEnv({ kind: 'anthropic_api_key', secret: API_KEY })).toEqual({ ANTHROPIC_API_KEY: API_KEY })
+  })
+
+  it('passes a Claude Code OAuth token as CLAUDE_CODE_OAUTH_TOKEN and nothing else', () => {
+    // In x-api-key (ANTHROPIC_API_KEY) Anthropic answers an sk-ant-oat01- token with 401.
+    expect(credentialEnv({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN })).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN,
+    })
   })
 
   it('passes a gateway as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN', () => {

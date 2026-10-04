@@ -279,3 +279,23 @@ export interface AiSessionView {
   budget_usd: number
   running: boolean
 }
+
+/**
+ * #931 — one resource a session's tool call created, changed or deleted (agent
+ * `sessions/touched.ts` TouchedRecord, `GET /api/v1/ai/sessions/:id/resources`).
+ * `model` is the model it belongs to; `before`/`after` are what it was and became
+ * where that has an id (a revision's parent and new commit). `print` is a Bambuddy
+ * queue item id; `print_run` is ScadBuddy's own run.
+ */
+export interface SessionResource {
+  type: 'model' | 'revision' | 'preset' | 'asset' | 'render_job' | 'output' | 'print_run' | 'print' | 'unclassified'
+  /** Null only for `unclassified`. */
+  id: string | null
+  action: 'created' | 'modified' | 'deleted'
+  model: string | null
+  before: string | null
+  after: string | null
+  /** The tool whose call touched it. */
+  tool: string
+  at: string
+}
