@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -295,6 +295,7 @@ async def accept_run(
         # The store's window, so a repeat the record no longer matches starts anew.
         repeat_window_s=runs.store.repeat_window.total_seconds(),
         search_attributes=runs.search_attributes,
+        accepted_at=datetime.now(UTC),
     )
     workflow_id = f"print-{key}"
 

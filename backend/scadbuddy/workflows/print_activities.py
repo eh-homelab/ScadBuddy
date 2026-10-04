@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import status
@@ -65,11 +65,18 @@ from scadbuddy.workflows.print_models import (
     SourceSpec,
     SucceedInput,
 )
+from scadbuddy.workflows.printing import CLIENT_ACCEPTING
 
 logger = logging.getLogger(__name__)
 
 #: How often a slice wait tells Temporal it is alive (its heartbeat timeout is 30 s).
 HEARTBEAT_EVERY = 10.0
+#: What a run answers when its check starts after every client stopped waiting for it.
+UNWAITED = ApiError(
+    status.HTTP_409_CONFLICT,
+    "Nobody was waiting for this print any more, so it was not started. Nothing was"
+    " queued; print again.",
+)
 
 
 @dataclass
@@ -139,6 +146,13 @@ class PrintActivities:
     @activity.defn(name="print_check")
     async def check(self, input: PrintRunInput) -> Checked:
         """Today's refusals before the 202 (§5.1 step 2); nothing is written."""
+        if (
+            input.accepted_at is not None
+            and datetime.now(UTC) - input.accepted_at > CLIENT_ACCEPTING
+        ):
+            # No worker ran this in time and every client has stopped re-sending it, so
+            # nobody would see it print (review #1061 1b).
+            raise _raised(UNWAITED, REFUSED)
         settings = self._settings()
         spec = input.source
         try:
@@ -265,15 +279,23 @@ class PrintActivities:
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
-        """What the run queued, for ``print_succeed`` to record: the part that reads
-        Bambuddy and the data volume, and may give up."""
+        """What the run queued, for ``print_succeed`` to record, and the project's printer
+        and nozzle remembered for its next Generate (#317). Every plate is queued, so
+        that is best effort: a failure there never fails the run (review #1061 1a)."""
         settings = self._settings()
-        try:
-            async with client_for(settings) as client:
-                source = await self._source(client, input.input.source, settings)
-                return await finish_run(client, source, input.planned, input.outcomes, input.queued)
-        except ApiError as error:
-            raise _raised(error, FAILED) from None
+        planned = input.planned
+        async with client_for(settings) as client:
+            if planned.project_id is not None:
+                try:
+                    source = await self._source(client, input.input.source, settings)
+                    await source.remember_project(
+                        planned.project_id,
+                        printer_id=planned.printer_id,
+                        nozzle_size=planned.nozzle_size,
+                    )
+                except Exception:
+                    logger.exception("could not remember project %s", planned.project_id)
+            return finish_run(client, planned, input.outcomes, input.queued)
 
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:
