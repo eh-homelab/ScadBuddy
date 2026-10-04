@@ -50,19 +50,6 @@ def bundled(seed_dir: Path) -> Path:
 
 
 @pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The API tests' settings, with the Postgres the media list lives in."""
-    return Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
-    )
-
-
-@pytest.fixture
 def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
@@ -588,19 +575,10 @@ def test_a_mine_model_json_media_entry_is_not_the_list(
 
 
 @pytest.fixture
-def small_limit_client(
-    data_dir: Path, seed_dir: Path, fake_openscad: str, model: str, pg_conninfo: str
-) -> Iterator[TestClient]:
-    settings = Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        media_upload_max_bytes=1024 * 1024,
-        database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
-    )
-    with TestClient(create_app(settings)) as test_client:
+def small_limit_client(settings: Settings, model: str) -> Iterator[TestClient]:
+    # On the api tests' Temporal: a write is a `library` operation (#1054).
+    limited = settings.model_copy(update={"media_upload_max_bytes": 1024 * 1024})
+    with TestClient(create_app(limited)) as test_client:
         yield test_client
 
 

@@ -249,12 +249,14 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
 
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
-    """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
-    imports this module. Its runs are the routes' former bodies, which take the whole
-    ``AppState``; the core is one."""
+    """The pins, a model's lifecycle and edits (``model_operations.py``) and its media
+    (``media_operations.py``). Imported here, as they import this module. Their runs
+    are the routes' former bodies, which take the whole ``AppState``; the core is one."""
+    from scadbuddy.library.media_operations import media_kinds
     from scadbuddy.library.model_operations import model_kinds
 
-    return [*library_kinds(core, components), *model_kinds(cast("AppState", core))]
+    state = cast("AppState", core)
+    return [*library_kinds(core, components), *model_kinds(state), *media_kinds(state)]
 
 
 OPERATION_KINDS: KindsBuild = _kinds

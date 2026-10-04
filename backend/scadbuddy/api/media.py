@@ -15,29 +15,34 @@ chosen with ``PUT .../media/cover``, since its shipped items keep their place.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
 from typing import IO, Annotated, Any
 
-from fastapi import APIRouter, Path, Request, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Path, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
-from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, SlugPath
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.core.events import ModelEvent, emit
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    Claimed,
+    IdempotencyKey,
+    operation_answer,
+    recorded,
+    run_operation,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
     MediaNotFoundError,
-    MediaOrderError,
-    MediaReadOnlyError,
     ModelNotFoundError,
     ModelRecord,
-    TooManyMediaError,
 )
 from scadbuddy.library.media import (
     LEGACY_ID,
@@ -51,6 +56,8 @@ from scadbuddy.library.media import (
     content_type_of,
     sniff_kind,
 )
+from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 
 router = APIRouter(tags=["media"])
 
@@ -111,6 +118,8 @@ class _Received:
 
     files: dict[str, FilePath] = field(default_factory=dict)
     sizes: dict[str, int] = field(default_factory=dict)
+    #: Each file part's sha256, computed while it streamed: its claim's name (#1054).
+    hashes: dict[str, Any] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
 
     def discard(self) -> None:
@@ -158,6 +167,7 @@ class _Receiver:
             path = self.directory / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
             self.received.files[name] = path
             self.received.sizes[name] = 0
+            self.received.hashes[name] = hashlib.sha256()
             self._out = path.open("xb")
         self._part = name
 
@@ -166,6 +176,7 @@ class _Receiver:
         if self._out is not None and self._part is not None:
             self._out.write(chunk)
             self.received.sizes[self._part] += len(chunk)
+            self.received.hashes[self._part].update(chunk)
         elif self._part == "caption":
             self.received.caption += chunk
             if len(self.received.caption) > MAX_CAPTION_BYTES:
@@ -283,7 +294,7 @@ def _upload_parts(received: _Received) -> tuple[StagedMedia, str, StagedMedia | 
 # ── routes ────────────────────────────────────────────────────────────────────
 
 
-def _no_model(slug: str) -> ApiError:
+def no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
@@ -305,7 +316,7 @@ READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
 }
 
 
-def _read_only(slug: str, item_id: str) -> ApiError:
+def read_only(slug: str, item_id: str) -> ApiError:
     return ApiError(
         status.HTTP_403_FORBIDDEN,
         f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
@@ -313,14 +324,14 @@ def _read_only(slug: str, item_id: str) -> ApiError:
     )
 
 
-def _require_media_store(catalogue: Catalogue) -> None:
+def require_media_store(catalogue: Catalogue) -> None:
     """503 before anything is read or written, so an upload is refused on its
     headers rather than after a gigabyte of body."""
     if catalogue.media_store is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
 
 
-def _no_item(slug: str, item_id: str) -> ApiError:
+def no_item(slug: str, item_id: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no media item {item_id!r}")
 
 
@@ -344,9 +355,9 @@ def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> 
     try:
         item, path = catalogue.media_item(slug, item_id)
     except ModelNotFoundError:
-        raise _no_model(slug) from None
+        raise no_model(slug) from None
     except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
+        raise no_item(slug, item_id) from None
     cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
     return FileResponse(path, media_type=item.content_type, headers={"Cache-Control": cache})
 
@@ -363,7 +374,7 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     try:
         path = catalogue.media_poster(slug, item_id)
     except ModelNotFoundError:
-        raise _no_model(slug) from None
+        raise no_model(slug) from None
     except MediaNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} has no poster for {item_id!r}"
@@ -385,6 +396,7 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
         },
         415: {"description": f"Not {ACCEPTED}"},
+        **OPERATION_RESPONSES,
     },
     openapi_extra={
         "requestBody": {
@@ -407,58 +419,107 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     ),
 )
 async def upload_media(
-    slug: SlugPath, request: Request, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
+    slug: SlugPath,
+    request: Request,
+    response: Response,
+    catalogue: CatalogueDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
+    require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
+    claims = ClaimStore(catalogue.paths.claims)
+    held: list[Held] = []
     try:
         upload, caption, poster = _upload_parts(received)
-        # `to_thread`: a git commit, from an `async def` handler.
-        record = await asyncio.to_thread(catalogue.add_media, slug, upload, caption, poster)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except TooManyMediaError:
-        raise ApiError(
-            status.HTTP_409_CONFLICT, f"a template holds at most {MAX_MEDIA_ITEMS} media items"
-        ) from None
+        # By claim, as streamed: a video runs to a gigabyte (#1054).
+        named = {part: received.hashes[part].hexdigest() for part in received.files}
+        body = {
+            "slug": slug,
+            "file": named["file"],
+            "kind": upload.kind,
+            "extension": upload.extension,
+            "poster": None if poster is None else named["poster"],
+            "poster_extension": None if poster is None else poster.extension,
+            "caption": caption,
+        }
+        kind = ops.kinds["model_media_upload"]
+        if (
+            await recorded(
+                ops, kind=kind, subject=slug, request=body, idempotency_key=idempotency_key
+            )
+            is None
+        ):
+            held.append(await asyncio.to_thread(claims.hold_file, upload.path, named["file"]))
+            if poster is not None:
+                held.append(await asyncio.to_thread(claims.hold_file, poster.path, named["poster"]))
     finally:
+        # What was not claimed: a part not sent, or all of it for a repeat.
         received.discard()
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+    result = await run_operation(
+        ops,
+        response,
+        kind=kind,
+        subject=slug,
+        request=body,
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, held),
+    )
+    return operation_answer(result, ModelRecord)
 
 
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Caption a media item",
 )
-def patch_media(
+async def patch_media(
     slug: SlugPath,
     item_id: MediaIdPath,
     body: MediaCaption,
+    response: Response,
     catalogue: CatalogueDep,
-    events: EventsDep,
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.set_caption(slug, item_id, body.caption)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
-    except MediaReadOnlyError:
-        raise _read_only(slug, item_id) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        catalogue,
+        "model_media_patch",
+        {"slug": slug, "item_id": item_id, "caption": body.caption},
+        idempotency_key,
+    )
+
+
+async def _edit(
+    ops: OperationCommands,
+    response: Response,
+    catalogue: Catalogue,
+    kind: str,
+    request: dict[str, Any],
+    idempotency_key: str | None,
+) -> ModelRecord | JSONResponse:
+    """A media edit as its operation (#1054); the check makes the 404 and the 503."""
+    require_model_exists(catalogue, request["slug"])
+    require_media_store(catalogue)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[kind],
+        subject=request["slug"],
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
 
 
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -467,25 +528,28 @@ def patch_media(
         "passed over, and its cover is set with `PUT .../media/cover`."
     ),
 )
-def reorder_media(
-    slug: SlugPath, body: MediaOrder, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.reorder(slug, body.ids)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaOrderError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def reorder_media(
+    slug: SlugPath,
+    body: MediaOrder,
+    response: Response,
+    catalogue: CatalogueDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        catalogue,
+        "model_media_order",
+        {"slug": slug, "ids": body.ids},
+        idempotency_key,
+    )
 
 
 @router.put(
     "/models/{slug}/media/cover",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
     summary="Choose the cover",
     description=(
         "Makes one item the cover. A template of mine's cover is its first item, so "
@@ -496,27 +560,28 @@ def reorder_media(
         "template does not list."
     ),
 )
-def put_media_cover(
-    slug: SlugPath, body: MediaCover, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.set_cover(slug, body.id)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, body.id or "") from None
-    except MediaOrderError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def put_media_cover(
+    slug: SlugPath,
+    body: MediaCover,
+    response: Response,
+    catalogue: CatalogueDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        catalogue,
+        "model_media_cover",
+        {"slug": slug, "id": body.id},
+        idempotency_key,
+    )
 
 
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "
@@ -524,18 +589,19 @@ def put_media_cover(
         "what was added to it is."
     ),
 )
-def delete_media(
-    slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.remove_media(slug, item_id)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
-    except MediaReadOnlyError:
-        raise _read_only(slug, item_id) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def delete_media(
+    slug: SlugPath,
+    item_id: MediaIdPath,
+    response: Response,
+    catalogue: CatalogueDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        catalogue,
+        "model_media_delete",
+        {"slug": slug, "item_id": item_id},
+        idempotency_key,
+    )
