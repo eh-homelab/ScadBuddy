@@ -16,13 +16,14 @@ import itertools
 import subprocess
 import threading
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from temporalio.client import WorkflowFailureError
+from temporalio.client import ScheduleActionExecutionStartWorkflow, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -32,7 +33,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
-from scadbuddy.render.submit import RenderService
+from scadbuddy.workflows.housekeeping import prune_schedule_id_for
+from scadbuddy.workflows.previews import preview_schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
@@ -94,8 +96,11 @@ def stub(state: AppState, paths: DataPaths) -> StubRender:
 
 
 @pytest.fixture
-def client(app: FastAPI, stub: StubRender) -> Iterator[TestClient]:
+def client(app: FastAPI, state: AppState, stub: StubRender) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
+        # The boot's backfill run (the Schedule's trigger) has listed nothing yet to
+        # render; done before the test's own requests, as the boot's pass was.
+        backfilled(test_client, state)
         yield test_client
 
 
@@ -107,6 +112,36 @@ def scheduler(state: AppState) -> PreviewScheduler:
 def settle(client: TestClient, state: AppState) -> None:
     """Wait until the scheduler has nothing due and nothing in flight."""
     client.portal.call(scheduler(state).idle)  # type: ignore[union-attr]
+
+
+async def _schedule_runs(state: AppState, schedule_id: str, runs: int) -> Any:
+    """The Schedule's description once it has started ``runs`` runs, within ~30 s."""
+    assert state.temporal is not None
+    handle = state.temporal.get_schedule_handle(schedule_id)
+    for _ in range(600):
+        with suppress(RPCError):  # not made yet: the library worker is still connecting
+            described = await handle.describe()
+            if described.info.num_actions >= runs and described.info.recent_actions:
+                return described
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{schedule_id} never started {runs} runs")
+
+
+def backfilled(client: TestClient, state: AppState, runs: int = 1) -> None:
+    """Wait for the preview backfill's ``runs``-th run (one per boot) to end; raises
+    as that run failed."""
+
+    async def wait() -> None:
+        assert state.temporal is not None
+        queue = state.settings.temporal_task_queue_library
+        described = await _schedule_runs(state, preview_schedule_id_for(queue), runs)
+        started = described.info.recent_actions[-1].action
+        assert isinstance(started, ScheduleActionExecutionStartWorkflow)
+        await state.temporal.get_workflow_handle(
+            started.workflow_id, run_id=started.first_execution_run_id
+        ).result()
+
+    client.portal.call(wait)  # type: ignore[union-attr]
 
 
 def _create(
@@ -447,6 +482,7 @@ def test_boot_renders_each_model_without_a_thumbnail_once(
 
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
+        backfilled(client, booted)
         settle(client, booted)
         bare = _model(client, f"{BUILTIN_PREFIX}bare")
         pictured = _model(client, f"{BUILTIN_PREFIX}pictured")
@@ -460,6 +496,7 @@ def test_boot_renders_each_model_without_a_thumbnail_once(
     # A second boot finds every preview current and renders nothing.
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
+        backfilled(client, booted, runs=2)
         settle(client, booted)
     assert len(stub.calls) == 2
 
@@ -501,62 +538,84 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     assert len(stub.calls) == 1
 
 
-# ── startup: the backfill never leaks the queue ───────────────────────────────
-
-
-def _failing_backfill(
-    booted: AppState, monkeypatch: pytest.MonkeyPatch, error: Exception
-) -> list[str]:
-    """`list_models` fails: its first call at boot is the preview backfill's, after
-    the queue has opened. Returns the log of what was closed."""
-
-    def listing() -> Any:
-        raise error
-
-    monkeypatch.setattr(booted.catalogue, "list_models", listing)
-    closed: list[str] = []
-    for name, part in (("previews", scheduler(booted)), ("queue", booted.render)):
-        aclose = part.aclose
-
-        async def recording(name: str = name, aclose: Any = aclose) -> None:
-            closed.append(name)
-            await aclose()
-
-        monkeypatch.setattr(part, "aclose", recording)
-    return closed
-
-
-def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
-    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Anything the backfill raises past the render service starting is cleaned up as
-    a shutdown is: its reconciler and the projection's pool are released."""
-    app, booted = _boot(settings, StubRender(paths))
-    closed = _failing_backfill(booted, monkeypatch, RuntimeError("listing blew up"))
-
-    with pytest.raises(RuntimeError, match="listing blew up"), TestClient(app):
-        pass
-
-    assert closed == ["previews", "queue"]
-    assert isinstance(booted.render, RenderService)
-    assert booted.projection is not None and booted.projection.pool.closed
+# ── the backfill: a Schedule-triggered workflow (#1054) ──────────────────────
 
 
 def test_a_listing_error_costs_the_backfill_not_the_boot(
-    settings: Settings,
-    paths: DataPaths,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The listing is the backfill run's first activity: one that fails fails that
+    run (the next tick tries again), never the boot."""
     app, booted = _boot(settings, StubRender(paths))
-    closed = _failing_backfill(booted, monkeypatch, OSError("volume went away"))
 
+    def listing() -> Any:
+        raise OSError("volume went away")
+
+    monkeypatch.setattr(booted.catalogue, "slugs", listing)
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-    # `_boot` configures logging after `caplog` would have hooked in; the app logs
-    # JSON to stdout, which is captured here.
-    assert "could not list the models to render their previews" in capsys.readouterr().out
-    assert closed == ["previews", "queue"]
+        with pytest.raises(WorkflowFailureError):
+            backfilled(client, booted)
+
+
+def test_an_edit_and_the_backfill_render_a_model_once(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """The backfill's refresh of a model the edit path is rendering waits for it, then
+    finds the preview current: one render, one write."""
+    stub.released.clear()
+    _create(client)
+    for _ in range(600):
+        if stub.started:
+            break
+        threading.Event().wait(0.05)
+    assert stub.started == [SLUG]
+    backfill = client.portal.start_task_soon(scheduler(state).refresh, SLUG)  # type: ignore[union-attr]
+    threading.Event().wait(0.2)
+    stub.released.set()
+    assert backfill.result(timeout=30) is False
+    settle(client, state)
+
+    assert stub.started == [SLUG]
+    assert len(stub.calls) == 1
+    assert _model(client)["thumbnail_source"] == "preview"
+
+
+def test_due_skips_a_model_it_cannot_plan(
+    client: TestClient, state: AppState, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previews = scheduler(state)
+    for slug in (SLUG, "gadget"):
+        paths.model_dir(slug).mkdir(parents=True)
+        paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
+
+    def plan(slug: str) -> str | None:
+        if slug == SLUG:
+            raise OSError("unreadable")
+        return "key"
+
+    monkeypatch.setattr(previews, "plan", plan)
+    due = previews.due()
+    assert "gadget" in due
+    assert SLUG not in due
+
+
+def test_previews_off_leaves_no_backfill_schedule(settings: Settings, paths: DataPaths) -> None:
+    queue = settings.temporal_task_queue_library
+    app, booted = _boot(settings, StubRender(paths))
+    with TestClient(app) as client:
+        backfilled(client, booted)
+
+    app, off = _boot(settings.model_copy(update={"preview_renders": False}), StubRender(paths))
+    with TestClient(app) as client:
+        # The preview Schedule is set up first, so once the prune's has this boot's
+        # run, the preview one is settled too.
+        client.portal.call(_schedule_runs, off, prune_schedule_id_for(queue), 2)  # type: ignore[union-attr]
+        assert off.temporal is not None
+        with pytest.raises(RPCError):
+            client.portal.call(  # type: ignore[union-attr]
+                off.temporal.get_schedule_handle(preview_schedule_id_for(queue)).describe
+            )
 
 
 def test_a_render_that_failed_on_the_worker_is_recorded_like_one_that_failed_here(

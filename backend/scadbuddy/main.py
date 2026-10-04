@@ -68,6 +68,12 @@ from scadbuddy.workflows.housekeeping import (
 )
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.previews import (
+    DUE_ACTIVITY,
+    REFRESH_ACTIVITY,
+    PreviewBackfill,
+    ensure_preview_schedule,
+)
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
@@ -292,7 +298,7 @@ async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
 
-async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
+async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
     2): a worker lost mid-sweep is then noticed within the heartbeat timeout."""
     running = asyncio.create_task(work)
@@ -301,7 +307,7 @@ async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
             activity.heartbeat()
     finally:
         running.cancel()
-    await running
+    return await running
 
 
 def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -338,6 +344,35 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
             logger.exception("could not sweep operation claims")
 
     return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
+
+
+def _preview_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The preview backfill's steps (#1054): what the boot's pass over every model did,
+    on its Schedule. With previews off (a run left open from before), both do nothing."""
+
+    @activity.defn(name=DUE_ACTIVITY)
+    async def previews_due() -> list[str]:
+        previews = state.previews
+        if previews is None:
+            return []
+        try:
+            return await asyncio.to_thread(previews.due)
+        except Exception:
+            logger.exception("could not list the models to render their previews")
+            raise
+
+    @activity.defn(name=REFRESH_ACTIVITY)
+    async def preview_refresh(slug: str) -> bool:
+        previews = state.previews
+        if previews is None:
+            return False
+        try:
+            return await _heartbeating(previews.refresh(slug))
+        except Exception:
+            logger.exception("could not refresh a model's preview", extra={"slug": slug})
+            raise
+
+    return [previews_due, preview_refresh]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -533,19 +568,22 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
 
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
-    sweeps need the data volume this process holds. Once connected it sets the
-    Schedule up; Temporal down at boot only delays that."""
+    sweeps and the preview backfill need the data volume this process holds. Once
+    connected it sets the Schedules up; Temporal down at boot only delays that."""
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
     settings = state.settings
     queue = settings.temporal_task_queue_library
     schedules = asyncio.create_task(
-        _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
+        _set_up_housekeeping(
+            client, queue, state.config.asset_sweep_interval, state.previews is not None, stop
+        )
     )
     ops = state.components.get(OPERATIONS)
     activities = [
         *_housekeeping_activities(state),
+        *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
     ]
     try:
@@ -553,7 +591,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             worker = Worker(
                 client,
                 task_queue=queue,
-                workflows=[Housekeeping, OperationWorkflow],
+                workflows=[Housekeeping, PreviewBackfill, OperationWorkflow],
                 activities=activities,
             )
             if not await _serve_until([worker], stop, name="library"):
@@ -569,16 +607,18 @@ def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
 
 
 async def _set_up_housekeeping(
-    client: Client, queue: str, interval: float, stop: asyncio.Event
+    client: Client, queue: str, interval: float, previews: bool, stop: asyncio.Event
 ) -> None:
-    """The housekeeping Schedules, retried until Temporal takes them: a frontend can
-    answer the connect before it can create one."""
+    """The housekeeping Schedules and the preview backfill's (none with ``previews``
+    off), retried until Temporal takes them: a frontend can answer the connect before
+    it can create one."""
     while not stop.is_set():
         try:
+            await ensure_preview_schedule(client, queue, previews)
             await ensure_schedules(client, queue, interval)
             return
         except Exception:
-            logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
+            logger.warning("could not set up the library Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
@@ -754,19 +794,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             backfill = asyncio.create_task(
                 _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
             )
+        # The per-change requests. The pass over every model is the preview
+        # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
-            # Every model without a thumbnail gets its default render, one at a time
-            # and behind any render someone asks for; one already made from the
-            # current source is left alone, so after the first boot this renders
-            # nothing. Best effort, like the migration above: a listing that fails
-            # costs the backfill, never the boot.
-            try:
-                records = await asyncio.to_thread(state.catalogue.list_models)
-            except (OSError, ValueError, GitError):
-                logger.exception("could not list the models to render their previews")
-            else:
-                state.previews.request_all(record.slug for record in records)
         logger.info(
             "scadbuddy started",
             extra={

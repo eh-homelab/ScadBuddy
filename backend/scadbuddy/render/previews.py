@@ -10,8 +10,10 @@ The work never sits in a request's path. A catalogue change hands the model's id
 waits out a short debounce (a burst of edits is rendered once), decides whether a
 render is needed at all, and runs one through its ``runner``
 (:meth:`~scadbuddy.render.submit.RenderService.render_preview`, on the render worker).
-One preview at a time, with a pause after each, is also what throttles the boot-time
-pass over every model without a thumbnail.
+The pass over every model is the ``PreviewBackfill`` workflow
+(:mod:`scadbuddy.workflows.previews`), on a Schedule: it lists what is due (:meth:`due`)
+and refreshes each through :meth:`PreviewScheduler.refresh`, the scheduler's own call.
+One lock makes the two take turns, so the process renders one preview at a time.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Executor
 from contextlib import suppress
 
@@ -156,11 +158,14 @@ class PreviewScheduler:
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._busy = False
+        #: Held by every refresh, the backfill's too: one preview at a time.
+        self._lock = asyncio.Lock()
 
     def start(self) -> None:
         # Made here, on the loop that will run the worker, not in `__init__`.
         self._due = {}
         self._wake = asyncio.Event()
+        self._lock = asyncio.Lock()
         self._loop = asyncio.get_running_loop()
         self._worker = asyncio.create_task(self._run())
 
@@ -186,10 +191,17 @@ class PreviewScheduler:
         with suppress(RuntimeError):  # the loop closed between the check and the call
             loop.call_soon_threadsafe(self._schedule, slug, self.debounce)
 
-    def request_all(self, slugs: Iterable[str]) -> None:
-        """The boot-time pass: every model, taken one at a time like any other."""
-        for slug in slugs:
-            self.request(slug)
+    def due(self) -> list[str]:
+        """The models whose preview is missing or stale: the backfill's listing. One
+        that cannot be planned is logged and left out; a listing that fails raises."""
+        due: list[str] = []
+        for slug in self.catalogue.slugs():
+            try:
+                if self.plan(slug) is not None:
+                    due.append(slug)
+            except Exception:
+                logger.exception("could not plan a model's preview", extra={"slug": slug})
+        return due
 
     async def idle(self) -> None:
         """Wait until nothing is due or running -- for tests."""
@@ -219,7 +231,7 @@ class PreviewScheduler:
             del self._due[slug]
             self._busy = True
             try:
-                rendered = await self._refresh(slug)
+                rendered = await self.refresh(slug)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -230,9 +242,15 @@ class PreviewScheduler:
             if rendered and self.interval > 0:
                 await asyncio.sleep(self.interval)
 
+    async def refresh(self, slug: str) -> bool:
+        """Render ``slug``'s preview if it needs one. True when a render ran. Planned
+        under the lock, so a refresh that waited on another of the same model finds
+        its preview current and renders nothing."""
+        async with self._lock:
+            return await self._refresh(slug)
+
     async def _refresh(self, slug: str) -> bool:
-        """Render ``slug``'s preview if it needs one. True when a render ran."""
-        key = await asyncio.to_thread(self._plan, slug)
+        key = await asyncio.to_thread(self.plan, slug)
         if key is None:
             return False
         try:
@@ -268,7 +286,7 @@ class PreviewScheduler:
         )
         return True
 
-    def _plan(self, slug: str) -> str | None:
+    def plan(self, slug: str) -> str | None:
         """The source key to render ``slug`` from, or None when it needs no render.
 
         A model that is gone or has its own thumbnail keeps no preview at all. One

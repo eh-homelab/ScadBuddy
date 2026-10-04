@@ -39,6 +39,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
+        previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
     )
@@ -85,17 +86,27 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     """Review I2: a create that fails after the connect (a frontend up before its
     history service) is retried, not left to the next restart."""
     calls: list[float] = []
+    previews: list[bool] = []
 
     async def flaky(client: object, queue: str, interval: float) -> None:
         calls.append(interval)
         if len(calls) == 1:
             raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
 
+    async def preview_schedule(client: object, queue: str, enabled: bool) -> None:
+        previews.append(enabled)
+
     monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
-    await asyncio.wait_for(main._set_up_housekeeping(object(), "library", 600.0, stop), 5)  # type: ignore[arg-type]
+    await asyncio.wait_for(
+        main._set_up_housekeeping(object(), "library", 600.0, True, stop),  # type: ignore[arg-type]
+        5,
+    )
     assert calls == [600.0, 600.0]
+    # The preview backfill's Schedule (#1054) is set up on the same retries.
+    assert previews == [True, True]
 
 
 def _broken(error: Exception) -> Callable[..., Any]:
