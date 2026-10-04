@@ -82,7 +82,9 @@ def print_worker(
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, spec 2026-10-01 §5.5). Unversioned: a change to
     ``PrintRun`` that alters its commands is made with ``workflow.patched``, so a run
-    started on the old code finishes on the new."""
+    started on the old code finishes on the new. ``tests/test_print_replay.py`` replays
+    committed histories to hold that; a new activity name also needs ``patched``, or an
+    old replica takes its task and fails it as unregistered."""
     return Worker(
         client,
         task_queue=task_queue,

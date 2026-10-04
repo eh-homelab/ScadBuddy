@@ -36,6 +36,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.workflows.client import connect_lazily
+from scadbuddy.workflows.commands import CommandClosedError
 from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
@@ -627,3 +628,22 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     assert response.status_code == 503, response.text
     assert response.json()["type"] == printing_api.STILL_ACCEPTING_PROBLEM
     assert len(starts) == 1
+
+
+@respx.mock
+def test_an_execution_ended_before_it_answered_is_still_accepting(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 1c: an execution terminated before its Update answered recorded
+    nothing, so the client is told to send the same request again, never a bare 500."""
+    output_id = prepared(client, model)
+
+    async def closed_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandClosedError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", closed_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == printing_api.STILL_ACCEPTING_PROBLEM

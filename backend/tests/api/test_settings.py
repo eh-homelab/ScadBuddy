@@ -166,8 +166,10 @@ def test_print_run_retention_is_stored_and_a_clear_keeps_every_run(
     assert cleared.json()["print_run_retention_seconds"] is None
 
 
-@pytest.mark.parametrize("value", [0, -1])
-def test_a_print_run_retention_of_zero_or_less_is_refused(client: TestClient, value: int) -> None:
+@pytest.mark.parametrize("value", [0, -1, 86, 86399])
+def test_a_print_run_retention_under_a_day_is_refused(client: TestClient, value: int) -> None:
+    """Review #1061 2a: under the repeat window, a pruned row turns a retry of a print
+    that succeeded into "print again"."""
     response = client.put("/api/v1/settings", json={"print_run_retention_seconds": value})
     assert response.status_code == 422
 

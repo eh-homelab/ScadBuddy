@@ -278,7 +278,9 @@ class SettingsPatch(BaseModel):
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
-    print_run_retention_seconds: float | None = Field(default=None, gt=0)
+    #: At least a day, past the repeat window: a pruned row would turn a retry of a print
+    #: that succeeded into "print again" (review #1061).
+    print_run_retention_seconds: float | None = Field(default=None, ge=86400)
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets

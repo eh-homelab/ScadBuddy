@@ -24,7 +24,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
@@ -83,6 +83,14 @@ STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 MAY_HAVE_QUEUED = SearchAttributeKey.for_bool("ScadbuddyMayHaveQueued")
 
 
+#: What a run cancelled before its record answers: nothing was written or queued.
+CANCELLED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This print was cancelled before it started. Nothing was queued; print again.",
+)
+
+
 def _problem(error: BaseException) -> PrintRunError:
     """The problem an activity reported (``REFUSED``/``FAILED`` details), else the
     unexpected failure's: never the exception's own text, which may say anything."""
@@ -122,11 +130,17 @@ class PrintRunWorkflow:
                 start_to_close_timeout=ACCEPT_TIMEOUT,
                 retry_policy=READ_RETRY,
             )
-        except ActivityError as error:
-            # Nothing was written: the execution fails, and a retry may start again.
-            self.refusal = _problem(error)
+        except (ActivityError, asyncio.CancelledError) as error:
+            # Nothing was written: the execution fails, and a retry may start again. A
+            # cancel answers the Update too, so it is never outlived by its execution.
+            cancelled = not isinstance(error, ActivityError) or isinstance(
+                error.cause, CancelledError
+            )
+            self.refusal = CANCELLED if cancelled else _problem(error)
             self._upsert(status="refused")
             await workflow.wait_condition(workflow.all_handlers_finished)
+            if cancelled:
+                raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
         run = await workflow.execute_activity(
             "print_insert",

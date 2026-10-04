@@ -19,6 +19,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
     AlreadyClosedError,
+    CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     start_command,
@@ -234,3 +235,17 @@ async def test_an_update_slower_than_the_default_deadline_is_still_accepting(
         with pytest.raises(CommandStillAcceptingError):
             await echo(client, queue, workflow_id, EchoInput(delay_s=20))
         await client.get_workflow_handle(workflow_id).terminate()
+
+
+async def test_an_execution_ended_before_its_update_answered_is_a_closed_command(
+    client: Client, queue: str
+) -> None:
+    """Review #1061 1c: terminated (or cancelled) while the Update waits, the command
+    is a typed error the route answers as a problem, never a bare 500."""
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        pending = asyncio.create_task(echo(client, queue, workflow_id, EchoInput(delay_s=30)))
+        await asyncio.sleep(1)
+        await client.get_workflow_handle(workflow_id).terminate("an operator ended it")
+        with pytest.raises(CommandClosedError):
+            await pending
