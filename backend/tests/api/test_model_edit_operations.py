@@ -26,7 +26,13 @@ from scadbuddy.library.upstream import MergeConflictError, MergePlan, MergePrevi
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
-from tests.api.test_model_operations import _commits, _history_bytes, _state, _workflow_ids
+from tests.api.test_model_operations import (
+    _claims,
+    _commits,
+    _history_bytes,
+    _state,
+    _workflow_ids,
+)
 
 SOURCE = "cube(10);\n"
 
@@ -60,6 +66,56 @@ def test_a_large_source_save_goes_by_claim(client: TestClient, app: FastAPI) -> 
     assert client.get(f"/api/v1/models/{slug}/source").text == source
     (workflow_id,) = _workflow_ids(app, "model_source_put")
     assert _history_bytes(app, workflow_id) < 100_000
+
+
+def test_an_edits_final_answer_drops_its_claim(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1130 1: every edit that goes by claim drops it once its answer is final,
+    a refusal included."""
+    slug, version = _model(client, "Claims")
+    png = models_api.PNG_MAGIC + b"\2" * 64
+    answers = [
+        (200, client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"})),
+        (
+            409,
+            client.put(
+                f"/api/v1/models/{slug}/source", json={"source": "cube(6);\n", "base": version}
+            ),
+        ),
+        (
+            409,
+            client.post(
+                f"/api/v1/models/{slug}/source/patch",
+                json={"base": version, "edits": [{"search": "cube", "replace": "sphere"}]},
+            ),
+        ),
+        (
+            200,
+            client.put(
+                f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", png, "image/png")}
+            ),
+        ),
+        (200, client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"})),
+        (200, client.put(f"/api/v1/models/{slug}/files/a.scad", json={"content": "a = 1;\n"})),
+    ]
+    current = client.get(f"/api/v1/models/{slug}").json()["version"]
+    answers.append(
+        (
+            200,
+            client.post(
+                f"/api/v1/models/{slug}/source/patch",
+                json={"base": current, "edits": [{"search": "cube", "replace": "sphere"}]},
+            ),
+        )
+    )
+    monkeypatch.setattr(model_files, "MAX_SOURCE_FILES", 1)
+    answers.append(
+        (422, client.put(f"/api/v1/models/{slug}/files/b.scad", json={"content": "b = 1;\n"}))
+    )
+    for status, answered in answers:
+        assert answered.status_code == status, answered.text
+    assert _claims(app) == set()
 
 
 def test_a_stale_base_is_a_409_with_current(client: TestClient) -> None:

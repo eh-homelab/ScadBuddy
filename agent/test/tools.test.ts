@@ -1321,11 +1321,25 @@ describe('Bambuddy writes as operations (#1053)', () => {
   })
 
   it('get_operation reads an operation', async () => {
-    server.use(http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json({ ...op, status: 'succeeded', result: again })))
-    const result = await tool('get_operation').execute({ operation_id: 'op-1' }, ctx())
+    const id = 'a'.repeat(32)
+    server.use(http.get(`${BACKEND}/api/v1/operations/${id}`, () => HttpResponse.json({ ...op, status: 'succeeded', result: again })))
+    const result = await tool('get_operation').execute({ operation_id: id }, ctx())
     expect(result.isError).toBeFalsy()
     expect(JSON.stringify(result.content)).toContain('succeeded')
     expect(tool('get_operation').risk).toBe('read')
+  })
+
+  it('get_operation refuses an id the backend would not take (review #1063 4)', async () => {
+    let asked = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => {
+        asked = true
+        return HttpResponse.json(op)
+      }),
+    )
+    const result = await runTool(tool('get_operation'), { operation_id: 'op-1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(asked).toBe(false)
   })
 })
 

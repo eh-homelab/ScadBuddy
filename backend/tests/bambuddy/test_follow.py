@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
@@ -498,3 +499,36 @@ def test_the_activity_heartbeats_while_a_settled_hook_runs(
     # A fresh first attempt reads at once: every beat is the hook's, carrying the age.
     assert len(beats) >= 2
     assert set(beats) == {(NOW.isoformat(),)}
+
+
+def test_running_follows_are_counted_and_a_full_worker_is_said(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 2: a follow holds its slot for as long as the print moves; the
+    gauge shows how many are held, and the last free slot taken is a warning, since
+    the prints after it wait unfollowed."""
+    write_output(paths)
+    follower, _ = follower_for(paths, Script(progress("running")), min_interval=60, max_interval=60)
+    metrics = Metrics()
+    activities = FollowActivities(follower, slots=1, running=metrics.print_follows_running)
+    env = ActivityEnvironment()
+
+    def held() -> float | None:
+        return metrics.registry.get_sample_value("scadbuddy_print_follows_running")
+
+    async def scenario() -> float | None:
+        attempt = asyncio.ensure_future(
+            env.run(activities.follow_print, FollowInput(output_id=OUTPUT))
+        )
+        await asyncio.sleep(0.05)
+        during = held()
+        env.worker_shutdown()
+        with pytest.raises(ApplicationError):
+            await asyncio.wait_for(attempt, 2)
+        return during
+
+    with caplog.at_level(logging.WARNING, logger=follow_module.__name__):
+        during = asyncio.run(scenario())
+    assert during == 1
+    assert held() == 0
+    assert any("every follow slot" in r.message for r in caplog.records)

@@ -86,7 +86,7 @@ export function useRenderJob(
 
     const mine = ++generation.current
     // Aborted when a newer submit supersedes this one: it stops re-sending a render
-    // the server is still accepting.
+    // the server is still accepting, after one last send that learns the job it made.
     const superseded = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let unfollow: (() => void) | undefined

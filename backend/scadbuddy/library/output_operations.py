@@ -136,7 +136,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         output_id = request["output_id"]
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
         if request["delete_inbox_copies"] and await state.uploads.for_output(meta.id):
-            settings = state.settings_store.load()
+            settings = await asyncio.to_thread(state.settings_store.load)
             async with client_for(settings) as client:
                 await remove_inbox_copies(client, state.uploads, meta, settings)
         await asyncio.to_thread(state.outputs.delete, output_id)

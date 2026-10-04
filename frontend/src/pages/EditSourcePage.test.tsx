@@ -164,6 +164,38 @@ describe('EditSourcePage', () => {
     expect(screen.queryByText('Could not load this model')).not.toBeInTheDocument()
   })
 
+  it('never offers a save without its version when only that read fails (review #1130 2)', async () => {
+    const { version } = await api.replaceSource('name-keychain', keychainSource)
+    // Only the first read fails: the one the page takes its save's `base` from.
+    let reads = 0
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        reads++ === 0
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('cube(5);\n')
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube(5);\n', false, undefined, version)
+    replace.mockRestore()
+  })
+
   it('shows a built-in template read-only, with nothing to save (#184)', async () => {
     renderEdit(encodeURIComponent(BUILTIN_SLUG))
     const editor = await screen.findByLabelText('OpenSCAD source')

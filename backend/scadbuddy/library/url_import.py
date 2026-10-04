@@ -155,6 +155,14 @@ def _getaddrinfo(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
+def resolver_busy() -> bool:
+    """Whether a lookup started now would find every resolver thread taken."""
+    if not _RESOLVER_SLOTS.acquire(blocking=False):
+        return True
+    _RESOLVER_SLOTS.release()
+    return False
+
+
 async def resolve_host(host: str, port: int) -> list[str]:
     if not _RESOLVER_SLOTS.acquire(blocking=False):
         raise ResolverBusyError(f"could not resolve {host}: every resolver thread is busy")
