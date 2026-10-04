@@ -13,7 +13,10 @@ The ``library`` worker is unversioned (unlike the render worker), so a run left 
 across a deploy replays on the new code: ``Housekeeping.run`` must stay
 replay-compatible. A change to its command sequence (a step added, the loop reordered)
 goes behind ``workflow.patched``. A run that fails on replay anyway ends at its
-`housekeeping_timeout`.
+`housekeeping_timeout`. Activities are not covered by that: a replica still on the old
+build takes a sweep the new one added to `SWEEPS` and fails it as unregistered, and a
+sweep is not retried, so it waits for the next tick. A release that adds a sweep is
+rolled out with ``Recreate`` (README, "Uploaded files").
 """
 
 from __future__ import annotations

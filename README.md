@@ -189,6 +189,11 @@ on shutdown.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
+  - The `library` queue's worker is not versioned: any API replica may take any of
+    its tasks. A release that adds a sweep (a new activity) says so here and needs a
+    `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
+    old build takes the new sweep's task and fails it as unregistered, and since a
+    sweep is not retried, that sweep waits for the next tick (a day, by default).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
