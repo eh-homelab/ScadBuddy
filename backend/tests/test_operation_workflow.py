@@ -58,6 +58,8 @@ class Fake:
         self.check_gate: asyncio.Event | None = None
         #: Set, the insert waits on it.
         self.insert_gate: asyncio.Event | None = None
+        #: Set, the finish waits on it.
+        self.finish_gate: asyncio.Event | None = None
 
     def _op(self, status: str = "running", **fields: Any) -> Operation:
         return Operation(
@@ -97,6 +99,8 @@ class Fake:
     @activity.defn(name="op_finish")
     async def finish(self, input: FinishOp) -> Operation:
         self.calls.append("finish:ok" if input.error is None else f"finish:{input.error.status}")
+        if self.finish_gate is not None:
+            await self.finish_gate.wait()
         if input.error is not None:
             return self._op("failed", error=input.error)
         return self._op("succeeded", result=input.result)
@@ -280,6 +284,26 @@ async def test_a_cancel_during_the_insert_still_records_and_ends_the_operation(
     assert answer.operation is not None and answer.operation.error == OPERATION_CANCELLED
     assert (await ended(client, arg)).status == "failed"
     assert fake.calls == ["check", "insert", "finish:409"]
+
+
+async def test_a_cancel_during_the_finish_still_records_the_effects_outcome(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 third review 1: the effect ran, so a cancel while its outcome is being
+    recorded waits the finish out; the row is never left for the reconciler to call lost."""
+    fake.finish_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    while "finish:ok" not in fake.calls:
+        await asyncio.sleep(0.05)
+    await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+    await asyncio.sleep(0.5)
+    fake.finish_gate.set()
+    answer = await accepting
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    done = await ended(client, arg)
+    assert done.status == "succeeded" and done.result == {"queue_item_id": 7}
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
 
 
 async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
