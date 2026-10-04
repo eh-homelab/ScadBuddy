@@ -148,6 +148,9 @@ class RenderStart(BaseModel):
     #: `render_queue_max` when the request was made; 0 is no limit.
     max_pending: int = 0
     search_attributes: bool = False
+    #: The first caller's ``traceparent`` (#988), written on the row `render_accept`
+    #: inserts: what a coalesced request links to.
+    traceparent: str | None = None
 
 
 class AcceptRender(BaseModel):

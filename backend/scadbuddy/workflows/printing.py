@@ -52,6 +52,7 @@ with workflow.unsafe.imports_passed_through():
         AcceptAnswer,
         Accepted,
         Checked,
+        CheckInput,
         EnqueueInput,
         FailInput,
         FinishInput,
@@ -144,15 +145,13 @@ class PrintRunWorkflow:
     async def run(self, input: PrintRunInput) -> PrintRun:
         self.search_attributes = input.search_attributes
         self._upsert(kind="print", subject=input.subject, status="accepting")
-        accepted_at = input.accepted_at
-        if workflow.patched("unwaited-server-clock"):
-            # The execution's start on the server's clock, not a time the route stamped
-            # on its own host: pods' clocks differ (review #1061 3).
-            accepted_at = workflow.info().workflow_start_time
+        # The execution's start on the server's clock, not a time the route stamped on
+        # its own host: pods' clocks differ (review #1061 3).
+        started_at = workflow.info().workflow_start_time
         try:
             checked = await workflow.execute_activity(
                 "print_check",
-                input.model_copy(update={"accepted_at": accepted_at}),
+                CheckInput(input=input, started_at=started_at),
                 result_type=Checked,
                 start_to_close_timeout=ACCEPT_TIMEOUT,
                 retry_policy=READ_RETRY,
@@ -166,11 +165,7 @@ class PrintRunWorkflow:
             if cancelled:
                 raise
             raise ApplicationError(refusal.detail, type=REFUSED, non_retryable=True) from None
-        if (
-            workflow.patched("unwaited-before-insert")
-            and accepted_at is not None
-            and workflow.now() - accepted_at > CLIENT_ACCEPTING
-        ):
+        if workflow.now() - started_at > CLIENT_ACCEPTING:
             # The point of no return: a check that ended after every client stopped
             # re-sending this run would print it with nobody watching (review #1061 (2) 2).
             await self._refuse(UNWAITED)
@@ -183,16 +178,13 @@ class PrintRunWorkflow:
             retry_policy=RECORD_RETRY,
         )
         cancelled = False
-        if workflow.patched("insert-survives-cancel"):
-            # The insert does not heartbeat, so a cancel would return here while it may
-            # still commit, leaving a `running` row nothing ends (review #1061 2). It
-            # finishes, and its row is recorded cancelled.
-            try:
-                run = await asyncio.shield(insert)
-            except asyncio.CancelledError:
-                cancelled = True
-                run = await insert
-        else:
+        # The insert does not heartbeat, so a cancel would return here while it may
+        # still commit, leaving a `running` row nothing ends (review #1061 2). It
+        # finishes, and its row is recorded cancelled.
+        try:
+            run = await asyncio.shield(insert)
+        except asyncio.CancelledError:
+            cancelled = True
             run = await insert
         accepted = Accepted(run=run, source=checked.source, prepared=checked.prepared)
         if cancelled:

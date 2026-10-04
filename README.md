@@ -582,12 +582,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   shows as `"unavailable (database timed out)"` instead of a hung probe. An
   edited, already-applied migration stops the service at start with a message
   naming it (each file's sha256 is recorded).
-- The Claude credential (an Anthropic API key, a Claude Code OAuth token from
-  `claude setup-token`, or a gateway base URL plus token) is set in Settings →
-  Assistant → **Claude credential**, which views, replaces, tests and deletes it
-  (#1000). Underneath, and from a loopback shell when there is no UI
-  (`docs/ai/operating.md`), it is `GET/PUT/DELETE /api/v1/ai/credentials`,
-  tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
+- The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
+  `claude setup-token`, or gateway base URLs plus tokens) are set in
+  Settings → Assistant → **Claude credentials**, a list in the order the
+  assistant tries them (#1000, #1093). Each shows whether it is active, rate
+  limited until a time, or disabled and why, and can be moved, tested, reset,
+  given a new key or deleted. Underneath, and from a loopback shell when there
+  is no UI (`docs/ai/operating.md`), they are `/api/v1/ai/credentials/entries`,
+  tested with `POST …/entries/{id}/test` (one test at a time, at most
   one per 10 s; otherwise `429` with `Retry-After`). No route returns the
   secret. The sealed value is bound to its `kind` and `base_url`, so editing
   either in the database makes it fail to decrypt rather than send the token
@@ -817,6 +819,52 @@ image line and annotations in the clusters manifests (both, once the render
 worker's exists) by hand and merging does
 exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
 what makes the running image knowable.
+
+### Tracing (#988)
+
+The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
+exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
+`otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
+also turns it off, with a warning in the log, since only the OTLP exporter ships.
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
+variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
+database queries and Bambuddy calls from background loops; it keeps everything that
+starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
+problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
+
+**Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
+`POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
+(`backend/scadbuddy/telemetry/`) forwards it in the background to
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is) or else
+`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
+`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
+public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
+`same-origin`, so a page on another allowed origin is refused; a request without
+`Sec-Fetch-Site`, from an older browser or a non-browser client, is admitted on `Origin`
+alone), at
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
+`service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
+reduced to the backend route template its path matches, or to its origin (a relative
+one on no route is dropped), as a server span keeps only its route; a URL on any host
+but those same origins keeps only its origin, since that host has none of the routes.
+No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
+answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
+export, arrives with row 4 of #988). Its rate
+limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+client), so with more than one API replica the overall ceiling multiplies.
+**`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
+whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
+`SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
+gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
+`FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
+that flag lets any loopback caller name its own client.
+`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
+`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
 
 ## Development
 
