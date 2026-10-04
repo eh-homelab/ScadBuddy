@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +27,22 @@ class OperationKind:
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     run_attempts: int = 1
+
+
+#: Set by the check activity; true while its check waits on Bambuddy, and left true when
+#: that wait is cut short, so a check out of time blames the right service.
+CHECK_ON_BAMBUDDY: ContextVar[list[bool] | None] = ContextVar("check_on_bambuddy", default=None)
+
+
+@asynccontextmanager
+async def waiting_on_bambuddy() -> AsyncIterator[None]:
+    """Wraps a check's Bambuddy calls: only a timeout inside one is Bambuddy's."""
+    waiting = CHECK_ON_BAMBUDDY.get()
+    if waiting is not None:
+        waiting[0] = True
+    yield
+    if waiting is not None:
+        waiting[0] = False
 
 
 #: A feature's kinds, built over the core and the components (`operations/component.py`).

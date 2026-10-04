@@ -182,6 +182,7 @@ describe('SettingsPage', () => {
 
     const days = screen.getByLabelText('Keep finished Bambuddy operations for (days)')
     expect(days).toHaveAttribute('placeholder', 'Forever')
+    expect(screen.getByText(/at least as long as Temporal's namespace retention/)).toBeInTheDocument()
     await user.type(days, '2')
     await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())

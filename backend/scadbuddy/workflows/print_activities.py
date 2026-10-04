@@ -65,18 +65,12 @@ from scadbuddy.workflows.print_models import (
     SourceSpec,
     SucceedInput,
 )
-from scadbuddy.workflows.printing import CLIENT_ACCEPTING
+from scadbuddy.workflows.printing import CLIENT_ACCEPTING, UNWAITED
 
 logger = logging.getLogger(__name__)
 
 #: How often a slice wait tells Temporal it is alive (its heartbeat timeout is 30 s).
 HEARTBEAT_EVERY = 10.0
-#: What a run answers when its check starts after every client stopped waiting for it.
-UNWAITED = ApiError(
-    status.HTTP_409_CONFLICT,
-    "Nobody was waiting for this print any more, so it was not started. Nothing was"
-    " queued; print again.",
-)
 
 
 @dataclass
@@ -151,8 +145,9 @@ class PrintActivities:
             and datetime.now(UTC) - input.accepted_at > CLIENT_ACCEPTING
         ):
             # No worker ran this in time and every client has stopped re-sending it, so
-            # nobody would see it print (review #1061 1b).
-            raise raised_as(UNWAITED, REFUSED)
+            # nobody would see it print (review #1061 1b). The workflow checks again
+            # once the check has ended, right before the record.
+            raise ApplicationError(UNWAITED.detail, UNWAITED, type=REFUSED, non_retryable=True)
         settings = self._settings()
         spec = input.source
         try:

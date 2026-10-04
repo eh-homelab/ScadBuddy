@@ -52,6 +52,7 @@ function services(): ToolServices {
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
     renderWaitMs: 5000,
+    operationFollowMs: 15 * 60_000,
   }
 }
 
