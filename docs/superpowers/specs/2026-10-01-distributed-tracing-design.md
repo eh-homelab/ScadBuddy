@@ -47,7 +47,9 @@ cluster does not run and which covers neither the browser nor Temporal context.
   configured before the database is reachable, and it is infrastructure, like
   `SCADBUDDY_DATABASE_URL`.
 - **No endpoint, no export.** With neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` nor
-  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER=none`), each
+  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER` naming anything
+  but `otlp`: `none`, or an exporter the services do not ship, which also logs
+  a warning), each
   service installs a provider with no exporter: spans are created (so context
   still propagates) and dropped. Tests, CI and a local `docker run` need nothing.
 - **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
