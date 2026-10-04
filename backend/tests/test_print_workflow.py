@@ -94,6 +94,8 @@ class Fake:
         self.record_error: Exception | None = None
         #: How many of the next `print_succeed` attempts fail before one succeeds.
         self.succeed_failures = 0
+        #: How many of the next `print_finish` attempts fail before one succeeds.
+        self.finish_failures = 0
         #: Set, the check waits on it, so a test can act while it is in flight.
         self.check_gate: asyncio.Event | None = None
         #: Set, the insert waits on it, then records its row anyway (it never heartbeats).
@@ -177,6 +179,9 @@ class Fake:
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         self.calls.append("finish")
+        if self.finish_failures:
+            self.finish_failures -= 1
+            raise RuntimeError("the settings could not be read")
         items = [item for outcome in input.outcomes for item in outcome.queue_item_ids]
         return PrintRunResult(
             library_file_id=41, copies=1, queue_item_ids=items, bambuddy_url="http://b/queue"
@@ -605,6 +610,20 @@ async def test_a_queued_print_whose_bambuddy_url_was_cleared_still_ends_succeede
     assert run.status == "succeeded" and run.result is not None
     assert run.result.queue_item_ids == [51]
     assert run.result.bambuddy_url is None
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+async def test_a_finish_that_fails_a_few_times_still_ends_succeeded(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (fourth) 3: `print_finish` failing (a settings blip) is retried, and
+    the run is recorded as it queued."""
+    fake.finish_failures = 2
+    arg = run_input()
+    await start(client, worker, arg)
+    run = await asyncio.wait_for(ended(client, arg), timeout=60)
+    assert run.status == "succeeded" and not run.may_have_queued
+    assert fake.calls.count("finish") == 3
     assert not any(call.startswith("fail") for call in fake.calls)
 
 
