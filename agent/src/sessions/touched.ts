@@ -62,6 +62,9 @@ export const LOOKUP_TYPES = [
   'print_archive',
 ] as const satisfies readonly Exclude<ResourceType, 'unclassified'>[]
 export type LookupType = (typeof LOOKUP_TYPES)[number]
+// Every kind but `unclassified` is in LOOKUP_TYPES: a kind added to RESOURCE_TYPES alone fails typecheck here.
+const LOOKUP_COMPLETE: [Exclude<ResourceType, 'unclassified' | LookupType>] extends [never] ? true : never = true
+void LOOKUP_COMPLETE
 
 /**
  * A resource to find the sessions of. A `model` matches every row of that
@@ -129,6 +132,27 @@ function output(result: unknown, slug: string | null): Touch[] {
 /** A Bambuddy id (a number or a string) as a resource id. */
 function bambuddyId(value: unknown): string | null {
   return typeof value === 'number' ? String(value) : str(value)
+}
+
+/** Bambuddy ids from a list of them. */
+function ids(value: unknown): string[] {
+  return (Array.isArray(value) ? value : []).flatMap((v) => {
+    const id = bambuddyId(v)
+    return id ? [id] : []
+  })
+}
+
+/** A Bambuddy library file holding an output: new only when the answer says it was made. */
+function bambuddyFile(result: unknown, output: string | null): Touch[] {
+  const id = bambuddyId(field(result, 'library_file_id'))
+  if (!id) return []
+  return [{ type: 'bambuddy_file', id, action: field(result, 'created') === true ? 'created' : 'modified', before: output }]
+}
+
+/** A ProjectFile: the library file, and the project it was filed in. */
+function projectFile(result: unknown, output: string | null, project: string | null): Touch[] {
+  const id = bambuddyId(field(result, 'project_id')) ?? project
+  return [...bambuddyFile(result, output), ...(id ? [{ type: 'project' as const, id, action: 'modified' as const }] : [])]
 }
 
 /** A library pin: the model's new revision, and the library by name. */
@@ -241,6 +265,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const name = str(input.name)
     return name ? [{ type: 'library', id: name, action: 'deleted', model: null, before: str(input.commit) }] : []
   },
+  // "Asked to install": an installed family is answered again without a download
+  // (backend library/fonts.py `install`), and the answer does not say which happened.
   install_font: (input, result) => {
     const family = str(field(result, 'family')) ?? str(input.family)
     return family ? [{ type: 'font', id: family, action: 'created' }] : []
@@ -249,8 +275,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   set_print_options: (input) => {
     const scope = str(input.scope)
     const key = str(input.key)
-    if (!scope) return []
-    return setting(scope === 'global' || !key ? `print_options:${scope}` : `print_options:${scope}:${key}`, {
+    if (!scope || (scope !== 'global' && !key)) return []
+    return setting(scope === 'global' ? 'print_options:global' : `print_options:${scope}:${key}`, {
       model: scope === 'model' ? key : null,
     })
   },
@@ -268,32 +294,35 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const id = bambuddyId(field(result, 'id'))
     return id ? [{ type: 'project', id, action: input.project_id == null ? 'created' : 'modified' }] : []
   },
-  send_to_bambuddy: (input, result) => {
-    const id = bambuddyId(field(result, 'library_file_id'))
-    return id ? [{ type: 'bambuddy_file', id, action: 'created', before: str(input.output_id) }] : []
-  },
-  file_output_in_project_folder: (input, result) => {
-    const file = bambuddyId(field(result, 'library_file_id'))
-    const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
-    return [
-      ...(file
-        ? [{ type: 'bambuddy_file' as const, id: file, action: field(result, 'created') === true ? ('created' as const) : ('modified' as const), before: str(input.output_id) }]
-        : []),
-      ...(project ? [{ type: 'project' as const, id: project, action: 'modified' as const }] : []),
-    ]
-  },
+  // Bambuddy reuses a copy it already holds (`created` false), so only `created: true` is new.
+  send_to_bambuddy: (input, result) => bambuddyFile(result, str(input.output_id)),
+  file_output_in_project_folder: (input, result) =>
+    projectFile(result, str(input.output_id), bambuddyId(input.project_id)),
+  // The project, and the queue items and archives filed under it.
   file_output_under_project: (input, result) => {
     const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
-    return project ? [{ type: 'project', id: project, action: 'modified', before: str(input.output_id) }] : []
+    const before = str(input.output_id)
+    return [
+      ...(project ? [{ type: 'project' as const, id: project, action: 'modified' as const, before }] : []),
+      ...ids(field(result, 'queue_item_ids')).map((id) => ({ type: 'print' as const, id, action: 'modified' as const, before })),
+      ...ids(field(result, 'archive_ids')).map((id) => ({ type: 'print_archive' as const, id, action: 'modified' as const, before })),
+    ]
   },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
   },
   // The user's tab: Generate saves an output (frontend ActionBar's `generate` answers it).
+  // With a project remembered, it also files the 3MF there (`filed`, a ProjectFile).
   browser_generate: (_input, result) => {
-    const id = str(field(field(result, 'output'), 'id'))
-    return id ? [{ type: 'output', id, action: 'created' }] : []
+    const out = field(result, 'output')
+    const id = str(field(out, 'id'))
+    if (!id) return []
+    const filed = field(result, 'filed')
+    return [
+      { type: 'output', id, action: 'created', model: str(field(out, 'slug')) },
+      ...(filed ? projectFile(filed, id, null) : []),
+    ]
   },
   // Answers Bambuddy's new queue item; `before` is the archive printed again.
   print_again: (input, result) => {

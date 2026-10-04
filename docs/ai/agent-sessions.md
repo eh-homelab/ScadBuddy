@@ -199,10 +199,15 @@ model; removing the shared checkout is a `library` row with none), installed fon
 stored settings and remembered choices (`setting`, by what they are for:
 `print_options:<scope>[:<key>]`, `print_choices:<slug>`, `last_project`,
 `bed_type:<printer>`), and Bambuddy's projects, library files (`bambuddy_file`, with the
-output sent as `before`) and print archives (`print_archive`, an archive id, not a queue
-item). The browser tools that only change the open page (navigate, open a model, set or
-reset parameters, pick a plate, open the print dialog, edit the source or a Settings
-field without saving) record nothing; `browser_generate` records the output it saved.
+output sent as `before`; `created` only when the answer says Bambuddy made one, since a
+send reuses a copy already in the inbox) and print archives (`print_archive`, an archive
+id, not a queue item; filing an output under a project also records the queue items and
+archives it filed). A `font` row means "asked to install": an installed family is
+answered again without a download, and the answer does not say which. The browser tools
+that only change the open page (navigate, open a model, set or reset parameters, pick a
+plate, open the print dialog, edit the source or a Settings field without saving) record
+nothing; `browser_generate` records the output it saved, with its model, and the
+Bambuddy file and project it filed it in when a project is remembered.
 `browser_click` and `browser_fill` stay `unclassified`: they can press anything, Save
 included. Every other `write` or `outward` tool has an extractor; one added without one
 is listed as `unclassified` with its tool, so the gap stays visible

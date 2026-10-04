@@ -195,6 +195,8 @@ describe('extractors', () => {
     expect(touches('set_print_options', { scope: 'model', key: 'box', options: {} }, {}, 'outward')).toEqual([
       { type: 'setting', id: 'print_options:model:box', action: 'modified', model: 'box' },
     ])
+    // A printer or model scope names its key; without one there is no setting to name.
+    expect(touches('set_print_options', { scope: 'printer', options: {} }, {}, 'outward')).toEqual([])
     expect(touches('remember_model_print_choices', { slug: 'box', tier: 'fast' }, {})).toEqual([
       { type: 'setting', id: 'print_choices:box', action: 'modified', model: 'box' },
     ])
@@ -214,9 +216,13 @@ describe('extractors', () => {
     expect(touches('create_print_project', { project_id: 9 }, { id: 9 }, 'outward')).toEqual([
       { type: 'project', id: '9', action: 'modified' },
     ])
-    expect(touches('send_to_bambuddy', { output_id: 'o1' }, { library_file_id: 31, filename: 'a.3mf' }, 'outward')).toEqual([
+    expect(touches('send_to_bambuddy', { output_id: 'o1' }, { library_file_id: 31, filename: 'a.3mf', created: true }, 'outward')).toEqual([
       { type: 'bambuddy_file', id: '31', action: 'created', before: 'o1' },
     ])
+    // A copy already in the inbox was reused; an answer that cannot say is not taken as new either.
+    for (const created of [false, undefined]) {
+      expect(touches('send_to_bambuddy', { output_id: 'o1' }, { library_file_id: 31, created }, 'outward')[0]).toMatchObject({ action: 'modified' })
+    }
     expect(
       touches('file_output_in_project_folder', { output_id: 'o1', project_id: 9 }, { library_file_id: 31, project_id: 9, created: false }, 'outward'),
     ).toEqual([
@@ -227,15 +233,33 @@ describe('extractors', () => {
       touches('file_output_in_project_folder', { output_id: 'o1', project_id: 9 }, { library_file_id: 32, project_id: 9, created: true }, 'outward')[0],
     ).toEqual({ type: 'bambuddy_file', id: '32', action: 'created', before: 'o1' })
     expect(
-      touches('file_output_under_project', { output_id: 'o1' }, { project_id: 9, queue_item_ids: [12], archive_ids: [] }, 'outward'),
-    ).toEqual([{ type: 'project', id: '9', action: 'modified', before: 'o1' }])
+      touches('file_output_under_project', { output_id: 'o1' }, { project_id: 9, queue_item_ids: [12, 13], archive_ids: [7] }, 'outward'),
+    ).toEqual([
+      { type: 'project', id: '9', action: 'modified', before: 'o1' },
+      { type: 'print', id: '12', action: 'modified', before: 'o1' },
+      { type: 'print', id: '13', action: 'modified', before: 'o1' },
+      { type: 'print_archive', id: '7', action: 'modified', before: 'o1' },
+    ])
     expect(touches('pull_print_timelapse', { archive_id: 7, filename: 't.mp4' }, null, 'outward')).toEqual([
       { type: 'print_archive', id: '7', action: 'modified' },
     ])
   })
 
   it("records the output the user's tab generated, and nothing for what changes only the open page", () => {
-    expect(touches('browser_generate', {}, { output: { id: 'o9', name: null } })).toEqual([{ type: 'output', id: 'o9', action: 'created' }])
+    expect(touches('browser_generate', {}, { output: { id: 'o9', name: null, slug: 'box' }, filed: null })).toEqual([
+      { type: 'output', id: 'o9', action: 'created', model: 'box' },
+    ])
+    // With a project remembered, Generate also files the 3MF in its Bambuddy folder.
+    expect(
+      touches('browser_generate', {}, {
+        output: { id: 'o9', name: null, slug: 'box' },
+        filed: { project_id: 4, library_file_id: 31, created: true },
+      }),
+    ).toEqual([
+      { type: 'output', id: 'o9', action: 'created', model: 'box' },
+      { type: 'bambuddy_file', id: '31', action: 'created', before: 'o9' },
+      { type: 'project', id: '4', action: 'modified' },
+    ])
     expect(touches('browser_generate', {}, null)).toEqual([])
     for (const name of [
       'browser_navigate',

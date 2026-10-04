@@ -296,6 +296,16 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       expect(await ids({ type: 'output', id: 'out-2' })).toEqual([])
     })
 
+    it("finds a model's sessions by what its extractors record: a library pin, its print options", async () => {
+      const pin = (await m.start(browser, { origin: 'chat' })).session
+      await touch(pin.id, 'pin_library', { slug: 'tray', name: 'BOSL2' }, { slug: 'tray', version: C1 })
+      const options = (await m.start(browser, { origin: 'chat' })).session
+      await touch(options.id, 'set_print_options', { scope: 'model', key: 'tray', options: {} }, {})
+      await touch((await m.start(browser, { origin: 'chat' })).session.id, 'set_print_options', { scope: 'global', options: {} }, {})
+      expect((await m.list(browser, { resource: { type: 'model', id: 'tray' } })).map((s) => s.id).sort()).toEqual([pin.id, options.id].sort())
+      expect((await m.list(browser, { resource: { type: 'library', id: 'BOSL2' } })).map((s) => s.id)).toEqual([pin.id])
+    })
+
     it('lists a session once however many times it touched the resource', async () => {
       const { edit } = await seed()
       await touch(edit.id, 'update_source', { slug: 'box', base: C2 }, { slug: 'box', version: C1 })

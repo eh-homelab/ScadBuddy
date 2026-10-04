@@ -132,16 +132,19 @@ export function ActionBar({
   }
 
   /** Best effort: the output is saved whether or not Bambuddy takes the file. */
-  async function fileIntoProject(created: Output) {
-    if (projectId === null) return
+  /** Files a new output in the remembered project; the file, or null when none was filed. */
+  async function fileIntoProject(created: Output): Promise<ProjectFile | null> {
+    if (projectId === null) return null
     const name = project?.name ?? `project ${projectId}`
     try {
       const file = await api.fileIntoProject(created.id, projectId)
       setFiled({ outputId: created.id, name, file })
+      return file
     } catch (cause) {
       setFileError(
         `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
       )
+      return null
     }
   }
 
@@ -162,7 +165,8 @@ export function ActionBar({
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
 
-  async function generate(): Promise<Output | null> {
+  /** The saved output, and the project file Generate filed it as (#931: the agent records both). */
+  async function generate(): Promise<{ output: Output; filed: ProjectFile | null } | null> {
     if (!job) return null
     setGenerating(true)
     setError(null)
@@ -172,8 +176,8 @@ export function ActionBar({
       const created = await saveOutput({ slug, job, extra, capture })
       onGenerated(created)
       // After the thumbnail, so the file Bambuddy lists carries the plate image.
-      await fileIntoProject(created)
-      return created
+      const filed = await fileIntoProject(created)
+      return { output: created, filed }
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
       setError(message)
@@ -204,10 +208,14 @@ export function ActionBar({
         throw new AgentToolError('invalid_args', 'A project is still being created; wait for it first.')
       }
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
-      const created = await generate()
-      if (!created) return null
+      const generated = await generate()
+      if (!generated) return null
+      const { output: created, filed } = generated
       await committed(() => live.current.output?.id === created.id, 'the saved output')
-      return { output: { id: created.id, name: created.name ?? null } }
+      return {
+        output: { id: created.id, name: created.name ?? null, slug: created.slug },
+        filed: filed && { project_id: filed.project_id, library_file_id: filed.library_file_id, created: filed.created },
+      }
     },
     open_print_dialog: async ({ kind }) => {
       if (!live.current.output) {
