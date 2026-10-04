@@ -828,7 +828,7 @@ async def plan_run(
     """Upload, then resolve every plate, before anything is sliced (spec §4).
 
     A print into a project also records its printer and nozzle for that project
-    (:meth:`PrintSource.remember_project`, in :func:`finish_run`), which is what the
+    (:meth:`PrintSource.remember_project`, in the ``print_finish`` activity), which is what the
     next Generate into it lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
@@ -964,23 +964,18 @@ async def plan_run(
     )
 
 
-async def finish_run(
+def finish_run(
     client: BambuddyClient,
-    source: PrintSource,
     planned: PlannedRun,
     outcomes: list[QueueOutcome],
     queued: list[QueuedPlate] | None = None,
 ) -> PrintRunResult:
-    """Remember the project's printer and nozzle, and report what was queued, with each
-    plate's rack picks and warnings (``queued``, one per outcome)."""
+    """Report what was queued, with each plate's rack picks and warnings (``queued``,
+    one per outcome)."""
     warnings = list(planned.warnings)
     for plate in queued or []:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate.warnings if warning not in warnings]
-    if planned.project_id is not None:
-        await source.remember_project(
-            planned.project_id, printer_id=planned.printer_id, nozzle_size=planned.nozzle_size
-        )
     return _queued(
         client,
         outcomes,

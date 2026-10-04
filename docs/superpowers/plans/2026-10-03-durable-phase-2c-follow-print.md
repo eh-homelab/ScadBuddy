@@ -32,10 +32,12 @@ watcher row) and §5.3. Stacked on PR #1066 (`feat/1053-renders`).
    Temporal's guidance for polling inside an activity (§3.1).
 2. **A poke restarts the activity.** An activity cannot receive a signal. Today's poke means
    "read now, and the age counts from now", which is what a fresh attempt does.
-3. **`print_watches` is read once at boot, not dropped.** The boot pass starts a `FollowPrint`
+3. **`print_watches` is read at boot, not dropped.** Each boot starts a `FollowPrint`
    for each print recorded within `MAX_AGE` (the prints the old in-process watcher was
-   following), then deletes those rows. A later migration drops the table once no release
-   writes it. Cost: one more table for a release.
+   following), and deletes a row once its follow is running; one that did not start waits
+   for the next boot. A later migration drops the table once no release writes it, and
+   removes the boot pass with it. Cost: one more table for a release. The upgrade needs a
+   `Recreate` rollout, since an old pod would still write rows after the new one's pass.
 4. **No `workflow.patched` in `PrintRun`.** `PrintRun` is unreleased (#1061 is not merged), so
    no history holds the old commands.
 5. **A follow that cannot be started from the progress route is a logged warning.** The read

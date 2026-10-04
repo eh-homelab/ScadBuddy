@@ -29,8 +29,9 @@ def watched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """The prints the progress route asks to follow, recorded instead (#1053)."""
     asked: list[str] = []
 
-    async def recording(client: object, task_queue: str, output_id: str) -> None:
+    async def recording(client: object, task_queue: str, output_id: str) -> bool:
         asked.append(output_id)
+        return True
 
     monkeypatch.setattr(printing, "follow", recording)
     return asked
@@ -91,6 +92,35 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     # Waiting is not failing.
     assert body["error_message"] is None
     assert body["copies_detail"][0]["waiting_reason"] == "No active H2C printers are idle"
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_progress_reads_and_follows_without_the_run_store(
+    client: TestClient, model: str, watched: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read needs Bambuddy, and the follow only Temporal: neither waits on the
+    print runs' store (#1053)."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    run_print(client, output_id, json=run_request())
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "printer_id": 1, "status": "pending"})
+    )
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.print_runs.store, "_pool", None)
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/progress")
+    assert response.status_code == 200
+    assert response.json()["settled"] is False
+    deadline = time.monotonic() + 5
+    while not watched and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert watched == [output_id]
 
 
 @pytest.mark.requires_postgres

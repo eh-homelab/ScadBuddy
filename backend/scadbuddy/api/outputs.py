@@ -15,7 +15,6 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
     EventsDep,
-    OperationsDep,
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
@@ -38,16 +37,12 @@ from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
-    project_stem,
 )
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
-from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -55,7 +50,9 @@ from scadbuddy.library.outputs import (
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
+    require_output,
 )
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
@@ -64,7 +61,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
     normalize_inputs,
 )
-from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
 
@@ -142,13 +139,6 @@ async def _details(
     return await asyncio.to_thread(
         lambda: [_detail(store, meta, copies[meta.id]) for meta in metas]
     )
-
-
-def require_output(store: OutputStore, output_id: str) -> OutputMeta:
-    try:
-        return store.get(output_id)
-    except OutputNotFoundError:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
 
 
 @router.post(
@@ -523,53 +513,6 @@ async def send_output_to_bambuddy(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, SendResult)
-
-
-def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
-    """The model's param defaults from its cached schema, or ``{}`` when the renderer
-    would not use that cache entry (:func:`load_cached_schema`: another source, cache
-    version, schema format or set of library pins).
-
-    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
-    clone) is run for them; a pinned checkout missing from the volume means no defaults.
-    Every render of the live model caches the schema.
-    """
-    try:
-        source = paths.model_source(slug).read_text(encoding="utf-8")
-        schema = load_cached_schema(
-            paths.model_schema_cache(slug),
-            source_sha256(source),
-            library_path=model_search_path(paths, slug),
-        )
-    except (OSError, ValueError, LibraryError):
-        return {}
-    if schema is None:
-        return {}
-    return {param.name: param.initial for param in schema.parameters}
-
-
-def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
-    params = outputs.params(meta.id)
-    try:
-        template = catalogue.record(meta.slug).name
-    except ModelNotFoundError:
-        return project_stem(meta.slug, params, {}, name=meta.name)
-    defaults = _cached_defaults(outputs.paths, meta.slug)
-    return project_stem(template, params, defaults, name=meta.name)
-
-
-async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
-    """The name a project file of this output goes by (#317): the template's name and
-    the params that differ from its defaults (`project_stem`).
-
-    Naming never fails what it names: when the model, its params or its cached schema
-    cannot be read, the name falls back to the slug and the output's own name.
-    """
-    try:
-        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
-    except Exception:
-        logger.warning("could not name the project file; using a plain name", exc_info=True)
-        return project_stem(meta.slug, {}, {}, name=meta.name)
 
 
 @router.post(
