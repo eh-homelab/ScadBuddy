@@ -4,8 +4,9 @@
    the ``accepted`` Update and *fails* the execution, so a retry may start again.
 2. ``op_insert`` writes the record, retried on its own so a refusal never follows it.
    A cancel waits it out and ends the record, which is never left ``running``.
-3. ``op.<kind>.run`` is the effect, with the kind's attempts; then ``op_finish``. From
-   the record on, every outcome completes the execution and is recorded.
+3. ``op.<kind>.run`` is the effect, with the kind's attempts; then ``op_finish``, which a
+   cancel waits out too. From the record on, every outcome completes the execution and
+   is recorded.
 
 Every kind here is ``done`` (§4.2 step 4): the Update answers once the effect ended.
 """
@@ -136,16 +137,23 @@ class OperationWorkflow:
             if cancelled
             else await self._effect(input, op.id, checked)
         )
-        self.done = await workflow.execute_activity(
+        finishing = workflow.start_activity(
             FINISH_ACTIVITY,
             finish,
             result_type=Operation,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
-        self._upsert(STATUS.value_set(self.done.status))
+        try:
+            done: Operation = await asyncio.shield(finishing)
+        except asyncio.CancelledError:
+            # The effect's outcome is recorded whatever comes (review #1063 third review
+            # 1): a row left running would be called lost, and its result dropped.
+            done = await finishing
+        self.done = done
+        self._upsert(STATUS.value_set(done.status))
         await workflow.wait_condition(workflow.all_handlers_finished)
-        return self.done
+        return done
 
     async def _effect(
         self, input: OperationInput, operation_id: str, checked: dict[str, Any]
