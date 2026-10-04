@@ -176,6 +176,13 @@ export const SHUTTING_DOWN = 'shutting down'
  * fail together wait on one request, not one each (#815 §5 would supersede them).
  */
 export const TAB_WAIT_S = 300
+/**
+ * How many tab waits one turn may open. A tab back on another replica answers
+ * `reconnected` while this replica still has none, so each retry can fail and
+ * wait again; this bounds that, and tab waits are outside the model's own rate
+ * limit (questions/service.ts).
+ */
+export const TAB_WAITS_PER_TURN = 3
 const CARRY_ON = 'Carry on without the tab'
 
 export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
@@ -183,8 +190,16 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   // Once the user said to carry on, or nobody came back in time, the rest of the
   // turn does not ask again: each later call that finds no tab fails at once.
   let gaveUp: string | undefined
+  let started = 0
   return ({ tool, toolUseId, signal, isBack }) => {
     if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
+    if (!open && started >= TAB_WAITS_PER_TURN) {
+      gaveUp =
+        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is still not reachable from here (it may be ` +
+        'connected to another agent replica). Carry on without the tab for the rest of this turn.'
+      return Promise.resolve({ back: false, message: gaveUp })
+    }
+    if (!open) started += 1
     // One wait for the turn's calls: a call that stops waiting (its own signal)
     // leaves the others waiting, and the last one to stop withdraws the request.
     open ??= start(tool, toolUseId, isBack)
@@ -194,7 +209,11 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       const withdrawn = () => {
         resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
         shared.waiters -= 1
-        if (shared.waiters === 0) shared.stop.abort()
+        if (shared.waiters === 0) {
+          // Withdrawn: a call that comes after must open a wait of its own, not join this one.
+          if (open === shared) open = undefined
+          shared.stop.abort()
+        }
       }
       if (signal.aborted) return withdrawn()
       signal.addEventListener('abort', withdrawn, { once: true })
@@ -243,10 +262,12 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         return { back: false, message: gaveUp }
       }
       return { back: false, message: verdict.message }
-    })().finally(() => {
-      open = undefined
-    })
-    return { wait, waiters: 0, stop }
+    })()
+    const handle = { wait, waiters: 0, stop }
+    void wait.finally(() => {
+      if (open === handle) open = undefined
+    }).catch(() => undefined)
+    return handle
   }
 }
 

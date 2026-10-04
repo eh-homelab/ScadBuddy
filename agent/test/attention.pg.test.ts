@@ -8,7 +8,7 @@ import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionV
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { ATTENTION_RATE_LIMIT } from '../src/questions/service.js'
-import { type SessionManager, TAB_WAIT_S, waitForTab } from '../src/sessions/manager.js'
+import { type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import type { TabWait, WaitForTab } from '../src/tools/registry.js'
 import { PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
@@ -580,6 +580,49 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       expect(later).toEqual(first)
       expect(asked).toBe(1)
     }
+  })
+
+  it('a call that comes after every waiter withdrew opens a wait of its own, not the withdrawn one', async () => {
+    const requests: QuestionRequest[] = []
+    const gate: QuestionGate = (request) => {
+      requests.push(request)
+      // As the real gate does: a withdrawn request ends as not answered.
+      return new Promise((resolve) => {
+        if (requests.length === 1) {
+          request.signal.addEventListener('abort', () => resolve({ answered: false, message: 'The user did not answer: the turn stopped first.' }), { once: true })
+        } else {
+          resolve({ answered: false, reconnected: true, message: 'x' })
+        }
+      })
+    }
+    const wait = waitForTab(gate, never, noop)
+    const first = new AbortController()
+    const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: gone })
+    first.abort()
+    // At once, before the withdrawn wait has settled.
+    const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: never, isBack: gone })
+    expect(await a).toEqual({ back: false, message: expect.stringMatching(/stopped while it waited/) })
+    expect(await b).toEqual({ back: true })
+    expect(requests.map((r) => r.toolUseId)).toEqual(['toolu_a', 'toolu_b'])
+    expect(requests[0]!.signal.aborted).toBe(true)
+  })
+
+  it(`opens at most ${TAB_WAITS_PER_TURN} tab waits a turn: a tab back on another replica cannot keep it waiting`, async () => {
+    let asked = 0
+    const wait = waitForTab(() => {
+      asked += 1
+      return Promise.resolve({ answered: false, reconnected: true, message: 'x' })
+    }, never, noop)
+    const results: TabWait[] = []
+    for (let i = 0; i < TAB_WAITS_PER_TURN + 2; i++) {
+      results.push(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: gone }))
+    }
+    expect(asked).toBe(TAB_WAITS_PER_TURN)
+    expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true }))
+    expect(results.slice(TAB_WAITS_PER_TURN)).toEqual([
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn.*another agent replica/s) },
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn/) },
+    ])
   })
 
   it('a call that stops waiting leaves the others sharing the wait still waiting', async () => {

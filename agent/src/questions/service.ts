@@ -515,7 +515,7 @@ export class QuestionService {
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
           // Only the model's own requests count, and only they are limited: a
           // browser_* call's wait for its tab (sessions/manager.ts waitForTab) is
-          // ScadBuddy's, at most one per turn, and must not use up the model's.
+          // ScadBuddy's, at most TAB_WAITS_PER_TURN per turn, and must not use up the model's.
           if (request.tool === ATTENTION_TOOL) {
             const [recent] = await tx<{ n: number }[]>`
               SELECT count(*)::int AS n FROM ai_questions
