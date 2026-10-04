@@ -31,6 +31,8 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.kinds import DuplicateKindError, OperationKind, build_kinds
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 #: A stand-in: these tests only check that `build` is handed the core it was given.
@@ -349,3 +351,41 @@ def test_the_lifespan_enters_a_discovered_components_run(
     with TestClient(app):
         assert log == ["enter probe"]
     assert log == ["enter probe", "exit probe"]
+
+
+def test_build_state_alone_registers_every_features_operation_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 4: the kinds come from the features' registrations as the operations
+    component builds, so a state that never went through ``create_app`` has them."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    state = deps.build_state(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url="postgresql://unused@127.0.0.1:1/unused",
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    kinds = state.components.get(OPERATIONS).kinds
+    assert {"send", "reprint", "attach_project", "register_sidebar"} <= set(kinds)
+    with pytest.raises(TypeError):
+        kinds["late"] = kinds["send"]  # type: ignore[index]
+
+
+def test_two_features_claiming_one_kind_name_are_refused() -> None:
+    def kind(name: str) -> OperationKind:
+        async def step(*args: object) -> dict[str, object]:
+            return {}
+
+        return OperationKind(name, step, step)
+
+    with pytest.raises(DuplicateKindError, match="'send'"):
+        build_kinds(CORE, Components(CORE, []), [lambda c, cs: [kind("send")]] * 2)

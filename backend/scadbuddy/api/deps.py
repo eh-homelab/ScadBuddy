@@ -47,8 +47,6 @@ from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
-from scadbuddy.operations.kinds import OperationKind
-from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
     PreviewScheduler,
@@ -150,7 +148,6 @@ class AppState:
     #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
     #: start them.
     print_runs: PrintCommands
-    operations: OperationCommands
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -225,18 +222,6 @@ class PrintCommands:
     search_attributes: bool = False
 
 
-@dataclass(frozen=True)
-class OperationCommands:
-    """What a route that starts an ``Operation`` needs (#1053): the record, the client
-    and queue, and the kinds the ``bambuddy`` worker serves (filled before it starts)."""
-
-    store: OperationStore
-    client: Client
-    task_queue: str
-    kinds: dict[str, OperationKind] = field(default_factory=dict)
-    search_attributes: bool = False
-
-
 class _AfterCommit:
     """``publish_in`` for a bus that has no transaction of its own (the in-process bus
     of a test): publishes at once."""
@@ -248,7 +233,7 @@ class _AfterCommit:
         emit(self.bus, event)
 
 
-def _transactional(events: EventBus) -> TransactionalEvents:
+def transactional_events(events: EventBus) -> TransactionalEvents:
     return events if isinstance(events, PgNotifyEventBus) else _AfterCommit(events)
 
 
@@ -404,13 +389,7 @@ def _build_core(settings: Settings) -> AppState:
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
         print_runs=PrintCommands(
-            store=PrintRunStore(pool, events=_transactional(events)),
-            client=temporal,
-            task_queue=settings.temporal_task_queue_bambuddy,
-            search_attributes=settings.temporal_search_attributes,
-        ),
-        operations=OperationCommands(
-            store=OperationStore(pool, events=_transactional(events)),
+            store=PrintRunStore(pool, events=transactional_events(events)),
             client=temporal,
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,
@@ -558,17 +537,6 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
 
-def require_operations(state: StateDep) -> OperationCommands:
-    """The operations, or a 503 naming what is missing: they live only in Postgres."""
-    if not state.operations.store.available:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "operations are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
-    return state.operations
-
-
 def require_print_runs(state: StateDep) -> PrintCommands:
     """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
     if not state.print_runs.store.available:
@@ -617,7 +585,6 @@ EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
-OperationsDep = Annotated[OperationCommands, Depends(require_operations)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
+from scadbuddy.operations.component import OPERATIONS
 
 
 class StubWorker:
@@ -49,6 +50,7 @@ async def test_a_failed_worker_is_logged_at_once_and_started_again(
     monkeypatch.setattr(main, "bambuddy_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
     state = _state()
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
@@ -64,6 +66,10 @@ async def _no_lost_runs(*args: Any, **kwargs: Any) -> int:
     return 0
 
 
+#: The operations component's value, as the worker task reads it.
+OPS = SimpleNamespace(store="operations", kinds={})
+
+
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
@@ -73,10 +79,9 @@ def _state() -> SimpleNamespace:
         uploads=None,
         catalogue=None,
         print_runs=SimpleNamespace(store=None),
-        operations=SimpleNamespace(store=None, kinds={}),
         print_progress=None,
         print_watcher=None,
-        components=SimpleNamespace(get=lambda key: None),
+        components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else None),
     )
 
 
@@ -95,6 +100,7 @@ async def test_the_worker_task_ends_lost_runs_at_start_and_on_its_interval(
 
     monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "reconcile_lost_runs", reconcile)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
     monkeypatch.setattr(main, "LOST_RUN_INTERVAL", 0.01)
     stop = asyncio.Event()
     task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
@@ -118,6 +124,7 @@ async def test_a_worker_that_fails_while_running_is_started_again(
     monkeypatch.setattr(main, "bambuddy_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
         task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
@@ -148,3 +155,29 @@ async def test_a_worker_still_connecting_stops_at_once(monkeypatch: pytest.Monke
     await asyncio.wait_for(connecting.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 1)
+
+
+async def test_the_worker_task_ends_lost_operations_on_its_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1063 1: an operation whose execution closed after ``op_insert`` is ended
+    beside the print runs, by the same loop."""
+    passes = asyncio.Event()
+    calls: list[object] = []
+
+    async def reconcile(client: object, store: object, **kwargs: Any) -> int:
+        calls.append(store)
+        if len(calls) >= 2:
+            passes.set()
+        return 0
+
+    monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", reconcile)
+    monkeypatch.setattr(main, "LOST_RUN_INTERVAL", 0.01)
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(passes.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert calls[:2] == ["operations", "operations"]

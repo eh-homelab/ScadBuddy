@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { ACCEPTING_MS } from '../src/api/command.js'
+import { ACCEPTING_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -495,20 +495,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
+    // No Retry-After unless a test sets one: a real one is whole seconds (review #1061 4a).
+    const accepting = (retryAfter?: string) => () =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/command-still-accepting',
+          title: 'Service Unavailable',
+          status: 503,
+          detail: 'ScadBuddy is still checking this print.',
+        },
+        { status: 503, headers: retryAfter ? { 'Retry-After': retryAfter } : {} },
+      )
+
     it('re-sends while the backend is still accepting the same request (#1052)', async () => {
-      const { ids, handler } = posts([
-        () =>
-          HttpResponse.json(
-            {
-              type: 'https://scadbuddy.dev/problems/command-still-accepting',
-              title: 'Service Unavailable',
-              status: 503,
-              detail: 'ScadBuddy is still checking this print.',
-            },
-            { status: 503, headers: { 'Retry-After': '2' } },
-          ),
-        () => HttpResponse.json(running, { status: 202 }),
-      ])
+      const { ids, handler } = posts([accepting(), () => HttpResponse.json(running, { status: 202 })])
       server.use(handler, done)
       const result = await tool('print_output').execute(args, ctx())
       expect(result.isError).toBeFalsy()
@@ -516,19 +516,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
-    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
-      const accepting = () =>
-        HttpResponse.json(
-          {
-            type: 'https://scadbuddy.dev/problems/command-still-accepting',
-            title: 'Service Unavailable',
-            status: 503,
-            detail: 'ScadBuddy is still checking this print.',
-          },
-          { status: 503, headers: { 'Retry-After': '2' } },
-        )
+    it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
+      const sent: number[] = []
       const { ids, handler } = posts([
-        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting),
+        () => (sent.push(Date.now()), accepting('0.2')()),
+        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    })
+
+    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
+      const { ids, handler } = posts([
+        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting()),
         () => HttpResponse.json(running, { status: 202 }),
       ])
       server.use(handler, done)
