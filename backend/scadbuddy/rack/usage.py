@@ -121,8 +121,11 @@ class RackUsageStore:
                 self._pool_open = True
         if not self._migrated:
             with self._pool.connection() as conn:
-                # Unbounded while migrating (#1086 review): the wait for another
-                # process's migration lock, and a slow migration, count toward it.
+                # Unbounded while migrating, deliberately (#1086 review): the wait for
+                # another process's migration lock, and a slow migration, count toward
+                # it. This also lifts a timeout the conninfo sets, so the first rack call
+                # in a process (on the print path too) waits as long as the lock is
+                # held. The bound it had is restored afterwards.
                 row = conn.execute("SHOW statement_timeout").fetchone()
                 bound = row["statement_timeout"] if row is not None else "0"
                 conn.execute("SET statement_timeout = 0")
