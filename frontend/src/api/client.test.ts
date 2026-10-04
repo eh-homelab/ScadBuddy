@@ -780,7 +780,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
   afterEach(() => {
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
-    printRunPoll.operationFollowMs = 900_000
+    printRunPoll.operationFollowMs = 1_260_000
   })
 
   const operation = {

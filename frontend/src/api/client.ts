@@ -328,15 +328,17 @@ const seg = encodeURIComponent
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
  * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
- * longest kind's `run_timeout` plus the run's cancel grace (library pins: 600 s + 30 s),
- * as the agent's `operationFollowMs` does (agent/src/tools/registry.ts).
+ * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
+ * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent's
+ * `operationFollowMs` is the same (agent/src/tools/registry.ts).
  */
 export const printRunPoll = {
   intervalMs: 1000,
   reattempts: 3,
   acceptingMs: 240_000,
   followMs: 3_600_000,
-  operationFollowMs: 900_000,
+  operationFollowMs: 1_260_000,
 }
 
 /**

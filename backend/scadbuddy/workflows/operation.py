@@ -46,7 +46,8 @@ with workflow.unsafe.imports_passed_through():
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
-#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin.
+#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin. The browser's and the
+#: agent's ``operationFollowMs`` are reckoned from it: change them together.
 RUN_TIMEOUT = timedelta(minutes=5)
 #: The run heartbeats (`operation_activities.py`), so a run on a worker that died is
 #: retired after this, not after ``RUN_TIMEOUT`` (review #1063 second review 2).
