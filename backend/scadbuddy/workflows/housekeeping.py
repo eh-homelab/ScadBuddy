@@ -113,17 +113,9 @@ class Housekeeping:
         return failed
 
 
-def _schedule(
-    schedule_id: str, task_queue: str, interval: float, sweeps: tuple[str, ...]
-) -> Schedule:
+def _schedule(interval: float, action: ScheduleActionStartWorkflow) -> Schedule:
     return Schedule(
-        action=ScheduleActionStartWorkflow(
-            HOUSEKEEPING_WORKFLOW,
-            list(sweeps),
-            id=schedule_id,
-            task_queue=task_queue,
-            execution_timeout=housekeeping_timeout(sweeps),
-        ),
+        action=action,
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=timedelta(seconds=max(interval, MIN_INTERVAL)))]
         ),
@@ -131,17 +123,12 @@ def _schedule(
     )
 
 
-async def ensure_schedule(
-    client: Client,
-    task_queue: str,
-    interval: float,
-    *,
-    schedule_id: str | None = None,
-    sweeps: tuple[str, ...] = SWEEPS,
+async def ensure_workflow_schedule(
+    client: Client, schedule_id: str, interval: float, action: ScheduleActionStartWorkflow
 ) -> None:
-    """The Schedule at ``interval`` seconds (0: none), then one run now: the boot's
-    converging sweep. A Schedule an operator paused stays paused, and is not run."""
-    schedule_id = schedule_id or schedule_id_for(task_queue)
+    """The Schedule starting ``action`` every ``interval`` seconds (0: none), then one
+    run now: the boot's. A Schedule an operator paused stays paused, and is not run.
+    Every Schedule the API keeps (housekeeping, the preview backfill) is made here."""
     handle = client.get_schedule_handle(schedule_id)
     if interval <= 0:
         try:
@@ -150,7 +137,7 @@ async def ensure_schedule(
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
         return
-    schedule = _schedule(schedule_id, task_queue, interval, sweeps)
+    schedule = _schedule(interval, action)
     try:
         await client.create_schedule(schedule_id, schedule)
     except ScheduleAlreadyRunningError:
@@ -162,9 +149,30 @@ async def ensure_schedule(
 
         await handle.update(replace)
     if not schedule.state.paused:
-        # A run still open (a rollout stopped the old pod mid-sweep) would SKIP this
+        # A run still open (a rollout stopped the old pod mid-run) would SKIP this
         # one; it queues behind that run instead.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
+
+
+async def ensure_schedule(
+    client: Client,
+    task_queue: str,
+    interval: float,
+    *,
+    schedule_id: str | None = None,
+    sweeps: tuple[str, ...] = SWEEPS,
+) -> None:
+    """The sweeps' Schedule at ``interval`` seconds (0: none), then one run now: the
+    boot's converging sweep (`ensure_workflow_schedule`)."""
+    schedule_id = schedule_id or schedule_id_for(task_queue)
+    action = ScheduleActionStartWorkflow(
+        HOUSEKEEPING_WORKFLOW,
+        list(sweeps),
+        id=schedule_id,
+        task_queue=task_queue,
+        execution_timeout=housekeeping_timeout(sweeps),
+    )
+    await ensure_workflow_schedule(client, schedule_id, interval, action)
 
 
 async def ensure_schedules(client: Client, task_queue: str, interval: float) -> None:
