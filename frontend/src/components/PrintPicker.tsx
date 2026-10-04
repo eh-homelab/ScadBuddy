@@ -165,6 +165,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** Bumped by each algorithm save: only the latest one's outcome counts, whatever
    *  order the answers arrive in (#1086 review). */
   const algorithmSave = useRef(0)
+  /** The saves, one at a time: two in flight at once could be applied in either order,
+   *  leaving the printer on a choice the user had replaced (#1086 review). */
+  const algorithmSaves = useRef<Promise<unknown>>(Promise.resolve())
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
@@ -187,25 +190,27 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     const session = algorithmSession.current
     const save = ++algorithmSave.current
     const savedOn = printerId
-    if (savedOn !== null)
-      void api.putPrinterRackAlgorithm(savedOn, next).then(
-        () => {
-          // Saved after its session ended (#1086 review): the printer now stores `next`,
-          // which a dialog that already read its choices does not know. Show it for that
-          // printer without carrying it in as a choice, and without re-reading the
-          // choices, which would reset the bed type and filament plan set since.
-          if (algorithmSession.current !== session)
-            setSavedAlgorithm((shown) =>
-              shown && shown.printerId === savedOn && shown.save > save
-                ? shown
-                : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
-            )
-        },
-        () => {
-          if (algorithmSave.current === save && algorithmSession.current === session)
-            setAlgorithmUnsaved(true)
-        },
-      )
+    if (savedOn === null) return
+    const saving = algorithmSaves.current.then(() => api.putPrinterRackAlgorithm(savedOn, next))
+    algorithmSaves.current = saving.catch(() => undefined)
+    void saving.then(
+      () => {
+        // Saved after its session ended (#1086 review): the printer now stores `next`,
+        // which a dialog that already read its choices does not know. Show it for that
+        // printer without carrying it in as a choice, and without re-reading the
+        // choices, which would reset the bed type and filament plan set since.
+        if (algorithmSession.current !== session)
+          setSavedAlgorithm((shown) =>
+            shown && shown.printerId === savedOn && shown.save > save
+              ? shown
+              : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
+          )
+      },
+      () => {
+        if (algorithmSave.current === save && algorithmSession.current === session)
+          setAlgorithmUnsaved(true)
+      },
+    )
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)

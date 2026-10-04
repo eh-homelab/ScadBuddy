@@ -2180,7 +2180,9 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     }
     /** Answer every held choices read. */
     const releaseReads = () => heldReads.splice(0).forEach((resolve) => resolve())
-    return { answers, answer, saves, heldReads, holdChoiceReads, releaseReads }
+    /** What the printer stores now. */
+    const storedNow = () => stored
+    return { answers, answer, saves, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
   }
 
   it('lets only the latest of two saves say it was not remembered', async () => {
@@ -2194,10 +2196,11 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     const select = await screen.findByLabelText('Rack algorithm')
     fireEvent.change(select, { target: { value: 'oldest_first' } })
     fireEvent.change(select, { target: { value: 'least_used' } })
-    await waitFor(() => expect(answers.length).toBe(2))
+    await waitFor(() => expect(answers.length).toBe(1))
 
-    answer(1, 200)
     answer(0, 503)
+    await waitFor(() => expect(answers.length).toBe(2))
+    answer(1, 200)
     await act(() => Promise.allSettled(saves))
     expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
@@ -2213,7 +2216,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     const first = await screen.findByLabelText('Rack algorithm')
     fireEvent.change(first, { target: { value: 'oldest_first' } })
     fireEvent.change(first, { target: { value: 'bambuddy' } })
-    await waitFor(() => expect(answers.length).toBe(2))
+    await waitFor(() => expect(answers.length).toBe(1))
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await user.click(screen.getByRole('button', { name: 'Reopen' }))
@@ -2221,6 +2224,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await showAdvanced()
     const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
     answer(0, 200)
+    await waitFor(() => expect(answers.length).toBe(2))
     answer(1, 200)
     await act(() => Promise.allSettled(saves))
 
@@ -2228,31 +2232,26 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
   })
 
-  it('shows the later of two saves when they land after a close and reopen in reverse', async () => {
-    // #1086 review: the earlier save answering last was shown, though the later one was the
-    // user's last choice and the one the printer most likely stores.
+  it('sends a save only once the one before it is answered, so the last choice is stored', async () => {
+    // #1086 review: two PUTs in flight at once could be applied in either order, leaving
+    // the printer on a choice the user had replaced.
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
-    const { answers, answer, saves } = heldSaves()
-    const { user } = renderReopenable()
+    const { answers, answer, saves, stored } = heldSaves()
+    renderPicker()
     await loaded()
     await showAdvanced()
-    const first = await screen.findByLabelText('Rack algorithm')
-    fireEvent.change(first, { target: { value: 'oldest_first' } })
-    fireEvent.change(first, { target: { value: 'bambuddy' } })
-    await waitFor(() => expect(answers.length).toBe(2))
+    const select = await screen.findByLabelText('Rack algorithm')
+    fireEvent.change(select, { target: { value: 'oldest_first' } })
+    fireEvent.change(select, { target: { value: 'bambuddy' } })
+    await waitFor(() => expect(answers.length).toBe(1))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(answers.length).toBe(1)
 
-    await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    await user.click(screen.getByRole('button', { name: 'Reopen' }))
-    await loaded()
-    await showAdvanced()
-    const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
-    answer(1, 200)
-    await act(() => Promise.allSettled([saves[1]]))
-    await waitFor(() => expect(select.value).toBe('bambuddy'))
     answer(0, 200)
+    await waitFor(() => expect(answers.length).toBe(2))
+    answer(1, 200)
     await act(() => Promise.allSettled(saves))
-
-    expect(select.value).toBe('bambuddy')
+    expect(stored()).toBe('bambuddy')
   })
 
   it('keeps showing a save that lands while the reopened dialog is still reading', async () => {
