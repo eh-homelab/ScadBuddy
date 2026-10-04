@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { commandAnswer } from '../api/command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
@@ -48,14 +49,17 @@ export const authoringTools: Tool[] = [
     source:
       "the backend's account of the edit, whose refusal can quote the model's OpenSCAD source",
     routes: ['POST /api/v1/models/{slug}/source/patch'],
-    handler: async ({ slug, base, patch, edits, message, force }, { backend }) => {
+    handler: async ({ slug, base, patch, edits, message, force }, ctx) => {
       if ((patch === undefined) === (edits === undefined)) {
         throw new ToolError('give exactly one of `patch` and `edits`')
       }
-      const answered = await backend.POST('/api/v1/models/{slug}/source/patch', {
-        params: { path: { slug } },
-        body: { base, patch: patch ?? null, edits: edits ?? null, message: message ?? null, force },
-      })
+      const answered = await commandAnswer(ctx, `patch source of ${slug}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/source/patch', {
+          params: { path: { slug } },
+          body: { base, patch: patch ?? null, edits: edits ?? null, message: message ?? null, force },
+          headers,
+        }),
+      )
       if (answered.response.status === 409) {
         const current = currentOf(answered.error)
         if (current !== null) {

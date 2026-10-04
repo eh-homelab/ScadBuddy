@@ -93,7 +93,7 @@ type Operation = {
   id: string
   status: 'running' | 'succeeded' | 'failed'
   result?: unknown
-  error?: { status: number; title: string; detail: string } | null
+  error?: { status: number; title: string; detail: string; extensions?: Record<string, unknown> } | null
 }
 
 /** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
@@ -109,10 +109,24 @@ export async function command<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<T> {
+  return ok(commandAnswer(ctx, what, send), what)
+}
+
+/**
+ * `command`, answered as the route would have answered it, for a tool that reads a
+ * refusal's fields: the route's own result, or a followed operation's result, or its
+ * failure as the problem the route would have sent (its extensions, such as a stale
+ * base's `current`, at the top level, as in any problem document).
+ */
+export async function commandAnswer<T>(
+  ctx: ToolContext,
+  what: string,
+  send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
+): Promise<FetchResult<T>> {
   const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
   const gaveUp = ' It may have been done anyway: check before trying again.'
   const first = await answered(ctx, () => send(headers), what, gaveUp)
-  if (first.response.status !== 202) return ok(Promise.resolve(first), what)
+  if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
   const deadline = Date.now() + ctx.renderWaitMs
   for (let step = 1; op.status === 'running'; step++) {
@@ -129,8 +143,8 @@ export async function command<T>(
     )) as Operation
   }
   if (op.status === 'failed') {
-    const error = op.error
-    throw new ToolError(`${what} failed (HTTP ${error?.status ?? 500})`, error?.status ?? 500, error ? `${error.title}: ${error.detail}` : undefined)
+    const { extensions, ...problem } = op.error ?? { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
+    return { error: { ...problem, ...extensions }, response: new Response(null, { status: problem.status }) }
   }
-  return op.result as T
+  return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }

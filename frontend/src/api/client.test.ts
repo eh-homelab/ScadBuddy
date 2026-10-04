@@ -951,6 +951,68 @@ describe("a model's lifecycle is commands (#1054)", () => {
   })
 })
 
+describe("a model's edits are commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-8', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W' }
+
+  it.each([
+    ['replaceSource', () => api.replaceSource('w', 'cube(2);'), 'put', '/api/v1/models/w/source', model],
+    ['resolveUpstreamMerge', () => api.resolveUpstreamMerge('w', 'cube(2);', 'abc1234'), 'put', '/api/v1/models/w/source', model],
+    ['removeThumbnail', () => api.removeThumbnail('w'), 'delete', '/api/v1/models/w/thumbnail', model],
+    ['setReadme', () => api.setReadme('w', '# W'), 'put', '/api/v1/models/w/readme', model],
+    ['removeReadme', () => api.removeReadme('w'), 'delete', '/api/v1/models/w/readme', model],
+    ['mergeUpstream', () => api.mergeUpstream('w'), 'post', '/api/v1/models/w/upstream/merge', { model, taken: [], kept: [] }],
+    ['dismissUpstream', () => api.dismissUpstream('w'), 'post', '/api/v1/models/w/upstream/dismiss', model],
+    ['detachUpstream', () => api.detachUpstream('w'), 'post', '/api/v1/models/w/upstream/detach', model],
+    ['restoreVersion', () => api.restoreVersion('w', 'abc1234'), 'post', '/api/v1/models/w/versions/abc1234/restore', { id: 'abc1234', current: true }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, method, path, result) => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-8', () => HttpResponse.json({ ...operation, status: 'succeeded', result })),
+    )
+    await expect(call()).resolves.toEqual(result)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('setThumbnail sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw, as uploadModel's: jsdom's Blob cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-8')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.setThumbnail('w', new Blob(['png']))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("keeps a merge conflict's merged text, answered by the route", async () => {
+    server.use(
+      http.post('/api/v1/models/w/upstream/merge', () =>
+        HttpResponse.json({ title: 'Conflict', status: 409, detail: 'conflicts', merged: '<<<<<<< w', merge_base: 'abc1234' }, { status: 409 }),
+      ),
+    )
+    const caught = await api.mergeUpstream('w').catch((e: unknown) => e)
+    expect((caught as ApiError).status).toBe(409)
+    expect((caught as ApiError).problem.merged).toBe('<<<<<<< w')
+  })
+})
+
 describe('render (#1053)', () => {
   const defaults = { ...printRunPoll }
   afterEach(() => {

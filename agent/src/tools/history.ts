@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { command } from '../api/command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
@@ -90,11 +91,10 @@ export const historyTools: Tool[] = [
     input: z.object({ slug, commit }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/versions/{commit}/restore'],
-    handler: async ({ slug, commit }, { backend }) =>
+    handler: async ({ slug, commit }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/versions/{commit}/restore', { params: { path: { slug, commit } } }),
-          `restore ${slug}@${commit}`,
+        await command(ctx, `restore ${slug}@${commit}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/versions/{commit}/restore', { params: { path: { slug, commit } }, headers }),
         ),
       ),
   }),
@@ -124,16 +124,16 @@ export const historyTools: Tool[] = [
       'POST /api/v1/models/{slug}/upstream/dismiss',
       'POST /api/v1/models/{slug}/upstream/detach',
     ],
-    handler: async ({ slug, action }, { backend }) => {
-      const options = { params: { path: { slug } } }
+    handler: async ({ slug, action }, ctx) => {
       const what = `${action} upstream of ${slug}`
+      const params = { path: { slug } }
       switch (action) {
         case 'merge':
-          return json(await ok(backend.POST('/api/v1/models/{slug}/upstream/merge', options), what))
+          return json(await command(ctx, what, (headers) => ctx.backend.POST('/api/v1/models/{slug}/upstream/merge', { params, headers })))
         case 'dismiss':
-          return json(await ok(backend.POST('/api/v1/models/{slug}/upstream/dismiss', options), what))
+          return json(await command(ctx, what, (headers) => ctx.backend.POST('/api/v1/models/{slug}/upstream/dismiss', { params, headers })))
         case 'detach':
-          return json(await ok(backend.POST('/api/v1/models/{slug}/upstream/detach', options), what))
+          return json(await command(ctx, what, (headers) => ctx.backend.POST('/api/v1/models/{slug}/upstream/detach', { params, headers })))
       }
     },
   }),

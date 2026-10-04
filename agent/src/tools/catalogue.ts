@@ -171,14 +171,14 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/source'],
-    handler: async ({ slug, source, message, force, base }, { backend }) =>
+    handler: async ({ slug, source, message, force, base }, ctx) =>
       json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/source', {
+        await command(ctx, `update source of ${slug}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/source', {
             params: { path: { slug } },
             body: { source, message: message ?? null, force, base: base ?? null },
+            headers,
           }),
-          `update source of ${slug}`,
         ),
       ),
   }),
@@ -221,11 +221,10 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug, content: z.string().max(1_000_000) }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/readme'],
-    handler: async ({ slug, content }, { backend }) =>
+    handler: async ({ slug, content }, ctx) =>
       json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/readme', { params: { path: { slug } }, body: { content } }),
-          `set README of ${slug}`,
+        await command(ctx, `set README of ${slug}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/readme', { params: { path: { slug } }, body: { content }, headers }),
         ),
       ),
   }),
@@ -236,9 +235,11 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/readme'],
-    handler: async ({ slug }, { backend }) =>
+    handler: async ({ slug }, ctx) =>
       json(
-        await ok(backend.DELETE('/api/v1/models/{slug}/readme', { params: { path: { slug } } }), `delete README of ${slug}`),
+        await command(ctx, `delete README of ${slug}`, (headers) =>
+          ctx.backend.DELETE('/api/v1/models/{slug}/readme', { params: { path: { slug } }, headers }),
+        ),
       ),
   }),
 
@@ -264,16 +265,16 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug, png_base64: z.string().min(1) }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/thumbnail'],
-    handler: async ({ slug, png_base64 }, { backend }) => {
+    handler: async ({ slug, png_base64 }, ctx) => {
       const form = fileForm(decodeBase64(png_base64, 'png_base64'), 'thumbnail.png', 'image/png')
       return json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/thumbnail', {
+        await command(ctx, `set thumbnail of ${slug}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/thumbnail', {
             params: { path: { slug } },
             body: { file: 'thumbnail.png' },
             bodySerializer: () => form,
+            headers,
           }),
-          `set thumbnail of ${slug}`,
         ),
       )
     },
@@ -285,11 +286,10 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/thumbnail'],
-    handler: async ({ slug }, { backend }) =>
+    handler: async ({ slug }, ctx) =>
       json(
-        await ok(
-          backend.DELETE('/api/v1/models/{slug}/thumbnail', { params: { path: { slug } } }),
-          `delete thumbnail of ${slug}`,
+        await command(ctx, `delete thumbnail of ${slug}`, (headers) =>
+          ctx.backend.DELETE('/api/v1/models/{slug}/thumbnail', { params: { path: { slug } }, headers }),
         ),
       ),
   }),

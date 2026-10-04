@@ -1353,6 +1353,50 @@ describe("a model's lifecycle as operations (#1054)", () => {
   })
 })
 
+describe("a model's edits as operations (#1054)", () => {
+  const op = { id: 'op-9', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+  const base = 'abc1234'
+
+  it.each([
+    ['update_source', { slug: 'w', source: 'cube(2);' }, 'put', '/api/v1/models/w/source'],
+    ['apply_patch', { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, 'post', '/api/v1/models/w/source/patch'],
+    ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
+    ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
+    ['set_model_thumbnail', { slug: 'w', png_base64: 'iVBORw0KGgo=' }, 'put', '/api/v1/models/w/thumbnail'],
+    ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
+    ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
+    ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
+    ['restore_version', { slug: 'w', commit: base }, 'post', `/api/v1/models/w/versions/${base}/restore`],
+    ['update_from_upstream', { slug: 'w', action: 'merge' }, 'post', '/api/v1/models/w/upstream/merge'],
+    ['update_from_upstream', { slug: 'w', action: 'dismiss' }, 'post', '/api/v1/models/w/upstream/dismiss'],
+    ['update_from_upstream', { slug: 'w', action: 'detach' }, 'post', '/api/v1/models/w/upstream/detach'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("apply_patch reads `current` from a stale base the operation's run found", async () => {
+    const stale = { status: 409, title: 'Conflict', detail: 'moved on', type: 'about:blank', extensions: { base, current: 'def5678' } }
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/w/source/patch`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: stale })),
+    )
+    const result = await runTool(tool('apply_patch'), { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatchObject({ status: 'conflict', current: 'def5678' })
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { command } from '../api/command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
@@ -87,14 +88,14 @@ export const sourceFileTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],
-    handler: async ({ slug, name, content, message }, { backend }) =>
+    handler: async ({ slug, name, content, message }, ctx) =>
       json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/files/{name}', {
+        await command(ctx, `write ${slug}/${name}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
             params: { path: { slug, name } },
             body: { content, message: message ?? null },
+            headers,
           }),
-          `write ${slug}/${name}`,
         ),
       ),
   }),
@@ -106,11 +107,10 @@ export const sourceFileTools: Tool[] = [
     input: z.object({ slug, name: fileName }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/files/{name}'],
-    handler: async ({ slug, name }, { backend }) =>
+    handler: async ({ slug, name }, ctx) =>
       json(
-        await ok(
-          backend.DELETE('/api/v1/models/{slug}/files/{name}', { params: { path: { slug, name } } }),
-          `remove ${slug}/${name}`,
+        await command(ctx, `remove ${slug}/${name}`, (headers) =>
+          ctx.backend.DELETE('/api/v1/models/{slug}/files/{name}', { params: { path: { slug, name } }, headers }),
         ),
       ),
   }),

@@ -496,7 +496,7 @@ export const api = {
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+    return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
   },
 
   /**
@@ -504,7 +504,7 @@ export const api = {
    * a generated model falls back to its first output's plate image.
    */
   removeThumbnail: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
 
   /** The README's Markdown, or null when the model has none. */
   getReadme: async (slug: string): Promise<string | null> => {
@@ -517,13 +517,13 @@ export const api = {
   },
 
   setReadme: (slug: string, content: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, {
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, {
       method: 'PUT',
       body: JSON.stringify({ content }),
     }),
 
   removeReadme: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
   /** The template's shipped presets, then the ones saved on it. */
   listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
@@ -565,7 +565,7 @@ export const api = {
    * when given. Parse-checked server-side unless `force`.
    */
   replaceSource: (slug: string, source: string, force = false, message?: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+    command<ModelSummary>(`/models/${seg(slug)}/source`, {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: message ?? null }),
     }),
@@ -607,20 +607,20 @@ export const api = {
 
   /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
   mergeUpstream: (slug: string) =>
-    request<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+    command<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
 
   dismissUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
 
   detachUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
 
   /**
    * Saves the resolution of a conflicted upstream merge: the same write as
    * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
    */
   resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
@@ -785,7 +785,7 @@ export const api = {
     ),
 
   restoreVersion: (slug: string, version: string) =>
-    request<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
+    command<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
       method: 'POST',
     }),
 
