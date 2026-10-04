@@ -491,6 +491,9 @@ describe('CataloguePage cards (#277)', () => {
       'li',
     ) as HTMLElement
     intersect(card)
+    // The carousel mounts once the card nears the viewport (#593); wait for it, or a
+    // query for its buttons can run before it renders.
+    await within(card).findByRole('region', { name: 'Crème Coaster' })
     return card
   }
 
