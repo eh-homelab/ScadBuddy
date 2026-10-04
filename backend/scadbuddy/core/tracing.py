@@ -256,12 +256,6 @@ def _context_from(traceparent: str | None) -> Context | None:
     return extracted
 
 
-def valid_traceparent(traceparent: str | None) -> bool:
-    """Whether ``traceparent`` names a span the propagator accepts: what `link_to` and
-    `use_traceparent` rejoin, and nothing else."""
-    return _context_from(traceparent) is not None
-
-
 def link_to(traceparent: str | None) -> Link | None:
     extracted = _context_from(traceparent)
     if extracted is None:
@@ -296,5 +290,4 @@ __all__ = [
     "traces_export_enabled",
     "tracing_disabled",
     "use_traceparent",
-    "valid_traceparent",
 ]

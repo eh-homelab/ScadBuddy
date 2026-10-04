@@ -145,7 +145,13 @@ class JobProjection:
                     (supersedes, job.slug),
                 ).fetchone()
                 if previous is not None and previous["render_key"] == key:
-                    return Submitted(_job(previous), coalesced=True)
+                    adopted = conn.execute(
+                        "UPDATE render_jobs SET traceparent = COALESCE(traceparent, %s)"
+                        " WHERE id = %s RETURNING *",
+                        (job.traceparent, previous["id"]),
+                    ).fetchone()
+                    assert adopted is not None
+                    return Submitted(_job(adopted), coalesced=True)
                 if previous is not None:
                     superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)
             if max_pending:
