@@ -462,7 +462,13 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         queue = settings.temporal_task_queue_bambuddy
         workers = [
             bambuddy_worker(client, queue, activities),
-            follow_worker(client, queue, FollowActivities(state.print_follower).follow_print),
+            follow_worker(
+                client,
+                queue,
+                FollowActivities(
+                    state.print_follower, running=state.metrics.print_follows_running
+                ).follow_print,
+            ),
         ]
         if not await _serve_until(
             workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
