@@ -45,7 +45,8 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
 #: The whole budget of a settle's settings read, its wait for a connection included (#1111):
-#: well inside the watcher's ``SETTLE_TIMEOUT``.
+#: well inside the watcher's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
+#: answer, not a connection that gets no reply at all (#1226).
 SETTINGS_READ_TIMEOUT = 10.0
 
 
@@ -432,9 +433,9 @@ def settle_hook(
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the watcher stops
-        # waiting on it at its timeout (#1083), and bounded itself (#1111), so a stuck
-        # read gives its thread back to the shared executor rather than holding it
-        # until Postgres answers.
+        # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
+        # stuck on a slow Postgres gives its thread back to the shared executor rather
+        # than holding it until Postgres answers.
         settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)

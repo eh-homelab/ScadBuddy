@@ -510,21 +510,23 @@ def test_a_settings_read_timeout_bounds_the_whole_read(
 ) -> None:
     """#1111: the timeout is the read's whole budget, not each statement's: a read that
     waits most of it on one table gets only the rest for the next."""
-    budget = 1.0
+    budget = 2.0
     settings_holder = psycopg.connect(settings.database_url)
+    release = threading.Timer(0.6 * budget, settings_holder.commit)
     try:
         settings_holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
         with psycopg.connect(settings.database_url) as beds, beds.transaction():
             beds.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
-            release = threading.Timer(0.6 * budget, settings_holder.commit)
             release.start()
             started = time.monotonic()
             with pytest.raises(psycopg.errors.QueryCanceled):
                 store.load(timeout=budget)
             elapsed = time.monotonic() - started
-            release.join()
     finally:
+        release.cancel()
+        release.join()
         settings_holder.close()
+    # A per-statement bound would take about 1.6 budgets here.
     assert elapsed < 1.3 * budget
 
 

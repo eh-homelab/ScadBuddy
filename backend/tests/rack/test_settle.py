@@ -363,12 +363,12 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
 
 
-async def test_the_settings_read_is_bounded_and_the_next_settle_reads_again(
+async def test_the_hook_passes_its_read_timeout_and_a_failed_read_spares_the_next(
     store: RackUsageStore, pool: PgPool
 ) -> None:
-    """#1111: the hook bounds its settings read, so a stuck one gives its thread back
-    rather than holding it until Postgres answers; a read that failed does not stop the
-    next settle from reading."""
+    """#1111: the hook passes ``SETTINGS_READ_TIMEOUT`` to its settings read, and a read
+    that failed does not stop the next settle from reading. The stub cannot show the
+    bound ends a read; ``test_a_real_stuck_settings_read_gives_its_thread_back`` does."""
     asked: list[float] = []
 
     def load(timeout: float) -> StoredSettings:

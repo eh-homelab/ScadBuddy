@@ -432,10 +432,14 @@ class SettingsStore:
 
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
         """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a
-        connection and every statement after it share one deadline, so the read ends
-        about ``timeout`` after it starts. It bounds this read only: a pool-wide
-        statement timeout would also cut short the saves' deliberate lock waits and the
-        migration."""
+        connection and every statement after it share one deadline. A pool wait that runs
+        out raises ``PoolTimeout``; a statement that does raises ``QueryCanceled``.
+
+        It bounds a read Postgres is slow to answer (a held lock, a slow plan), since
+        ``statement_timeout`` is enforced by the server. A connection that gets no reply
+        at all (a half-open socket) is not bounded here: that is #1226. It bounds this
+        read only: a pool-wide statement timeout would also cut short the saves'
+        deliberate lock waits and the migration."""
         deadline = None if timeout is None else time.monotonic() + timeout
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
