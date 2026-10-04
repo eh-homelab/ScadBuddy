@@ -94,6 +94,7 @@ import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './a
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
+import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
 
@@ -368,10 +369,14 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+async function reattach<T>(
+  attempt: () => Promise<T>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<T> {
   for (let tries = 0; ; tries++) {
     try {
-      return await attempt()
+      return await (within ? within(attempt) : attempt())
     } catch (caught) {
       if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
       await wait(printRunPoll.intervalMs, signal)
@@ -385,16 +390,19 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
  * slices and queues in the background, since that takes longer than the proxies in
  * front wait. A repeat of the same request (the same `request_id`) is the same run, so
  * re-sending it after an answer that never arrived re-attaches to that run and never
- * queues a second print. `signal` stops following; the run itself goes on.
+ * queues a second print. `signal` stops following; the run itself goes on. `within`
+ * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
  */
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,
   signal?: AbortSignal,
+  within?: Within,
 ): Promise<PrintRunResult> {
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    within,
   )
   while (run.status === 'running') {
     await wait(printRunPoll.intervalMs, signal)
@@ -887,8 +895,8 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal, within),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -1023,8 +1031,8 @@ export const api = {
   },
 
   /** #742 — followed to its end like an output's run (`runPrint`). */
-  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/library/${fileId}/run`, body, signal),
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
