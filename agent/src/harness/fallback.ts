@@ -156,8 +156,11 @@ function textOf(message: Extract<SDKMessage, { type: 'assistant' }>): string {
     .trim()
 }
 
-/** The failed model request a result reports, if it reports one. */
-function apiFailure(
+/**
+ * The failed model request a result reports, if it reports one. Also how the
+ * session manager tells a refused request from a reply (#1101).
+ */
+export function apiFailure(
   result: SDKResultMessage | undefined,
   synthetic: FailureEvidence | undefined,
   lastRetry: FailureEvidence | undefined,

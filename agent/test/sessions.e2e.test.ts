@@ -233,6 +233,32 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
   }, 60_000)
 
+  it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
+    script = (r) =>
+      conversation(r).includes('tool_result')
+        ? { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+        : { toolUse: { name: 'mcp__stub__lookup', input: { q: 'box' } } }
+    const lookup = tool('lookup', 'Look something up', { q: z.string() }, (args) =>
+      Promise.resolve({ content: [{ type: 'text' as const, text: `found ${args.q}` }] }),
+    )
+    const m = await replica({
+      mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [lookup] }) }),
+      tierOf: (name) => (name === 'mcp__stub__lookup' ? 'read' : undefined),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    // Two model requests: the tool call, which counts, and the refused one, which does not.
+    expect(fake.messageCalls()).toHaveLength(2)
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 1 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.map((e) => e.type).filter((t) => t.startsWith('tool.') || t.startsWith('assistant.') || t === 'error')).toEqual([
+      'tool.call',
+      'tool.result',
+      'error',
+    ])
+  }, 60_000)
+
   it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
     script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })
     const m = await replica({ newSessions: { max: 3, windowMs: 60_000 } })

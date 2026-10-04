@@ -69,6 +69,27 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
   return 'other'
 }
 
+/**
+ * What the user is told about a turn that ended on a failed model request
+ * (#1101), from the same evidence `classifyFailure` reads. Claude Code's own
+ * "API Error: …" text, when there is one, follows as the detail.
+ */
+export function describeApiFailure(evidence: FailureEvidence): string {
+  const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
+  const text = evidence.message?.trim()
+  const detail = text ? `: ${text}` : ''
+  switch (classifyFailure(evidence)) {
+    case 'permanent':
+      return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+    case 'rate_limited':
+      return `the Claude credential is rate limited (${http}); try again later${detail}`
+    case 'transient':
+      return `the model endpoint failed (${http}); try again${detail}`
+    default:
+      return `the model API refused the request (${http})${detail}`
+  }
+}
+
 /** A rate limit that names no time is tried again after this long. */
 export const DEFAULT_COOLDOWN_MS = 60_000
 /** No credential waits longer than this without being tried again. */

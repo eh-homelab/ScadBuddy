@@ -4,6 +4,7 @@ import {
   classifyFailure,
   cooldownUntil,
   DEFAULT_COOLDOWN_MS,
+  describeApiFailure,
   type FailureClass,
   type FailureEvidence,
   MAX_COOLDOWN_MS,
@@ -42,6 +43,31 @@ describe('classifyFailure (#1093)', () => {
   ]
   it.each(cases)('%s', (_name, evidence, expected) => {
     expect(classifyFailure(evidence)).toBe(expected)
+  })
+})
+
+describe('describeApiFailure (#1101)', () => {
+  it.each<[FailureEvidence, string]>([
+    [
+      { status: 403, message: 'API Error: 403 forbidden' },
+      'the Claude credential was rejected (HTTP 403); check it under Settings → AI: API Error: 403 forbidden',
+    ],
+    [
+      { status: 400, message: 'Your credit balance is too low' },
+      'the Claude credential was rejected (HTTP 400); check it under Settings → AI: Your credit balance is too low',
+    ],
+    // The category decides over a status that would say otherwise.
+    [
+      { status: 400, category: 'billing_error', message: 'API Error' },
+      'the Claude credential was rejected (HTTP 400); check it under Settings → AI: API Error',
+    ],
+    [{ status: 429, message: 'slow down' }, 'the Claude credential is rate limited (HTTP 429); try again later: slow down'],
+    [{ status: 529, message: 'Overloaded' }, 'the model endpoint failed (HTTP 529); try again: Overloaded'],
+    [{ status: null, message: 'Connection error.' }, 'the model endpoint failed (no response); try again: Connection error.'],
+    [{ status: 400, message: 'bad request' }, 'the model API refused the request (HTTP 400): bad request'],
+    [{ status: 400, message: '  ' }, 'the model API refused the request (HTTP 400)'],
+  ])('%j', (evidence, said) => {
+    expect(describeApiFailure(evidence)).toBe(said)
   })
 })
 

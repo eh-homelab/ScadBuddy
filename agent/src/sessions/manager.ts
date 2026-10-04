@@ -10,8 +10,8 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
-import { classifyFailure, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
+import { apiFailure, type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import {
@@ -151,29 +151,6 @@ export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 export const MAX_SESSION_BUDGET_USD = 100
 /** The largest `max_turns` per reply Settings takes. */
 export const MAX_SESSION_MAX_TURNS = 200
-
-/**
- * What to say about a turn the model API refused, or undefined when the
- * result is not one (#1101). Claude Code reports a refused request as a
- * `success` result with `is_error` set, whose `result` is its own
- * "API Error: …" text; that text is not the model's reply.
- */
-function apiRefusal(result: SDKResultMessage): string | undefined {
-  if (result.subtype !== 'success' || !result.is_error) return undefined
-  const status = typeof result.api_error_status === 'number' ? result.api_error_status : null
-  const http = status === null ? 'no response' : `HTTP ${status}`
-  const detail = result.result.trim() ? `: ${result.result.trim()}` : ''
-  switch (classifyFailure({ status, message: result.result })) {
-    case 'permanent':
-      return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
-    case 'rate_limited':
-      return `the Claude credential is rate limited (${http}); try again later${detail}`
-    case 'transient':
-      return `the model endpoint failed (${http}); try again${detail}`
-    default:
-      return `the model API refused the request (${http})${detail}`
-  }
-}
 
 /** Money as the user reads it: dollars, rounded to cents ("$0.03", never "$0.025546000000000007"). */
 export function usd(amount: number): string {
@@ -977,6 +954,9 @@ export class SessionManager {
 
     let result: SDKResultMessage | undefined
     let failure: string | undefined
+    /** What fallback.ts `apiFailure` reads besides the result: Claude Code's synthetic error message and last retry. */
+    let synthetic: FailureEvidence | undefined
+    let lastRetry: FailureEvidence | undefined
     let forwarded: PluginsForRun | undefined
     let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
@@ -1160,6 +1140,10 @@ export class SessionManager {
         if (message.type === 'result') {
           result = message
           local.settling = true
+        } else if (message.type === 'assistant' && message.error) {
+          synthetic ??= { category: message.error }
+        } else if (message.type === 'system' && message.subtype === 'api_retry') {
+          lastRetry = { status: message.error_status, category: message.error }
         }
         await pluginCheck?.(message)
         const events = mapper.map(message)
@@ -1194,7 +1178,8 @@ export class SessionManager {
     // replica, resumes from a complete transcript.
     if (lost) return { kind: 'lost_claim' }
     const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-    return this.finish(session, turnId, stopped, result, failure, secrets)
+    const refused = result ? apiFailure(result, synthetic, lastRetry) : undefined
+    return this.finish(session, turnId, stopped, result, refused, failure, secrets)
   }
 
   /**
@@ -1296,6 +1281,8 @@ export class SessionManager {
     turnId: string,
     stopped: string | undefined,
     result: SDKResultMessage | undefined,
+    /** The failed model request `result` reports, when it reports one (fallback.ts `apiFailure`). */
+    refused: FailureEvidence | undefined,
     failure: string | undefined,
     secrets: readonly string[],
   ): Promise<TurnOutcome> {
@@ -1334,11 +1321,13 @@ export class SessionManager {
       // and it is added instead.
       const total = result.total_cost_usd
       costUsd = total >= session.costUsd ? total : session.costUsd + total
-      // Redacted here too: the outcome reaches MCP callers without scrubForLog.
-      const refused = apiRefusal(result)
-      const refusal = refused === undefined ? undefined : redact(refused, secrets)
-      if (refusal !== undefined) {
-        // Not a reply, so no turn: only what it spent counts (#1101).
+      if (refused) {
+        // Claude Code reports a refused request as a `success` result with
+        // `is_error` set, and its "API Error: …" text as a synthetic reply
+        // (#1101). Redacted here too: the outcome reaches MCP callers without
+        // scrubForLog. The refused request is not a turn; any before it are.
+        const refusal = redact(describeApiFailure(refused), secrets)
+        turns = session.turns + Math.max(result.num_turns - 1, 0)
         status = 'failed'
         tail.push(event({ type: 'session.budget', sessionId: id, costUsd, budgetUsd: session.budgetUsd }))
         tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal }))
