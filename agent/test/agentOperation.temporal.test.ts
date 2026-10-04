@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { AlreadyClosedError, startCommand } from '../src/operations/command.js'
+import { AgentCommands } from '../src/operations/run.js'
 import { type OperationKind, refusal } from '../src/operations/kinds.js'
 import { OperationStore } from '../src/operations/store.js'
 import type { OperationInput } from '../src/temporal/names.js'
@@ -164,6 +165,20 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
     expect(a.operation?.id).toBe(b.operation?.id)
     expect([a.repeated, b.repeated].sort()).toEqual([false, true])
     expect(runs).toBe(1)
+  }, 60_000)
+
+  it('answers 202 past the deadline, and records an execution terminated after its record as lost', async () => {
+    const commands = new AgentCommands({ client: env.client, store, kinds, searchAttributes: false, deadlineMs: 1_000 })
+    const outcome = await commands.run('slow', {}, 'lost-key')
+    expect(outcome).toMatchObject({ status: 'running', operation: { kind: 'slow', status: 'running' } })
+    const op = (outcome as { operation: { id: string } }).operation
+    expect(await commands.get(op.id)).toMatchObject({ status: 'running' })
+    const execution = (await store.execution(op.id))!
+    await env.client.workflow.getHandle(execution.workflowId).terminate('test')
+    release!()
+    expect(await commands.get(op.id)).toMatchObject({ status: 'failed', error: { status: 500 } })
+    // The same press answers from the record.
+    expect(await commands.run('slow', {}, 'lost-key')).toMatchObject({ status: 'problem', problem: { status: 500 } })
   }, 60_000)
 
   it('replays its recorded history', async () => {

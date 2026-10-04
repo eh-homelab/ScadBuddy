@@ -107,6 +107,13 @@ export class OperationStore {
     return row ? view(row) : undefined
   }
 
+  /** The execution that runs (or ran) an operation. */
+  async execution(id: string): Promise<{ workflowId: string; workflowRunId: string } | undefined> {
+    const [row] = await this.sql<{ workflow_id: string; workflow_run_id: string }[]>`
+      SELECT workflow_id, workflow_run_id FROM ai_operations WHERE id = ${id}`
+    return row ? { workflowId: row.workflow_id, workflowRunId: row.workflow_run_id } : undefined
+  }
+
   /**
    * Record an accepted operation, or return the execution's row when it has one (a
    * retried activity). Prunes operations finished more than the retention ago.

@@ -9,9 +9,11 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
+import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { InlineCommands } from './support/commands.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -171,6 +173,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         credentials: new MemoryCredentials(),
         pluginPackages: store,
         packageInstaller: installer,
+        commands: new InlineCommands(packageKinds({ packages: store, installer })),
         testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
         remoteAddress: () => '10.0.0.7',
         origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
