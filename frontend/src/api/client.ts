@@ -298,6 +298,8 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  // Its run may be checking still, and will print once it is accepted (#1052).
+  if (error.problem.type === STILL_ACCEPTING) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -319,10 +321,16 @@ function bambuddyUnanswered(problem: Problem): boolean {
 const seg = encodeURIComponent
 
 /**
- * How often `runPrint` reads a running print run (#470), and how many times it tries a
- * request no ScadBuddy answer described again before giving up; tests shorten it.
+ * How often `runPrint` reads a running print run (#470), how many times it tries a
+ * request no ScadBuddy answer described again before giving up, and how long it keeps
+ * sending one the server is still accepting (#1052: past the accept's own worst case,
+ * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+/**
+ * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
+ * execution is gone within minutes; this is the backstop, past any run's own length.
+ */
+export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
 
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
@@ -343,16 +351,18 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
+export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ * Or ScadBuddy answered that the same request is still being accepted.
  */
 function unanswered(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    caught.problem.type === UNANSWERED &&
-    [0, 502, 503, 504, 524].includes(caught.status)
-  )
+  if (!(caught instanceof ApiError)) return false
+  if (caught.problem.type === STILL_ACCEPTING) return true
+  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
@@ -380,12 +390,19 @@ async function reattach<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
-  for (let tries = 0; ; tries++) {
+  const began = Date.now()
+  for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
-      await wait(printRunPoll.intervalMs, signal)
+      if (signal?.aborted || !unanswered(caught)) throw caught
+      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+        throw caught
+      }
+      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
 }
@@ -410,7 +427,18 @@ async function followPrintRun(
     signal,
     within,
   )
+  const began = Date.now()
   while (run.status === 'running') {
+    if (Date.now() - began >= printRunPoll.followMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:print-run-unfinished',
+        title: 'Still preparing',
+        status: 504,
+        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        // It may be queued by now: the dialog says to check before printing again.
+        may_have_queued: true,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = run.id
     run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)

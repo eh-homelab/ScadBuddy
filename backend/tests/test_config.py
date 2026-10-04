@@ -40,6 +40,7 @@ def test_settings_refuse_to_start_without_a_database_url(
         "SCADBUDDY_TEMPORAL_ADDRESS",
         "SCADBUDDY_TEMPORAL_NAMESPACE",
         "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER",
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY",
     ],
 )
 @pytest.mark.parametrize("value", ["  ", " temporal:7233", "temporal:7233\n"])
@@ -53,7 +54,12 @@ def test_a_temporal_setting_with_whitespace_is_refused_by_name(
 
 
 @pytest.mark.parametrize(
-    "variable", ["SCADBUDDY_TEMPORAL_NAMESPACE", "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER"]
+    "variable",
+    [
+        "SCADBUDDY_TEMPORAL_NAMESPACE",
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER",
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY",
+    ],
 )
 def test_an_empty_temporal_namespace_or_queue_is_refused_by_name(
     variable: str, monkeypatch: pytest.MonkeyPatch
@@ -61,6 +67,13 @@ def test_an_empty_temporal_namespace_or_queue_is_refused_by_name(
     monkeypatch.setenv(variable, "")
     with pytest.raises(ValueError, match=variable):
         Settings()
+
+
+def test_prints_run_on_the_bambuddy_queue_without_search_attributes_by_default() -> None:
+    """#1052: spec 2026-10-01 §4.3, §5.5; the attributes need the clusters change first."""
+    settings = Settings(_env_file=None, temporal_address="temporal:7233")  # type: ignore[call-arg]
+    assert settings.temporal_task_queue_bambuddy == "bambuddy"
+    assert settings.temporal_search_attributes is False
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
