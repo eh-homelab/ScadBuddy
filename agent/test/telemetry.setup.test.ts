@@ -1,7 +1,7 @@
 // agent/test/telemetry.setup.test.ts
 import { hostname } from 'node:os'
 import { BatchSpanProcessor, InMemorySpanExporter, NoopSpanProcessor } from '@opentelemetry/sdk-trace'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   agentResource,
   httpInstrumentation,
@@ -49,6 +49,23 @@ describe('telemetry setup', () => {
     const otlp = spanProcessors({ ...traces, OTEL_TRACES_EXPORTER: 'otlp' }, new InMemorySpanExporter())
     expect(otlp[0]).toBeInstanceOf(BatchSpanProcessor)
     await otlp[0]!.shutdown()
+  })
+
+  it('turns off with one warning for an exporter it does not ship; a list containing otlp exports', async () => {
+    const endpoint = { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://alloy:4318' }
+    const warn = vi.fn()
+    expect(spanProcessors({ ...endpoint, OTEL_TRACES_EXPORTER: ' Console ' }, undefined, warn)[0]).toBeInstanceOf(NoopSpanProcessor)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]![0]).toContain('Console')
+    const quiet = vi.fn()
+    spanProcessors({ ...endpoint, OTEL_TRACES_EXPORTER: 'none' }, undefined, quiet)
+    expect(quiet).not.toHaveBeenCalled()
+    for (const value of ['otlp,console', ' Console , OTLP ', '', '  ']) {
+      const processors = spanProcessors({ ...endpoint, OTEL_TRACES_EXPORTER: value }, new InMemorySpanExporter(), quiet)
+      expect(processors[0]).toBeInstanceOf(BatchSpanProcessor)
+      await processors[0]!.shutdown()
+    }
+    expect(quiet).not.toHaveBeenCalled()
   })
 
   it('is disabled only by OTEL_SDK_DISABLED=true', () => {

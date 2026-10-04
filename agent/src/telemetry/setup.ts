@@ -13,7 +13,8 @@ import { ScrubbingSpanExporter } from './scrub.js'
 // src/telemetry.ts before the app loads. Configured by the standard OTEL_*
 // variables only:
 //   OTEL_EXPORTER_OTLP_ENDPOINT, or the traces-specific
-//   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  neither set (or OTEL_TRACES_EXPORTER=none): a
+//   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  neither set (or OTEL_TRACES_EXPORTER=none, or any
+//                                value without `otlp`, which also warns once): a
 //                                provider with no exporter, so spans are created
 //                                (context propagates) and dropped (§3). The exporter
 //                                itself resolves the URL and the (TRACES_)HEADERS.
@@ -55,8 +56,19 @@ export function tracingDisabled(env: Env = process.env): boolean {
  * all for an empty list (sdk-node 0.222.0 `start()`), which would stop
  * propagation; §3 wants spans created and dropped.
  */
-export function spanProcessors(env: Env = process.env, exporter?: SpanExporter): SpanProcessor[] {
-  if (env.OTEL_TRACES_EXPORTER?.trim().toLowerCase() === 'none') return [new NoopSpanProcessor()]
+export function spanProcessors(
+  env: Env = process.env,
+  exporter?: SpanExporter,
+  warn: (message: string) => void = console.warn,
+): SpanProcessor[] {
+  const named = env.OTEL_TRACES_EXPORTER?.trim() ?? ''
+  if (named !== '') {
+    const names = named.split(',').map((name) => name.trim().toLowerCase())
+    if (!names.includes('otlp')) {
+      if (named.toLowerCase() !== 'none') warn(`OTEL_TRACES_EXPORTER=${named} is not an exporter the agent ships; tracing is off`)
+      return [new NoopSpanProcessor()]
+    }
+  }
   if (!present(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) && !present(env.OTEL_EXPORTER_OTLP_ENDPOINT)) return [new NoopSpanProcessor()]
   return [new BatchSpanProcessor({ exporter: new ScrubbingSpanExporter(exporter ?? new OTLPTraceExporter()) })]
 }
