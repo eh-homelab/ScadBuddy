@@ -156,24 +156,31 @@ __all__ = [
 LOST_RUN_GRACE = timedelta(minutes=1)
 
 
+async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool:
+    """Whether that run (or, with no run id, the workflow's latest) is running."""
+    try:
+        described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe()
+    except RPCError as error:
+        if error.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return described.status == WorkflowExecutionStatus.RUNNING
+
+
 async def reconcile_lost_runs(
     client: Client, store: PrintRunStore, *, older_than: timedelta = LOST_RUN_GRACE
 ) -> int:
     """End each ``running`` print run whose execution has closed or is gone (review
-    #1061): terminated or reset in the Temporal UI, it never runs ``print_fail``. One
-    still running is left to end its row itself. Returns how many it ended."""
+    #1061): terminated in the Temporal UI, it never runs ``print_fail``. One still
+    running is left to end its row itself, and so is one whose workflow still runs
+    under a later run id: a reset continues the same row there. Returns how many it
+    ended."""
     ended = 0
     for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
-        try:
-            described = await client.get_workflow_handle(
-                workflow_id, run_id=workflow_run_id
-            ).describe()
-        except RPCError as error:
-            if error.status != RPCStatusCode.NOT_FOUND:
-                raise
-        else:
-            if described.status == WorkflowExecutionStatus.RUNNING:
-                continue
+        if await _running(client, workflow_id, workflow_run_id) or await _running(
+            client, workflow_id, None
+        ):
+            continue
         if (await store.fail_lost(run_id)).status == "failed":
             ended += 1
     return ended

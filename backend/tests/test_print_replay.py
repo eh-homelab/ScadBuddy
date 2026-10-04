@@ -3,7 +3,12 @@
 The ``bambuddy`` worker is unversioned and runs in every API replica, so during a
 rolling update an old pod and a new one share running executions. A change to
 ``PrintRunWorkflow`` that would not replay these histories needs ``workflow.patched``;
-this test is what says so. Regenerate a history only for a deliberate, patched change.
+this test is what says so.
+
+These histories are the phase-1 baseline (#1052), recorded before any ``PrintRun`` ran in
+the wild. Never re-record them: a later change to the workflow's commands, including a
+new activity, goes behind ``workflow.patched`` and adds a history recorded on the
+changed code beside them, so both replay.
 """
 
 from __future__ import annotations

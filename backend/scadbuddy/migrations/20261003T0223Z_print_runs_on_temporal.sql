@@ -9,14 +9,12 @@ CREATE UNIQUE INDEX print_runs_execution ON print_runs (workflow_id, workflow_ru
 -- The slug a run's events are announced under, so a run ended for its lost execution
 -- is announced as its workflow's activities announce it.
 ALTER TABLE print_runs ADD COLUMN slug text;
--- A run a pre-#1052 process left `running` has no workflow to finish it. One that never
--- tried to queue queued nothing, and says so (`may_have_queued` is false for it).
-UPDATE print_runs SET status = 'failed', finished_at = now(),
+-- A run a pre-#1052 process left `running` has no workflow to finish it. During a
+-- rolling update an old pod may still be running it, and may yet queue it, so every
+-- such run may have queued (`enqueue_attempted`), and says so.
+UPDATE print_runs SET status = 'failed', finished_at = now(), enqueue_attempted = true,
     error = jsonb_build_object(
         'type', 'about:blank', 'status', 500, 'title', 'Internal Server Error',
         'extensions', '{}'::jsonb,
-        'detail', CASE WHEN enqueue_attempted
-            THEN 'ScadBuddy was upgraded while it was preparing this print, after it had started queueing it, so it cannot tell whether the print was queued.'
-            ELSE 'ScadBuddy was upgraded while it was preparing this print, before it queued anything. Nothing was queued; print again to retry.'
-        END)
+        'detail', 'ScadBuddy was upgraded while it was preparing this print, so it cannot tell whether the print was queued; check Bambuddy''s queue before printing again.')
   WHERE status = 'running';

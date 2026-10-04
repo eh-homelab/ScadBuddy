@@ -14,11 +14,17 @@ dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes r
 without limit; ``print_record`` and ``print_finish`` also touch the data volume and
 Bambuddy, so they give up and the run is recorded as failed. ``print_succeed`` is the
 record alone, so once every plate is queued the run never ends ``failed``.
+
+``print_plan`` uploads the 3MF and retries (``READ_RETRY``): ``ensure_uploaded`` reuses
+the copy ScadBuddy recorded, so a retry uploads again only when the attempt died after
+Bambuddy stored the file and before the copy was recorded. That leaves a spare library
+file, never a second print, and is tracked as a follow-up (review #1061).
 """
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -68,6 +74,12 @@ RECORD_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 ACCEPT_TIMEOUT = timedelta(seconds=60)
+#: How long a client keeps re-sending a print answered ``command-still-accepting``:
+#: ``frontend`` ``printRunPoll.acceptingMs`` and ``agent`` ``ACCEPTING_MS`` are this, in
+#: ms, and their tests say so. Past ``print_check``'s worst case (three attempts of
+#: ``ACCEPT_TIMEOUT`` and the backoff between them), so no client gives up on a run
+#: that will still be accepted (review #1061).
+CLIENT_ACCEPTING = timedelta(seconds=240)
 #: The upload is one 3MF (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) plus the plates' reads.
 PLAN_TIMEOUT = timedelta(minutes=5)
 SHORT = timedelta(seconds=60)
@@ -152,8 +164,11 @@ class PrintRunWorkflow:
             )
         self._upsert(status=self.row.status, may_have_queued=self.row.may_have_queued)
         if self.row.status == "succeeded" or self.row.may_have_queued:
-            # Repeats of a body-only key inside the window get this row (§5.2).
-            await workflow.sleep(timedelta(seconds=input.repeat_window_s))
+            # Repeats of a body-only key inside the window get this row (§5.2). A cancel
+            # ends the window early but the execution still completes, so the failed-only
+            # reuse policy keeps a re-sent request off a second print (review #1061).
+            with suppress(asyncio.CancelledError):
+                await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
         return self.row
 
