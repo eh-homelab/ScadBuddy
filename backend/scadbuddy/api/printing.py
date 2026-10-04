@@ -373,8 +373,7 @@ async def accept_run(
             logger.error("Temporal refused to start a print run", exc_info=True)
             raise ApiError(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-                "Temporal refused to start this print; see ScadBuddy's logs. Nothing was"
-                " queued.",
+                "Temporal refused to start this print; see ScadBuddy's logs. Nothing was queued.",
             ) from None
         logger.warning("could not start a print run on Temporal", exc_info=True)
         raise ApiError(
