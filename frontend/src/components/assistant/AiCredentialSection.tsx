@@ -41,32 +41,35 @@ const SECRET_FIELD: Record<AiCredentialKind, { label: string; placeholder: strin
   gateway: { label: 'Gateway token', placeholder: 'token' },
 }
 
+/** The Anthropic secret prefixes, and the kind each one is (the placeholders in `SECRET_FIELD`). */
+const PREFIXES: readonly { prefix: string; kind: AiCredentialKind; called: string }[] = [
+  { prefix: 'sk-ant-api03-', kind: 'anthropic_api_key', called: 'an Anthropic API key' },
+  { prefix: 'sk-ant-oat01-', kind: 'claude_oauth_token', called: 'a Claude Code OAuth token' },
+]
+
+/** The other Anthropic kind the secret's prefix says it is, if any. A gateway token can look like anything. */
+function looksLike(kind: AiCredentialKind, secret: string): (typeof PREFIXES)[number] | null {
+  if (kind === 'gateway') return null
+  const typed = secret.trim()
+  const match = PREFIXES.find((p) => typed.startsWith(p.prefix))
+  return match && match.kind !== kind ? match : null
+}
+
 /**
  * A warning, not a refusal, when the secret has the other Anthropic kind's prefix: saved
  * as the wrong kind it is sent in the wrong header, refused, and the credential disabled.
  */
 function kindMismatch(kind: AiCredentialKind, secret: string): string | null {
-  const typed = secret.trim()
-  if (kind === 'anthropic_api_key' && typed.startsWith('sk-ant-oat01-')) {
-    return 'This looks like a Claude Code OAuth token. Choose “Claude Code OAuth token” to save it as one.'
-  }
-  if (kind === 'claude_oauth_token' && typed.startsWith('sk-ant-api03-')) {
-    return 'This looks like an Anthropic API key. Choose “Anthropic API” to save it as one.'
-  }
-  return null
+  const other = looksLike(kind, secret)
+  if (!other) return null
+  return `This looks like ${other.called}. Choose “${KIND_OPTION[other.kind]}” to save it as one.`
 }
 
 /** The same warning for a replacement, which cannot change the credential's kind. */
 function replaceMismatch(kind: AiCredentialKind, secret: string): string | null {
-  const typed = secret.trim()
-  const other =
-    kind === 'anthropic_api_key' && typed.startsWith('sk-ant-oat01-')
-      ? 'a Claude Code OAuth token'
-      : kind === 'claude_oauth_token' && typed.startsWith('sk-ant-api03-')
-        ? 'an Anthropic API key'
-        : null
+  const other = looksLike(kind, secret)
   if (!other) return null
-  return `This looks like ${other}, and a replacement keeps the credential's kind. Add it as a new credential instead, then delete this one.`
+  return `This looks like ${other.called}, and a replacement keeps the credential's kind. Add it as a new credential instead, then delete this one.`
 }
 
 /**
@@ -120,9 +123,14 @@ function clock(iso: string, now = new Date()): string {
     : at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
-/** How a credential is named in messages: "Anthropic API key ••••abcd", no secret. */
-function nameOf(entry: AiCredentialEntry): string {
-  return `${KIND_LABEL[entry.kind]}${entry.last4 ? ` ••••${entry.last4}` : ''}`
+/**
+ * How a credential is named in labels and messages, no secret: "credential 2 (Anthropic API key
+ * ••••abcd)". The position keeps two of one kind apart, even with no last four (a short secret).
+ */
+function nameOf(entry: AiCredentialEntry, list: readonly AiCredentialEntry[]): string {
+  const at = list.findIndex((c) => c.id === entry.id)
+  const what = `${KIND_LABEL[entry.kind]}${entry.last4 ? ` ••••${entry.last4}` : ''}`
+  return at < 0 ? what : `credential ${at + 1} (${what})`
 }
 
 type Busy = { id: string; action: 'add' | 'up' | 'down' | 'test' | 'reset' | 'replace' | 'delete' } | null
@@ -139,9 +147,9 @@ const OVERDUE_MAX_MS = 30_000
 function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[]): string {
   const live = (c: AiCredentialEntry) => c.usable && c.status === 'active'
   const inUse = credentials.find(live)
-  if (inUse && inUse.id !== entry.id) return `The assistant keeps using ${nameOf(inUse)}.`
+  if (inUse && inUse.id !== entry.id) return `The assistant keeps using ${nameOf(inUse, credentials)}.`
   const next = credentials.find((c) => c.id !== entry.id && live(c))
-  if (next) return `The assistant falls back to ${nameOf(next)}.`
+  if (next) return `The assistant falls back to ${nameOf(next, credentials)}.`
   return 'No other credential is usable now, so the assistant stops working until one is.'
 }
 
@@ -260,34 +268,48 @@ export function AiCredentialSection() {
   const canAdd =
     busy === null && current.can_save && secret.trim() !== '' && (kind !== 'gateway' || baseUrl.trim() !== '')
 
-  /** Runs one action, then shows the list as the agent now has it; true when it worked. */
-  async function act<T extends AiCredentialList | AiCredentialEntry>(
-    next: Busy,
-    run: () => Promise<T>,
-    done: string | null | ((answer: T) => string),
-    fallback: string,
-  ): Promise<{ ok: true } | { ok: false; error: unknown }> {
+  /**
+   * What every action shares: the one busy state, the last message cleared, and on failure the
+   * error shown and a stale list read again.
+   */
+  async function attempt<T>(
+    next: NonNullable<Busy>,
+    work: () => Promise<T>,
+    failure: (caught: unknown) => string,
+  ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
     setBusy(next)
     setError(null)
     setNotice(null)
     try {
-      const answer = await run()
-      if ('credentials' in answer) {
-        list.setData(answer, { supersede: true })
-        setStale(false)
-        setMissed(0)
-      } else reread()
-      if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
-      if (done) setNotice(typeof done === 'function' ? done(answer) : done)
-      void recheckAiAvailability({ force: true })
-      return { ok: true }
+      return { ok: true, value: await work() }
     } catch (caught) {
-      setError(rowError(caught, next?.id, fallback))
+      setError(failure(caught))
       refreshIfStale(caught)
       return { ok: false, error: caught }
     } finally {
       setBusy(null)
     }
+  }
+
+  /** Runs one row action, then shows the list as the agent now has it. */
+  async function act<T extends AiCredentialList | AiCredentialEntry>(
+    next: NonNullable<Busy>,
+    run: () => Promise<T>,
+    done: string | null | ((answer: T) => string),
+    fallback: string,
+  ): Promise<{ ok: true } | { ok: false; error: unknown }> {
+    const result = await attempt(next, run, (caught) => rowError(caught, next.id, fallback))
+    if (!result.ok) return result
+    const answer = result.value
+    if ('credentials' in answer) {
+      list.setData(answer, { supersede: true })
+      setStale(false)
+      setMissed(0)
+    } else reread()
+    if (next.action === 'replace' || next.action === 'reset' || next.action === 'delete') forgetTest(next.id)
+    if (done) setNotice(typeof done === 'function' ? done(answer) : done)
+    void recheckAiAvailability({ force: true })
+    return { ok: true }
   }
 
   /**
@@ -297,7 +319,7 @@ export function AiCredentialSection() {
   function rowError(caught: unknown, id: string | undefined, fallback: string): string {
     const entry = credentials.find((c) => c.id === id)
     if (entry && caught instanceof ApiError && caught.status === 404) {
-      return `${nameOf(entry)} was deleted elsewhere; the list has been read again.`
+      return `${nameOf(entry, credentials)} was deleted elsewhere; the list has been read again.`
     }
     return describeError(caught, fallback)
   }
@@ -313,28 +335,25 @@ export function AiCredentialSection() {
 
   async function add(event: FormEvent) {
     event.preventDefault()
-    setBusy({ id: '', action: 'add' })
-    setError(null)
-    setNotice(null)
-    try {
-      await api.createAiCredential({
-        kind,
-        ...(kind === 'gateway' ? { base_url: baseUrl.trim() } : {}),
-        secret: secret.trim(),
-      })
-      setSecret('')
-      setBaseUrl('')
-      setNotice(
-        credentials.length === 0 ? 'Saved. Use Test to check it works.' : 'Added last; it is tried after the others.',
-      )
-      reread()
-      void recheckAiAvailability({ force: true })
-    } catch (caught) {
-      setError(describeError(caught, 'Could not save the credential'))
-      refreshIfStale(caught)
-    } finally {
-      setBusy(null)
-    }
+    const created = await attempt(
+      { id: '', action: 'add' },
+      () =>
+        api.createAiCredential({
+          kind,
+          ...(kind === 'gateway' ? { base_url: baseUrl.trim() } : {}),
+          secret: secret.trim(),
+        }),
+      // No row yet, so no name to give a 404.
+      (caught) => describeError(caught, 'Could not save the credential'),
+    )
+    if (!created.ok) return
+    setSecret('')
+    setBaseUrl('')
+    setNotice(
+      credentials.length === 0 ? 'Saved. Use Test to check it works.' : 'Added last; it is tried after the others.',
+    )
+    reread()
+    void recheckAiAvailability({ force: true })
   }
 
   function move(index: number, by: -1 | 1) {
@@ -350,33 +369,23 @@ export function AiCredentialSection() {
   }
 
   async function test(entry: AiCredentialEntry) {
-    setBusy({ id: entry.id, action: 'test' })
-    setError(null)
-    setNotice(null)
+    // Before the test, not after: an earlier verdict must not show beside the one running.
     forgetTest(entry.id)
-    try {
-      const result = await api.testAiCredential(entry.id)
-      setTests((all) => ({ ...all, [entry.id]: result }))
-    } catch (caught) {
+    const tested = await attempt({ id: entry.id, action: 'test' }, () => api.testAiCredential(entry.id), (caught) => {
       const wait = retryAfter(caught)
-      setError(
-        wait === undefined
-          ? rowError(caught, entry.id, 'Could not test the credential')
-          : `${describeError(caught, 'A test ran moments ago')} (wait ${wait} s).`,
-      )
-      refreshIfStale(caught)
-    } finally {
-      setBusy(null)
-    }
+      return wait === undefined
+        ? rowError(caught, entry.id, 'Could not test the credential')
+        : `${describeError(caught, 'A test ran moments ago')} (wait ${wait} s).`
+    })
+    if (tested.ok) setTests((all) => ({ ...all, [entry.id]: tested.value }))
   }
 
   async function replace(event: FormEvent, entry: AiCredentialEntry) {
     event.preventDefault()
-    const position = credentials.findIndex((c) => c.id === entry.id) + 1
     const saved = await act(
       { id: entry.id, action: 'replace' },
       () => api.saveAiCredential(entry.id, { kind: entry.kind, base_url: entry.base_url, secret: replacement.trim() }),
-      (answer) => `Saved a new key for credential ${position} (${nameOf(answer)}).`,
+      (answer) => `Saved a new key for ${nameOf(answer, credentials)}.`,
       'Could not save the key',
     )
     if (saved.ok) {
@@ -391,7 +400,7 @@ export function AiCredentialSection() {
       () => api.deleteAiCredential(entry.id),
       credentials.length === 1
         ? 'Deleted. The assistant is off until a credential is saved.'
-        : `Deleted ${nameOf(entry)}.`,
+        : `Deleted ${nameOf(entry, credentials)}.`,
       'Could not delete the credential',
     )
     // Gone already (deleted elsewhere): what the user asked for has happened, and the list is re-read.
@@ -454,7 +463,7 @@ export function AiCredentialSection() {
                     variant="ghost"
                     onClick={() => move(index, -1)}
                     disabled={index === 0 || busy !== null}
-                    aria-label={`Move ${nameOf(entry)} up`}
+                    aria-label={`Move ${nameOf(entry, credentials)} up`}
                   >
                     {isBusy(entry.id, 'up') ? <Spinner /> : 'Up'}
                   </Button>
@@ -463,7 +472,7 @@ export function AiCredentialSection() {
                     variant="ghost"
                     onClick={() => move(index, 1)}
                     disabled={index === credentials.length - 1 || busy !== null}
-                    aria-label={`Move ${nameOf(entry)} down`}
+                    aria-label={`Move ${nameOf(entry, credentials)} down`}
                   >
                     {isBusy(entry.id, 'down') ? <Spinner /> : 'Down'}
                   </Button>
@@ -472,7 +481,7 @@ export function AiCredentialSection() {
                     onClick={() => void test(entry)}
                     disabled={busy !== null || !entry.usable}
                     aria-busy={isBusy(entry.id, 'test')}
-                    aria-label={`Test ${nameOf(entry)}`}
+                    aria-label={`Test ${nameOf(entry, credentials)}`}
                   >
                     {isBusy(entry.id, 'test') && <Spinner />}
                     Test
@@ -484,12 +493,12 @@ export function AiCredentialSection() {
                         void act(
                           { id: entry.id, action: 'reset' },
                           () => api.resetAiCredential(entry.id),
-                          `${nameOf(entry)} is active again.`,
+                          `${nameOf(entry, credentials)} is active again.`,
                           'Could not reset the credential',
                         )
                       }
                       disabled={busy !== null}
-                      aria-label={`Reset ${nameOf(entry)}`}
+                      aria-label={`Reset ${nameOf(entry, credentials)}`}
                     >
                       {isBusy(entry.id, 'reset') && <Spinner />}
                       Reset
@@ -504,7 +513,7 @@ export function AiCredentialSection() {
                     }}
                     disabled={busy !== null || !current.can_save}
                     aria-expanded={replacing === entry.id}
-                    aria-label={`Replace the key of ${nameOf(entry)}`}
+                    aria-label={`Replace the key of ${nameOf(entry, credentials)}`}
                   >
                     Replace key
                   </Button>
@@ -517,7 +526,7 @@ export function AiCredentialSection() {
                       setConfirmDelete(entry)
                     }}
                     disabled={busy !== null}
-                    aria-label={`Delete ${nameOf(entry)}`}
+                    aria-label={`Delete ${nameOf(entry, credentials)}`}
                   >
                     Delete
                   </Button>
@@ -676,7 +685,7 @@ export function AiCredentialSection() {
       )}
       <Dialog
         open={confirmDelete !== null}
-        title={`Delete ${confirmDelete ? nameOf(confirmDelete) : 'the credential'}?`}
+        title={`Delete ${confirmDelete ? nameOf(confirmDelete, credentials) : 'the credential'}?`}
         onClose={() => {
           if (busy?.action === 'delete') return
           setConfirmDelete(null)

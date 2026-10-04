@@ -9,8 +9,8 @@ import { AiCredentialSection } from './AiCredentialSection'
 
 const base = '/api/v1/ai/credentials'
 const entries = `${base}/entries`
-const KEY = 'Anthropic API key ••••Q7xA'
-const GATEWAY = 'Gateway ••••GW99'
+const KEY = 'credential 1 (Anthropic API key ••••Q7xA)'
+const GATEWAY = 'credential 2 (Gateway ••••GW99)'
 
 /** Resolves once msw has answered the credential list read. */
 function listRead(): Promise<void> {
@@ -221,7 +221,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     setCredentials([credentialEntry({ id: 'default', kind: 'claude_oauth_token', last4: 'ZZ34' })])
     const saves = bodiesOf('PUT', `${entries}/default`)
     const { user } = renderPage(<AiCredentialSection />)
-    await user.click(await screen.findByRole('button', { name: 'Replace the key of Claude Code OAuth token ••••ZZ34' }))
+    await user.click(await screen.findByRole('button', { name: 'Replace the key of credential 1 (Claude Code OAuth token ••••ZZ34)' }))
     await user.type(screen.getByLabelText('New OAuth token'), 'sk-ant-oat01-NEW0wxyz')
     await user.click(screen.getByRole('button', { name: 'Save key' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for credential 1')
@@ -307,16 +307,34 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(rows()[0]).toHaveTextContent('1.Gateway')
   })
 
+  it('names two credentials of one kind with no last four apart (#1162)', async () => {
+    setCredentials([
+      credentialEntry({ id: 'g1', kind: 'gateway', base_url: 'https://one.example', last4: '' }),
+      credentialEntry({ id: 'g2', kind: 'gateway', base_url: 'https://two.example', last4: '' }),
+    ])
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    const deletes = screen.getAllByRole('button', { name: /^Delete / })
+    expect(deletes.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Delete credential 1 (Gateway)',
+      'Delete credential 2 (Gateway)',
+    ])
+    await user.click(deletes[1]!)
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Delete credential 2 (Gateway)?')
+    expect(dialog).toHaveTextContent('The assistant keeps using credential 1 (Gateway).')
+  })
+
   it.each([
     ['one behind the one in use', 'c3', `The assistant keeps using ${KEY}.`],
-    ['the one in use, with a usable one behind it', 'default', 'The assistant falls back to Anthropic API key ••••BBBB.'],
+    ['the one in use, with a usable one behind it', 'default', 'The assistant falls back to credential 2 (Anthropic API key ••••BBBB).'],
   ])('says what deleting %s does', async (_, id, message) => {
     setCredentials([
       credentialEntry({ id: 'default', last4: 'Q7xA' }),
       credentialEntry({ id: 'c3', last4: 'BBBB' }),
     ])
     const { user } = renderPage(<AiCredentialSection />)
-    const name = id === 'default' ? KEY : 'Anthropic API key ••••BBBB'
+    const name = id === 'default' ? KEY : 'credential 2 (Anthropic API key ••••BBBB)'
     await user.click(await screen.findByRole('button', { name: `Delete ${name}` }))
     expect(await screen.findByRole('dialog')).toHaveTextContent(message)
   })
@@ -633,10 +651,10 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     const { user } = renderPage(<AiCredentialSection />)
     await screen.findAllByTestId('ai-credential')
     failing = true
-    await user.click(screen.getByRole('button', { name: 'Reset Anthropic API key ••••K333' }))
+    await user.click(screen.getByRole('button', { name: 'Reset credential 3 (Anthropic API key ••••K333)' }))
     expect(await screen.findByTestId('ai-credentials-stale')).toBeInTheDocument()
     failing = false
-    await user.click(screen.getByRole('button', { name: 'Move Anthropic API key ••••K333 up' }))
+    await user.click(screen.getByRole('button', { name: 'Move credential 3 (Anthropic API key ••••K333) up' }))
     await waitFor(() => expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument())
     const after = reads
     // Backing off would read again after 1 s; the cooldown has a minute left.
