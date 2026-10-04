@@ -146,7 +146,8 @@ export async function commandAnswer<T>(
   }
   if (op.status === 'failed') {
     const { extensions, ...problem } = op.error ?? { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
-    return { error: { ...problem, ...extensions }, response: new Response(null, { status: problem.status }) }
+    // The problem's own fields win over an extension of the same name, as in the browser's `command()`.
+    return { error: { ...extensions, ...problem }, response: new Response(null, { status: problem.status }) }
   }
   return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }
