@@ -166,8 +166,13 @@ forwarder (§5.2) is not one, since it must stay untraced.
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
 `render.solids`, `render.thumbnail`, `render.write`. Each `openscad` invocation
-(`render/runner.py`) is an `openscad.export` span with format, backend, exit
-code and, for `solids`, the colour index.
+(`render/runner.py`) is an `openscad.export` span with format, backend and exit
+code. Under `render.solids`, each colour is a `render.solid` span carrying
+`scadbuddy.colour_index` (1-based, in the template's colour order): the parent
+of that colour's `openscad.export` and of its mesh parse, so the index lives
+there rather than on the export. A colour whose `openscad` fails falls back to
+the split mesh (`scadbuddy.solid.fallback`) without failing the span; a failed
+mesh parse fails the job, and the span with it.
 
 ### 5.2 Browser relay route
 
