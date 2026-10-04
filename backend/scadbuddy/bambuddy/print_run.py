@@ -82,6 +82,13 @@ from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen, save_pick
 
 logger = logging.getLogger(__name__)
 
+#: The three rack fallbacks that swallow an exception and log only its type (§7). Named
+#: so the test guard reads these, not copies of them (#1081, #1086 review).
+RACK_PICK_FALLBACK = "rack pick left to Bambuddy"
+RACK_PREVIEW_FALLBACK = "the rack preview could not be built"
+RACK_USAGE_FALLBACK = "rack usage unreadable; ranked without it"
+RACK_FALLBACKS = frozenset({RACK_PICK_FALLBACK, RACK_PREVIEW_FALLBACK, RACK_USAGE_FALLBACK})
+
 QUEUE_PATH = "/queue"
 
 #: Bambuddy documents these in ``SliceRequest.bed_type``'s own description as the
@@ -357,7 +364,7 @@ async def _usage_or_empty(
         return await rack.usage(rack_serials(status.nozzle_rack))
     except Exception as exc:
         logger.warning(
-            "rack usage unreadable; ranked without it",
+            RACK_USAGE_FALLBACK,
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
         return {}
@@ -393,12 +400,16 @@ def rack_chooser(
                 return None
             stage = "status unreadable"
             status_read = await client.printer_status(printer_id)
-            # Read before this read is recorded as seen (#1015).
+            # The order no longer decides a hotend's age: prepare_run and choices_for
+            # record the rack as seen earlier in the same request (#1081).
             usage = (
                 await _usage_or_empty(rack, status_read, printer_id)
                 if algorithm != "bambuddy"
                 else {}
             )
+            # Recorded again on purpose: this is a fresh read, per plate, and can show a
+            # hotend swapped in since prepare_run's. An unchanged rack makes no new row
+            # version (#1082), though the upsert still locks its rows.
             await record_seen(rack, printer_id, status_read)
             stage = "rack pick failed"
             picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
@@ -422,7 +433,7 @@ def rack_chooser(
         except Exception as exc:
             # Never str(exc) or a traceback: an error's text can carry a serial (§7).
             logger.warning(
-                "rack pick left to Bambuddy",
+                RACK_PICK_FALLBACK,
                 extra={"printer_id": printer_id, "stage": stage, "error": type(exc).__name__},
             )
             warnings.append(
@@ -564,7 +575,7 @@ async def rack_preview(
     except Exception as exc:
         # Never str(exc): an error's text can carry a serial (§7).
         logger.warning(
-            "the rack preview could not be built",
+            RACK_PREVIEW_FALLBACK,
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
         return None, []
