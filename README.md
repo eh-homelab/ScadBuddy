@@ -301,7 +301,13 @@ Both call `deploy.reusable.yml`, which:
    `scadbuddy-render.yaml` when that file exists in clusters (#547; until
    clusters#1454 adds it, the run notes its absence and pins the API alone). Each
    file must have exactly one such image line and one of each annotation, before
-   and after the rewrite, or the deploy stops;
+   and after the rewrite, or the deploy stops. In the same PR it moves the
+   dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
+   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`, to
+   the same revision. That line is optional: an overlay that does not mention
+   `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
+   notice; one that mentions it in any other form (a short SHA, a branch, a
+   comment, other casing or spacing) or twice stops the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -806,6 +812,9 @@ deploy PR link into the release notes. There is no human step after
   `applications/scadbuddy/scadbuddy.yaml` and
   `applications/scadbuddy/scadbuddy-render.yaml`; one deploy pins both to the
   same digest.
+- **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
+  clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
+  `revision` annotation.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -816,9 +825,9 @@ deploy PR link into the release notes. There is no human step after
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
 image line and annotations in the clusters manifests (both, once the render
-worker's exists) by hand and merging does
-exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
-what makes the running image knowable.
+worker's exists), and the dashboard line's `?ref=` (the full 40-character
+revision), by hand and merging does exactly what the pipeline does. Do not
+`kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
 
@@ -865,6 +874,22 @@ only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvic
 that flag lets any loopback caller name its own client.
 `scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
 `queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+
+The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
+directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
+in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
+rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
+overlay will list it as a remote resource pinned to a full commit SHA, once
+clusters#1596 Phase 5 adds the line, and the deploy
+moves that pin with the image (above), so the dashboard shown is the one written
+for the build that is serving. The overlay must namespace its own resources with
+an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
+ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
+Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default
+uid `tempo`); until clusters#1596 Phase 4 adds Tempo the trace tables are empty
+and the metric panels are unaffected. CI's `lint` job checks the dashboard
+(`.github/scripts/lint-dashboard.sh`): every series it reads must be declared in
+`core/metrics.py`, and every span name must be one the service emits.
 
 ## Development
 
