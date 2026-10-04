@@ -779,15 +779,15 @@ describe('render and createOutput (spec 2026-09-27 §4.3)', () => {
 describe('Retry-After on problems (#1000)', () => {
   it("keeps a 429's or 503's delay in seconds, and nothing on other statuses", async () => {
     server.use(
-      http.post('/api/v1/ai/credentials/test', () =>
+      http.post('/api/v1/ai/credentials/entries/default/test', () =>
         HttpResponse.json({ detail: 'a connection test ran moments ago' }, { status: 429, headers: { 'Retry-After': '7' } }),
       ),
-      http.get('/api/v1/ai/credentials', () =>
+      http.get('/api/v1/ai/credentials/entries', () =>
         HttpResponse.json({ detail: 'nope' }, { status: 400, headers: { 'Retry-After': '7' } }),
       ),
     )
-    await expect(api.testAiCredential()).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
-    const other = await api.getAiCredential().catch((cause: unknown) => cause)
+    await expect(api.testAiCredential('default')).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
+    const other = await api.listAiCredentials().catch((cause: unknown) => cause)
     expect((other as ApiError).problem).not.toHaveProperty('retry_after')
   })
 })

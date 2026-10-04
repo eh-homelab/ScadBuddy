@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.render import solids as solids_module
@@ -136,7 +138,9 @@ class FakeRenders:
         *,
         config: Config,
         extra_defines: Sequence[str] = (),
+        failure_is_fallback: bool = False,
     ) -> ProcessOutput:
+        assert failure_is_fallback
         colour = _colour_of(extra_defines)
         assert scad_path.name.startswith(WRAPPER_PREFIX)
         assert scad_path.is_file()
@@ -318,6 +322,61 @@ async def test_a_colour_waiting_for_a_slot_is_not_charged_against_its_timeout(
 
     assert result.warnings == []
     assert list(result.meshes) == colours
+
+
+async def test_each_colour_is_a_solid_span_with_its_export_beneath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    monkeypatch.setattr(solids_module, "split_by_material", lambda p: _box(_solid_index(p)))
+    model, work = _model(tmp_path)
+    config = Config(openscad=_fake_openscad(tmp_path, "exit 0"), data_dir=tmp_path / "data")
+
+    await render_solids(model, CustomizerSchema(), {}, MANY_COLOURS[:2], work, config=config)
+
+    finished = spans.get_finished_spans()
+    solid_spans = [s for s in finished if s.name == "render.solid"]
+    assert sorted((s.attributes or {})["scadbuddy.colour_index"] for s in solid_spans) == [1, 2]
+    exports = [s for s in finished if s.name == "openscad.export"]
+    assert len(exports) == 2
+    for solid_span in solid_spans:
+        assert solid_span.context is not None
+        assert [
+            e
+            for e in exports
+            if e.parent is not None and e.parent.span_id == solid_span.context.span_id
+        ]
+
+
+class _ParseError(Exception):
+    pass
+
+
+async def test_a_colours_mesh_parse_is_inside_its_solid_span_and_fails_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    # Review 5 of #1064: the parse is the colour's work, so its time and its failure
+    # (a real job failure, not a fallback) belong to that colour's span.
+    def split(path: Path) -> list[ColourPart]:
+        if _solid_index(path) == 2:
+            raise _ParseError
+        return _box(_solid_index(path))
+
+    monkeypatch.setattr(solids_module, "split_by_material", split)
+    model, work = _model(tmp_path)
+    config = Config(openscad=_fake_openscad(tmp_path, "exit 0"), data_dir=tmp_path / "data")
+
+    with pytest.raises(_ParseError):
+        await render_solids(model, CustomizerSchema(), {}, MANY_COLOURS[:2], work, config=config)
+
+    by_index = {
+        (s.attributes or {})["scadbuddy.colour_index"]: s
+        for s in spans.get_finished_spans()
+        if s.name == "render.solid"
+    }
+    failed = by_index[2]
+    assert failed.status.status_code is StatusCode.ERROR
+    assert (failed.attributes or {})["scadbuddy.failure_class"] == "_ParseError"
+    assert "scadbuddy.openscad.exit_code" not in (failed.attributes or {})
 
 
 async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(

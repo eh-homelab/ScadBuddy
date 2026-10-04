@@ -19,6 +19,7 @@ import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import type { InputsExtra } from '../lib/inputs'
 import { saveOutput } from '../lib/saveOutput'
+import { traceAction } from '../lib/traceAction'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { ImageDialog } from './ImageDialog'
@@ -169,11 +170,18 @@ export function ActionBar({
     setFiled(null)
     setFileError(null)
     try {
-      const created = await saveOutput({ slug, job, extra, capture })
-      onGenerated(created)
-      // After the thumbnail, so the file Bambuddy lists carries the plate image.
-      await fileIntoProject(created)
-      return created
+      return await traceAction(
+        'generate',
+        { 'scadbuddy.slug': slug, 'scadbuddy.job_id': job.id },
+        async (within, span) => {
+          const created = await saveOutput({ slug, job, extra, capture, within })
+          span.setAttribute('scadbuddy.output_id', created.id)
+          onGenerated(created)
+          // After the thumbnail, so the file Bambuddy lists carries the plate image.
+          await within(() => fileIntoProject(created))
+          return created
+        },
+      )
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
       setError(message)
