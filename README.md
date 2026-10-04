@@ -374,6 +374,26 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
 
+### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
+
+The API process also polls the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`):
+print runs and every other Bambuddy write (send, project files, projects, reprint,
+timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
+**not** versioned: any replica polling the queue may take any task on it.
+
+- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
+  activities to that queue. A replica still on the old build takes those tasks and
+  fails them as unregistered; nothing is corrupted (the task is retried), but each
+  Bambuddy write that lands there stalls until the old pod is gone. Roll this release
+  out with `Recreate`, or scale the old replicas to 0 before the new ones start.
+- **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
+  should be at least the Temporal namespace's retention. A retry of an operation whose
+  record was deleted while Temporal still holds its closed execution answers 409 "may
+  have been done" instead of its outcome.
+- **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
+  a rolling update stays safe; a release that adds a workflow or activity type to the
+  queue says so here and needs the same `Recreate` rollout.
+
 ### Blob store and render workers (#426)
 
 Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
