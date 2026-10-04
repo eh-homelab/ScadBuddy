@@ -204,10 +204,11 @@ async def test_running_executions_names_each_running_rows_execution(
     assert await store.running_executions(timedelta(hours=1)) == []
 
 
-def test_the_migration_says_nothing_was_queued_for_a_run_that_never_tried(
+def test_the_migration_says_every_run_it_ends_may_have_queued(
     jobs: JobProjection,
 ) -> None:
-    """Review #1061 F4: the upgrade's message matches ``may_have_queued``."""
+    """Review #1061 (third) 1: during a rolling update an old pod may still queue a run
+    the migration ends, so no row it ends says nothing was queued."""
     migration = (MIGRATIONS_DIR / "20261003T0223Z_print_runs_on_temporal.sql").read_text()
     update = migration[migration.index("UPDATE print_runs") :]
     with jobs.pool.connection() as conn:
@@ -218,14 +219,13 @@ def test_the_migration_says_nothing_was_queued_for_a_run_that_never_tried(
                 (run_id, OUTPUT, run_id, attempted),
             )
         conn.execute(update)
-        rows = {
-            row["id"]: row["detail"]
-            for row in conn.execute(
-                "SELECT id, error->>'detail' AS detail FROM print_runs ORDER BY id"
-            ).fetchall()
-        }
-    assert "Nothing was queued" in rows["r1"]
-    assert "cannot tell whether the print was queued" in rows["r2"]
+        rows = conn.execute(
+            "SELECT error->>'detail' AS detail, enqueue_attempted FROM print_runs"
+        ).fetchall()
+    assert len(rows) == 2
+    for row in rows:
+        assert row["enqueue_attempted"]
+        assert "check Bambuddy's queue before printing again" in row["detail"]
 
 
 async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
@@ -261,3 +261,31 @@ async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
     assert (await store.get("live")).status == "running"  # type: ignore[union-attr]
     assert (await store.get("killed")).error == LOST_UNQUEUED  # type: ignore[union-attr]
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
+
+
+async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
+    store: PrintRunStore,
+) -> None:
+    """Review #1061 (third) 2: a reset terminates the run that inserted the row and
+    goes on under a new run id with the same row; the row is not lost."""
+    async with temporal_client() as client:
+        queue = f"unserved-{uuid.uuid4().hex[:8]}"
+        workflow_id = f"print-reset-{uuid.uuid4().hex[:8]}"
+        first = await client.start_workflow("PrintRun", "x", id=workflow_id, task_queue=queue)
+        await first.terminate("reset")
+        reset = await client.start_workflow("PrintRun", "x", id=workflow_id, task_queue=queue)
+        await store.insert_accepted(
+            "reset",
+            subject=OUTPUT,
+            key="reset",
+            slug="demo",
+            workflow_id=workflow_id,
+            workflow_run_id=first.result_run_id or "",
+            retention=None,
+        )
+        try:
+            ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+        finally:
+            await reset.terminate("test over")
+    assert ended == 0
+    assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]

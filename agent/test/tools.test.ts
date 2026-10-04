@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { RUN_REATTEMPTS } from '../src/tools/print.js'
+import { ACCEPTING_MS, RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
@@ -50,6 +50,12 @@ const SCHEMA = {
     { name: 'logo', type: 'file', initial: 'default-logo.svg', accept: ['svg'], samples: ['default-logo.svg', 'star.svg'] },
   ],
 }
+
+describe('print_output still-accepting budget (#1061)', () => {
+  it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
+    expect(ACCEPTING_MS).toBe(240_000)
+  })
+})
 
 describe('validateParams', () => {
   it('accepts values the customizer could produce and reports effective values', () => {
