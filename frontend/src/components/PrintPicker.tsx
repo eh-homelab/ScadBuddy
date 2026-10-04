@@ -148,6 +148,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     algorithm: RackAlgorithm
     /** The last choices read started when the save landed. */
     afterRead: number
+    /** The save's `algorithmSave` number, so an earlier one landing later is ignored. */
+    save: number
   } | null>(null)
   const storedAlgorithm =
     savedAlgorithm && savedAlgorithm.printerId === printerId && choicesRead <= savedAlgorithm.afterRead
@@ -193,11 +195,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           // printer without carrying it in as a choice, and without re-reading the
           // choices, which would reset the bed type and filament plan set since.
           if (algorithmSession.current !== session)
-            setSavedAlgorithm({
-              printerId: savedOn,
-              algorithm: next,
-              afterRead: picker.readsStarted.current,
-            })
+            setSavedAlgorithm((shown) =>
+              shown && shown.printerId === savedOn && shown.save > save
+                ? shown
+                : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
+            )
         },
         () => {
           if (algorithmSave.current === save && algorithmSession.current === session)

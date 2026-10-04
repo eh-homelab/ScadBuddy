@@ -2228,6 +2228,33 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
   })
 
+  it('shows the later of two saves when they land after a close and reopen in reverse', async () => {
+    // #1086 review: the earlier save answering last was shown, though the later one was the
+    // user's last choice and the one the printer most likely stores.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves } = heldSaves()
+    const { user } = renderReopenable()
+    await loaded()
+    await showAdvanced()
+    const first = await screen.findByLabelText('Rack algorithm')
+    fireEvent.change(first, { target: { value: 'oldest_first' } })
+    fireEvent.change(first, { target: { value: 'bambuddy' } })
+    await waitFor(() => expect(answers.length).toBe(2))
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    await showAdvanced()
+    const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
+    answer(1, 200)
+    await act(() => Promise.allSettled([saves[1]]))
+    await waitFor(() => expect(select.value).toBe('bambuddy'))
+    answer(0, 200)
+    await act(() => Promise.allSettled(saves))
+
+    expect(select.value).toBe('bambuddy')
+  })
+
   it('keeps showing a save that lands while the reopened dialog is still reading', async () => {
     // #1086 review: a choices read that started before the save landed answered with the
     // old algorithm and cleared the save's label, so the dialog showed least_used while the
