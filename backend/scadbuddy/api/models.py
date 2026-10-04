@@ -1328,7 +1328,8 @@ async def put_source(
             "`base` and `merge_base` cannot be combined: a merge is checked against its upstream",
         )
     # By claim: a source may be 1M characters, past a workflow payload's limit (#1054).
-    source = await asyncio.to_thread(ClaimStore(paths.claims).put, body.source.encode())
+    claims = ClaimStore(paths.claims)
+    source = await asyncio.to_thread(claims.hold, body.source.encode())
     result = await run_operation(
         ops,
         response,
@@ -1336,7 +1337,7 @@ async def put_source(
         subject=slug,
         request={
             "slug": slug,
-            "source": source,
+            "source": source.name,
             "message": body.message,
             # Either spelling forces, as on `POST /models`.
             "force": force or body.force,
@@ -1344,6 +1345,7 @@ async def put_source(
             "base": body.base,
         },
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [source]),
     )
     return operation_answer(result, ModelRecord)
 
@@ -1502,14 +1504,16 @@ async def patch_source(
     require_mine(slug)
     require_model_exists(catalogue, slug)
     # The whole body by claim: up to MAX_EDITS edits of a source's size each (#1054).
-    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.model_dump_json().encode())
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, body.model_dump_json().encode())
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_source_patch"],
         subject=slug,
-        request={"slug": slug, "base": body.base, "body": claimed},
+        request={"slug": slug, "base": body.base, "body": claimed.name},
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 
@@ -1671,14 +1675,16 @@ async def put_thumbnail(
     require_model_exists(catalogue, slug)
     png = _require_png(await file.read())
     # By claim: up to MAX_THUMBNAIL_SIZE, past a workflow payload's limit (#1054).
-    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, png)
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, png)
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_thumbnail_put"],
         subject=slug,
-        request={"slug": slug, "png": claimed},
+        request={"slug": slug, "png": claimed.name},
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 
@@ -1796,14 +1802,16 @@ async def put_readme(
             "the README contains a NUL byte, so it is binary, not text",
         )
     # By claim: a README may be as long as a source (#1054).
-    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.content.encode())
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, body.content.encode())
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_readme_put"],
         subject=slug,
-        request={"slug": slug, "content": claimed},
+        request={"slug": slug, "content": claimed.name},
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 

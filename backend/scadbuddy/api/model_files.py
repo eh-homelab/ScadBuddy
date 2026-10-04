@@ -33,6 +33,7 @@ from scadbuddy.api.models import (
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    Claimed,
     IdempotencyKey,
     operation_answer,
     run_operation,
@@ -141,14 +142,16 @@ async def put_source_file(
             "the file contains a NUL byte, so it is binary, not OpenSCAD text",
         )
     # By claim: a file may be as long as a source (#1054).
-    claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.content.encode())
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, body.content.encode())
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_file_put"],
         subject=slug,
-        request={"slug": slug, "name": name, "content": claimed, "message": body.message},
+        request={"slug": slug, "name": name, "content": claimed.name, "message": body.message},
         idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 
