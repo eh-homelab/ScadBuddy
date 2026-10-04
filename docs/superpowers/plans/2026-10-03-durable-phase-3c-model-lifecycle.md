@@ -6,15 +6,19 @@
 > holds:
 > - `ClaimStore` keeps flat files named by the sha256 of their bytes,
 >   `cache/claims/<digest>`, not `cache/claims/<operation key>/<part>`. Its API is
->   `put(data) -> name`, `get(name)`, `drop(name)` and `sweep(max_age)`. A put always
->   writes a fresh file, which renews it; the sweep moves a claim aside before removing
->   it and puts it back if a put renewed it meanwhile.
+>   `put(data) -> name`, `hold(data) -> Held`, `get(name)`, `release(held)` and
+>   `sweep(max_age)`. A put always writes a fresh file, which renews it; the sweep moves
+>   a claim aside before removing it and puts it back if a put renewed it meanwhile.
+>   `Held` says whether that put created the claim, and which file it wrote (inode and
+>   mtime); a release removes only a claim its put created and no put has written
+>   since, so a request with the same bytes, before or after, keeps it.
 > - The run does not remove its claims. The route drops a request's claims once its
 >   answer is final (a refusal before any operation, the 413 cap, a recorded failure
 >   or a result), unless an operation still `running` names the same digest
 >   (`OperationStore.named_by_running`). A 202 leaves them to the day-long sweep.
 > - Claimed parts: a create's source, thumbnail and README; a patch's `presets`; an
->   import's URL. The import's request holds the URL without its query.
+>   import's URL. The import's request, and the model's `origin_url`, hold the URL as
+>   scheme, host, port and path only.
 > - The subject is the slug, except for an import, whose subject is the URL's host.
 > - A keyed create first looks up its recorded operation (`recorded`); if there is
 >   none, a taken slug is refused before anything is claimed.

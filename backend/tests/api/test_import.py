@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from temporalio.client import Client
 
 from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
-from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER
+from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER, shown_url
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
@@ -257,33 +257,46 @@ def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -
 
 
 @respx.mock
-def test_an_imports_operation_never_records_the_urls_query(client: TestClient) -> None:
-    """Review 3c 1.5: the URL goes by claim; the operation's request, and every input in
-    its history that carries it, hold it without its query, which may carry a token.
-    The answer is the model, whose `origin_url` is the URL as given."""
-    url = RAW_URL + "?token=secret"
-    respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
-    assert client.post("/api/v1/models/import", json={"url": url}).status_code == 201
+def test_an_import_never_records_the_urls_query(client: TestClient, paths: DataPaths) -> None:
+    """Review 3c 1.5: a URL's query may carry a token. The URL goes by claim, and the
+    model records it without its query or fragment, so neither the operation's record
+    nor its history, nor the model.json, ever holds the token."""
+    url = RAW_URL + "?token=secret#secret"
+    respx.get(RAW_URL + "?token=secret").mock(return_value=httpx.Response(200, text=SOURCE))
+    created = client.post("/api/v1/models/import", json={"url": url})
+    assert created.status_code == 201, created.text
+    assert created.json()["origin_url"] == RAW_URL
+    assert "secret" not in paths.model_meta("gridfinity-bin").read_text("utf-8")
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     with state.operations.store._require().connection() as conn:
         (row,) = conn.execute(
-            "SELECT request::text AS request, workflow_id FROM operations"
-            " WHERE kind = 'model_import'"
+            "SELECT request::text AS request, result::text AS result, workflow_id"
+            " FROM operations WHERE kind = 'model_import'"
         ).fetchall()
-    assert "secret" not in row["request"]
+    assert "secret" not in row["request"] and "secret" not in row["result"]
     assert RAW_URL in row["request"]
 
-    async def inputs() -> str:
+    async def history() -> str:
         client = await Client.connect(state.settings.temporal_address, namespace="default")
-        history = await client.get_workflow_handle(row["workflow_id"]).fetch_history()
-        payloads = []
-        for event in history.events:
-            payloads.append(str(event.workflow_execution_started_event_attributes.input))
-            accepted = event.workflow_execution_update_accepted_event_attributes
-            payloads.append(str(accepted.accepted_request.input))
-            scheduled = event.activity_task_scheduled_event_attributes
-            if scheduled.activity_type.name != FINISH_ACTIVITY:
-                payloads.append(str(scheduled.input))
-        return "".join(payloads)
+        fetched = await client.get_workflow_handle(row["workflow_id"]).fetch_history()
+        finishes = [
+            event
+            for event in fetched.events
+            if event.activity_task_scheduled_event_attributes.activity_type.name == FINISH_ACTIVITY
+        ]
+        assert finishes, "the history has its finish input"
+        return fetched.to_json()
 
-    assert "secret" not in asyncio.run(inputs())
+    assert "secret" not in asyncio.run(history())
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://u:p@example.com:8443/a/b.scad?t=1#f", "https://example.com:8443/a/b.scad"),
+        ("https://example.com/b.scad", "https://example.com/b.scad"),
+        ("https://[::1]:8443/b.scad?x", "https://[::1]:8443/b.scad"),
+    ],
+)
+def test_a_shown_url_keeps_scheme_host_port_and_path(url: str, shown: str) -> None:
+    assert shown_url(url) == shown

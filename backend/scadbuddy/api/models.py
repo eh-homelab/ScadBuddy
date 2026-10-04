@@ -125,7 +125,7 @@ from scadbuddy.library.url_import import (
     ResolverBusyError,
     fetch_model,
 )
-from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.store import Operation
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -665,7 +665,7 @@ async def _create_command(
     }
     kind = ops.kinds["model_create"]
     claims = ClaimStore(paths.claims)
-    put: list[str] = []
+    held: list[Held] = []
     if (
         await recorded(
             ops, kind=kind, subject=slug, request=request, idempotency_key=idempotency_key
@@ -675,7 +675,7 @@ async def _create_command(
         _require_new(catalogue, slug)
         for data in parts.values():
             if data is not None:
-                put.append(await asyncio.to_thread(claims.put, data))
+                held.append(await asyncio.to_thread(claims.hold, data))
     result = await run_operation(
         ops,
         response,
@@ -683,7 +683,7 @@ async def _create_command(
         subject=slug,
         request=request,
         idempotency_key=idempotency_key,
-        claimed=Claimed(claims, put),
+        claimed=Claimed(claims, held),
     )
     return operation_answer(result, ModelRecord)
 
@@ -878,7 +878,8 @@ class UrlImport(BaseModel):
         "Fetches the source on the server -- https only, from public internet addresses "
         f"only, at most {MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds "
         "-- then creates the model exactly as a paste does, recording the URL as "
-        "`origin_url`. A direct link to the file works; a MakerWorld model page is "
+        "`origin_url` (its scheme, host, port and path; never a query, fragment or "
+        "userinfo). A direct link to the file works; a MakerWorld model page is "
         "refused, because MakerWorld only serves files to a signed-in account. Every "
         "refusal is a 422, and an address that is not public reads the same as one that "
         "did not answer."
@@ -908,7 +909,7 @@ async def import_model(
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history; they hold it without (review 3c 1.5).
     claims = ClaimStore(paths.claims)
-    url = await asyncio.to_thread(claims.put, body.url.encode())
+    url = await asyncio.to_thread(claims.hold, body.url.encode())
     parts = urlsplit(body.url)
     result = await run_operation(
         ops,
@@ -918,13 +919,28 @@ async def import_model(
         subject=parts.hostname or "url",
         request={
             **body.model_dump(mode="json"),
-            "url": url,
-            "shown": urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")),
+            "url": url.name,
+            "shown": shown_url(body.url),
         },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
     )
     return operation_answer(result, ModelRecord)
+
+
+def shown_url(url: str) -> str:
+    """``url`` as an import records it: scheme, host, port and path. Never its userinfo,
+    query or fragment, any of which may carry a token (review 3c 1.5)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # not a number; the fetch refuses the URL
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _require_import_permit(imports: ImportPermits) -> None:
@@ -963,7 +979,8 @@ async def import_url(body: UrlImport, state: AppState) -> ModelRecord:
         state.events,
         slug=_slug_from_name(name),
         source=imported.source,
-        meta=ModelMeta(name=name, origin_url=imported.origin_url),
+        # Never the URL as given: its query may carry a token (review 3c 1.5).
+        meta=ModelMeta(name=name, origin_url=shown_url(imported.origin_url)),
         force=body.force,
     )
 
@@ -1040,19 +1057,19 @@ async def patch_model(
     # The presets by claim: a full list of them is past the inline cap (review 3c 1.1).
     claims = ClaimStore(paths.claims)
     presets = fields.pop("presets", None)
-    claimed = (
+    held = (
         None
         if presets is None
-        else await asyncio.to_thread(claims.put, json.dumps(presets).encode())
+        else await asyncio.to_thread(claims.hold, json.dumps(presets).encode())
     )
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["model_patch"],
         subject=slug,
-        request={"slug": slug, "patch": fields, "presets": claimed},
+        request={"slug": slug, "patch": fields, "presets": None if held is None else held.name},
         idempotency_key=idempotency_key,
-        claimed=Claimed(claims, [] if claimed is None else [claimed]),
+        claimed=Claimed(claims, [] if held is None else [held]),
     )
     return operation_answer(result, ModelRecord)
 

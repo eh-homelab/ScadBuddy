@@ -1058,8 +1058,10 @@ Each phase is its own implementation plan and ships alone.
      claim sweep (`housekeeping_sweep_claims`, on the prune Schedule every 300 s
      whatever the sweep interval, a day after the last request put it). An operation's
      inline request is capped at 128 KB (413 past it). An import's subject is the URL's
-     host, and its request holds the URL without its query. The UI's and the agent's
-     calls to these routes go through `command()`.
+     host; its request, and the model's `origin_url`, hold the URL as scheme, host,
+     port and path only. A release removes only a claim its own put created and no put
+     has written since. The UI's and the agent's calls to these routes go through
+     `command()`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
