@@ -234,9 +234,13 @@ async def _sweep_assets_logged(state: AppState) -> None:
 
 
 async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = False) -> None:
+    """The boot skips a volume error; the Schedule's sweep (``reraise``) logs any error,
+    then fails its activity (review #1095b 4)."""
     try:
         await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
+    except Exception as error:
+        if not reraise and not isinstance(error, OSError):
+            raise
         logger.exception("could not sweep duplicate staging folders")
         if reraise:
             raise
