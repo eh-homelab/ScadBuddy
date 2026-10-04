@@ -193,10 +193,22 @@ fails, since its job was made all the same) is mapped to the resources it create
 changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
 extractor reads the call's parsed input and its result: models, revisions (the new
-commit, and its parent when the call names one, as `apply_patch`'s `base` does), presets, assets, render jobs, outputs, print runs and prints (a `print` is always a Bambuddy queue item id, whichever tool queued it). A `write` or
-`outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
-gap stays visible; a `read` tool records nothing, and neither does session control
-(`sessions_*`), `browser_pair` or `confirm_action` itself (the call it ran is recorded). It is recorded in `runToolWithOutcome`
+commit, and its parent when the call names one, as `apply_patch`'s `base` does), presets, assets, render jobs, outputs, print runs and prints (a `print` is always a Bambuddy queue item id, whichever tool queued it).
+Also: libraries by name (a pin is a revision of its model plus a `library` row with that
+model; removing the shared checkout is a `library` row with none), installed fonts,
+stored settings and remembered choices (`setting`, by what they are for:
+`print_options:<scope>[:<key>]`, `print_choices:<slug>`, `last_project`,
+`bed_type:<printer>`), and Bambuddy's projects, library files (`bambuddy_file`, with the
+output sent as `before`) and print archives (`print_archive`, an archive id, not a queue
+item). The browser tools that only change the open page (navigate, open a model, set or
+reset parameters, pick a plate, open the print dialog, edit the source or a Settings
+field without saving) record nothing; `browser_generate` records the output it saved.
+`browser_click` and `browser_fill` stay `unclassified`: they can press anything, Save
+included. Every other `write` or `outward` tool has an extractor; one added without one
+is listed as `unclassified` with its tool, so the gap stays visible
+(`test/touched.test.ts` pins that only those two are). A `read` tool records nothing,
+and neither does session control (`sessions_*`), `browser_pair` or `confirm_action`
+itself (the call it ran is recorded). It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
 projection, so the tool activities a durable session would run record the same way
 (proposed in PR #972,
@@ -211,7 +223,9 @@ resource with every way it was touched, grouped by kind, and reads it again when
 the session's status moves or one of its tool calls finishes, so a running turn's
 changes show as they land. Each entry links to its page: a model to `/m/{slug}`, a
 revision to `/m/{slug}?version={commit}`, a preset, asset or render to its model's
-page, an output to `/edit/{id}`, a print run or print to `/prints`. A deleted
+page, an output to `/edit/{id}`, a print run or print to `/prints`, a print archive to
+`/prints/{id}`, a library to its model's page (the shared checkout to `/library`) and a
+setting to `/settings`; fonts and Bambuddy's projects and files have no page here. A deleted
 resource, anything of a model the session deleted after last touching it (even if it
 made one of that slug again), and an `unclassified` row (shown by its tool) link
 nowhere.
@@ -240,7 +254,5 @@ assistant is off.
 - **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
   access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).
-- **The rest of #931**: extractors for the remaining tools (libraries, fonts, Bambuddy
-  projects, settings and remembered choices, `browser_*` param changes), a backfill
-  from `ai_audit`, a resource filter in the panel's own session picker, and
-  "restore to before this session".
+- **The rest of #931**: a backfill from `ai_audit`, a resource filter in the panel's own
+  session picker, and "restore to before this session".

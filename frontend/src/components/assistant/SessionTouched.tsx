@@ -17,6 +17,12 @@ const GROUPS: ReadonlyArray<{ type: Kind; label: string }> = [
   { type: 'output', label: 'Outputs' },
   { type: 'print_run', label: 'Print runs' },
   { type: 'print', label: 'Prints' },
+  { type: 'print_archive', label: 'Print archives' },
+  { type: 'library', label: 'Libraries' },
+  { type: 'font', label: 'Fonts' },
+  { type: 'setting', label: 'Settings' },
+  { type: 'project', label: 'Bambuddy projects' },
+  { type: 'bambuddy_file', label: 'Bambuddy files' },
   { type: 'unclassified', label: 'Other changes' },
 ]
 
@@ -98,6 +104,19 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
       return { name: id, to: page('/prints') }
     case 'print':
       return { name: `queue item ${id}`, to: page('/prints') }
+    case 'print_archive':
+      return { name: `print ${id}`, to: page(`/prints/${encodeURIComponent(id)}`) }
+    case 'library':
+      // A model's pin goes to the model; the shared checkout, to the Library page.
+      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/library') }
+    case 'font':
+      return { name: id, to: null }
+    case 'setting':
+      return { name: id, to: page('/settings') }
+    case 'project':
+      return { name: `project ${id}`, to: null }
+    case 'bambuddy_file':
+      return { name: `library file ${id}`, to: null }
     case 'unclassified':
       return { name: e.tools.join(', '), to: null }
   }

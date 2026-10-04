@@ -80,7 +80,22 @@ export function setSessionResources(
   state.views.set(sessionId, view({ ...state.views.get(sessionId), ...session, id: sessionId }))
 }
 
-const VALID_TYPES: readonly string[] = ['model', 'revision', 'preset', 'asset', 'render_job', 'output', 'print_run', 'print']
+const VALID_TYPES: readonly string[] = [
+  'model',
+  'revision',
+  'preset',
+  'asset',
+  'render_job',
+  'output',
+  'print_run',
+  'print',
+  'library',
+  'font',
+  'setting',
+  'project',
+  'bambuddy_file',
+  'print_archive',
+] satisfies readonly ResourceRef['type'][]
 
 function touched(rows: readonly SessionResource[], ref: ResourceRef): boolean {
   return rows.some((r) => (ref.type === 'model' ? r.model === ref.id : r.type === ref.type && r.id === ref.id))

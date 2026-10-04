@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, SessionResources } from '../src/sessions/touched.js'
+import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -106,11 +106,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     expect(resources.every((r) => !Number.isNaN(Date.parse(r.at)))).toBe(true)
   })
 
+  it('stores every kind the extractors name (the table CHECK lists them all)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const kinds = RESOURCE_TYPES.filter((t) => t !== 'unclassified')
+    await db.sql`INSERT INTO ai_session_resources ${db.sql(
+      kinds.map((t) => ({ session_id: session.id, tool: 't', resource_type: t, resource_id: 'x', action: 'modified' })),
+    )}`
+    expect((await m.resources(session.id, browser)).map((r) => r.type)).toEqual(kinds)
+  })
+
   it('records a write with no extractor as unclassified, naming the tool', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     expect(await m.resources(session.id, browser)).toMatchObject([
-      { type: 'unclassified', id: null, action: 'modified', tool: 'set_print_options' },
+      { type: 'unclassified', id: null, action: 'modified', tool: 'browser_click' },
     ])
   })
 
@@ -149,7 +158,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     // No such session: the foreign key refuses the row.
     await broken.record({
       sessionId: '33333333-3333-4333-8333-333333333333',
-      tool: { name: 'set_print_options', risk: 'write' },
+      tool: { name: 'browser_click', risk: 'write' },
       input: {},
       result: { content: [] },
     })
@@ -180,7 +189,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
 
   it("goes with its session, and is read only by those who may see the session", async () => {
     const { session } = await m.start(agentA, { origin: 'mcp' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     // The browser user sees every session (spec §6); another agent does not.
     expect(await m.resources(session.id, browser)).toHaveLength(1)
     await expect(m.resources(session.id, { kind: 'bearer', id: 'token:b', label: 'B' })).rejects.toThrow(/no session/)
@@ -191,7 +200,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
 
   it('answers sessions_resources to whoever may see the session', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     const tool = ALL_TOOLS.find((t) => t.name === 'sessions_resources')!
     const call = (owner: typeof agentA) =>
       runTool(tool, { session_id: session.id }, {
@@ -200,7 +209,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
         progress: async () => {},
         signal: new AbortController().signal,
       })
-    expect(firstText(await call(agentA))).toMatchObject({ resources: [{ type: 'unclassified', tool: 'set_print_options' }] })
+    expect(firstText(await call(agentA))).toMatchObject({ resources: [{ type: 'unclassified', tool: 'browser_click' }] })
     const other = await call({ kind: 'bearer', id: 'token:b', label: 'B' })
     expect(other.isError).toBe(true)
   })

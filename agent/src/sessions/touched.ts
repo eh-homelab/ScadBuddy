@@ -30,6 +30,16 @@ export const RESOURCE_TYPES = [
   'output',
   'print_run',
   'print',
+  // Third-party libraries by name: a model's pin (with its model) or the shared checkout (without).
+  'library',
+  'font',
+  // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
+  // `print_choices:<slug>`, `last_project`, `bed_type:<printer>`).
+  'setting',
+  // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
+  'project',
+  'bambuddy_file',
+  'print_archive',
   'unclassified',
 ] as const
 export type ResourceType = (typeof RESOURCE_TYPES)[number]
@@ -44,6 +54,12 @@ export const LOOKUP_TYPES = [
   'output',
   'print_run',
   'print',
+  'library',
+  'font',
+  'setting',
+  'project',
+  'bambuddy_file',
+  'print_archive',
 ] as const satisfies readonly Exclude<ResourceType, 'unclassified'>[]
 export type LookupType = (typeof LOOKUP_TYPES)[number]
 
@@ -110,6 +126,25 @@ function output(result: unknown, slug: string | null): Touch[] {
   return id ? [{ type: 'output', id, action: 'created', model: str(field(result, 'slug')) ?? slug }] : []
 }
 
+/** A Bambuddy id (a number or a string) as a resource id. */
+function bambuddyId(value: unknown): string | null {
+  return typeof value === 'number' ? String(value) : str(value)
+}
+
+/** A library pin: the model's new revision, and the library by name. */
+function libraryPin(action: ResourceAction): Extractor {
+  return (input, result) => {
+    const name = str(input.name)
+    const model = str(field(result, 'slug')) ?? str(input.slug)
+    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action, model }] : [])]
+  }
+}
+
+/** A stored setting, by what it is for. */
+function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
+  return id ? [{ type: 'setting', id, action: 'modified', ...extra }] : []
+}
+
 /** Tool name → extractor. A name that is not a registered tool fails test/touched.test.ts. */
 export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // Models.
@@ -161,6 +196,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     return id ? [{ type: 'preset', id, action: 'deleted', model: str(input.slug) }] : []
   },
   // Assets.
+  fetch_asset: (input, result) => {
+    const id = str(field(result, 'id'))
+    return id ? [{ type: 'asset', id, action: 'created', model: str(input.slug) }] : []
+  },
   upload_asset: (input, result) => {
     const id = str(field(result, 'id'))
     return id ? [{ type: 'asset', id, action: 'created', model: str(input.slug) }] : []
@@ -192,6 +231,70 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
         .map((item) => ({ type: 'print' as const, id: String(item), action: 'created' as const, before: output })),
     ]
   },
+  // Libraries and fonts.
+  pin_library: libraryPin('created'),
+  pin_library_from_url: libraryPin('created'),
+  repin_library: libraryPin('modified'),
+  repin_library_from_pinned_url: libraryPin('modified'),
+  unpin_library: libraryPin('deleted'),
+  remove_library_checkout: (input) => {
+    const name = str(input.name)
+    return name ? [{ type: 'library', id: name, action: 'deleted', model: null, before: str(input.commit) }] : []
+  },
+  install_font: (input, result) => {
+    const family = str(field(result, 'family')) ?? str(input.family)
+    return family ? [{ type: 'font', id: family, action: 'created' }] : []
+  },
+  // Settings and remembered choices.
+  set_print_options: (input) => {
+    const scope = str(input.scope)
+    const key = str(input.key)
+    if (!scope) return []
+    return setting(scope === 'global' || !key ? `print_options:${scope}` : `print_options:${scope}:${key}`, {
+      model: scope === 'model' ? key : null,
+    })
+  },
+  remember_model_print_choices: (input) => {
+    const slug = str(input.slug)
+    return setting(slug ? `print_choices:${slug}` : null, { model: slug })
+  },
+  remember_last_project: (input) => setting('last_project', { after: bambuddyId(input.project_id) }),
+  remember_printer_bed_type: (input) => {
+    const printer = bambuddyId(input.printer_id)
+    return setting(printer ? `bed_type:${printer}` : null)
+  },
+  // Bambuddy projects and library files.
+  create_print_project: (input, result) => {
+    const id = bambuddyId(field(result, 'id'))
+    return id ? [{ type: 'project', id, action: input.project_id == null ? 'created' : 'modified' }] : []
+  },
+  send_to_bambuddy: (input, result) => {
+    const id = bambuddyId(field(result, 'library_file_id'))
+    return id ? [{ type: 'bambuddy_file', id, action: 'created', before: str(input.output_id) }] : []
+  },
+  file_output_in_project_folder: (input, result) => {
+    const file = bambuddyId(field(result, 'library_file_id'))
+    const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
+    return [
+      ...(file
+        ? [{ type: 'bambuddy_file' as const, id: file, action: field(result, 'created') === true ? ('created' as const) : ('modified' as const), before: str(input.output_id) }]
+        : []),
+      ...(project ? [{ type: 'project' as const, id: project, action: 'modified' as const }] : []),
+    ]
+  },
+  file_output_under_project: (input, result) => {
+    const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
+    return project ? [{ type: 'project', id: project, action: 'modified', before: str(input.output_id) }] : []
+  },
+  pull_print_timelapse: (input) => {
+    const archive = bambuddyId(input.archive_id)
+    return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+  },
+  // The user's tab: Generate saves an output (frontend ActionBar's `generate` answers it).
+  browser_generate: (_input, result) => {
+    const id = str(field(field(result, 'output'), 'id'))
+    return id ? [{ type: 'output', id, action: 'created' }] : []
+  },
   // Answers Bambuddy's new queue item; `before` is the archive printed again.
   print_again: (input, result) => {
     const item = field(result, 'queue_item_id')
@@ -215,8 +318,9 @@ export function resultJson(result: CallToolResult): unknown {
 /**
  * Write tools that change no resource of the kinds recorded here: session
  * control (it changes ScadBuddy's own session state, which the session list
- * already shows), pairing a browser tab, and confirm_action itself (the call
- * it ran is recorded as that tool). Not `unclassified`: there is nothing to
+ * already shows), pairing a browser tab, confirm_action itself (the call
+ * it ran is recorded as that tool), and the browser tools that change only the
+ * open page. Not `unclassified`: there is nothing to
  * classify. A name that is not a registered tool fails test/touched.test.ts.
  */
 export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
@@ -231,6 +335,19 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_deny',
   'browser_pair',
   'confirm_action',
+  // The user's tab: these change only what the open page shows or holds unsaved (a
+  // parameter, the editor, a Settings field, a dialog a human then confirms). What is
+  // saved is saved by a tool that records it. browser_click and browser_fill are not
+  // here: they can press anything, Save included, so they stay `unclassified`.
+  'browser_navigate',
+  'browser_open_model',
+  'browser_set_param',
+  'browser_set_params',
+  'browser_reset_param',
+  'browser_select_plate',
+  'browser_open_print_dialog',
+  'browser_replace_range',
+  'browser_set_field',
 ])
 
 /**

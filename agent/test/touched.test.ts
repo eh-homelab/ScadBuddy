@@ -154,6 +154,111 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a fetched asset as an upload does', () => {
+    expect(touches('fetch_asset', { slug: 'box', url: 'https://x.test/a.png' }, { id: 'f'.repeat(64), kind: 'image' }, 'outward')).toEqual([
+      { type: 'asset', id: 'f'.repeat(64), action: 'created', model: 'box' },
+    ])
+  })
+
+  it("records a library pin as the model's revision and the library, by name", () => {
+    const record = { slug: 'box', version: C2 }
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)).toEqual([
+      { type: 'revision', id: C2, action: 'created', model: 'box', before: null, after: C2 },
+      { type: 'library', id: 'BOSL2', action: 'created', model: 'box' },
+    ])
+    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, record, 'outward')[1]).toEqual(
+      { type: 'library', id: 'lib', action: 'created', model: 'box' },
+    )
+    for (const name of ['repin_library', 'repin_library_from_pinned_url']) {
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
+    }
+    expect(touches('unpin_library', { slug: 'box', name: 'BOSL2' }, record)[1]).toEqual({ type: 'library', id: 'BOSL2', action: 'deleted', model: 'box' })
+    // The shared checkout, which no model owns.
+    expect(touches('remove_library_checkout', { name: 'BOSL2', commit: C1 }, null, 'outward')).toEqual([
+      { type: 'library', id: 'BOSL2', action: 'deleted', model: null, before: C1 },
+    ])
+  })
+
+  it('records a font installed', () => {
+    expect(touches('install_font', { family: 'Lobster Two' }, { family: 'Lobster Two', files: [] })).toEqual([
+      { type: 'font', id: 'Lobster Two', action: 'created' },
+    ])
+  })
+
+  it('records settings and remembered choices by what they are for', () => {
+    expect(touches('set_print_options', { scope: 'global', options: {} }, {}, 'outward')).toEqual([
+      { type: 'setting', id: 'print_options:global', action: 'modified', model: null },
+    ])
+    expect(touches('set_print_options', { scope: 'printer', key: '3', options: {} }, {}, 'outward')).toEqual([
+      { type: 'setting', id: 'print_options:printer:3', action: 'modified', model: null },
+    ])
+    expect(touches('set_print_options', { scope: 'model', key: 'box', options: {} }, {}, 'outward')).toEqual([
+      { type: 'setting', id: 'print_options:model:box', action: 'modified', model: 'box' },
+    ])
+    expect(touches('remember_model_print_choices', { slug: 'box', tier: 'fast' }, {})).toEqual([
+      { type: 'setting', id: 'print_choices:box', action: 'modified', model: 'box' },
+    ])
+    expect(touches('remember_last_project', { project_id: 4 }, { project_id: 4 })).toEqual([
+      { type: 'setting', id: 'last_project', action: 'modified', after: '4' },
+    ])
+    expect(touches('remember_printer_bed_type', { printer_id: 2, bed_type: 'pei' }, {})).toEqual([
+      { type: 'setting', id: 'bed_type:2', action: 'modified' },
+    ])
+  })
+
+  it("records Bambuddy projects, files and a print's timelapse", () => {
+    expect(touches('create_print_project', { name: 'Bins' }, { id: 9, name: 'Bins' }, 'outward')).toEqual([
+      { type: 'project', id: '9', action: 'created' },
+    ])
+    // Linking an existing project changes it; it makes none.
+    expect(touches('create_print_project', { project_id: 9 }, { id: 9 }, 'outward')).toEqual([
+      { type: 'project', id: '9', action: 'modified' },
+    ])
+    expect(touches('send_to_bambuddy', { output_id: 'o1' }, { library_file_id: 31, filename: 'a.3mf' }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '31', action: 'created', before: 'o1' },
+    ])
+    expect(
+      touches('file_output_in_project_folder', { output_id: 'o1', project_id: 9 }, { library_file_id: 31, project_id: 9, created: false }, 'outward'),
+    ).toEqual([
+      { type: 'bambuddy_file', id: '31', action: 'modified', before: 'o1' },
+      { type: 'project', id: '9', action: 'modified' },
+    ])
+    expect(
+      touches('file_output_in_project_folder', { output_id: 'o1', project_id: 9 }, { library_file_id: 32, project_id: 9, created: true }, 'outward')[0],
+    ).toEqual({ type: 'bambuddy_file', id: '32', action: 'created', before: 'o1' })
+    expect(
+      touches('file_output_under_project', { output_id: 'o1' }, { project_id: 9, queue_item_ids: [12], archive_ids: [] }, 'outward'),
+    ).toEqual([{ type: 'project', id: '9', action: 'modified', before: 'o1' }])
+    expect(touches('pull_print_timelapse', { archive_id: 7, filename: 't.mp4' }, null, 'outward')).toEqual([
+      { type: 'print_archive', id: '7', action: 'modified' },
+    ])
+  })
+
+  it("records the output the user's tab generated, and nothing for what changes only the open page", () => {
+    expect(touches('browser_generate', {}, { output: { id: 'o9', name: null } })).toEqual([{ type: 'output', id: 'o9', action: 'created' }])
+    expect(touches('browser_generate', {}, null)).toEqual([])
+    for (const name of [
+      'browser_navigate',
+      'browser_open_model',
+      'browser_set_param',
+      'browser_set_params',
+      'browser_reset_param',
+      'browser_select_plate',
+      'browser_open_print_dialog',
+      'browser_replace_range',
+      'browser_set_field',
+    ]) {
+      expect(touches(name, {}, {}), name).toEqual([])
+    }
+    // A click or a fill can press anything, Save included: what it changed is not known.
+    expect(touches('browser_fill', {}, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
+  })
+
+  it('leaves only the browser click and fill unclassified', () => {
+    const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
+    expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])
+  })
+
   it('records a failed render_model (its job was made), and no other failed call', () => {
     const failed = (name: string, input: Record<string, unknown>, data: unknown) =>
       touchesOf({ name, risk: 'write' }, input, { ...result(data, name), isError: true }, false)
@@ -162,7 +267,7 @@ describe('extractors', () => {
     ])
     // apply_patch's conflict answer is JSON too, but nothing was written.
     expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
-    expect(failed('set_print_options', {}, {})).toEqual([])
+    expect(failed('set_print_options', { scope: 'global' }, {})).toEqual([])
   })
 
   it('records nothing it cannot name, rather than a row with no id', () => {
@@ -171,7 +276,7 @@ describe('extractors', () => {
   })
 
   it('records a write with no extractor as unclassified, and a read with none as nothing', () => {
-    expect(touches('set_print_options', {}, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
+    expect(touches('browser_click', { ref: 'e1' }, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
     expect(touches('get_model', { slug: 'box' }, { slug: 'box' }, 'read')).toEqual([])
     // Session control changes no recorded resource: no unclassified noise.
     expect(touches('sessions_send', { session_id: 's', text: 'hi' }, { turn_id: 't' })).toEqual([])
