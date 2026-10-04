@@ -39,6 +39,7 @@ const KIND_LABEL: Record<AuditKind, string> = {
   token: 'MCP tokens',
   memory: 'Memory',
   http: 'HTTP requests',
+  question: 'Questions',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
@@ -72,6 +73,8 @@ function describe(entry: AuditEntry): string {
       return entry.action === 'recall' ? 'Memory recall' : entry.action === 'retain' ? 'Memory save' : `Memory ${entry.action}`
     case 'http':
       return `HTTP ${entry.action}`
+    case 'question':
+      return `Question ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }

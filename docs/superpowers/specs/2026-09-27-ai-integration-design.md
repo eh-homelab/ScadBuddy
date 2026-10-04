@@ -34,7 +34,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | # | Decision | Why | Rejected |
 |---|---|---|---|
 | D1 | **Harness: Claude Agent SDK, TypeScript** | Loads Claude plugins natively; has sessions with resume/fork and a pluggable `SessionStore`, in-process custom tools, permission callbacks and hooks (§3.1) | Vercel AI SDK loop and Mastra: both multi-provider, neither loads Claude plugins |
-| D2 | **Claude only, to start** | The harness supports nothing else (§3.1). Credentials: an Anthropic API key, or a gateway base URL plus credential | claude.ai subscription login (not allowed, §3.1); non-Claude models through a gateway (not supported, §3.1) |
+| D2 | **Claude only, to start** | The harness supports nothing else (§3.1). Credentials: an Anthropic API key, a gateway base URL plus credential, or (reversed 2026-10-03, the owner's decision for their own deployment) a Claude Code OAuth token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN` | non-Claude models through a gateway (not supported, §3.1). §3.1's note on claude.ai login stands as Anthropic's terms; the OAuth kind is the deployment owner's own token, used on their own deployment |
 | D3 | **One tool registry, two projections** | A tool is defined once and served in-process to the harness and over `/mcp` to external agents, so the surfaces cannot drift | Deriving tools mechanically from `openapi.json` (route-shaped rather than task-shaped; no risk tiers) |
 | D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
@@ -799,7 +799,15 @@ including `disabled`. Where it is enforced:
   `waiting_input`. Questions live in `ai_questions`, so any replica can take the
   answer, but unlike an approval a question never outlives its turn: interrupt,
   handoff, a shutdown and every other end of the turn cancel it, and the model is told
-  nobody answered. Nothing answers a question by itself. Expiry and notifications
+  nobody answered. Nothing answers a question by itself. A subagent cannot use
+  `AskUserQuestion` (Claude Code refuses it there without asking `canUseTool`, measured
+  on 2.1.283), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
+  in-process tool with the same input that parks on the same gate
+  (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
+  (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
+  answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
+  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
+  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.

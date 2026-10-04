@@ -47,6 +47,7 @@ class FakeXhr {
   status = 0
   statusText = ''
   responseText = ''
+  responseHeaders: Record<string, string> = {}
   readonly upload = new EventTarget()
   onload: (() => void) | null = null
   onerror: (() => void) | null = null
@@ -61,6 +62,9 @@ class FakeXhr {
   }
   setRequestHeader(name: string, value: string) {
     this.headers[name] = value
+  }
+  getResponseHeader(name: string): string | null {
+    return this.responseHeaders[name] ?? null
   }
   send(body: FormData) {
     this.body = body
@@ -132,6 +136,13 @@ describe('uploadMedia (#274)', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).status).toBe(413)
     expect((error as ApiError).detail).toContain('at most 1024 MB')
+  })
+
+  it("keeps a 503's Retry-After as retry_after, as the fetch path does (#1000)", async () => {
+    const { pending, xhr } = upload()
+    xhr.responseHeaders['Retry-After'] = '30'
+    xhr.answer(503, { title: 'Service Unavailable', status: 503, detail: 'the render queue is full' })
+    await expect(pending).rejects.toMatchObject({ status: 503, problem: { retry_after: 30 } })
   })
 
   it('rejects with what the status means when the answer is not a problem', async () => {
@@ -837,5 +848,21 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     )
     await call()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+describe('Retry-After on problems (#1000)', () => {
+  it("keeps a 429's or 503's delay in seconds, and nothing on other statuses", async () => {
+    server.use(
+      http.post('/api/v1/ai/credentials/test', () =>
+        HttpResponse.json({ detail: 'a connection test ran moments ago' }, { status: 429, headers: { 'Retry-After': '7' } }),
+      ),
+      http.get('/api/v1/ai/credentials', () =>
+        HttpResponse.json({ detail: 'nope' }, { status: 400, headers: { 'Retry-After': '7' } }),
+      ),
+    )
+    await expect(api.testAiCredential()).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
+    const other = await api.getAiCredential().catch((cause: unknown) => cause)
+    expect((other as ApiError).problem).not.toHaveProperty('retry_after')
   })
 })
