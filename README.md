@@ -377,6 +377,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading to the release with #1053** moves renders onto the command shape: the
+  workflow `render-<render key>` inserts its own row. Do not let an older API overlap a
+  new one: stop the old API pods (or use a `Recreate` rollout, as the manifest does)
+  before the new API starts. An older API beside it would restart this release's
+  waiting renders as its own (its reconciler) and count requests into them that the
+  workflow never sees (its insert). The older render workers may keep running: they
+  finish the renders pinned to their build. A pending row of the older API's that no
+  workflow will run is failed, once it is 30 s old, by the next render of its key or
+  the API's next pass over such rows.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
 
