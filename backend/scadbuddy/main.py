@@ -480,13 +480,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     activities = _housekeeping_activities(state)
     try:
         while not stop.is_set():
-            try:
-                async with Worker(
-                    client, task_queue=queue, workflows=[Housekeeping], activities=activities
-                ):
-                    await stop.wait()
-            except Exception:
-                logger.exception("the library worker failed; starting it again")
+            worker = Worker(
+                client, task_queue=queue, workflows=[Housekeeping], activities=activities
+            )
+            if not await _serve_until(worker, stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
@@ -509,23 +506,29 @@ async def _set_up_housekeeping(
 
 
 async def _serve_until(
-    worker: Worker, stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
+    worker: Worker,
+    stop: asyncio.Event,
+    alongside: Coroutine[Any, Any, None] | None = None,
+    *,
+    name: str = "print",
 ) -> bool:
-    """Run ``worker`` and ``alongside`` until ``stop``: True. A worker that ends first,
-    failed or not, is said at once (review #1061: a poller that dies while running
+    """Run ``worker`` (and ``alongside``) until ``stop``: True. A worker that ends
+    first, failed or not, is said at once (review #1061: a poller that dies while running
     would otherwise leave the queue unpolled until the pod restarts): False."""
     running = asyncio.create_task(worker.run())
-    beside = asyncio.create_task(alongside)
+    beside = asyncio.create_task(alongside) if alongside is not None else None
     stopping = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        beside.cancel()
+        if beside is not None:
+            beside.cancel()
         stopping.cancel()
     if running.done():
         error = running.exception()
         logger.error(
-            "the print worker failed; starting it again",
+            "the %s worker failed; starting it again",
+            name,
             exc_info=error if error is not None else RuntimeError("the worker stopped"),
         )
         return False
