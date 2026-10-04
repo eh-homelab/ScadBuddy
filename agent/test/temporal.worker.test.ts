@@ -1,3 +1,4 @@
+import { Client, WithStartWorkflowOperation } from '@temporalio/client'
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
@@ -29,8 +30,11 @@ const echo = defineTool({
 /** A codec that changes nothing and records the context of every call (spec §6.5). */
 class SpyCodec implements PayloadCodec {
   readonly contexts: (SerializationContext | undefined)[] = []
+  /** What each encode carried, by its payloads' JSON data. */
+  readonly encoded: { data: string[]; context: SerializationContext | undefined }[] = []
   async encode(payloads: Payload[], context?: SerializationContext): Promise<Payload[]> {
     this.contexts.push(context)
+    this.encoded.push({ data: payloads.map((p) => Buffer.from(p.data ?? []).toString()), context })
     return payloads
   }
   async decode(payloads: Payload[], context?: SerializationContext): Promise<Payload[]> {
@@ -84,6 +88,35 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
       await agent.stop()
     }
     expect(agent.state()).not.toBe('connecting')
+  }, 120_000)
+
+  // §6.5's gate for phase 5: a client's codec learns which session a durable turn's
+  // start arguments and Update arguments belong to, so it can seal them under its key.
+  it("gives a client's codec the session's workflow id for Update-with-Start", async () => {
+    const codec = new SpyCodec()
+    const client = new Client({ connection: env.connection, namespace: 'default', dataConverter: { payloadCodecs: [codec] } })
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: 'durable-session-standin',
+      workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
+    })
+    const workflowId = `session-${randomUUID()}`
+    const result = await worker.runUntil(
+      client.workflow.executeUpdateWithStart('send', {
+        args: ['update-arg'],
+        startWorkflowOperation: new WithStartWorkflowOperation('turns', {
+          workflowId,
+          taskQueue: 'durable-session-standin',
+          args: ['start-arg'],
+          workflowIdConflictPolicy: 'USE_EXISTING',
+        }),
+      }),
+    )
+    expect(result).toBe('got update-arg')
+    await client.workflow.getHandle(workflowId).terminate()
+    const context = { type: 'workflow', namespace: 'default', workflowId }
+    expect(codec.encoded).toContainEqual({ data: ['"start-arg"'], context })
+    expect(codec.encoded).toContainEqual({ data: ['"update-arg"'], context })
   }, 120_000)
 
   it('keeps trying while Temporal cannot be reached, and stops cleanly', async () => {

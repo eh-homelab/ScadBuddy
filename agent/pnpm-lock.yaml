@@ -190,6 +190,9 @@ importers:
       '@temporalio/common':
         specifier: 1.24.0
         version: 1.24.0
+      '@temporalio/proto':
+        specifier: 1.24.0
+        version: 1.24.0
       '@temporalio/worker':
         specifier: 1.24.0
         version: 1.24.0(lightningcss@1.33.0)(postcss@8.5.28)

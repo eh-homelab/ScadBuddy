@@ -41,6 +41,8 @@ import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { AgentWorker } from './temporal/worker.js'
+import { SubjectPayloadCodec } from './temporal/codec.js'
+import { PgPayloadKeys } from './temporal/payloadKeys.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
@@ -313,6 +315,13 @@ const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
 const temporal = config.temporalAddress && database ? { address: config.temporalAddress, sql: database.sql } : undefined
 if (config.temporalAddress && !database) console.error('agent-tools worker: not started, it needs SCADBUDDY_DATABASE_URL')
 if (temporal) Runtime.install({ shutdownSignals: [] })
+// The payload codec (spec 2026-10-01 §6.5): session-*/flow-* payloads are sealed per
+// subject. Without a KEK it stays off, and no durable session can be created.
+const payloadKeys =
+  temporal && kek.ok
+    ? new PgPayloadKeys(temporal.sql, { current: kek.kek, ...(previousKek?.ok ? { previous: previousKek.kek } : {}) })
+    : undefined
+const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
 const temporalWorker =
@@ -328,6 +337,7 @@ const temporalWorker =
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
+        ...(dataConverter ? { dataConverter } : {}),
       })
     : undefined
 // Routes start commands through a lazy client: a Temporal that is down answers 503.
@@ -337,6 +347,7 @@ const commands =
         client: new Client({
           connection: Connection.lazy({ address: temporal.address }),
           namespace: config.temporalNamespace,
+          ...(dataConverter ? { dataConverter } : {}),
         }),
         store: operationStore,
         kinds: commandKinds,
