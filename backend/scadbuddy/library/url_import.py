@@ -49,6 +49,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpcore
 import httpx
@@ -296,9 +297,40 @@ def _name_from(url: httpx.URL) -> str:
     return stem.strip() or url.host
 
 
-def _require_https(url: httpx.URL) -> None:
+def _require_https(url: httpx.URL, *, shown: str | None = None) -> None:
     if url.scheme != "https":
-        raise ImportRefusedError(f"only https URLs can be imported, and {str(url)!r} is not one")
+        quoted = shown_url(str(url)) if shown is None else shown
+        raise ImportRefusedError(f"only https URLs can be imported, and {quoted!r} is not one")
+
+
+def shown_url(url: str) -> str:
+    """``url`` as an import records it: scheme, host, port and path. Never its userinfo,
+    query or fragment, any of which may carry a token (review 3c 1.5)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # not a number; the fetch refuses the URL
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def parse_import_url(pasted: str) -> httpx.URL:
+    """``pasted`` as an https URL with a host. Its refusals quote the URL whole, so the
+    route makes them before an operation could record them (#1054); a redirect's hop
+    is quoted by :func:`shown_url`."""
+    try:
+        url = httpx.URL(pasted.strip())
+        shown_url(pasted)  # its `urlsplit` refuses some that httpx takes, "https://[x/"
+    except (httpx.InvalidURL, ValueError):
+        raise ImportRefusedError(f"{pasted!r} is not a URL") from None
+    _require_https(url, shown=str(url))
+    if not url.host:
+        raise ImportRefusedError(f"{pasted!r} names no host")
+    return url
 
 
 async def _vet_hop(request: httpx.Request) -> None:
@@ -359,13 +391,7 @@ async def _read_capped(response: httpx.Response, *, limit: int) -> bytes:
 
 async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
     """Resolve and fetch the model at `pasted`, reading at most `limit` bytes of it."""
-    try:
-        url = httpx.URL(pasted.strip())
-    except httpx.InvalidURL:
-        raise ImportRefusedError(f"{pasted!r} is not a URL") from None
-    _require_https(url)
-    if not url.host:
-        raise ImportRefusedError(f"{pasted!r} names no host")
+    url = parse_import_url(pasted)
     resolver = next(candidate for candidate in RESOLVERS if candidate.handles(url))
     # The hop in flight, so whatever stops it -- a refused address, no answer, the
     # deadline -- names the host that failed, not only the one that was pasted.

@@ -784,7 +784,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
   afterEach(() => {
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
-    printRunPoll.operationFollowMs = 600_000
+    printRunPoll.operationFollowMs = 900_000
   })
 
   const operation = {
@@ -1054,6 +1054,18 @@ describe("a model's edits are commands (#1054)", () => {
       fetched.mockRestore()
     }
     expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('replaceSource sends the base the edit was made against', async () => {
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/models/w/source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(model)
+      }),
+    )
+    await api.replaceSource('w', 'cube(2);', false, undefined, 'abc1234')
+    expect(sent).toMatchObject({ source: 'cube(2);', base: 'abc1234' })
   })
 
   it("keeps a merge conflict's merged text, answered by the route", async () => {

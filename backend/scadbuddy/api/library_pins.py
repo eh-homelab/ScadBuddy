@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from functools import partial
 
 from fastapi import status
@@ -36,6 +36,31 @@ from scadbuddy.operations.kinds import to_thread_to_end
 MAX_CREATE_LIBRARIES = 16
 
 
+@contextlib.contextmanager
+def _pin_refusals() -> Iterator[None]:
+    """A pin's library errors as the route answers them."""
+    try:
+        yield
+    except LibraryNotFoundError as error:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"{error.args[0]!r} is not in the catalogue; give a url to pin it from",
+        ) from None
+    except LibraryFetchError as error:
+        raise ApiError(status.HTTP_502_BAD_GATEWAY, str(error)) from None
+    except LibraryResolverUnavailableError as error:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
+    except LibraryError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+
+
+def check_pin(name: str, *, url: str | None, ref: str | None, libraries: LibraryStore) -> None:
+    """:func:`resolve_pin`'s refusals that need no clone and no lookup, answered the
+    same way."""
+    with _pin_refusals():
+        libraries.check(name, url=url, ref=ref)
+
+
 async def resolve_pin(
     name: str,
     *,
@@ -46,22 +71,11 @@ async def resolve_pin(
 ) -> ModelLibrary:
     """Clone ``name`` at ``ref`` and return the pin. The caller holds
     :meth:`CheckoutGate.pinning` until the pin is recorded."""
-    try:
+    with _pin_refusals():
         # A clone is a network fetch; off the loop, and a bounded number at a time.
         # A cancel waits for the clone, so the slot and the caller's gate stay held.
         async with installs:
             return await to_thread_to_end(partial(libraries.resolve, name, url=url, ref=ref))
-    except LibraryNotFoundError:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"{name!r} is not in the catalogue; give a url to pin it from",
-        ) from None
-    except LibraryFetchError as error:
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, str(error)) from None
-    except LibraryResolverUnavailableError as error:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
-    except LibraryError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
 def require_library_names(names: Iterable[str]) -> None:

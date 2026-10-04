@@ -1240,6 +1240,15 @@ class Catalogue:
         self._drop_preview(slug)
         return self.record(slug)
 
+    def has_own_thumbnail(self, slug: str) -> bool:
+        """Whether :meth:`delete_thumbnail` has a thumbnail to remove: the model's
+        ``thumbnail.png``, or with media, its first item when that is an image."""
+        self._require(slug)
+        stored = self._stored_media(slug)
+        if not stored:
+            return self.thumbnail_path(slug).is_file()
+        return stored[0].kind == "image"
+
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
         report one: the next item's, or the fallback's when the model has been
@@ -2001,15 +2010,23 @@ class Catalogue:
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
 
-    def merge_plan(self, slug: str) -> MergePlan | None:
-        """The merge a ``merge_upstream`` would make now, written nowhere; None when
-        there is no update to merge (#1054: the merge route answers a conflict from it)."""
+    def upstream_state(self, slug: str) -> tuple[str, UpstreamState]:
+        """The upstream's id and where this template stands against it, without the
+        merge preview :meth:`upstream_status` works out (#1054: the upstream checks)."""
+        upstream, _, state = self._upstream_now(slug)
+        return upstream.id, state
+
+    def merge_plan(self, slug: str) -> tuple[MergePlan, UpstreamState] | None:
+        """The merge a ``merge_upstream`` would make now, written nowhere, and the state
+        it was worked out in; None when there is no update to merge (#1054: the merge
+        route answers a conflict from it)."""
         upstream, revision, state = self._upstream_now(slug)
         if state not in ("update", "dismissed") or revision is None:
             return None
-        return plan_merge(
+        plan = plan_merge(
             self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
         )
+        return plan, state
 
     def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
         """Take the upstream's current revision as one commit, or raise
@@ -2032,7 +2049,7 @@ class Catalogue:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
             plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
-                raise MergeConflictError(plan)
+                raise MergeConflictError(plan, state)
             merge = partial(self._write_merge, slug, plan, planned)
             try:
                 self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)

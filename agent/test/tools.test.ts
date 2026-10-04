@@ -1272,6 +1272,26 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(JSON.stringify(result.content)).toContain('51')
   })
 
+  it('follows a 202 past renderWaitMs, to the operation follow window (review #1063 3)', async () => {
+    let reads = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, async () => {
+        reads += 1
+        if (reads < 4) await new Promise((resolve) => setTimeout(resolve, 30))
+        return HttpResponse.json(reads < 4 ? op : { ...op, status: 'succeeded', result: again })
+      }),
+    )
+    const result = await runTool(
+      { ...tool('print_again'), gated: false },
+      { archive_id: 35 },
+      ctx({ renderWaitMs: 20, operationFollowMs: 5000 }),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(reads).toBe(4)
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
   it('a failed operation is the tool error, in the backend words', async () => {
     const error = { type: 'about:blank', status: 502, title: 'Bad Gateway', detail: 'Bambuddy said no', extensions: {} }
     server.use(
@@ -1425,6 +1445,19 @@ describe("a model's edits as operations (#1054)", () => {
     const result = await runTool(tool('apply_patch'), { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatchObject({ status: 'conflict', current: 'def5678' })
+  })
+
+  it("an extension named like a problem field does not replace the operation's own", async () => {
+    const failed = { status: 404, title: 'Not Found', detail: 'w has no README to remove', type: 'about:blank', extensions: { detail: 'spoofed' } }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w/readme`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: failed })),
+    )
+    const result = await runTool({ ...tool('delete_readme'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBe(true)
+    const text = JSON.stringify(firstText(result))
+    expect(text).toContain('w has no README to remove')
+    expect(text).not.toContain('spoofed')
   })
 })
 

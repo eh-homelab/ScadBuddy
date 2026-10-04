@@ -10,10 +10,11 @@ from fastapi.testclient import TestClient
 from temporalio.client import Client
 
 from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
-from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER, shown_url
+from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
+from scadbuddy.library.url_import import shown_url
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.operation_models import FINISH_ACTIVITY
 
@@ -301,3 +302,76 @@ def test_an_import_never_records_the_urls_query(client: TestClient, paths: DataP
 )
 def test_a_shown_url_keeps_scheme_host_port_and_path(url: str, shown: str) -> None:
     assert shown_url(url) == shown
+
+
+def _import_records(client: TestClient) -> list[str]:
+    """Every ``model_import`` operation's row and its workflow's history, as text."""
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.components.get(OPERATIONS).store._require().connection() as conn:
+        rows = conn.execute(
+            "SELECT row_to_json(operations)::text AS row, workflow_id"
+            " FROM operations WHERE kind = 'model_import'"
+        ).fetchall()
+
+    async def histories() -> list[str]:
+        temporal = await Client.connect(state.settings.temporal_address, namespace="default")
+        return [
+            (await temporal.get_workflow_handle(row["workflow_id"]).fetch_history()).to_json()
+            for row in rows
+        ]
+
+    return [row["row"] for row in rows] + (asyncio.run(histories()) if rows else [])
+
+
+@pytest.mark.parametrize(
+    ("url", "detail"),
+    [
+        ("http://example.com/model.scad?token=secret", "only https URLs can be imported"),
+        ("https://[nope/model.scad?token=secret", "is not a URL"),
+        ("https:///model.scad?token=secret", "names no host"),
+    ],
+)
+def test_a_url_refused_on_its_shape_starts_no_operation(
+    client: TestClient, url: str, detail: str
+) -> None:
+    """#1054: these refusals quote the URL, query and all. Made in the route, before
+    any operation, they are recorded nowhere."""
+    with respx.mock(assert_all_called=False) as mock:
+        response = client.post("/api/v1/models/import", json={"url": url})
+
+    assert response.status_code == 422, response.text
+    assert detail in response.json()["detail"]
+    assert not mock.calls
+    assert _import_records(client) == []
+
+
+@respx.mock
+def test_a_refused_redirect_records_no_query(client: TestClient) -> None:
+    """#1054: a refusal the run makes is recorded in the operation's error and the
+    history, so it quotes the hop without its query."""
+    respx.get(RAW_URL).mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "http://example.com/model.scad?token=secret"}
+        )
+    )
+
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+
+    assert response.status_code == 422, response.text
+    assert "http://example.com/model.scad" in response.json()["detail"]
+    records = _import_records(client)
+    assert records and all("secret" not in record for record in records)
+
+
+def test_a_host_that_is_not_public_records_no_query(
+    client: TestClient, fake_dns: dict[str, list[str]]
+) -> None:
+    fake_dns["internal.example.com"] = ["10.43.0.12"]
+
+    response = client.post(
+        "/api/v1/models/import", json={"url": "https://internal.example.com/m.scad?token=secret"}
+    )
+
+    assert response.status_code == 422, response.text
+    records = _import_records(client)
+    assert records and all("secret" not in record for record in records)

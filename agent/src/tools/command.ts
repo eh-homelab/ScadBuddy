@@ -130,7 +130,7 @@ export async function commandAnswer<T>(
   const first = await answered(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + ctx.renderWaitMs
+  const deadline = Date.now() + ctx.operationFollowMs
   for (let step = 1; op.status === 'running'; step++) {
     if (Date.now() >= deadline) {
       throw new ToolError(`${what} is still running as operation ${op.id}: follow it with get_operation.`)
@@ -146,7 +146,8 @@ export async function commandAnswer<T>(
   }
   if (op.status === 'failed') {
     const { extensions, ...problem } = op.error ?? { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
-    return { error: { ...problem, ...extensions }, response: new Response(null, { status: problem.status }) }
+    // The problem's own fields win over an extension of the same name, as in the browser's `command()`.
+    return { error: { ...extensions, ...problem }, response: new Response(null, { status: problem.status }) }
   }
   return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }

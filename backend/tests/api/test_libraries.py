@@ -25,6 +25,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi import FastAPI
@@ -1252,6 +1253,56 @@ def test_a_checkout_a_render_is_reading_is_not_removed(
         assert response.json()["jobs"] == [job_id]
     assert after.status_code == 204, after.text
     assert not checkout.exists()
+
+
+def test_a_removal_refused_for_a_lease_leaves_no_operation(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    pg_conninfo: str,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """Review #1119 2-2: the removal's refusals are its check, so "try again once the
+    render has finished" is not recorded as a failed operation."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.checkouts.hold("a" * 32, [paths.libraries / "BOSL2" / commits["v1"]])
+    with psycopg.connect(pg_conninfo) as conn:
+        before = conn.execute("SELECT count(*) FROM operations").fetchone()
+
+    leased = lib_client.delete("/api/v1/libraries/BOSL2")
+    unknown = lib_client.delete("/api/v1/libraries/nothing")
+
+    assert leased.status_code == 409, leased.text
+    assert unknown.status_code == 404, unknown.text
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == before
+
+
+def test_a_pin_refused_before_its_clone_leaves_no_operation(
+    lib_client: TestClient, libraries_app: FastAPI, pg_conninfo: str
+) -> None:
+    """Review #1119 2-2: an unknown catalogue name, and an address literal that is not
+    public, are refused by the pin's check."""
+    create_model(lib_client)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    store.protocols = ("https",)
+
+    unknown = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={})
+    private = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://10.0.0.7/o/r.git", "ref": "v1"},
+    )
+
+    assert unknown.status_code == 404, unknown.text
+    assert private.status_code == 422, private.text
+    assert "public" in private.json()["detail"]
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind = 'library_pin'"
+        ).fetchone() == (0,)
 
 
 def test_a_lease_elsewhere_does_not_block_a_removal(

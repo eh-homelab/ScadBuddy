@@ -6,6 +6,8 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api import upstream as upstream_api
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import catalogue as catalogue_module
@@ -21,7 +26,9 @@ from scadbuddy.library.catalogue import MERGE_ATTEMPTS, Catalogue, ModelMeta, Mo
 from scadbuddy.library.history import GitUnavailableError, ModelHistory
 from scadbuddy.library.upstream import MergePlan, UpstreamStateError
 from scadbuddy.main import create_app
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_model_operations import _workflow_ids
 
@@ -634,3 +641,71 @@ def test_a_repeated_merge_answers_from_its_record_after_the_upstream_moved(
     _json(_put(client, MINE, _source(client).replace('layout = "column";', 'layout = "grid";')))
     _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "stack";'))
     assert _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key)) == merged
+
+
+def test_a_re_sent_merge_whose_first_is_still_running_skips_the_conflict_check(
+    client: TestClient,
+    app: FastAPI,
+    settings: Settings,
+    bundled: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 1130 2: a re-send that arrives before the first merge's record exists
+    follows the running merge rather than answering the conflict a later upstream makes."""
+    _duplicate(client)
+    _json(_put(client, MINE, SOURCE.replace('layout = "row";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace("hole = 3;", "hole = 4;"))
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    release = threading.Event()
+    merge = upstream_api.merge_run
+
+    def held(*args: Any) -> Any:
+        release.wait(60)
+        return merge(*args)
+
+    monkeypatch.setattr(upstream_api, "merge_run", held)
+    key = {"Idempotency-Key": "b" * 32}
+    try:
+        first = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key), 202)
+        _restart_with(
+            settings,
+            bundled,
+            SOURCE.replace("hole = 3;", "hole = 4;").replace(
+                'layout = "row";', 'layout = "column";'
+            ),
+        )
+
+        async def unrecorded(self: OperationStore, key: str) -> None:
+            return None
+
+        # The window the review names: the first operation's row is not written yet.
+        # The re-send joins the running merge, which is still accepting it.
+        with monkeypatch.context() as window:
+            window.setattr(OperationStore, "find", unrecorded)
+            joined = client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key)
+        assert joined.status_code == 503, joined.text
+        assert joined.json()["type"] == STILL_ACCEPTING_PROBLEM
+        again = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key), 202)
+        assert again["id"] == first["id"]
+    finally:
+        release.set()
+    deadline = time.monotonic() + 60
+    op = first
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = _json(client.get(f"/api/v1/operations/{first['id']}"))
+    assert op["status"] != "running", op
+
+
+def test_upstream_state_refusals_record_nothing(client: TestClient, app: FastAPI) -> None:
+    """M1: dismissing with no update, or detaching an upstream that still exists, is
+    refused by the operation's check, so nothing is recorded."""
+    _duplicate(client)
+    dismissed = _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss"), 409)
+    assert dismissed["state"] == "current"
+    detached = _json(client.post(f"/api/v1/models/{MINE}/upstream/detach"), 409)
+    assert detached["state"] == "current"
+    assert _workflow_ids(app, "model_upstream_dismiss") == []
+    assert _workflow_ids(app, "model_upstream_detach") == []

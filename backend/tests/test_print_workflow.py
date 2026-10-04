@@ -4,6 +4,7 @@ under the real names, on a dev server: the shape every command copies."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -43,7 +44,7 @@ from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.commands import start_command
-from scadbuddy.workflows.follow import FollowPrint, follow_id
+from scadbuddy.workflows.follow import FollowPrint, follow_id, follow_queue
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -66,6 +67,7 @@ from scadbuddy.workflows.printing import (
     CANCELLED,
     CLIENT_ACCEPTING,
     READ_RETRY,
+    UNWAITED,
     PrintRunWorkflow,
 )
 from tests.support.temporal import temporal_client
@@ -234,11 +236,14 @@ def fake() -> Fake:
 @pytest.fixture
 async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
-    async with Worker(
-        client,
-        task_queue=queue,
-        workflows=[PrintRunWorkflow, FollowPrint],
-        activities=[*fake.all(), fake.follow_print],
+    async with (
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[PrintRunWorkflow, FollowPrint],
+            activities=fake.all(),
+        ),
+        Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
     ):
         yield queue
 
@@ -516,13 +521,16 @@ async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
     handle = client.get_workflow_handle(follow_id(output))
     queue = f"print-{uuid.uuid4().hex[:8]}"
     try:
-        async with Worker(
-            client,
-            task_queue=queue,
-            workflows=[PrintRunWorkflow, FollowPrint],
-            activities=[*fake.all(), fake.follow_print],
-            interceptors=[LosePokes()],
-            workflow_runner=UnsandboxedWorkflowRunner(),
+        async with (
+            Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LosePokes()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ),
+            Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
         ):
             arg = run_input(output_id=output)
             await start(client, queue, arg)
@@ -535,6 +543,54 @@ async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
         assert len(signals) == 1
     finally:
         await handle.terminate()
+
+
+class _LoseEveryPoke(WorkflowOutboundInterceptor):
+    async def signal_external_workflow(self, input: SignalExternalWorkflowInput) -> None:
+        raise ApplicationError("workflow execution already completed")
+
+
+class _LosingEveryPoke(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_LoseEveryPoke(outbound))
+
+
+class LoseEveryPoke(Interceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> type[WorkflowInboundInterceptor]:
+        return _LosingEveryPoke
+
+
+async def test_a_print_left_unfollowed_is_logged(
+    client: Client, fake: Fake, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 3: both rounds of start and poke failing leave the print to the
+    progress route; the run still succeeds, and says so."""
+    output = uuid.uuid4().hex
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    try:
+        with caplog.at_level(logging.WARNING, logger="temporalio.workflow"):
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LoseEveryPoke()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                arg = run_input(output_id=output)
+                await start(client, queue, arg)
+                assert (await ended(client, arg)).status == "succeeded"
+                # The follow comes after the record: the run's execution ends after it.
+                await client.get_workflow_handle(f"print-{arg.key}").result()
+    finally:
+        await handle.terminate()
+    assert any("could not follow the print" in r.message for r in caplog.records)
 
 
 async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
@@ -686,3 +742,27 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
     assert answer.refusal.status == 409
     assert "Nothing was queued" in answer.refusal.detail
     assert fake.calls == []
+
+
+async def test_a_check_that_ends_after_every_client_stopped_waiting_records_nothing(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (2) 2: the check started inside `CLIENT_ACCEPTING` but ended past
+    it. The workflow refuses before `print_insert`, so nothing prints unwatched."""
+    fake.check_gate = asyncio.Event()
+    accepted_at = datetime.now(UTC) - CLIENT_ACCEPTING + timedelta(seconds=1)
+    arg = run_input().model_copy(update={"accepted_at": accepted_at})
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "check" not in fake.calls:
+            await asyncio.sleep(0.05)
+        while datetime.now(UTC) - accepted_at <= CLIENT_ACCEPTING:
+            await asyncio.sleep(0.05)
+        fake.check_gate.set()
+        answer = await accepting
+        assert answer.run is None and answer.refusal == UNWAITED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
+    finally:
+        fake.check_gate.set()

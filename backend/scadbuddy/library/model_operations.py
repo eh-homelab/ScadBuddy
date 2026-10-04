@@ -1,10 +1,14 @@
-"""A model's lifecycle as operations (#1054, spec 2026-10-01 §4.3, the ``library`` row):
-create, import, patch, duplicate and delete. Each route keeps the refusals that read only
-its request; the kind's check makes the ones that read the volume, and its run is the
-route's former body.
+"""A model's lifecycle and edits as operations (#1054, spec 2026-10-01 §4.3, the
+``library`` row): create, import, patch, duplicate and delete (phase 3c); source saves and
+patches, thumbnail, README and sibling-file writes, restore, and the upstream's merge,
+dismiss and detach (phase 3d). Each route keeps the refusals that read only its request;
+the kind's check makes the ones that read the volume, and its run is the route's former
+body. The merge's conflict is the route's own refusal, so ``merged`` stays out of the
+operation's history.
 
-A create's source, thumbnail and README, a patch's presets and an import's URL arrive
-as claims (``operations/claims.py``), never as workflow payloads.
+A create's source, thumbnail and README, a patch's presets, an import's URL, a saved
+source, a patch's body, a thumbnail, a README and a sibling file arrive as claims
+(``operations/claims.py``), never as workflow payloads.
 """
 
 from __future__ import annotations
@@ -46,7 +50,8 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         except LookupError:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "this request's upload is no longer held; send it again",
+                # Not "send it again": a re-send with the same key replays this answer.
+                "this request's upload is no longer held; start the edit again",
             ) from None
 
     async def create_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +178,32 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         assert claimed is not None  # the route claims every text it sends
         return claimed.decode()
 
+    async def thumbnail_delete_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(models_api.thumbnail_delete_check, request["slug"], state)
+        return {}
+
+    async def readme_delete_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(models_api.readme_delete_check, request["slug"], state)
+        return {}
+
+    async def file_put_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(model_files.file_put_check, request["slug"], request["name"], state)
+        return {}
+
+    async def file_delete_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(
+            model_files.file_delete_check, request["slug"], request["name"], state
+        )
+        return {}
+
+    async def dismiss_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(upstream_api.dismiss_check, request["slug"], state)
+        return {}
+
+    async def detach_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(upstream_api.detach_check, request["slug"], state)
+        return {}
+
     async def thumbnail_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         png = await _claimed(request["png"])
         assert png is not None  # every set claims its image
@@ -241,13 +272,13 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         kind("model_source_put", source_put_check, source_put_run, run_timeout=PIN_TIMEOUT),
         kind("model_source_patch", source_patch_check, source_patch_run, run_timeout=PIN_TIMEOUT),
         kind("model_thumbnail_put", exists_check, thumbnail_put_run),
-        kind("model_thumbnail_delete", exists_check, thumbnail_delete_run),
+        kind("model_thumbnail_delete", thumbnail_delete_check, thumbnail_delete_run),
         kind("model_readme_put", exists_check, readme_put_run),
-        kind("model_readme_delete", exists_check, readme_delete_run),
-        kind("model_file_put", exists_check, file_put_run),
-        kind("model_file_delete", exists_check, file_delete_run),
+        kind("model_readme_delete", readme_delete_check, readme_delete_run),
+        kind("model_file_put", file_put_check, file_put_run),
+        kind("model_file_delete", file_delete_check, file_delete_run),
         kind("model_restore", restore_check, restore_run),
         kind("model_upstream_merge", exists_check, merge_run),
-        kind("model_upstream_dismiss", exists_check, dismiss_run),
-        kind("model_upstream_detach", exists_check, detach_run),
+        kind("model_upstream_dismiss", dismiss_check, dismiss_run),
+        kind("model_upstream_detach", detach_check, detach_run),
     ]

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { Button } from '../components/ui/Button'
@@ -22,7 +22,17 @@ import { useAsync } from '../lib/useAsync'
 export function EditSourcePage() {
   const { slug = '' } = useParams()
   const merging = useSearchParams()[0].has('merge')
-  const loaded = useAsync(() => api.getSource(slug), [slug])
+  // The source and the version it was read at. The version is read first, so a save
+  // made in between leaves the base older than the source: a save is then refused
+  // rather than written over a change this page never showed (#1054). A record that
+  // does not load is `model`'s error to show; its retry reads both again.
+  const loaded = useAsync(async () => {
+    const version = await api.getModel(slug).then(
+      (record) => record.version ?? undefined,
+      () => undefined,
+    )
+    return { source: await api.getSource(slug), version }
+  }, [slug])
   const model = useAsync(() => api.getModel(slug), [slug])
   const upstream = useAsync(
     async () => (merging ? await api.getUpstream(slug) : null),
@@ -45,43 +55,65 @@ export function EditSourcePage() {
   const [source, setSource] = useState<string | null>(null)
   const navigate = useNavigate()
 
-  const initial = merge ? merge.merged : upstream.loading ? undefined : loaded.data
+  const initial = merge ? merge.merged : upstream.loading ? undefined : loaded.data?.source
   useEffect(() => {
     if (initial !== undefined) setSource(initial)
   }, [initial])
 
   // #269 — the source changed elsewhere (another tab, an agent). An untouched buffer
-  // follows it; an edited one is never overwritten: the page offers theirs. Saving mine
-  // replaces theirs (`PUT /source` carries no base revision), as the banner says.
-  const [theirs, setTheirs] = useState<string | null>(null)
-  /** The buffer as it is when a read answers, not as it was when the signal came. */
-  const buffer = useRef({ source, loaded: loaded.data })
+  // follows it; an edited one is never overwritten: the page offers theirs. A save
+  // carries `base`, the version the buffer saves over: the one loaded, or theirs once
+  // "Keep editing" chose to save over it. A change this page has not shown is a 409,
+  // which offers theirs the same way (#1054).
+  const [theirs, setTheirs] = useState<{ source: string; version: string | undefined } | null>(null)
+  const [base, setBase] = useState<string | undefined>()
+  const loadedVersion = loaded.data?.version
   useEffect(() => {
-    buffer.current = { source, loaded: loaded.data }
+    setBase(loadedVersion)
+  }, [loadedVersion])
+  /** The buffer as it is when a read answers, not as it was when the signal came. */
+  const buffer = useRef({ source, loaded: loaded.data?.source })
+  useEffect(() => {
+    buffer.current = { source, loaded: loaded.data?.source }
   })
   const untouched = () => buffer.current.source === null || buffer.current.source === buffer.current.loaded
-  useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
-    if (signal === 'resync' || signal.kind !== 'source.changed') return
-    // Through the loader, whose sequence guard drops an older read still in flight
-    // (the first one, say). Decided as the answer lands, not as the signal came.
+  // Through the loader, whose sequence guard drops an older read still in flight
+  // (the first one, say). Decided as the answer lands, not as the signal came.
+  const offerTheirs = () =>
     loaded.refresh((latest) => {
       // Already what the buffer holds (typed the same, or this tab's own save): take it
       // as loaded, so the buffer reads as untouched again.
-      if (latest === buffer.current.source || untouched()) return true
+      if (latest.source === buffer.current.source || untouched()) return true
       setTheirs(latest)
       return false
     })
+  useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'source.changed') return
+    offerTheirs()
   })
   const takeTheirs = () => {
     if (theirs === null) return
     loaded.setData(theirs)
-    setSource(theirs)
+    setSource(theirs.source)
+    setTheirs(null)
+  }
+  const keepMine = () => {
+    if (theirs === null) return
+    setBase(theirs.version)
     setTheirs(null)
   }
 
   async function save(force: boolean) {
     if (merge) await api.resolveUpstreamMerge(slug, source ?? '', merge.base, force)
-    else await api.replaceSource(slug, source ?? '', force)
+    else {
+      try {
+        await api.replaceSource(slug, source ?? '', force, undefined, base)
+      } catch (caught) {
+        // Saved elsewhere since this buffer's version: the workbench shows the refusal.
+        if (caught instanceof ApiError && caught.status === 409 && caught.problem['current']) offerTheirs()
+        throw caught
+      }
+    }
     await navigate(modelPath(slug))
   }
 
@@ -111,7 +143,14 @@ export function EditSourcePage() {
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">Could not load this model</h1>
         <p className="mt-2 text-[13px] text-muted">{model.error.message}</p>
-        <Button size="sm" className="mt-4" onClick={model.reload}>
+        <Button
+          size="sm"
+          className="mt-4"
+          onClick={() => {
+            model.reload()
+            loaded.refresh()
+          }}
+        >
           Try again
         </Button>
       </div>
@@ -148,7 +187,7 @@ export function EditSourcePage() {
             <Button size="sm" onClick={takeTheirs}>
               Load their version
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setTheirs(null)}>
+            <Button size="sm" variant="ghost" onClick={keepMine}>
               Keep editing
             </Button>
           </div>

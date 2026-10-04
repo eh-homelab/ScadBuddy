@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import (
@@ -121,6 +121,8 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     ResolverBusyError,
     fetch_model,
+    parse_import_url,
+    shown_url,
 )
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
@@ -904,6 +906,11 @@ async def import_model(
     # Here as well as in the run, so a full budget answers with its Retry-After header
     # and starts no operation.
     _require_import_permit(imports)
+    try:
+        # Refusals that quote the URL whole: here, so no operation records them.
+        parse_import_url(body.url)
+    except ImportRefusedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history; they hold it without (review 3c 1.5).
     claims = ClaimStore(paths.claims)
@@ -924,21 +931,6 @@ async def import_model(
         claimed=Claimed(claims, [url]),
     )
     return operation_answer(result, ModelRecord)
-
-
-def shown_url(url: str) -> str:
-    """``url`` as an import records it: scheme, host, port and path. Never its userinfo,
-    query or fragment, any of which may carry a token (review 3c 1.5)."""
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:  # not a number; the fetch refuses the URL
-        port = None
-    netloc = host if port is None else f"{host}:{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _require_import_permit(imports: ImportPermits) -> None:
@@ -1310,6 +1302,7 @@ async def put_source(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
+    catalogue: CatalogueDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -1321,6 +1314,9 @@ async def put_source(
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
+    # Here, before the claim: the run refuses it too, but only after recording it.
+    _refuse_binary(body.source)
     if merge_base is not None and has_conflict_markers(body.source):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1500,9 +1496,11 @@ async def patch_source(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
+    catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
     # The whole body by claim: up to MAX_EDITS edits of a source's size each (#1054).
     claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, body.model_dump_json().encode())
     result = await run_operation(
@@ -1666,9 +1664,11 @@ async def put_thumbnail(
     file: Annotated[
         UploadFile, File(description=f"The thumbnail, a PNG of at most {MAX_THUMBNAIL_SIZE}")
     ],
+    catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
     png = _require_png(await file.read())
     # By claim: up to MAX_THUMBNAIL_SIZE, past a workflow payload's limit (#1054).
     claimed = await asyncio.to_thread(ClaimStore(paths.claims).put, png)
@@ -1726,6 +1726,17 @@ async def delete_thumbnail(
     return operation_answer(result, ModelRecord)
 
 
+def thumbnail_delete_check(slug: str, state: AppState) -> None:
+    """The ``model_thumbnail_delete`` operation's check (#1054): the model has a
+    thumbnail of its own to remove."""
+    try:
+        own = state.catalogue.has_own_thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    if not own:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove")
+
+
 async def thumbnail_delete_run(slug: str, state: AppState) -> ModelRecord:
     """The ``model_thumbnail_delete`` operation's run (#1054)."""
     try:
@@ -1773,9 +1784,11 @@ async def put_readme(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
+    catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
     if "\x00" in body.content:
         # The same line `_guard_source` draws: the models repository holds text.
         raise ApiError(
@@ -1828,6 +1841,13 @@ async def delete_readme(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, ModelRecord)
+
+
+def readme_delete_check(slug: str, state: AppState) -> None:
+    """The ``model_readme_delete`` operation's check (#1054): there is a README to remove."""
+    require_model_exists(state.catalogue, slug)
+    if not state.catalogue.readme_path(slug).is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove")
 
 
 async def readme_delete_run(slug: str, state: AppState) -> ModelRecord:

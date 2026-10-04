@@ -9,13 +9,14 @@ import time
 import httpx
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from scadbuddy.api import printing
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.workflows import follow as follow_module
 from scadbuddy.workflows.follow import follow_id
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
@@ -33,7 +34,7 @@ def watched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         asked.append(output_id)
         return True
 
-    monkeypatch.setattr(printing, "follow", recording)
+    monkeypatch.setattr(follow_module, "follow", recording)
     return asked
 
 
@@ -174,3 +175,59 @@ def test_a_run_starts_its_follow(client: TestClient, model: str) -> None:
                     await asyncio.sleep(0.1)
 
     assert asyncio.run(described()) == "FollowPrint"
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_print_seen_followed_is_not_started_again_on_each_read(
+    client: TestClient, model: str, watched: list[str]
+) -> None:
+    """Review #1091 4: each change re-reads the progress; a follow seen running is
+    trusted for a while instead of a start RPC per read."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    run_print(client, output_id, json=run_request())
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "printer_id": 1, "status": "pending"})
+    )
+    client.get(f"/api/v1/print/outputs/{output_id}/progress")
+    deadline = time.monotonic() + 5
+    while not watched and time.monotonic() < deadline:
+        time.sleep(0.02)
+    client.get(f"/api/v1/print/outputs/{output_id}/progress")
+    time.sleep(0.2)
+    assert watched == [output_id]
+
+
+def test_shutdown_cancels_the_follows_still_starting(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1091 5: a start that hangs on a Temporal that does not answer is
+    cancelled and awaited by the lifespan, not left to the loop's teardown."""
+    started = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def hanging(client: object, task_queue: str, output_id: str) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(output_id)
+            raise
+        return True
+
+    monkeypatch.setattr(follow_module, "follow", hanging)
+    with TestClient(app) as client:
+        state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+
+        async def ensure() -> None:
+            state.print_follows.ensure("o" * 32)
+            await started.wait()
+
+        client.portal.call(ensure)  # type: ignore[union-attr]
+        assert cancelled == []
+    assert cancelled == ["o" * 32]

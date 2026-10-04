@@ -29,7 +29,7 @@ from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -216,6 +216,21 @@ def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
     assert counts.runs == 1
 
 
+def test_a_pruned_library_operation_names_the_model_not_bambuddy(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Review #1119 2-1: a ``library`` kind's effect is on the model and its checkouts."""
+    headers = {"Idempotency-Key": PRESS_7}
+    first = client.post("/api/v1/test-op?kind=test_library", json={}, headers=headers)
+    assert first.status_code == 200, first.text
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = client.post("/api/v1/test-op?kind=test_library", json={}, headers=headers)
+    assert again.status_code == 409, again.text
+    assert "Bambuddy" not in again.json()["detail"]
+    assert "Check the model and its libraries" in again.json()["detail"]
+
+
 def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> None:
     started = post(client, {"delay": 12}, key=PRESS_4)
     assert started.status_code == 202, started.text
@@ -275,6 +290,8 @@ def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
     gate runs beside it; the effect itself can still land after the record failed."""
     response = client.post("/api/v1/test-op?kind=test_threaded", json={})
     assert response.status_code == 500, response.text
+    # Review #1119 2-4: the record says the effect may have landed, not just "failed".
+    assert "may have been done" in response.json()["detail"]
     deadline = time.monotonic() + 40
     while len(counts.events) < 2 and time.monotonic() < deadline:
         time.sleep(0.2)
