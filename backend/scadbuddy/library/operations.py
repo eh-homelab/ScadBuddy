@@ -51,9 +51,9 @@ PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
 def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-    """A model.json that cannot be read, or a pin whose checkout is gone, as the 409
-    every route answers it with (``api/models.py``, ``install_library_handlers``),
-    rather than the operation's unexpected 500."""
+    """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
+    checkout is gone, as the 409 every route answers it with (``api/models.py``,
+    ``install_library_handlers``), rather than the operation's unexpected 500."""
 
     @wraps(fn)
     async def answered(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -65,6 +65,10 @@ def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]
             ) from None
         except LibraryNotInstalledError as error:
             raise ApiError(status.HTTP_409_CONFLICT, str(error.args[0])) from None
+        except LibraryDeclarationError as error:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
+            ) from None
 
     return answered
 
@@ -83,13 +87,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         return dumped
 
     async def _declared(slug: str, name: str) -> ModelLibrary:
-        try:
-            declared = await asyncio.to_thread(declared_libraries, state.paths.model_dir(slug))
-        except LibraryDeclarationError as error:
-            # The 409 every other reader of a malformed declaration gives.
-            raise ApiError(
-                status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
-            ) from None
+        declared = await asyncio.to_thread(declared_libraries, state.paths.model_dir(slug))
         current = next((entry for entry in declared if entry.name == name), None)
         if current is None:
             raise ApiError(
@@ -236,6 +234,6 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         OperationKind(
             "library_unpin", _answered(model_check), _answered(unpin_run), queue="library"
         ),
-        OperationKind("library_remove", no_check, remove_run, queue="library"),
+        OperationKind("library_remove", no_check, _answered(remove_run), queue="library"),
     ]
     return {kind.name: kind for kind in kinds}

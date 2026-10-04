@@ -20,7 +20,8 @@ from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -41,8 +42,10 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library import operations as library_operations
 from scadbuddy.library import url_import
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.includes import resolve_dependencies
 from scadbuddy.library.libraries import (
@@ -50,6 +53,8 @@ from scadbuddy.library.libraries import (
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
+    LibraryDeclarationError,
+    LibraryNotInstalledError,
     LibraryStore,
     ModelLibrary,
 )
@@ -1784,10 +1789,42 @@ def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(
 def test_a_pin_may_run_longer_than_its_clone() -> None:
     """Review I2: the run outlives the clone's own limit, so a slow clone is never
     recorded failed while it goes on to commit."""
-    kinds = library_operations.library_kinds(None)  # type: ignore[arg-type]
+    kinds = library_operations.library_kinds(cast(AppState, SimpleNamespace()))
     for name in ("library_pin", "library_repin"):
         timeout = kinds[name].run_timeout
         assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT
+
+
+def _raising_state(error: Exception) -> Any:
+    def raise_it(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return SimpleNamespace(
+        catalogue=SimpleNamespace(unpin_library=raise_it, library_users=raise_it),
+        libraries=SimpleNamespace(paths=SimpleNamespace(libraries=Path("/nowhere"))),
+        checkouts=CheckoutGate(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "title"),
+    [
+        (InvalidModelMetaError("w", "not JSON"), "Invalid Model Metadata"),
+        (LibraryDeclarationError("bad entry"), "Invalid Library Declaration"),
+        (LibraryNotInstalledError("not on the volume"), "Conflict"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["library_unpin", "library_remove"])
+async def test_a_runs_unreadable_declaration_is_the_routes_409(
+    kind: str, error: Exception, title: str
+) -> None:
+    """Review #1119 3: what the app's handlers answered 409 under the routes, the
+    runs answer 409 too, not the operation's unexpected 500."""
+    run = library_operations.library_kinds(_raising_state(error))[kind].run
+    request = {"slug": "w", "name": "BOSL2", "index": 0, "commit": None}
+    with pytest.raises(ApiError) as raised:
+        await run(request, {})
+    assert (raised.value.status, raised.value.title) == (409, title)
 
 
 def test_a_pin_on_a_model_with_a_thumbnail_answers_its_record(lib_client: TestClient) -> None:
