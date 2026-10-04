@@ -28,12 +28,18 @@ const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
  * handshake therefore held the assistant's socket back, as observed with Chromium
  * through `pnpm preview`.
  *
+ * `/telemetry` is the backend's browser trace relay (tracing spec 2026-10-01 §5.2),
+ * outside `/api` like `/healthz`. Without its entry the page's exporter would post to
+ * Vite's SPA fallback and lose every batch without an error (§5.3). `changeOrigin`
+ * rewrites `Host`, not `Origin`, and the relay's origin check accepts a loopback one.
+ *
  * The mocked build (`VITE_MOCK_API=1`) proxies nothing: msw answers every route.
  */
 const proxy: Record<string, ProxyOptions> = {
   '^/api/v1/ai(?:[/?]|$)': { target: agent, ws: true },
   '^/mcp(?:[/?]|$)': { target: agent },
   '/api': { target: backend, changeOrigin: true, ws: true },
+  '^/telemetry(?:/|$)': { target: backend, changeOrigin: true },
 }
 
 export default defineConfig({
