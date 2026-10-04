@@ -28,7 +28,7 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
@@ -57,7 +57,6 @@ from scadbuddy.library.libraries import (
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
     from scadbuddy.core.components import Components, Core
 
 
@@ -294,10 +293,17 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
     imports this module. Its runs are the routes' former bodies, which take the whole
-    ``AppState``; the core is one."""
+    ``AppState`` and read services the ``Core`` does not name, so any other core is
+    refused here rather than failing inside an operation (review #1126 1.2)."""
+    from scadbuddy.api.deps import AppState
     from scadbuddy.library.model_operations import model_kinds
 
-    return [*library_kinds(core, components), *model_kinds(cast("AppState", core))]
+    if not isinstance(core, AppState):
+        raise TypeError(
+            "the model operation kinds run the routes' bodies, which need the API's "
+            f"AppState, not a {type(core).__name__}"
+        )
+    return [*library_kinds(core, components), *model_kinds(core)]
 
 
 OPERATION_KINDS: KindsBuild = _kinds
