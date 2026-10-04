@@ -30,6 +30,7 @@ from tests.api.test_print_run_choices import (
 from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
+from tests.support.rack_guard import foreign_rack_errors
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -413,6 +414,7 @@ class LeakyUsage(BrokenUsage):
         raise RuntimeError(f"duplicate key value: (serial)=({INVENTED_SERIALS[2]})")
 
 
+@pytest.mark.rack_injects_errors
 @respx.mock
 def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
     client: TestClient, model: str, caplog: pytest.LogCaptureFixture
@@ -436,6 +438,8 @@ def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
         assert not [s for s in INVENTED_SERIALS if s in text], record.getMessage()
         assert record.exc_info is None and record.exc_text is None
     assert not [s for s in INVENTED_SERIALS if s in response.text]
+    # The real fallback reaches the guard (#1086 review, finding 4).
+    assert foreign_rack_errors(caplog.records) == ["RuntimeError"]
 
 
 @respx.mock

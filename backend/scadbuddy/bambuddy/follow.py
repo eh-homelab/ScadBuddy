@@ -59,6 +59,16 @@ ERROR_INTERVAL = 60.0
 MAX_AGE = timedelta(hours=24)
 #: The longest the activity goes between heartbeats while it waits.
 HEARTBEAT_SLICE = 5.0
+#: How long one settled-print hook may run (#1083). Hooks are awaited inside the
+#: activity, which heartbeats meanwhile (a hook longer than ``FOLLOW_HEARTBEAT`` would
+#: otherwise time the attempt out, and each retry would run it again), so one that never
+#: returns would hold the follow open. A hook cut off here is not retried now: the rack's
+#: settle leaves the archives it had not yet started unrecorded until that output settles
+#: again (another print of it), which records them with its own time; the warning names
+#: the output so the gap can be traced. Cutting a hook off stops the wait, not the work:
+#: a database read or write it started in a thread runs on until Postgres answers, so
+#: the archive whose write was in flight may still be recorded.
+SETTLE_TIMEOUT = 60.0
 
 FOLLOW_ACTIVITY = "follow_print"
 
@@ -93,6 +103,7 @@ class Follower:
         max_age: timedelta = MAX_AGE,
         now: Callable[[], datetime] = _now,
         on_settled: Sequence[SettledHook] = (),
+        settle_timeout: float = SETTLE_TIMEOUT,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -108,6 +119,7 @@ class Follower:
         #: A hook must be idempotent: it may run more than once for one print, and
         #: concurrently (a poke's old attempt reads until its next heartbeat).
         self.on_settled: list[SettledHook] = list(on_settled)
+        self.settle_timeout = settle_timeout
 
     async def follow(
         self,
@@ -162,23 +174,39 @@ class Follower:
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: an output never printed through slice_queue has no picks.
-                await self._settled(meta)
+                await self._settled(meta, active, heartbeat)
             if progress is None or progress.settled:
                 return "settled"
             if changed:
                 active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)
 
-    async def _settled(self, meta: OutputMeta) -> None:
+    async def _settled(
+        self, meta: OutputMeta, active: datetime, heartbeat: Callable[[datetime], None]
+    ) -> None:
         for hook in self.on_settled:
             try:
-                await hook(meta)
+                await self._bounded(hook(meta), active, heartbeat)
             except Exception as exc:
                 # Type only: a hook's error can carry data it must not log (#836, spec §7).
                 logger.warning(
                     "a settled-print hook failed",
                     extra={"output_id": meta.id, "error": type(exc).__name__},
                 )
+
+    async def _bounded(
+        self, work: Awaitable[None], active: datetime, heartbeat: Callable[[datetime], None]
+    ) -> None:
+        """Await ``work`` for at most `settle_timeout` (`TimeoutError` past it),
+        heartbeating ``active`` at least every `HEARTBEAT_SLICE` meanwhile."""
+        task = asyncio.ensure_future(work)
+        try:
+            async with asyncio.timeout(self.settle_timeout):
+                while not (await asyncio.wait({task}, timeout=HEARTBEAT_SLICE))[0]:
+                    heartbeat(active)
+            return task.result()
+        finally:
+            task.cancel()
 
     async def _wait(
         self, seconds: float, active: datetime, heartbeat: Callable[[datetime], None]
