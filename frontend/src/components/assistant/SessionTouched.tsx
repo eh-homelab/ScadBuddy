@@ -17,6 +17,12 @@ const GROUPS: ReadonlyArray<{ type: Kind; label: string }> = [
   { type: 'output', label: 'Outputs' },
   { type: 'print_run', label: 'Print runs' },
   { type: 'print', label: 'Prints' },
+  { type: 'print_archive', label: 'Print archives' },
+  { type: 'library', label: 'Libraries' },
+  { type: 'font', label: 'Fonts' },
+  { type: 'setting', label: 'Settings' },
+  { type: 'project', label: 'Bambuddy projects' },
+  { type: 'bambuddy_file', label: 'Bambuddy files' },
   { type: 'unclassified', label: 'Other changes' },
 ]
 
@@ -42,7 +48,8 @@ function entries(rows: readonly SessionResource[]): Entry[] {
   const out: Entry[] = []
   const byKey = new Map<string, Entry>()
   rows.forEach((r, index) => {
-    const key = r.id === null ? null : `${r.type}\u0000${r.id}`
+    // A library is one per model it is pinned on, plus the shared checkout (no model).
+    const key = r.id === null ? null : `${r.type}\u0000${r.id}${r.type === 'library' ? `\u0000${r.model ?? ''}` : ''}`
     const seen = key === null ? undefined : byKey.get(key)
     if (seen) {
       if (seen.actions.at(-1) !== r.action) seen.actions.push(r.action)
@@ -98,6 +105,19 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
       return { name: id, to: page('/prints') }
     case 'print':
       return { name: `queue item ${id}`, to: page('/prints') }
+    case 'print_archive':
+      return { name: `print ${id}`, to: page(`/prints/${encodeURIComponent(id)}`) }
+    case 'library':
+      // A model's pin goes to the model; the shared checkout, to Settings' Libraries.
+      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/settings#libraries') }
+    case 'font':
+      return { name: id, to: null }
+    case 'setting':
+      return { name: id, to: page('/settings') }
+    case 'project':
+      return { name: `project ${id}`, to: null }
+    case 'bambuddy_file':
+      return { name: `library file ${id}`, to: null }
     case 'unclassified':
       return { name: e.tools.join(', '), to: null }
   }
