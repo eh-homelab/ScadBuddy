@@ -176,8 +176,9 @@ class Settings(BaseSettings):
     temporal_address: str = Field(default="", validate_default=True)
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
-    # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs run (#1052, spec
-    # 2026-10-01 §4.3). The API serves it itself in this phase (#1060).
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs and the Bambuddy writes
+    # run (#1052, spec 2026-10-01 §4.3), served by `python -m scadbuddy.worker --queue
+    # bambuddy` (#1060).
     temporal_task_queue_bambuddy: str = "bambuddy"
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY: where the housekeeping Schedule's sweeps
     # run (#1054, spec 2026-10-01 §4.3, §4.4); this process serves it.
@@ -190,9 +191,27 @@ class Settings(BaseSettings):
     # process (one replica, dev and tests). Production runs `python -m
     # scadbuddy.worker` as its own Deployment and leaves this off.
     temporal_worker_inprocess: bool = False
+    # SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS: serve the `bambuddy` queue inside the
+    # API process (#1060), as SCADBUDDY_TEMPORAL_WORKER_INPROCESS does with every queue,
+    # for a deployment without the `scadbuddy-print` worker.
+    temporal_print_worker_inprocess: bool = False
+    # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
+    # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5). Only that
+    # worker reads it.
+    api_internal_url: str | None = None
     # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
     # links to (#668). Empty (the default) shows no link.
     temporal_ui_url: str | None = None
+
+    @field_validator("api_internal_url")
+    @classmethod
+    def _api_internal_url_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
+        return value
 
     @field_validator("temporal_ui_url")
     @classmethod
@@ -387,6 +406,14 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_worker_inprocess": (
             "Whether this process runs a render worker at all, decided by how the deployment"
             " is laid out (one replica, or a separate worker Deployment)."
+        ),
+        "temporal_print_worker_inprocess": (
+            "Whether this process serves the print queue itself, decided by whether the"
+            " deployment runs the `scadbuddy-print` worker."
+        ),
+        "api_internal_url": (
+            "Where the print worker reaches the API inside the cluster: the deployment's"
+            " Service, read only by that worker."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",

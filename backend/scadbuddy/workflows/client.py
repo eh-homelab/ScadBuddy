@@ -19,7 +19,7 @@ from scadbuddy.bambuddy.follow import FOLLOW_SLOTS
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
-from scadbuddy.workflows.follow import FollowPrint, follow_queue
+from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 from scadbuddy.workflows.printing import PrintRunWorkflow
@@ -27,6 +27,8 @@ from scadbuddy.workflows.problems import OPERATION_LOST
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
+#: The print worker's deployment (#1060, spec 2026-10-01 §5.5): `--queue bambuddy`.
+PRINT_DEPLOYMENT_NAME = "scadbuddy-print"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 
@@ -84,11 +86,17 @@ def bambuddy_worker(
     activities: Sequence[Callable[..., Any]],
     *,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+    build_id: str | None = None,
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
     ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves).
-    Unversioned: a change to any of them that alters its commands is made with
-    ``workflow.patched``, so a run started on the old code finishes on the new.
+    With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned like
+    the render worker: ``PrintRun`` and ``Operation`` are pinned to the build that started
+    them, and ``FollowPrint`` is AUTO_UPGRADE (`VersionedFollowPrint`), since it lasts as long
+    as the print.
+    Without (in the API, dev and tests) it is unversioned. Either way a change that
+    alters a workflow's commands is made with ``workflow.patched``, so a run started on
+    the old code finishes on the new.
     ``tests/test_print_replay.py`` replays committed ``PrintRun`` histories to hold that;
     a new activity name also needs ``patched``, or an old replica takes its task and
     fails it as unregistered.
@@ -101,9 +109,14 @@ def bambuddy_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[PrintRunWorkflow, OperationWorkflow, FollowPrint],
+        workflows=[
+            PrintRunWorkflow,
+            OperationWorkflow,
+            FollowPrint if build_id is None else VersionedFollowPrint,
+        ],
         activities=activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
+        deployment_config=print_deployment(build_id),
     )
 
 
@@ -113,28 +126,44 @@ def follow_worker(
     follow_print: Callable[..., Any],
     *,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+    build_id: str | None = None,
 ) -> Worker:
     """``FollowPrint``'s activity on its own queue beside ``task_queue`` (review #1091
     1): each follow holds its slot for as long as the print moves, so it never takes a
     slot from the ``bambuddy`` worker's short activities. Its `FOLLOW_SLOTS` are set
     here, not left to the SDK's default (review #1091 2). An attempt ends at once on a
-    shutdown (`FollowActivities`)."""
+    shutdown (`FollowActivities`). With ``build_id`` it joins the same deployment
+    version as the ``bambuddy`` worker, so the follow's activity is routed within it."""
     return Worker(
         client,
         task_queue=follow_queue(task_queue),
         activities=[follow_print],
         max_concurrent_activities=FOLLOW_SLOTS,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
+        deployment_config=print_deployment(build_id),
     )
 
 
-async def make_current(client: Client, *, namespace: str, build_id: str) -> None:
+def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
+    """``scadbuddy-print`` at ``build_id``, workflows pinned by default; None unversioned."""
+    if build_id is None:
+        return None
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(deployment_name=PRINT_DEPLOYMENT_NAME, build_id=build_id),
+        use_worker_versioning=True,
+        default_versioning_behavior=VersioningBehavior.PINNED,
+    )
+
+
+async def make_current(
+    client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
+) -> None:
     """Make `build_id` the deployment's current version: a versioned worker takes new
     workflows only once its version is current."""
     await client.workflow_service.set_worker_deployment_current_version(
         SetWorkerDeploymentCurrentVersionRequest(
             namespace=namespace,
-            deployment_name=DEPLOYMENT_NAME,
+            deployment_name=deployment_name,
             build_id=build_id,
             ignore_missing_task_queues=True,
             allow_no_pollers=True,
@@ -143,29 +172,40 @@ async def make_current(client: Client, *, namespace: str, build_id: str) -> None
     )
 
 
-async def is_current(client: Client, *, namespace: str, build_id: str) -> bool:
+async def is_current(
+    client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
+) -> bool:
     """Whether `build_id` is the deployment's current version. Then any worker of this
     build serves the runs pinned to it, so one that stops need not drain (#874)."""
     response = await client.workflow_service.describe_worker_deployment(
-        DescribeWorkerDeploymentRequest(namespace=namespace, deployment_name=DEPLOYMENT_NAME),
+        DescribeWorkerDeploymentRequest(namespace=namespace, deployment_name=deployment_name),
         timeout=RPC_TIMEOUT,
     )
     current = response.worker_deployment_info.routing_config.current_deployment_version
     return current.build_id == build_id
 
 
-async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
+async def drained(
+    client: Client,
+    *,
+    namespace: str,
+    build_id: str,
+    deployment_name: str = DEPLOYMENT_NAME,
+    ignore_types: Sequence[str] = (),
+) -> bool:
     """Whether no workflow pinned to `build_id` is still running. A visibility count,
     not `DescribeWorkerDeploymentVersion`'s drainage status: that one is absent while
-    the version is current and still says DRAINING well after its last run has ended."""
+    the version is current and still says DRAINING well after its last run has ended.
+    ``ignore_types`` are AUTO_UPGRADE types (``FollowPrint``): attributed to the build
+    until their next workflow task, they move to the current one rather than wait."""
+    query = (
+        f'TemporalWorkerDeploymentVersion="{deployment_name}:{build_id}"'
+        ' AND ExecutionStatus="Running"'
+    )
+    for name in ignore_types:
+        query += f' AND WorkflowType!="{name}"'
     response = await client.workflow_service.count_workflow_executions(
-        CountWorkflowExecutionsRequest(
-            namespace=namespace,
-            query=(
-                f'TemporalWorkerDeploymentVersion="{DEPLOYMENT_NAME}:{build_id}"'
-                ' AND ExecutionStatus="Running"'
-            ),
-        ),
+        CountWorkflowExecutionsRequest(namespace=namespace, query=query),
         timeout=RPC_TIMEOUT,
     )
     return response.count == 0
@@ -173,6 +213,7 @@ async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
 
 __all__ = [
     "DEPLOYMENT_NAME",
+    "PRINT_DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",

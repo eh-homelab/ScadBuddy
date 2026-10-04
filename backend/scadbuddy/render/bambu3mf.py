@@ -10,7 +10,7 @@ import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -500,7 +500,7 @@ def plate_settings(config: ET.Element) -> list[PlateSettings]:
     return plates
 
 
-def plates_of(path: Path) -> list[PlateEntry]:
+def plates_of(path: Path | IO[bytes]) -> list[PlateEntry]:
     """Every plate the 3MF lays out, in index order (#83).
 
     ScadBuddy's own writer produces one unless the template asks for more (#289); a

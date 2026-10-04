@@ -10,10 +10,13 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, _prelude
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.workflows.operation_models import PreludeStep
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
-from tests.api.test_library_copies import API, run, set_up, uploads
+from tests.api.test_library_copies import API, deletes, run, set_up, uploads
 from tests.api.test_model_operations import _workflow_ids
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
@@ -91,3 +94,36 @@ def test_an_inbox_copy_that_fails_to_delete_keeps_the_output(
     assert len(_workflow_ids(app, "output_delete")) == 1
     assert output_id in _outputs(paths, model)
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
+
+
+def test_only_a_delete_of_the_inbox_copies_waits_on_the_print_worker(client: TestClient) -> None:
+    """#1060: the inbox copies go on the `bambuddy` queue, as `output_delete`'s prelude;
+    a plain delete names none, so it never waits on the print worker."""
+    app_state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    ops = app_state.components.get(OPERATIONS)
+    kind = ops.kinds["output_delete"]
+    request = {"output_id": "a" * 32, "delete_inbox_copies": False}
+
+    assert _prelude(ops, kind, request) is None
+    assert _prelude(ops, kind, {**request, "delete_inbox_copies": True}) == PreludeStep(
+        kind="output_inbox_delete", task_queue=ops.queues["bambuddy"], run_attempts=3
+    )
+    assert ops.kinds["output_inbox_delete"].queue == "bambuddy"
+
+
+@respx.mock
+def test_a_delete_started_without_a_prelude_still_takes_the_inbox_copies(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """The rollout window (#1060): an API from before the prelude starts the delete with
+    none, and the library worker that runs it deletes the inbox copies itself."""
+    output_id = set_up(client, model)
+    uploads(41)
+    delete = deletes()
+    run(client, output_id)
+    monkeypatch.setattr("scadbuddy.api.operations._prelude", lambda *_: None)
+
+    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+
+    assert response.status_code == 204, response.text
+    assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]

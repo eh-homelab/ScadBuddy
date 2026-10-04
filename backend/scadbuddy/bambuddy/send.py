@@ -13,7 +13,6 @@ import logging
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, NamedTuple
 
 from fastapi import status
@@ -26,7 +25,7 @@ from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -78,15 +77,15 @@ class SidebarLink(BaseModel):
     embed_path: str
 
 
-def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
-    path: Path = store.directory(meta.id) / MODEL_NAME
-    if not path.is_file():
+async def read_3mf(store: OutputFiles, meta: OutputMeta) -> bytes:
+    payload = await store.model_3mf(meta.id)
+    if payload is None:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"output {meta.id!r} has no 3MF to send",
             type_=NOT_FOUND_PROBLEM,
         )
-    return path.read_bytes()
+    return payload
 
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
@@ -268,7 +267,7 @@ async def project_filename(
 
 async def upload_output(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -301,7 +300,7 @@ async def upload_output(
     supersedes it.
     """
     target = target if target is not None else await target_for(client, settings)
-    payload = _laid_out_for(_read_3mf(store, meta), target)
+    payload = _laid_out_for(await read_3mf(store, meta), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
 
     filename = (
@@ -352,7 +351,7 @@ async def _delete_copy(
 
 async def ensure_copy(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -405,7 +404,7 @@ class _Ensured(NamedTuple):
 
 async def _ensure_copy(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -544,7 +543,7 @@ class ReadableCopy:
 
 async def copy_to_read(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -569,7 +568,7 @@ async def copy_to_read(
 
 async def ensure_uploaded(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -689,7 +688,7 @@ def resolve_print_options(
 
 async def send_output(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,

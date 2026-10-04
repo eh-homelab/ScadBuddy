@@ -28,6 +28,7 @@ export IMAGE=ghcr.io/eh-homelab/scadbuddy
 export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
+export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
 export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
@@ -74,12 +75,13 @@ EOF
   done
 }
 
-# `run <api-manifest> [worker-manifest]`: a fresh repo, then the step. Output
-# lands in $work/log, and the manifests stay in $work/repo for the checks.
+# `run <api-manifest> [worker-manifest] [print-manifest]`: a fresh repo, then the
+# step. Output lands in $work/log, and the manifests stay in $work/repo for the checks.
 run() {
   rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy"
   printf '%s\n' "$1" > "$work/repo/$MANIFEST"
   [ $# -lt 2 ] || printf '%s\n' "$2" > "$work/repo/$MANIFEST_WORKER"
+  [ $# -lt 3 ] || printf '%s\n' "$3" > "$work/repo/$MANIFEST_PRINT"
   (
     cd "$work/repo"
     git init -q && git add -A
@@ -129,6 +131,15 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-
   has_line "$agent_pinned" "$MANIFEST" || fail "worker: agent image not pinned"
 else
   fail "worker: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 5b. The print worker's file (#1060), when present, is pinned too; it has no agent.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")" "$(deployment scadbuddy-print "$IMAGE:$old")"; then
+  has_line "$pinned" "$MANIFEST_PRINT" || fail "print worker: image not pinned"
+  has_line "$pinned" "$MANIFEST_WORKER" || fail "print worker: render worker not pinned"
+  grep -q "$MANIFEST_PRINT" "$work/out" || fail "print worker: not among the changed files"
+else
+  fail "print worker: step failed: $(grep '::error' "$work/log")"
 fi
 
 # 6. A bare image with no tag or digest is REJECTED, on purpose: clusters pins

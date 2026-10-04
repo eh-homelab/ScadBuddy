@@ -769,6 +769,7 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         ),
         Metrics(),
         store,
+        "render",
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:

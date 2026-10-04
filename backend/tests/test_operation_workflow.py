@@ -30,6 +30,7 @@ from scadbuddy.workflows.operation_models import (
     InsertOp,
     OperationAnswer,
     OperationInput,
+    PreludeStep,
     RunOp,
 )
 from scadbuddy.workflows.print_models import FAILED, REFUSED
@@ -300,6 +301,73 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     assert answer.operation is not None
     assert answer.operation.error == OPERATION_CANCELLED_RUNNING
     assert (await ended(client, arg)).status == "failed"
+
+
+# --- a prelude on another queue (#1060) ------------------------------------------
+
+
+class Prelude:
+    """The prelude kind's run, on its own worker and queue (the print worker's)."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+        self.error: Exception | None = None
+        self.requests: list[dict[str, Any]] = []
+
+    @activity.defn(name="op.inbox.run")
+    async def run(self, input: RunOp) -> dict[str, Any]:
+        self.calls.append("prelude")
+        self.requests.append(input.request)
+        if self.error is not None:
+            raise self.error
+        return {}
+
+
+@pytest.fixture
+async def prelude(client: Client, fake: Fake) -> AsyncIterator[tuple[str, Prelude]]:
+    queue = f"op-prelude-{uuid.uuid4().hex[:8]}"
+    step = Prelude(fake.calls)
+    async with Worker(client, task_queue=queue, activities=[step.run]):
+        yield queue, step
+
+
+def with_prelude(queue: str) -> OperationInput:
+    return op_input().model_copy(update={"prelude": PreludeStep(kind="inbox", task_queue=queue)})
+
+
+async def test_a_prelude_runs_on_its_queue_before_the_run(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    queue, step = prelude
+    answer = await start(client, worker, with_prelude(queue))
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    assert fake.calls == ["check", "insert", "prelude", "run", "finish:ok"]
+    assert step.requests == [{"archive_id": 5}]
+
+
+async def test_a_failed_prelude_fails_the_operation_and_the_run_never_starts(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    queue, step = prelude
+    step.error = ApplicationError(
+        BAMBUDDY_502.detail, BAMBUDDY_502, type=FAILED, non_retryable=True
+    )
+    arg = with_prelude(queue)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
+    assert (await ended(client, arg)).status == "failed"
+    assert fake.calls == ["check", "insert", "prelude", "finish:502"]
+
+
+async def test_an_operation_without_a_prelude_records_no_patch_marker(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """A history recorded before preludes replays unchanged (`workflow.patched`)."""
+    arg = op_input()
+    await start(client, worker, arg)
+    await ended(client, arg)
+    history = await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").fetch_history()
+    assert not [e for e in history.events if e.event_type == EventType.EVENT_TYPE_MARKER_RECORDED]
 
 
 async def test_the_run_activity_heartbeats_while_the_effect_runs(

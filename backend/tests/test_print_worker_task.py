@@ -11,7 +11,9 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
+from scadbuddy.core.settings import Settings
 from scadbuddy.operations.component import OPERATIONS
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 class StubWorker:
@@ -88,7 +90,7 @@ def _state() -> SimpleNamespace:
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
         temporal=object(),
         settings_store=None,
-        outputs=None,
+        outputs=SimpleNamespace(prints=None),
         uploads=None,
         catalogue=None,
         print_runs=SimpleNamespace(store=None),
@@ -100,10 +102,11 @@ def _state() -> SimpleNamespace:
     )
 
 
-async def test_the_worker_task_ends_lost_runs_at_start_and_on_its_interval(
+async def test_the_upkeep_ends_lost_runs_at_start_and_on_its_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review #1061 F1: a run whose execution closed without ending it is ended."""
+    """Review #1061 F1: a run whose execution closed without ending it is ended, by the
+    API whoever serves the queue (#1060)."""
     passes = asyncio.Event()
     calls: list[object] = []
 
@@ -113,12 +116,12 @@ async def test_the_worker_task_ends_lost_runs_at_start_and_on_its_interval(
             passes.set()
         return 0
 
-    monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "resume_followed", _no_lost_runs)
     monkeypatch.setattr(main, "reconcile_lost_runs", reconcile)
     monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
     monkeypatch.setattr(main, "LOST_RUN_INTERVAL", 0.01)
     stop = asyncio.Event()
-    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    task = asyncio.create_task(main._print_upkeep(_state(), stop))  # type: ignore[arg-type]
     await asyncio.wait_for(passes.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 5)
@@ -172,7 +175,7 @@ async def test_a_worker_still_connecting_stops_at_once(monkeypatch: pytest.Monke
     await asyncio.wait_for(task, 1)
 
 
-async def test_the_worker_task_ends_lost_operations_on_its_interval(
+async def test_the_upkeep_ends_lost_operations_on_its_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review #1063 1: an operation whose execution closed after ``op_insert`` is ended
@@ -186,12 +189,12 @@ async def test_the_worker_task_ends_lost_operations_on_its_interval(
             passes.set()
         return 0
 
-    monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "resume_followed", _no_lost_runs)
     monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
     monkeypatch.setattr(main, "reconcile_lost_operations", reconcile)
     monkeypatch.setattr(main, "LOST_RUN_INTERVAL", 0.01)
     stop = asyncio.Event()
-    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    task = asyncio.create_task(main._print_upkeep(_state(), stop))  # type: ignore[arg-type]
     await asyncio.wait_for(passes.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 5)
@@ -231,3 +234,20 @@ async def test_a_failed_follow_worker_restarts_both_workers(
     assert len(prints) == len(follows) == 2
     assert prints[0].stopped.is_set()
     assert "the print worker failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("inprocess", "print_inprocess", "serves"),
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+def test_the_api_serves_the_print_queue_only_when_told_to(
+    inprocess: bool, print_inprocess: bool, serves: bool
+) -> None:
+    """#1060: the `scadbuddy-print` worker serves it; the API only in-process."""
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        temporal_worker_inprocess=inprocess,
+        temporal_print_worker_inprocess=print_inprocess,
+    )
+    assert main.serves_print_queue(settings) is serves

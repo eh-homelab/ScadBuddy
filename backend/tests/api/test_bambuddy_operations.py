@@ -17,7 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy import operations as bambuddy_operations
+from scadbuddy.bambuddy import output_reader
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
 from tests.api.test_print_history import link, mock_archive
@@ -138,7 +138,7 @@ def test_a_slow_check_that_is_not_bambuddy_is_not_blamed_on_bambuddy(
         await asyncio.sleep(9)
         return "never"
 
-    monkeypatch.setattr(bambuddy_operations, "output_stem", slow_stem)
+    monkeypatch.setattr(output_reader, "output_stem", slow_stem)
 
     response = client.post(
         f"/api/v1/outputs/{output_id}/project-file",

@@ -41,6 +41,11 @@ class OperationKind:
     #: What to check before repeating an effect that may have happened ("Check
     #: Bambuddy ..."); its queue's ``WHERE`` when None.
     where: str | None = None
+    #: Another kind, on its own queue, whose run goes first (#1060): the part of this
+    #: kind's effect that needs what its queue's worker does not hold. Only when
+    #: ``needs_prelude`` says the request needs it.
+    prelude: str | None = None
+    needs_prelude: Callable[[dict[str, Any]], bool] = lambda request: True
 
     def __post_init__(self) -> None:
         if self.where is None:

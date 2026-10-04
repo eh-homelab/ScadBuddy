@@ -26,6 +26,7 @@ from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, R
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.follow import FollowActivities
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -522,19 +523,21 @@ async def _connect_until(state: AppState, stop: asyncio.Event, name: str) -> Cli
 
 
 async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
-    """Serve the ``bambuddy`` queue until ``stop`` (#1052): print runs need the data
-    volume and the Bambuddy key this process holds (#1060). It connects eagerly (a
-    worker cannot run on the lazy client), retrying while Temporal is down, so the API
-    still boots without it; print routes answer 503 meanwhile."""
+    """Serve the ``bambuddy`` queue in this process until ``stop`` (#1052): only with
+    SCADBUDDY_TEMPORAL_WORKER_INPROCESS or SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS;
+    otherwise the ``scadbuddy-print`` worker serves it (#1060). Unversioned, on this
+    process's stores and volume. It connects eagerly (a worker cannot run on the lazy
+    client), retrying while Temporal is down, so the API still boots without it; print
+    routes answer 503 meanwhile."""
     client = await _connect_until(state, stop, "print")
     if client is None:
         return
     settings = state.settings
     deps = PrintDeps(
         settings_store=state.settings_store,
-        outputs=state.outputs,
+        outputs=LocalOutputs(state.outputs, state.catalogue),
+        prints=state.outputs.prints,
         uploads=state.uploads,
-        catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
@@ -544,17 +547,6 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         *PrintActivities(deps).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
-    try:
-        resumed = await resume_followed(
-            state.projection.pool, client, settings.temporal_task_queue_bambuddy, datetime.now(UTC)
-        )
-        if resumed:
-            logger.info(
-                "following on Temporal the prints the old watcher followed",
-                extra={"output_ids": resumed},
-            )
-    except Exception:
-        logger.exception("could not hand the old watcher's prints to FollowPrint")
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
@@ -569,11 +561,37 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
                 ).follow_print,
             ),
         ]
-        if not await _serve_until(
-            workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
-        ):
+        if not await _serve_until(workers, stop):
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+
+
+def serves_print_queue(settings: Settings) -> bool:
+    """Whether the API process serves the ``bambuddy`` queue itself (#1060)."""
+    return settings.temporal_worker_inprocess or settings.temporal_print_worker_inprocess
+
+
+async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
+    """What the API does for print runs whoever serves their queue (#1060): hand the old
+    watcher's prints to ``FollowPrint`` once, then end the runs and operations whose
+    execution closed without ending them, until ``stop``. Postgres and a client only."""
+    client = await _connect_until(state, stop, "print upkeep")
+    if client is None:
+        return
+    settings = state.settings
+    ops = state.components.get(OPERATIONS)
+    try:
+        resumed = await resume_followed(
+            state.projection.pool, client, settings.temporal_task_queue_bambuddy, datetime.now(UTC)
+        )
+        if resumed:
+            logger.info(
+                "following on Temporal the prints the old watcher followed",
+                extra={"output_ids": resumed},
+            )
+    except Exception:
+        logger.exception("could not hand the old watcher's prints to FollowPrint")
+    await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
 
 
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
@@ -789,6 +807,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     stop = asyncio.Event()
     stop_printing = asyncio.Event()
     printing: asyncio.Task[None] | None = None
+    upkeep: asyncio.Task[None] | None = None
     try:
         # Every component's `run` (`core/components.py`), now that the database and
         # the bus are up. One that fails exits those already running and fails the
@@ -801,8 +820,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
-        # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
-        printing = asyncio.create_task(_run_print_worker(state, stop_printing))
+        # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
+        # or this process does when told to (#1060); the upkeep is this process's.
+        if serves_print_queue(state.settings):
+            printing = asyncio.create_task(_run_print_worker(state, stop_printing))
+        upkeep = asyncio.create_task(_print_upkeep(state, stop_printing))
         # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
         # run once at once (the boot's sweep of the uploads, converging with the store;
         # review #1095 1: the boot no longer walks them itself first), then every interval.
@@ -841,6 +863,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.print_follows.aclose()
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
+        await _stop_queue_worker(upkeep, "print upkeep")
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)

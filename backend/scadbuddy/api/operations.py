@@ -43,9 +43,11 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
+    PRELUDE_REQUESTED,
     OperationAnswer,
     OperationAuthor,
     OperationInput,
+    PreludeStep,
 )
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 
@@ -216,6 +218,18 @@ async def run_operation(
     return result
 
 
+def _prelude(
+    ops: OperationCommands, kind: OperationKind, body: dict[str, Any]
+) -> PreludeStep | None:
+    """The step on another queue this request needs first, if any (#1060)."""
+    if kind.prelude is None or not kind.needs_prelude(body):
+        return None
+    first = ops.kinds[kind.prelude]
+    return PreludeStep(
+        kind=first.name, task_queue=ops.queues[first.queue], run_attempts=first.run_attempts
+    )
+
+
 async def _run_operation(
     ops: OperationCommands,
     response: Response,
@@ -247,15 +261,17 @@ async def _run_operation(
         idempotency_key is not None and await _running(ops, workflow_id)
     ):
         await before_start()
+    prelude = _prelude(ops, kind, body)
     arg = OperationInput(
         kind=kind.name,
         subject=subject,
         key=key,
-        request=body,
+        request=body if prelude is None else {**body, PRELUDE_REQUESTED: prelude.kind},
         run_attempts=kind.run_attempts,
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
+        prelude=prelude,
         idempotency_key=idempotency_key,
     )
     try:

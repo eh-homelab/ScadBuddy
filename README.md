@@ -274,8 +274,9 @@ for its own origin check (below).
 
 ScadBuddy runs on the homelab cluster from
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters)
-(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, and the render
-worker's `applications/scadbuddy/scadbuddy-render.yaml`). Those manifests pin the
+(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, the render
+worker's `applications/scadbuddy/scadbuddy-render.yaml`, and the print worker's
+`applications/scadbuddy/scadbuddy-print.yaml`). Those manifests pin the
 image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
@@ -323,8 +324,9 @@ Both call `deploy.reusable.yml`, which:
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
    annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
-   `scadbuddy-render.yaml` when that file exists in clusters (#547; until
-   clusters#1454 adds it, the run notes its absence and pins the API alone). Each
+   `scadbuddy-render.yaml` and `scadbuddy-print.yaml` when those files exist in
+   clusters (#547, #1060; until clusters adds one, the run notes its absence and
+   pins the rest). Each
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
@@ -416,33 +418,68 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `print_watches` after the new one hands that log to `FollowPrint` at start, and
   those prints would go unfollowed until someone opens their progress.
 
-### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
+### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 
-The API process also polls the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`):
-print runs and every other Bambuddy write (send, project files, projects, reprint,
-timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
-**not** versioned: any replica polling the queue may take any task on it.
+Print runs and every other Bambuddy write (send, project files, projects, reprint,
+timelapse pull, sidebar registration, and the inbox copies an output delete takes) run as
+Temporal workflows on the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`),
+with `FollowPrint`'s long `follow_print` activity on `<bambuddy queue>-follow`
+(`bambuddy-follow` by default), so a followed print never holds a slot a print run or an
+operation needs.
 
+**The print worker (#1060)** serves both queues: the **same image** run as
+`python -m scadbuddy.worker --queue bambuddy`, the Deployment `scadbuddy-print` in
+clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …}`) and
+`/metrics` on **9090**, like the render worker.
+
+- **No volume.** It does not mount `scadbuddy-data` and runs no template code. It reads an
+  output's record, its stored `model.3mf` and the names taken from the model's files from
+  the API's cluster-internal routes (`/api/v1/internal/outputs/…`, not in the OpenAPI
+  schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
+  `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
+  like the rest of the API they have no auth today, so whoever reaches the API reaches
+  them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
+  Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
+  output not printed since.
+- **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
+  included, are read from it on every use), `SCADBUDDY_TEMPORAL_ADDRESS`,
+  `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and the Bambuddy
+  URL and key as the API has them (they only seed a database never saved). Its build id
+  is `SCADBUDDY_REVISION`, stamped in the image.
+- **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
+  render worker's is. `PrintRun` and `Operation` are pinned to the build that started
+  them; `FollowPrint` is AUTO_UPGRADE, since it lasts as long as the print, and moves to
+  the new build. Changes to any of them are still made with `workflow.patched`.
+- **Shutdown:** SIGTERM drains the build's pinned runs, as the render worker does, for at
+  most 1920 s (`REPEAT_WINDOW` 600 s, two slice timeouts of 600 s, and 120 s): a print run
+  stays open for `REPEAT_WINDOW` after it ends, so repeats of the same press find it. Set
+  `terminationGracePeriodSeconds` to **2000** and roll with `RollingUpdate`,
+  `maxSurge >= 1`.
+- **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
+  (dev, tests) or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS` (a deployment without the
+  `scadbuddy-print` Deployment yet), unversioned, on its own volume. Either way the API
+  ends print runs and operations whose execution was terminated, and hands the old
+  watcher's prints to `FollowPrint` at start.
+- **Upgrading to the release with #1060**: deploy `scadbuddy-print` with it, or set
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS=true` on the API until it exists; without
+  either nothing polls the `bambuddy` queue, and prints and Bambuddy writes wait. Roll the
+  API out with `Recreate`, so no old replica keeps polling the queue unversioned beside
+  the new worker.
 - **Upgrading to the release with #1053** adds two workflow types (`Operation`,
-  `FollowPrint`) and their activities to that queue, and a second queue beside it,
-  `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
-  `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
-  slot a print run or an operation needs. That worker has `FOLLOW_SLOTS` (200,
-  `bambuddy/follow.py`) slots per process: each print holds one while it moves (a
-  poke's old attempt holds its own for up to about 24 s more). Past them, new prints
-  wait on the queue unfollowed: watch `scadbuddy_print_follows_running`, and the
-  warning "every follow slot is taken". A replica still on the old build takes the
-  new tasks on the `bambuddy` queue and fails them as unregistered; nothing is
-  corrupted (the task is retried), but each Bambuddy write that lands there stalls
-  until the old pod is gone. Roll this release
-  out with `Recreate`, or scale the old replicas to 0 before the new ones start.
+  `FollowPrint`) and their activities to that queue, and the `<bambuddy queue>-follow`
+  queue beside it. The follow worker has `FOLLOW_SLOTS` (200, `bambuddy/follow.py`) slots
+  per process: each print holds one while it moves (a poke's old attempt holds its own
+  for up to about 24 s more). Past them, new prints wait on the queue unfollowed: watch
+  `scadbuddy_print_follows_running`, and the warning "every follow slot is taken". A
+  replica still on the old build takes the new tasks and fails them as unregistered;
+  nothing is corrupted (the task is retried), but each Bambuddy write that lands there
+  stalls until the old pod is gone. Roll this release out with `Recreate`, or scale the
+  old replicas to 0 before the new ones start.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   should be at least the Temporal namespace's retention. A retry of an operation whose
   record was deleted while Temporal still holds its closed execution answers 409 "may
   have been done" instead of its outcome.
-- **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
-  a rolling update stays safe; a release that adds a workflow or activity type to the
-  queue says so here and needs the same `Recreate` rollout.
 
 ### Blob store and render workers (#426)
 

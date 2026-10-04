@@ -3,10 +3,10 @@
 the check makes the ones that read the volume, the render's job or the blob store,
 and the run is the route's former body.
 
-An output delete with ``delete_inbox_copies`` deletes the Bambuddy inbox copies in its
-run, before the files (plan 3e Ruling 4): §4.3 puts that part on ``bambuddy``, which is
-acceptable while both workers run in the API process. #1060, which moves ``bambuddy``
-out, splits it.
+An output delete with ``delete_inbox_copies`` deletes the Bambuddy inbox copies before
+the files. Since #1060 that is its prelude on ``bambuddy`` (``output_inbox_delete``);
+a delete an API from before it started (no ``PRELUDE_REQUESTED`` in the request) still
+deletes them in its run, as plan 3e Ruling 4 had it.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -135,7 +136,13 @@ def output_kinds(state: AppState) -> list[OperationKind]:
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         output_id = request["output_id"]
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
-        if request["delete_inbox_copies"] and await state.uploads.for_output(meta.id):
+        # The inbox copies went first, on `bambuddy` (`output_inbox_delete`, #1060), unless
+        # an API from before that started this delete with no prelude: then they go here.
+        if (
+            request["delete_inbox_copies"]
+            and PRELUDE_REQUESTED not in request
+            and await state.uploads.for_output(meta.id)
+        ):
             settings = await asyncio.to_thread(state.settings_store.load)
             async with client_for(settings) as client:
                 await remove_inbox_copies(client, state.uploads, meta, settings)
@@ -149,6 +156,13 @@ def output_kinds(state: AppState) -> list[OperationKind]:
             logger.exception(
                 "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
             )
+        if state.outputs.prints is not None:
+            try:
+                await asyncio.to_thread(state.outputs.prints.delete, output_id)
+            except psycopg.Error:
+                logger.exception(
+                    "could not forget a deleted output's last print", extra={"id": output_id}
+                )
         try:
             await state.print_links.delete_outputs([output_id])
         except (DatabaseRequiredError, psycopg.Error):
@@ -158,13 +172,25 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         emit(state.events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
         return {}
 
-    def kind(name: str, check: Any, run: Any, where: str) -> OperationKind:
+    def kind(name: str, check: Any, run: Any, where: str, **extra: Any) -> OperationKind:
         return OperationKind(
-            name, answered_as_routes(check), answered_as_routes(run), queue="library", where=where
+            name,
+            answered_as_routes(check),
+            answered_as_routes(run),
+            queue="library",
+            where=where,
+            **extra,
         )
 
     return [
         kind("output_create", create_check, create_run, "the template's outputs"),
         kind("output_thumbnail", output_check, thumbnail_run, "the output"),
-        kind("output_delete", output_check, delete_run, "the output and Bambuddy's inbox folder"),
+        kind(
+            "output_delete",
+            output_check,
+            delete_run,
+            "the output and Bambuddy's inbox folder",
+            prelude="output_inbox_delete",
+            needs_prelude=lambda request: bool(request["delete_inbox_copies"]),
+        ),
     ]

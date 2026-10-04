@@ -13,6 +13,11 @@ from scadbuddy.operations.store import Operation
 OPERATION_WORKFLOW = "Operation"
 INSERT_ACTIVITY = "op_insert"
 FINISH_ACTIVITY = "op_finish"
+#: Guards the prelude step (#1060), so a history from before it replays unchanged.
+PRELUDE_PATCH = "op-prelude"
+#: Set in the request of an operation started with a prelude: its run knows the prelude's
+#: part is done. A request without it came from an API from before the prelude (#1060).
+PRELUDE_REQUESTED = "_prelude"
 
 
 def check_activity(kind: str) -> str:
@@ -31,6 +36,14 @@ class OperationAuthor(BaseModel):
     session: str | None = None
 
 
+class PreludeStep(BaseModel):
+    """A kind whose run goes first, on its own task queue (#1060)."""
+
+    kind: str
+    task_queue: str
+    run_attempts: int = 1
+
+
 class OperationInput(BaseModel):
     kind: str
     subject: str
@@ -46,6 +59,8 @@ class OperationInput(BaseModel):
     search_attributes: bool = False
     #: The request's agent author, when an agent made it.
     author: OperationAuthor | None = None
+    #: The kind's prelude, when the request needs it (``OperationKind.prelude``).
+    prelude: PreludeStep | None = None
     #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
     idempotency_key: str | None = None
 
