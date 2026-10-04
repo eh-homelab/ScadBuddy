@@ -259,7 +259,7 @@ async def _run_operation(
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 "This request already ran, and its record has since been deleted, so it "
-                "may have been done. Check Bambuddy before sending it again.",
+                f"may have been done. Check {kind.where} before sending it again.",
             ) from None
         return _answer(recorded, response, repeated=True)
     except CommandStillAcceptingError:

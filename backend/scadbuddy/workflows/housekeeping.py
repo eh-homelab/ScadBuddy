@@ -9,6 +9,12 @@ queue is served in the API process, which holds the data volume the sweeps read.
 sweep is best effort, as the loop's were: one that fails is logged, fails its activity
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
 tries again.
+
+The ``library`` worker is unversioned (unlike the render worker), so a run left open
+across a deploy replays on the new code: ``Housekeeping.run`` must stay
+replay-compatible. A change to its command sequence (a step added, the loop reordered)
+goes behind ``workflow.patched``. A run that fails on replay anyway ends at its
+`housekeeping_timeout`.
 """
 
 from __future__ import annotations
@@ -72,6 +78,18 @@ SWEEP_TIMEOUT = timedelta(minutes=30)
 HEARTBEAT_TIMEOUT = timedelta(minutes=1)
 #: The prune is two deletes; it fits well inside the prune Schedule's interval.
 PRUNE_TIMEOUT = timedelta(minutes=2)
+#: What a run spends between its activities: workflow tasks, and a start on a busy worker.
+RUN_MARGIN = timedelta(minutes=3)
+
+
+def housekeeping_timeout(sweeps: tuple[str, ...]) -> timedelta:
+    """A run's bound: each sweep's activity timeout, plus a margin. A run that can
+    never finish (a workflow task that fails on replay retries forever) then ends,
+    and the Schedule's overlap SKIP does not hold back every later tick."""
+    return sum(
+        (PRUNE_TIMEOUT if sweep in PRUNE_SWEEPS else SWEEP_TIMEOUT for sweep in sweeps),
+        RUN_MARGIN,
+    )
 
 
 @workflow.defn(name=HOUSEKEEPING_WORKFLOW)
@@ -100,7 +118,11 @@ def _schedule(
 ) -> Schedule:
     return Schedule(
         action=ScheduleActionStartWorkflow(
-            HOUSEKEEPING_WORKFLOW, list(sweeps), id=schedule_id, task_queue=task_queue
+            HOUSEKEEPING_WORKFLOW,
+            list(sweeps),
+            id=schedule_id,
+            task_queue=task_queue,
+            execution_timeout=housekeeping_timeout(sweeps),
         ),
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=timedelta(seconds=max(interval, MIN_INTERVAL)))]
@@ -118,7 +140,7 @@ async def ensure_schedule(
     sweeps: tuple[str, ...] = SWEEPS,
 ) -> None:
     """The Schedule at ``interval`` seconds (0: none), then one run now: the boot's
-    converging sweep."""
+    converging sweep. A Schedule an operator paused stays paused, and is not run."""
     schedule_id = schedule_id or schedule_id_for(task_queue)
     handle = client.get_schedule_handle(schedule_id)
     if interval <= 0:
@@ -133,11 +155,16 @@ async def ensure_schedule(
         await client.create_schedule(schedule_id, schedule)
     except ScheduleAlreadyRunningError:
 
-        def replace(_: ScheduleUpdateInput) -> ScheduleUpdate:
+        def replace(input: ScheduleUpdateInput) -> ScheduleUpdate:
+            # The state (paused, its note) is the operator's, not the deploy's.
+            schedule.state = input.description.schedule.state
             return ScheduleUpdate(schedule=schedule)
 
         await handle.update(replace)
-    await handle.trigger()
+    if not schedule.state.paused:
+        # A run still open (a rollout stopped the old pod mid-sweep) would SKIP this
+        # one; it queues behind that run instead.
+        await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
 
 
 async def ensure_schedules(client: Client, task_queue: str, interval: float) -> None:

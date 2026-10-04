@@ -410,7 +410,7 @@ The rest:
     execution has closed starts a new execution under the same workflow ID
     (`ALLOW_DUPLICATE` reuse), with a new job id. Today, too, only an unfinished row
     coalesces.
-- **Superseding.** A request naming `supersedes: <job id>` (and `RenderService.cancel`, `render/submit.py:185`) looks
+- **Superseding.** A request naming `supersedes: <job id>` looks
   up that row's `workflow_id` and run id and sends that execution the `release` Update.
   - `release` takes off one claim. At zero the workflow writes `cancelled` through its
     projection activity and stops at the next activity boundary.
@@ -1043,7 +1043,12 @@ Each phase is its own implementation plan and ships alone.
      its own kinds. Pin, re-pin, unpin and checkout removal are `library` kinds
      (`library/operations.py`) on the generic `Operation` workflow. They are `done`, not
      `accepted`: a fast clone answers the model as before, and one past the deadline
-     answers 202 with the operation, so no request is held past it either way. The
+     answers 202 with the operation, so no request is held past it either way. Only the
+     refusals that need no clone, no DNS lookup and no lock are checks (an unknown model
+     or catalogue name, a malformed URL or ref, an address literal that is not public,
+     and a removal's lease, pin and missing checkout, made again under the gate in the
+     run). The rest (a clone's 502, a lookup's 503 or non-public host, a re-pin or unpin
+     whose entry changed) arrive as failed operations. The
      library check (`POST …/check`) stays a request. The UI's and the agent's pin calls go
      through `command()`.
    - As built so far (3c, #1054, plan `2026-10-03-durable-phase-3c-model-lifecycle.md`):

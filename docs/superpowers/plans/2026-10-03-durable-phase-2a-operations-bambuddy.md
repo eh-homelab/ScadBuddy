@@ -120,8 +120,8 @@ in this order:
 
 **Interfaces:**
 - Produces: `Operation` (pydantic: `id, kind, subject, status: Literal["running","succeeded","failed"], result: dict | None, error: PrintRunError | None, created_at, finished_at`), `OperationStore(pool, *, events)` with
-  `async find(key) -> Operation | None`, `async get(id) -> Operation | None`,
-  `async insert(op_id, *, kind, subject, key, request, workflow_id, workflow_run_id, retention) -> Operation`,
+  `async find(operation_key) -> Operation | None`, `async get(id) -> Operation | None`,
+  `async insert(op_id, *, kind, subject, operation_key, request, workflow_id, workflow_run_id, retention) -> Operation`,
   `async finish(op_id, *, result=None, error=None) -> Operation`;
   `OperationEvent(kind="operation.changed", operation_id, op_kind, subject)`.
 
@@ -132,7 +132,7 @@ CREATE TABLE operations (
     id text PRIMARY KEY,
     kind text NOT NULL,
     subject text NOT NULL,
-    idempotency_key text NOT NULL,
+    operation_key text NOT NULL,
     status text NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
     request jsonb NOT NULL,
     result jsonb,
@@ -143,7 +143,7 @@ CREATE TABLE operations (
     finished_at timestamptz
 );
 CREATE UNIQUE INDEX operations_execution ON operations (workflow_id, workflow_run_id);
-CREATE INDEX operations_key ON operations (idempotency_key, created_at DESC);
+CREATE INDEX operations_operation_key ON operations (operation_key, created_at DESC);
 CREATE INDEX operations_finished ON operations (finished_at) WHERE finished_at IS NOT NULL;
 ```
 
@@ -151,9 +151,9 @@ CREATE INDEX operations_finished ON operations (finished_at) WHERE finished_at I
 
 ```python
 async def test_insert_twice_for_one_execution_returns_the_first_row_and_publishes_once(store, events):
-    first = await store.insert("a", kind="reprint", subject="archive:5", key="k", request={},
+    first = await store.insert("a", kind="reprint", subject="archive:5", operation_key="k", request={},
                                workflow_id="op-reprint-k", workflow_run_id="r1", retention=None)
-    again = await store.insert("b", kind="reprint", subject="archive:5", key="k", request={},
+    again = await store.insert("b", kind="reprint", subject="archive:5", operation_key="k", request={},
                                workflow_id="op-reprint-k", workflow_run_id="r1", retention=None)
     assert again.id == first.id == "a"
     assert [e.operation_id for e in events.published] == ["a"]
@@ -416,7 +416,7 @@ def test_create_project_with_a_key_twice_creates_once(client, ...):
 - Test: `frontend/src/api/client.test.ts`, `frontend/src/pages/SettingsPage.test.tsx`
 
 **Interfaces:**
-- Produces: `command<T>(path: string, init: RequestInit & { signal?: AbortSignal }): Promise<T>`. It sends `Idempotency-Key: newRequestId()` (one per call; re-sends reuse it); a 2xx other than 202 is `T`; a 202 is an `Operation` followed through `GET /operations/{id}` every `printRunPoll.intervalMs` until it ends; `succeeded` → its `result` as `T`; `failed` → `new ApiError(error.status, error)`; re-sends while `unanswered()` (the same rule `reattach` uses, including `command-still-accepting`).
+- Produces: `command<T>(path: string, init: RequestInit & { signal?: AbortSignal }): Promise<T>`. It sends `Idempotency-Key: newRequestId()` (one per call; re-sends reuse it); a 2xx other than 202 is `T`; a 202 is an `Operation` followed through `GET /operations/{id}` every `printRunPoll.intervalMs` until it ends, for at most `printRunPoll.operationFollowMs` (15 min; past it, a 504 `urn:scadbuddy:operation-unfinished` saying it may have been done: review #1063, so the follow is bounded, not a deferred gap); `succeeded` → its `result` as `T`; `failed` → `new ApiError(error.status, error)`; re-sends while `unanswered()` (the same rule `reattach` uses, including `command-still-accepting`).
 - `sendOutput`, `createProject`, `fileIntoProject`, `attachToProject`, `reprint`, `pullTimelapse`, `registerSidebar` call `command()` instead of `request()`.
 
 - [ ] **Step 1: Failing tests:** `sends one Idempotency-Key and re-sends it after an unanswered answer`; `follows a 202 to the operation's result`; `turns a failed operation into the route's ApiError`; `reprint goes through command()` (asserts the header on the msw request); Settings: `keeps finished operations for the days given`.
@@ -433,7 +433,7 @@ def test_create_project_with_a_key_twice_creates_once(client, ...):
 - Test: `agent/test/command.test.ts`, `agent/test/tools.test.ts`, `agent/test/coverage.test.ts` (must stay green with the new route)
 
 **Interfaces:**
-- Produces: `command<T>(ctx: ToolContext, what: string, send: (headers: { 'Idempotency-Key': string }) => Promise<FetchResult<T | Operation>>): Promise<T>`, with `print.ts`'s `reattach` rules (re-send on `TypeError`, a proxy's own 502/503/504/524, and `command-still-accepting`; up to `RUN_REATTEMPTS` and then a `ToolError` that says the effect may have happened), and a 202 followed through `GET /api/v1/operations/{id}` every `ctx.pollIntervalMs`.
+- Produces: `command<T>(ctx: ToolContext, what: string, send: (headers: { 'Idempotency-Key': string }) => Promise<FetchResult<T | Operation>>): Promise<T>`, with `print.ts`'s `reattach` rules (re-send on `TypeError`, a proxy's own 502/503/504/524, and `command-still-accepting`; up to `RUN_REATTEMPTS` and then a `ToolError` that says the effect may have happened), and a 202 followed through `GET /api/v1/operations/{id}` every `ctx.pollIntervalMs` for at most `ctx.operationFollowMs` (15 min, as the browser; review #1063), then a `ToolError` naming the operation for `get_operation`.
 
 - [ ] **Step 1: Failing tests:** `re-sends with the same Idempotency-Key`; `follows a 202 to the result`; `print_again sends an Idempotency-Key`; `get_operation reads an operation`.
 - [ ] **Step 2: Run** `pnpm exec vitest run test/command.test.ts test/tools.test.ts test/coverage.test.ts`; expect FAIL.
