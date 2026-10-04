@@ -9,6 +9,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -132,13 +133,12 @@ class BrokenUsage(RackUsageStore):
     async def record_picks(
         self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
     ) -> int:
-        raise RuntimeError("the database went away")
+        raise psycopg.OperationalError("the database went away")
 
     def close(self) -> None:
         return None
 
 
-@pytest.mark.rack_injects_errors
 @respx.mock
 def test_a_failed_picks_write_still_returns_the_queued_run(client: TestClient, model: str) -> None:
     """Spec §5: the item is queued, so the write is advisory."""

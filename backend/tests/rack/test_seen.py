@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
+import psycopg
 import pytest
 
 from scadbuddy.rack.usage import record_seen
@@ -36,12 +37,11 @@ async def test_no_status_or_no_store_records_nothing() -> None:
     assert store.calls == []
 
 
-@pytest.mark.rack_injects_errors
 async def test_a_failed_write_is_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> None:
-    store = Seen(RuntimeError(f"duplicate key (serial)=({serial(17)})"))
+    store = Seen(psycopg.OperationalError(f"duplicate key (serial)=({serial(17)})"))
     with caplog.at_level(logging.DEBUG):
         await record_seen(store, 1, status(slot(2)))  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
     assert record.getMessage() == "could not record the rack's hotends"
-    assert record.__dict__["error"] == "RuntimeError"
+    assert record.__dict__["error"] == "OperationalError"
     assert serial(17) not in repr(record.__dict__) and record.exc_info is None

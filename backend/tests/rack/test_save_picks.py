@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
+import psycopg
 import pytest
 
 from scadbuddy.rack.usage import PickedHotend, save_picks
@@ -47,16 +48,15 @@ async def test_a_pick_with_no_serial_is_sent_but_not_recorded() -> None:
     assert [p.group_id for p in store.rows[0][2]] == [0]
 
 
-@pytest.mark.rack_injects_errors
 async def test_a_failed_write_is_logged_by_type_and_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    store = Picks(error=RuntimeError(f"violates key (serial)=({serial(19)})"))
+    store = Picks(error=psycopg.OperationalError(f"violates key (serial)=({serial(19)})"))
     with caplog.at_level(logging.DEBUG):
         await save_picks(store, 1, [51], [PICK])  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
     assert record.getMessage() == "could not record the rack picks"
-    assert getattr(record, "error", None) == "RuntimeError"
+    assert getattr(record, "error", None) == "OperationalError"
     assert serial(19) not in repr(record.__dict__) and record.exc_info is None
 
 
