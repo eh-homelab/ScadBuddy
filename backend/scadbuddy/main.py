@@ -405,22 +405,44 @@ PRINT_WORKER_RECONNECT = 5.0
 LOST_RUN_INTERVAL = 300.0
 
 
+async def _connect_until(state: AppState, stop: asyncio.Event, name: str) -> Client | None:
+    """The app's client, or one connected eagerly (a worker cannot run on the lazy
+    client), retrying while Temporal is down; None once ``stop`` is set. A connect to a
+    Temporal that never answers retries for a long time, so it is raced against
+    ``stop``: the app's shutdown never waits it out."""
+    settings = state.settings
+    if state.temporal is not None:
+        return state.temporal
+    while not stop.is_set():
+        connecting = asyncio.create_task(
+            connect(settings.temporal_address, settings.temporal_namespace)
+        )
+        stopping = asyncio.create_task(stop.wait())
+        try:
+            await asyncio.wait({connecting, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopping.cancel()
+        if not connecting.done():
+            connecting.cancel()
+            return None
+        error = connecting.exception()
+        if error is None:
+            return connecting.result()
+        logger.warning("the %s worker cannot reach Temporal yet; retrying", name, exc_info=error)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    return None
+
+
 async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``bambuddy`` queue until ``stop`` (#1052): print runs need the data
     volume and the Bambuddy key this process holds (#1060). It connects eagerly (a
     worker cannot run on the lazy client), retrying while Temporal is down, so the API
     still boots without it; print routes answer 503 meanwhile."""
+    client = await _connect_until(state, stop, "print")
+    if client is None:
+        return
     settings = state.settings
-    client = state.temporal
-    while client is None:
-        try:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
-        except Exception:
-            logger.warning("the print worker cannot reach Temporal yet; retrying", exc_info=True)
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-            if stop.is_set():
-                return
     deps = PrintDeps(
         settings_store=state.settings_store,
         outputs=state.outputs,
