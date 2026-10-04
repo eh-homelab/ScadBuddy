@@ -7,7 +7,7 @@ import asyncio
 import dataclasses
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -723,13 +723,22 @@ async def ended_with_real_finish(
         return await asyncio.wait_for(ended(client, arg), timeout=30)
 
 
+def _returning(source: object) -> Callable[..., Awaitable[object]]:
+    """``_output_source`` is async since outputs are read from the API (#1060)."""
+
+    async def load(*_: object) -> object:
+        return source
+
+    return load
+
+
 async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeeded(
     client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review #1061 1a: the real `print_finish`; remembering the project's printer is
     best effort, so a run with every plate queued never ends `failed`."""
     real = real_activities()
-    monkeypatch.setattr(real, "_output_source", lambda *_: _ForgetfulSource())
+    monkeypatch.setattr(real, "_output_source", _returning(_ForgetfulSource()))
     fake.project_id = 7
     run = await ended_with_real_finish(client, fake, real, run_input())
     assert run.status == "succeeded" and run.result is not None
@@ -744,7 +753,7 @@ async def test_a_project_remembered_past_its_budget_is_skipped_and_the_run_succe
     which no ``except`` sees, and `print_finish` retries without limit; the remember is
     given up after its budget instead."""
     real = real_activities()
-    monkeypatch.setattr(real, "_output_source", lambda *_: _StalledSource())
+    monkeypatch.setattr(real, "_output_source", _returning(_StalledSource()))
     monkeypatch.setattr(print_activities, "REMEMBER_BUDGET", 0.5)
     fake.project_id = 7
     run = await ended_with_real_finish(client, fake, real, run_input())
