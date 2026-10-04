@@ -4,6 +4,7 @@ the real names, on a dev server: the generic command every Bambuddy write runs a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -19,9 +20,10 @@ from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.runs import PrintRunError
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
-from scadbuddy.workflows import print_activities
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.workflows import operation_activities, print_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import _kind_activities
@@ -38,6 +40,7 @@ from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED_RUNNING,
     OPERATION_UNEXPECTED_DETAIL,
     OPERATION_UNEXPECTED_RUNNING_DETAIL,
+    problem_of,
 )
 from tests.support.temporal import temporal_client
 
@@ -346,3 +349,53 @@ async def test_the_run_activity_heartbeats_while_the_effect_runs(
     env.on_heartbeat = lambda *details: beats.append(details)
     assert await env.run(run, RunOp(request={}, checked={})) == {"done": True}
     assert beats
+
+
+@pytest.mark.parametrize(
+    ("raised", "still_waiting"),
+    [(None, False), (LookupError, False), (TimeoutError, True), (asyncio.CancelledError, True)],
+)
+async def test_only_a_timeout_leaves_the_check_waiting_on_bambuddy(
+    raised: type[BaseException] | None, still_waiting: bool
+) -> None:
+    """Review #1063 third review 2: a check that catches a Bambuddy error and goes on to
+    slow work of its own must not blame Bambuddy when that work runs out of time."""
+    waiting = [False]
+    token = CHECK_ON_BAMBUDDY.set(waiting)
+    try:
+        with pytest.raises(raised) if raised is not None else contextlib.nullcontext():
+            async with waiting_on_bambuddy():
+                assert waiting == [True]
+                if raised is not None:
+                    raise raised
+    finally:
+        CHECK_ON_BAMBUDDY.reset(token)
+    assert waiting == [still_waiting]
+
+
+@pytest.mark.parametrize("bambuddy_answered", [False, True])
+async def test_a_check_out_of_time_blames_bambuddy_only_while_waiting_on_it(
+    monkeypatch: pytest.MonkeyPatch, bambuddy_answered: bool
+) -> None:
+    """The budget cuts the check with a cancel inside ``waiting_on_bambuddy``, which keeps
+    the blame; a check that left it with an error and then ran out of time does not."""
+    monkeypatch.setattr(operation_activities, "CHECK_BUDGET_SECONDS", 0.2)
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        with contextlib.suppress(LookupError):
+            async with waiting_on_bambuddy():
+                if bambuddy_answered:
+                    raise LookupError
+                await asyncio.Event().wait()
+        await asyncio.Event().wait()
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    activity_check, _ = _kind_activities(OperationKind(name="slow", check=check, run=run))
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_check, {})
+    answer = problem_of(caught.value)
+    assert answer.status == 504
+    assert (answer.type == UNAVAILABLE_PROBLEM) is not bambuddy_answered

@@ -40,7 +40,16 @@ async def waiting_on_bambuddy() -> AsyncIterator[None]:
     waiting = CHECK_ON_BAMBUDDY.get()
     if waiting is not None:
         waiting[0] = True
-    yield
+    try:
+        yield
+    except TimeoutError:
+        raise
+    except Exception:
+        # Any exit but being cut short ends the wait (review #1063 third review 2). The
+        # check's budget cuts it with a cancel, which leaves the flag set too.
+        if waiting is not None:
+            waiting[0] = False
+        raise
     if waiting is not None:
         waiting[0] = False
 
