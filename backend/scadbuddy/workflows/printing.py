@@ -14,7 +14,7 @@ dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes r
 without limit; ``print_record`` also touches the data volume and Bambuddy, so it gives
 up and the run is recorded as failed. ``print_finish`` remembers the project's printer
 best effort and, like ``print_succeed``, retries without limit, so once every plate is
-queued the run never ends ``failed`` (unless Bambuddy's settings are removed meanwhile).
+queued the run never ends ``failed``.
 
 ``print_plan`` uploads the 3MF and retries (``READ_RETRY``): ``ensure_uploaded`` reuses
 the copy ScadBuddy recorded, so a retry uploads again only when the attempt died after

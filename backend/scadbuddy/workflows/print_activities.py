@@ -71,6 +71,9 @@ logger = logging.getLogger(__name__)
 
 #: How often a slice wait tells Temporal it is alive (its heartbeat timeout is 30 s).
 HEARTBEAT_EVERY = 10.0
+#: Seconds ``print_finish`` gives remembering the project, well under its 60 s timeout:
+#: an attempt that timed out would be retried without limit (review #1061).
+REMEMBER_BUDGET = 20.0
 
 
 @dataclass
@@ -127,6 +130,9 @@ class PrintActivities:
         if spec.kind == "library":
             assert spec.file_id is not None
             return await LibrarySource.load(client, spec.file_id)
+        return self._output_source(spec, settings)
+
+    def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
         assert spec.output_id is not None
         return OutputSource(
             self.d.outputs,
@@ -275,29 +281,34 @@ class PrintActivities:
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
-        """What the run queued, for ``print_succeed`` to record, and the project's printer
-        and nozzle remembered for its next Generate (#317). Every plate is queued, so
-        that is best effort: a failure there never fails the run (review #1061 1a), and
-        the workflow retries this without limit (review #1061 1). Bambuddy's settings
-        removed meanwhile would never come back on a retry, so that fails the run."""
+        """What the run queued, for ``print_succeed`` to record, and an output's project
+        printer and nozzle remembered for its next Generate (#317). Every plate is
+        queued, and the workflow retries this without limit (review #1061 1), so all
+        but the settings read is best effort: remembering is bounded by
+        ``REMEMBER_BUDGET`` and its failure logged (review #1061 1a), and Bambuddy's
+        settings removed meanwhile only leave out the queue link."""
         settings = self._settings()
         planned = input.planned
-        try:
-            config = BambuddyConfig.from_settings(settings)
-        except ApiError as error:
-            raise _raised(error, FAILED) from None
-        async with BambuddyClient(config) as client:
-            if planned.project_id is not None:
-                try:
-                    source = await self._source(client, input.input.source, settings)
-                    await source.remember_project(
+        spec = input.input.source
+        # A library file's project is not remembered (``LibrarySource.remember_project``).
+        if planned.project_id is not None and spec.kind == "output":
+            try:
+                await asyncio.wait_for(
+                    self._output_source(spec, settings).remember_project(
                         planned.project_id,
                         printer_id=planned.printer_id,
                         nozzle_size=planned.nozzle_size,
-                    )
-                except Exception:
-                    logger.exception("could not remember project %s", planned.project_id)
-            return finish_run(client, planned, input.outcomes, input.queued)
+                    ),
+                    REMEMBER_BUDGET,
+                )
+            except Exception:
+                logger.exception("could not remember project %s", planned.project_id)
+        try:
+            config: BambuddyConfig | None = BambuddyConfig.from_settings(settings)
+        except ApiError as error:
+            logger.warning("run %s queued without a Bambuddy link: %s", input.run_id, error.detail)
+            config = None
+        return finish_run(config, planned, input.outcomes, input.queued)
 
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:
