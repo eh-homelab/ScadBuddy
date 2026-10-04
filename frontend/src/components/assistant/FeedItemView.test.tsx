@@ -279,3 +279,70 @@ describe('the question card (#940)', () => {
     }
   })
 })
+
+describe('the attention card (#815)', () => {
+  type Question = Extract<FeedItem, { kind: 'question' }>
+  const card = {
+    question: 'The ScadBuddy tab closed. Reopen it so I can select the plate?',
+    header: 'Tab disconnected',
+    multiSelect: false,
+    options: [
+      { label: "I'm here", description: '' },
+      { label: 'Carry on without me', description: '' },
+    ],
+  }
+  const expiresAt = new Date(Date.UTC(2026, 9, 4, 9, 5)).toISOString()
+
+  function raise(onTimeout: 'proceed' | 'wait' | 'stop', extra: Partial<Question> = {}) {
+    const onAnswer = vi.fn()
+    const item: Question = {
+      kind: 'question',
+      id: 'att1',
+      tool: 't1',
+      questions: [card],
+      attention: { reason: 'tab_disconnected', onTimeout, expiresAt },
+      state: 'pending',
+      ...extra,
+    }
+    const view = render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={onAnswer} />)
+    return { onAnswer, ...view }
+  }
+
+  it('says what it needs and what its timer does, and the user acknowledges it with a quick reply', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = raise('proceed')
+    expect(screen.getByTestId('agent-attention')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'The assistant needs you: Tab disconnected' })).toBeInTheDocument()
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(/carries on with work that needs no approval\. A timeout never approves anything\./)
+    await user.click(screen.getByRole('radio', { name: /I'm here/ }))
+    await user.click(screen.getByRole('button', { name: 'Send reply' }))
+    expect(onAnswer).toHaveBeenCalledWith('att1', ["I'm here"])
+  })
+
+  it('or with their own words', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = raise('stop')
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(/it stops\.$/)
+    await user.click(screen.getByRole('radio', { name: 'Other…' }))
+    await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'Back in five minutes')
+    await user.click(screen.getByRole('button', { name: 'Send reply' }))
+    expect(onAnswer).toHaveBeenCalledWith('att1', ['Back in five minutes'])
+  })
+
+  it("says how long 'wait' waits, naming the day when it is not today", () => {
+    const tomorrow = new Date(Date.now() + 86_400_000)
+    const { unmount } = raise('wait', { attention: { reason: 'blocked', onTimeout: 'wait', expiresAt: tomorrow.toISOString() } })
+    const day = tomorrow.toLocaleString([], { weekday: 'short' })
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(new RegExp(`^It waits for you until ${day}.+, then stops\\.$`))
+    unmount()
+    raise('proceed', { attention: { reason: 'blocked', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 60_000).toISOString() } })
+    expect(screen.getByTestId('agent-attention-timer')).not.toHaveTextContent(day)
+  })
+
+  it('once timed out, says nobody replied, and offers nothing to answer', () => {
+    raise('proceed', { state: 'cancelled', reason: 'nobody replied in time (on_timeout: proceed)' })
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-attention-timer')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('No reply: nobody replied in time (on_timeout: proceed).')
+  })
+})
