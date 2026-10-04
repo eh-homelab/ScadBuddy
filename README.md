@@ -417,7 +417,9 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   output's record, its stored `model.3mf` and the names taken from the model's files from
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, not in the OpenAPI
   schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
-  `http://scadbuddy:8080`; never the ingress). An output's last print is recorded in
+  `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
+  like the rest of the API they have no auth today, so whoever reaches the API reaches
+  them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
