@@ -5,6 +5,12 @@ unchanged.
 They run on the ``library`` worker, which is in the API process and holds the data
 volume (phase 3a), so they share the API's checkout gate and install semaphore. Every
 kind runs once: a git commit is not deduped.
+
+The gate, the semaphore and the render leases are in-process ``asyncio`` primitives:
+they hold only while every process that pins, removes or renders from the volume is
+this one. Before the ``library`` worker leaves the API process, or the API runs more
+than one replica, the gate and the leases must move to Postgres advisory locks (#872
+tracks the leases a separate render worker takes).
 """
 
 from __future__ import annotations
