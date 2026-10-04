@@ -61,8 +61,8 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     HEARTBEAT_TIMEOUT,
     SWEEPS,
-    Housekeeping,
     ensure_schedules,
+    library_worker,
 )
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
@@ -545,9 +545,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     activities = _housekeeping_activities(state)
     try:
         while not stop.is_set():
-            worker = Worker(
-                client, task_queue=queue, workflows=[Housekeeping], activities=activities
-            )
+            worker = library_worker(client, queue, activities)
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)

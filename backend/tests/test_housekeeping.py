@@ -29,6 +29,7 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedule,
     ensure_schedules,
     housekeeping_timeout,
+    library_worker,
     prune_schedule_id_for,
     schedule_id_for,
 )
@@ -97,6 +98,37 @@ async def test_the_prune_is_short_and_the_long_sweeps_heartbeat(client: Client) 
     assert fake.timeouts[SWEEPS[0]] == (PRUNE_TIMEOUT, None)
     for sweep in SWEEPS[1:]:
         assert fake.timeouts[sweep] == (SWEEP_TIMEOUT, HEARTBEAT_TIMEOUT)
+
+
+async def test_a_sweep_in_flight_finishes_before_the_worker_stops(client: Client) -> None:
+    """Review #1095b 5: the lifespan closes the stores the sweeps use once the worker
+    has stopped, so a stop lets a running sweep finish instead of cancelling its task
+    while its thread goes on."""
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    started = asyncio.Event()
+    finished: list[str] = []
+
+    @activity.defn(name=SWEEPS[1])
+    async def sweep() -> None:
+        started.set()
+        await asyncio.sleep(0.5)
+        finished.append(SWEEPS[1])
+
+    worker = library_worker(client, queue, [sweep])
+    running = asyncio.create_task(worker.run())
+    try:
+        await client.start_workflow(
+            Housekeeping.run,
+            [SWEEPS[1]],
+            id=f"housekeeping-{uuid.uuid4().hex}",
+            task_queue=queue,
+        )
+        await asyncio.wait_for(started.wait(), 10)
+        await worker.shutdown()
+    finally:
+        await asyncio.gather(running, return_exceptions=True)
+        await terminate_open_workflows(client, queue)
+    assert finished == [SWEEPS[1]]
 
 
 async def test_ensure_schedule_creates_then_updates_the_interval(client: Client) -> None:

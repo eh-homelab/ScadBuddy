@@ -19,7 +19,9 @@ goes behind ``workflow.patched``. A run that fails on replay anyway ends at its
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
 from temporalio.client import (
@@ -37,6 +39,7 @@ from temporalio.client import (
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.worker import Worker
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,26 @@ class Housekeeping:
                 workflow.logger.warning("housekeeping sweep %s failed", sweep)
                 failed.append(sweep)
         return failed
+
+
+def library_worker(
+    client: Client,
+    task_queue: str,
+    activities: Sequence[Callable[..., Any]],
+    *,
+    graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+) -> Worker:
+    """The ``library`` worker: ``Housekeeping`` and its sweeps. A stop gives a running
+    sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5): a cancelled one
+    only stops waiting, its thread goes on while the lifespan closes the stores it
+    uses. A sweep longer than that (an asset sweep's converge) is still cancelled."""
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[Housekeeping],
+        activities=activities,
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
+    )
 
 
 def _schedule(

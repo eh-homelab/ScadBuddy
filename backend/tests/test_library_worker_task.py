@@ -31,7 +31,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     async def no_schedules(*args: Any) -> bool:
         return False
 
-    monkeypatch.setattr(main, "Worker", build)
+    monkeypatch.setattr(main, "library_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "ensure_schedules", no_schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
@@ -114,7 +114,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
         backfilled.append(assets)
         return 0
 
-    monkeypatch.setattr(main, "Worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     state = SimpleNamespace(
