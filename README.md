@@ -374,6 +374,10 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading from a release with the in-process print watcher** (before #1053): roll
+  it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
+  `print_watches` after the new one hands that log to `FollowPrint` at start, and
+  those prints would go unfollowed until someone opens their progress.
 
 ### Blob store and render workers (#426)
 
