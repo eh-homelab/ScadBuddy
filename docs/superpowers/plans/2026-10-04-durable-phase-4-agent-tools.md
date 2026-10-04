@@ -67,7 +67,11 @@ exposes the same serialization context to a codec"), §8 (`agent-tools` activiti
    `ToolOutcome(is_error=True)`: retrying would repeat a call that already ran. Only
    infrastructure errors (the session lookup failing) are retryable.
 4. **Who the call runs as.** Only a workflow ID `session-<uuid>` whose `ai_sessions` row exists
-   is served; anything else (a `flow-*` before phase 6, an unknown ID) is refused
+   with `mode = 'durable'` is served. The column is §6.1's, added here (migration
+   `20261004T1330Z_session_mode.sql`; phase 5 must not add it again) after the commit security
+   review: with the row alone, a workflow named after a *classic* session would run its outward
+   tools without the `ai_approvals` approval that session's calls need. No session is durable
+   until phase 5 creates one; anything else (a `flow-*` before phase 6, an unknown ID) is refused
    non-retryably. The principal is `harnessPrincipal(owner)` and `session` the row's id, as
    `harnessTools().mcpServers` sets them for a classic turn without turn tiers.
 5. **Approval belongs to the workflow.** `ToolContext.gate` gains `'workflow'`: a call that

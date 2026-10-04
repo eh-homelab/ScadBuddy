@@ -19,10 +19,13 @@ import { parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServ
 // workflow approved an outward call before scheduling it (§6.4), so it is not
 // prepared again.
 //
-// The session is the workflow's: an activity of `session-<id>` runs as that session.
-// Any other caller (a flow before phase 6, a workflow no session started) is refused.
+// The session is the workflow's: an activity of `session-<id>` runs as that session,
+// and only when that session is durable (`ai_sessions.mode`, §6.1). A classic
+// session's outward calls park in ai_approvals, so a workflow that borrowed its id
+// must not skip that. Any other caller (a flow before phase 6, a workflow no session
+// started) is refused.
 
-/** Where a session's owner is read. */
+/** Where a durable session's owner is read; undefined for any other session. */
 export interface SessionOwners {
   ownerOf(sessionId: string): Promise<Owner | undefined>
 }
@@ -36,7 +39,7 @@ export class PgSessionOwners implements SessionOwners {
 
   async ownerOf(sessionId: string): Promise<Owner | undefined> {
     const [row] = await this.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${sessionId}`
+      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
     return row ? { kind: row.owner_kind, id: row.owner_id, label: row.owner_label } : undefined
   }
 }
@@ -89,7 +92,7 @@ async function runAsActivity(
   const owner = session === undefined ? undefined : await deps.sessions.ownerOf(session)
   if (session === undefined || owner === undefined) {
     throw ApplicationFailure.nonRetryable(
-      `${tool.name} runs only for a ScadBuddy session; ${workflowExecution?.workflowId ?? 'this workflow'} is none`,
+      `${tool.name} runs only for a durable ScadBuddy session; ${workflowExecution?.workflowId ?? 'this workflow'} is none`,
       UNKNOWN_SESSION,
     )
   }
