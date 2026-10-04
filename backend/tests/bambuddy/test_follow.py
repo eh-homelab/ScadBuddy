@@ -502,6 +502,38 @@ def test_the_activity_heartbeats_while_a_settled_hook_runs(
     assert set(beats) == {(NOW.isoformat(),)}
 
 
+def test_the_activity_heartbeats_while_a_slow_read_runs(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1091 1: a read is two Bambuddy calls of up to 30 s each, longer than
+    ``FOLLOW_HEARTBEAT``; without beats meanwhile each attempt would time out mid-read,
+    and the retry read again, never reaching the error interval."""
+    monkeypatch.setattr(follow_module, "HEARTBEAT_SLICE", 0.01)
+    write_output(paths)
+
+    async def slow(meta: OutputMeta) -> PrintProgress | None:
+        await asyncio.sleep(0.2)
+        return progress("done", settled=True)
+
+    follower, _ = follower_for(paths, slow)
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    env.on_heartbeat = lambda *details: beats.append(details)
+    reason = asyncio.run(
+        asyncio.wait_for(
+            env.run(
+                FollowActivities(follower).follow_print,
+                FollowInput(output_id=OUTPUT, fresh=True),
+            ),
+            5,
+        )
+    )
+    assert reason == "settled"
+    # A fresh first attempt reads at once: every beat is the read's, carrying the age.
+    assert len(beats) >= 2
+    assert set(beats) == {(NOW.isoformat(),)}
+
+
 def test_running_follows_are_counted_and_a_full_worker_is_said(
     paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:

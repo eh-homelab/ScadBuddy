@@ -503,7 +503,10 @@ class RenderActivities:
                 )
             except LegacyPendingError as waiting:
                 # An older build's row holds the key: retried until that build runs it,
-                # unless no workflow ever will (it would block the key for good).
+                # unless no workflow ever will (it would block the key for good). A local
+                # activity has a client too when it is `async def` (temporalio 1.33,
+                # worker/_activity.py: `client=... if not running_activity.sync`;
+                # review #1066 (2) 1.1), and test_submit's legacy_unrun tests run it.
                 if not await legacy_unrun(
                     activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
                 ):

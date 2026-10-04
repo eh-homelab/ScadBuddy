@@ -118,8 +118,10 @@ def allow_reprints(client: TestClient) -> None:
     state.print_runs.store.repeat_window = timedelta(0)
 
 
-def follow_run(client: TestClient, run_id: str, *, timeout: float = 10.0) -> dict[str, Any]:
-    """Read ``GET /print/runs/{id}`` until the run has ended; its last answer (#470)."""
+def follow_run(client: TestClient, run_id: str, *, timeout: float = 60.0) -> dict[str, Any]:
+    """Read ``GET /print/runs/{id}`` until the run has ended; its last answer (#470).
+    ``timeout`` only catches a run that never ends: a loaded machine takes far longer
+    than an idle one, and the test asserts the end, not how soon it came."""
     deadline = time.monotonic() + timeout
     while True:
         response = client.get(f"/api/v1/print/runs/{run_id}")
