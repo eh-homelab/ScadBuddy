@@ -485,7 +485,8 @@ RUN uv sync --frozen \
 
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
-# above (the release's checksums.txt).
+# above (the release's checksums.txt). ci.yml's `agent` job installs the same version
+# and amd64 digest for the agent's Temporal tests (#1055); bump them together.
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5

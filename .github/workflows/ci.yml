@@ -459,9 +459,26 @@ jobs:
         # --with-deps runs apt through sudo itself when it is not root.
         run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
 
+      # The agent-tools worker's tests (#1055: test/*.temporal.test.ts,
+      # test/temporal.worker.test.ts) start their own dev server from this CLI and
+      # skip without one. The same version and amd64 digest as the Dockerfile's
+      # `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
       - name: Unit tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: pnpm test
 
       - name: Build
