@@ -25,13 +25,27 @@ export type AiStatusView = {
   reason?: string
   /** Set when this request would be refused by the chat socket's gate. */
   chat?: 'refused'
+  /** When no credential is usable now but one is rate limited: the soonest one is usable again (#1093). */
+  recovers_at?: string
 }
 
 /** The words the UI shows for an AiStatus other than `enabled`. */
-export function statusReason(ai: AiStatus): string | undefined {
+export function statusReason(ai: AiStatus, recoversAt?: string): string | undefined {
   if (ai === 'enabled') return undefined
   if (ai === 'disabled (no database)') return 'The agent service has no database (SCADBUDDY_DATABASE_URL is not set).'
   if (ai === 'disabled (no Claude credential)') return 'No Claude credential is configured yet.'
+  if (ai === 'unavailable (every Claude credential is rate limited)') {
+    return `Every Claude credential is rate limited${recoversAt ? `; the first is usable again at ${recoversAt}` : ''}.`
+  }
+  if (ai === 'unavailable (no Claude credential is usable now)') {
+    return (
+      'No Claude credential is usable now: some need attention in Settings (disabled, or sealed with another ' +
+      `key-encryption key or an older format, which need saving again)${recoversAt ? `, and the first rate-limited one is usable again at ${recoversAt}` : ''}.`
+    )
+  }
+  if (ai === 'unavailable (every Claude credential is disabled)') {
+    return 'Every Claude credential was refused and is disabled; reset one, or save a new secret for it, in Settings.'
+  }
   if (ai.startsWith('disabled (no key-encryption key')) {
     return `The agent service has no key-encryption key, so it cannot store a Claude credential (${ai.slice('disabled (no key-encryption key: '.length, -1)}).`
   }
@@ -42,12 +56,12 @@ export function statusReason(ai: AiStatus): string | undefined {
 export function registerStatusRoute(app: Hono, deps: AppDeps): void {
   app.get('/api/v1/ai/status', async (c) => {
     const dbOk = deps.database ? await deps.database.ping() : undefined
-    const { ai } = await aiStatus(deps, dbOk)
+    const { ai, recoversAt } = await aiStatus(deps, dbOk)
     const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
     const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
     const refused = uiReadProblem(c, deps.origins, deps.remoteAddress, 'The assistant')
     const reason =
-      statusReason(ai) ??
+      statusReason(ai, recoversAt) ??
       (chat ? undefined : 'The agent service was started without its chat socket.') ??
       (refused ? `${refused}. Open ScadBuddy at its public HTTPS address to use it.` : undefined)
     const body: AiStatusView = {
@@ -56,6 +70,7 @@ export function registerStatusRoute(app: Hono, deps: AppDeps): void {
       ai,
       ...(reason ? { reason } : {}),
       ...(refused ? { chat: 'refused' as const } : {}),
+      ...(recoversAt ? { recovers_at: recoversAt } : {}),
     }
     c.header('Cache-Control', 'no-store')
     return c.json(body)

@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -99,7 +100,7 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
     return manager({
       sql: pool.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve(values[key] as T) },
       headlessBrowser: { backendUrl: ui.origin, ...(browserAllowedOrigins ? { browserAllowedOrigins } : {}), ...chromium },
       approvalPollMs: 50,

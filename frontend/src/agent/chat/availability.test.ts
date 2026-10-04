@@ -166,6 +166,33 @@ describe('recheckAiAvailability', () => {
     expect(answer).toEqual({ available: false, state: 'unavailable', reason: 'not here', chat: 'refused' })
     expect(result.current).toEqual(answer)
   })
+
+  it('with force, answers from a read started after the call, not one already in flight (#1000)', async () => {
+    let answerOld: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      answerOld = resolve
+    })
+    server.use(
+      http.get(
+        AI_STATUS_PATH,
+        async () => {
+          await gate
+          return HttpResponse.json({ available: false, state: 'disabled', ai: 'disabled', reason: 'no credential' })
+        },
+        { once: true },
+      ),
+    )
+    const before = recheckAiAvailability()
+    server.use(http.get(AI_STATUS_PATH, () => HttpResponse.json({ available: true, state: 'enabled', ai: 'enabled' })))
+    const { result } = renderHook(() => useAiAvailability())
+    await act(async () => {
+      expect(await recheckAiAvailability({ force: true })).toEqual({ available: true, state: 'configured' })
+    })
+    answerOld()
+    await before
+    // The older read lands last and is not published over the fresh one.
+    expect(result.current).toEqual({ available: true, state: 'configured' })
+  })
 })
 
 describe('resetAiAvailability', () => {
