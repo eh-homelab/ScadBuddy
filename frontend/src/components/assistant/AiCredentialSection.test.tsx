@@ -468,7 +468,8 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
     await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    expect(screen.getByRole('alert')).toHaveTextContent('no such credential')
+    expect(screen.getByRole('status')).toHaveTextContent('Already deleted elsewhere.')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await waitFor(() => expect(rows()).toHaveLength(1))
   })
 

@@ -145,19 +145,36 @@ it('never lets a read in flight overwrite data set since', async () => {
   await act(async () => resolvers[0]?.('first'))
   act(() => result.current.refresh())
   await waitFor(() => expect(resolvers).toHaveLength(2))
-  act(() => result.current.setData('set'))
+  act(() => result.current.setData('set', { supersede: true }))
   await act(async () => resolvers[1]?.('stale'))
   expect(result.current.data).toBe('set')
 })
 
-it('settles with data set before the first read answers', async () => {
+it('lets a read in flight replace data set without supersede', async () => {
   const { load, resolvers } = deferred<string>()
-  const { result } = renderHook(() => useAsync(load, []))
-  await waitFor(() => expect(resolvers).toHaveLength(1))
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
   act(() => result.current.setData('set'))
-  expect(result.current).toMatchObject({ data: 'set', loading: false })
-  await act(async () => resolvers[0]?.('stale'))
-  expect(result.current.data).toBe('set')
+  await act(async () => resolvers[1]?.('newer'))
+  expect(result.current.data).toBe('newer')
+})
+
+it('never settles a new key, or cancels its load, with data set after the deps changed', async () => {
+  const reads: Record<string, ((value: string) => void)[]> = { a: [], b: [] }
+  const { result, rerender } = renderHook(
+    ({ slug }) => useAsync(() => new Promise<string>((resolve) => reads[slug]!.push(resolve)), [slug]),
+    { initialProps: { slug: 'a' } },
+  )
+  await act(async () => reads.a![0]?.('a data'))
+  const fromA = result.current.setData
+  rerender({ slug: 'b' })
+  await waitFor(() => expect(reads.b).toHaveLength(1))
+  act(() => fromA('a edited', { supersede: true }))
+  expect(result.current).toMatchObject({ data: undefined, loading: true })
+  await act(async () => reads.b![0]?.('b data'))
+  expect(result.current).toMatchObject({ data: 'b data', loading: false })
 })
 
 it('tells refresh when its read fails', async () => {

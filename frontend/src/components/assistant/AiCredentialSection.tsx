@@ -272,7 +272,7 @@ export function AiCredentialSection() {
     try {
       const answer = await run()
       if ('credentials' in answer) {
-        list.setData(answer)
+        list.setData(answer, { supersede: true })
         setStale(false)
       } else reread()
       if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
@@ -382,6 +382,10 @@ export function AiCredentialSection() {
     )
     // Gone already (deleted elsewhere): what the user asked for has happened, and the list is re-read.
     const gone = !deleted.ok && deleted.error instanceof ApiError && deleted.error.status === 404
+    if (gone) {
+      setError(null)
+      setNotice('Already deleted elsewhere.')
+    }
     if (deleted.ok || gone) setConfirmDelete(null)
   }
 

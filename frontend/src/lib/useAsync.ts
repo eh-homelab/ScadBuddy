@@ -14,8 +14,11 @@ export interface AsyncState<T> {
    * when the read (if still the newest) fails.
    */
   refresh: (accept?: (data: T) => boolean, failed?: () => void) => void
-  /** Shows `next` now; a read already in flight no longer replaces it. */
-  setData: (next: T) => void
+  /**
+   * Shows `next` in place of the data. With `supersede`, a background read already in flight
+   * for the same deps no longer replaces it (an action's own answer is newer than that read).
+   */
+  setData: (next: T, options?: { supersede?: boolean }) => void
 }
 
 interface Snapshot<T> {
@@ -115,9 +118,14 @@ export function useAsync<T>(
   }, [topicList, refresh])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
-  const setData = useCallback((data: T) => {
-    ++sequence.current
-    setSnapshot({ key: latest.current.key, data })
+  // The key the snapshot holds, so `supersede` never cancels another key's first load.
+  const held = useRef(snapshot.key)
+  useEffect(() => {
+    held.current = snapshot.key
+  })
+  const setData = useCallback((data: T, options?: { supersede?: boolean }) => {
+    if (options?.supersede && held.current === latest.current.key) ++sequence.current
+    setSnapshot((s) => ({ ...s, data, error: undefined }))
   }, [])
 
   const settled = snapshot.key === key
