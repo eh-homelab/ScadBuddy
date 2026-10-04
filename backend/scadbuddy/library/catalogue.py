@@ -563,7 +563,7 @@ class Catalogue:
         if self.on_change is None:
             return
         for slug in slugs:
-            # The whole `_builtin/` mirror: the boot-time pass covers every built-in.
+            # The whole `_builtin/` mirror: the backfill Schedule covers every built-in.
             if slug == BUILTIN_DIR:
                 continue
             try:

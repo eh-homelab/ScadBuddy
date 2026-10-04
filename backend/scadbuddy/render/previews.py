@@ -261,7 +261,7 @@ class PreviewScheduler:
             reason = str(error) or type(error).__name__
             if not is_render_error(error):
                 # Not this source's fault: nothing is recorded, so the next request
-                # for it (an edit, the next boot's pass) tries again.
+                # for it (an edit, the next backfill tick, hourly) tries again.
                 logger.warning(
                     "could not run the default render for a preview; it is tried again later",
                     extra={"slug": slug, "error": reason},
