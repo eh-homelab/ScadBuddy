@@ -190,8 +190,9 @@ jobs:
           path: clusters
 
       # The dashboard's ref= may only move to a revision that has the
-      # kustomization it points at: one without it fails the whole overlay's
-      # sync, the images included.
+      # kustomization it points at: one without it (a rollback to a build from
+      # before #988) would fail the whole overlay's sync, the images included.
+      # Only a 404 means "absent"; any other failure stops the deploy.
       - name: Check deploy/grafana exists at the revision
         id: grafana
         env:
@@ -199,10 +200,12 @@ jobs:
           REVISION: ${{ inputs.revision }}
         run: |
           set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/contents/deploy/grafana/kustomization.yaml?ref=${REVISION}" --silent 2>/dev/null; then
+          if err=$(gh api "repos/${GITHUB_REPOSITORY}/contents/deploy/grafana/kustomization.yaml?ref=${REVISION}" --silent 2>&1); then
             echo "present=true" >> "$GITHUB_OUTPUT"
-          else
+          elif grep -q 'HTTP 404' <<< "$err"; then
             echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not tell whether ${REVISION} has deploy/grafana: ${err}"; exit 1
           fi
 
       # sed against anchored lines rather than a YAML rewrite: yq would
@@ -361,8 +364,11 @@ jobs:
             if ! ns_transformer_ok "$target"; then
               echo "::error file=$target::pins the dashboard but has no NamespaceTransformer with unsetOnly: true (a YAML boolean; the string \"true\" does not count) in transformers, inline or as a file (clusters#1596 Phase 5)"; exit 1
             fi
+            # A rollback past #988: the images move, the dashboard stays where it is.
             if [ "${DASHBOARD_AT_REVISION:-}" != true ]; then
-              echo "::error file=$target::${REVISION} has no deploy/grafana/kustomization.yaml; pinning the dashboard to it would fail the overlay's sync"; exit 1
+              echo "::warning file=$target::${REVISION} has no deploy/grafana/kustomization.yaml; the dashboard stays at its current ref"
+              dashboard=kept
+              return 0
             fi
             sed -i -E "s|${line}|\1- ${DASHBOARD_RESOURCE}?ref=${REVISION}|" "$target"
             expect_one "$target" "^\s*- ${DASHBOARD_RESOURCE//./\\.}\?ref=${REVISION}\$" "pinned dashboard"
@@ -431,6 +437,7 @@ jobs:
           # The dashboard moves with the image, or the overlay has no pin yet.
           case "$DASHBOARD" in
             pinned) dashboard_note="deploy/grafana at ${REVISION}" ;;
+            kept)   dashboard_note="left at its current ref: ${REVISION} has no deploy/grafana" ;;
             *)      dashboard_note="not pinned in clusters yet (clusters#1596 Phase 5)" ;;
           esac
           git checkout -B "$DEPLOY_BRANCH"

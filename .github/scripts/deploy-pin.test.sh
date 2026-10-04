@@ -226,13 +226,16 @@ else
   fail "dashboard: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 9b. A revision without deploy/grafana: the pin does not move, the deploy fails.
+# 9b. A rollback to a revision without deploy/grafana: the images move, the
+#     dashboard line stays at its old ref, with a warning.
 overlay=$(overlay_ns "${dashboard_line}${old_ref}")
 if DASHBOARD_AT_REVISION=false run "$api_and_agent"; then
-  fail "dashboard missing at revision: step passed, expected an error"
+  grep -qxF "${dashboard_line}${old_ref}" "$work/repo/$KUSTOMIZATION" || fail "rollback: dashboard ref moved"
+  grep -q '::warning .*has no deploy/grafana' "$work/log" || fail "rollback: no warning"
+  grep -qx 'dashboard=kept' "$work/out" || fail "rollback: dashboard output is not kept"
+  has_line "$pinned" "$MANIFEST" || fail "rollback: api image not pinned"
 else
-  grep -qF "has no deploy/grafana/kustomization.yaml" "$work/log" \
-    || fail "dashboard missing at revision: wrong error: $(grep '::error' "$work/log")"
+  fail "rollback: step failed: $(grep '::error' "$work/log")"
 fi
 
 # 10. The same deploy again, once clusters merged the first: nothing to deploy.
