@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { command, reattach } from '../api/command.js'
+import { command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -40,7 +40,7 @@ const runId = z
 
 type PrintRun = Awaited<ReturnType<typeof getRun>>
 
-export { RUN_REATTEMPTS } from '../api/command.js'
+export { RUN_REATTEMPTS } from './command.js'
 
 async function getRun(ctx: ToolContext, id: string) {
   return ok(

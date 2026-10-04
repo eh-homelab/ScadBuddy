@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
     get_fonts,
     get_libraries,
 )
+from scadbuddy.core.components import Components
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.core.problems import ApiError
@@ -1786,12 +1787,16 @@ def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(
     assert refused.json()["title"] == "Invalid Model Metadata"
 
 
+#: The library kinds read no component.
+_NO_COMPONENTS = cast(Components, SimpleNamespace())
+
+
 def test_a_pin_may_run_longer_than_its_clone() -> None:
     """Review I2: the run outlives the clone's own limit, so a slow clone is never
     recorded failed while it goes on to commit."""
-    kinds = library_operations.library_kinds(cast(AppState, SimpleNamespace()))
+    kinds = library_operations.library_kinds(cast(AppState, SimpleNamespace()), _NO_COMPONENTS)
     for name in ("library_pin", "library_repin"):
-        timeout = kinds[name].run_timeout
+        timeout = next(kind for kind in kinds if kind.name == name).run_timeout
         assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT
 
 
@@ -1820,7 +1825,8 @@ async def test_a_runs_unreadable_declaration_is_the_routes_409(
 ) -> None:
     """Review #1119 3: what the app's handlers answered 409 under the routes, the
     runs answer 409 too, not the operation's unexpected 500."""
-    run = library_operations.library_kinds(_raising_state(error))[kind].run
+    kinds = library_operations.library_kinds(_raising_state(error), _NO_COMPONENTS)
+    run = next(each for each in kinds if each.name == kind).run
     request = {"slug": "w", "name": "BOSL2", "index": 0, "commit": None}
     with pytest.raises(ApiError) as raised:
         await run(request, {})

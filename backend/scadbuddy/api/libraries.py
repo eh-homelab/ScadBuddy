@@ -35,7 +35,6 @@ from scadbuddy.api.deps import (
     FontsDep,
     InstallsDep,
     LibrariesDep,
-    OperationsDep,
     PathsDep,
     SlugPath,
 )
@@ -66,6 +65,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.scad import SourceCheck, check_source
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 
 router = APIRouter(tags=["libraries"])

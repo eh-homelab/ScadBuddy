@@ -164,15 +164,18 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
-  `operations`) and `kinds.py` (`OperationKind`: a kind's check, its effect, its
-  attempts, and its queue). `api/operations.py` `run_operation` is how a route runs a
-  kind (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
-  `GET /operations/{id}`. Each worker serves only its queue's kinds: the Bambuddy kinds
-  are `bambuddy/operations.py` (`bambuddy_kinds`, queue `bambuddy`), the library pins
-  `library/operations.py` (`library_kinds`, queue `library`, #1054), both registered in
-  `create_app`. A kind reads the state when it runs, never a route dependency, so a test
-  replaces a store on the state (`state.libraries = store`). The browser's `command()`
-  (`frontend/src/api/client.ts`) and the agent's (`agent/src/api/command.ts`) send the
+  `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
+  feature registers its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list.
+  Each worker serves only its queue's kinds: the Bambuddy kinds are
+  `bambuddy/operations.py` (queue `bambuddy`), the library pins `library/operations.py`
+  (queue `library`, #1054). A kind reads the state when it runs, never a route
+  dependency, so a test replaces a store on the state (`state.libraries = store`).
+  `api/operations.py` `run_operation` is how a route runs a kind (`Idempotency-Key`
+  header; 202 with the operation past the deadline) and serves `GET /operations/{id}`.
+  The browser's `command()` (`frontend/src/api/client.ts`) and the agent's
+  (`agent/src/tools/command.ts`) send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.

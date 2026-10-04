@@ -176,7 +176,9 @@ class StoredSettings(BambuddyIds):
     #: ``None`` keeps every one: the rows are the start of print history.
     print_run_retention_seconds: float | None = None
     #: How long a finished operation's row is kept (#1053, spec 2026-10-01 §4.2).
-    #: ``None`` keeps every one.
+    #: ``None`` keeps every one. Keep it at least the Temporal namespace's retention: a
+    #: retry whose row is gone while its closed execution is not answers 409 "may have
+    #: been done" rather than its outcome (review #1063 8).
     operation_retention_seconds: float | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.

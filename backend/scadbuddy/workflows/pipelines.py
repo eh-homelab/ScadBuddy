@@ -219,8 +219,10 @@ class RenderPiece:
 
     async def _tell_waiting(self, outcome: PieceOutcome) -> None:
         while self._waiting:
-            job = workflow.get_external_workflow_handle_for(
-                TemplatePipeline.run, self._waiting.pop(0)
+            job: workflow.ExternalWorkflowHandle[TemplatePipeline] = (
+                workflow.get_external_workflow_handle_for(
+                    TemplatePipeline.run, self._waiting.pop(0)
+                )
             )
             try:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
@@ -266,8 +268,12 @@ class TemplatePipeline:
         self._queue_full: int | None = None
         self._answered = False
         self._claims = 0
+        #: The `accepted` Update ids answered: a request sent again keeps its one claim.
+        self._requests: set[str] = set()
         #: Why the last claim was released: the error the cancelled job keeps.
         self._released: str | None = None
+        #: The release cancelled the job; False when its work settled it first.
+        self._cancelled = False
         self._work: asyncio.Task[None] | None = None
         self._search_attributes = False
 
@@ -285,9 +291,15 @@ class TemplatePipeline:
         if self._released is not None:
             return RenderAnswer(closing=True)
         assert self._job is not None
+        info = workflow.current_update_info()
+        assert info is not None
         coalesced = self._answered
         self._answered = True
-        if coalesced:
+        # The route sends its request's key as the Update id (review #1066 2.1): a
+        # re-send after `command-still-accepting` or a lost answer is the same claim.
+        claimed = coalesced and info.id not in self._requests
+        self._requests.add(info.id)
+        if claimed:
             self._claims += 1
             await self._project_claims()
         return RenderAnswer(
@@ -299,7 +311,9 @@ class TemplatePipeline:
         await workflow.wait_condition(
             lambda: self._work is not None or self._queue_full is not None
         )
-        if self._work is None or self._released is not None:
+        if self._work is None or self._released is not None or self._work.done():
+            # Nothing to cancel: never started, already released, or finished while
+            # the run waits for its handlers (review #1066 2.3).
             return ReleaseAnswer()
         assert self._job is not None
         self._claims -= 1
@@ -310,6 +324,11 @@ class TemplatePipeline:
         work = self._work
         work.cancel()
         await workflow.wait_condition(work.done)
+        if not self._cancelled:
+            # Its `done` or `failed` write was in flight and landed despite the cancel:
+            # the job settled, and the run closes as settled.
+            self._released = None
+            return ReleaseAnswer()
         return ReleaseAnswer(
             cancelled=self._job.model_copy(
                 update={"state": "cancelled", "claims": 0, "error": self._released}
@@ -447,6 +466,7 @@ class TemplatePipeline:
                         start_to_close_timeout=SHORT,
                         retry_policy=PROJECT_RETRY,
                     )
+                    self._cancelled = True
                     return  # a released job is an outcome: the run completes
                 await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
                 raise

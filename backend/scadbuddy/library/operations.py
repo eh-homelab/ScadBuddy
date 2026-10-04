@@ -44,10 +44,10 @@ from scadbuddy.library.libraries import (
     ModelLibrary,
     declared_libraries,
 )
-from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
+from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
+    from scadbuddy.core.components import Components, Core
 
 
 #: A pin's run: the clone's own limit, plus waiting its turn (installs, a removal holding
@@ -84,7 +84,7 @@ def library_changed(events: EventBus, slug: str, name: str) -> None:
     emit(events, ModelEvent(kind="model.updated", slug=slug))
 
 
-def library_kinds(state: AppState) -> dict[str, OperationKind]:
+def library_kinds(state: Core, components: Components) -> list[OperationKind]:
     """The pin kinds, bound to this process's state (read at each call, so a test's
     replaced store is the one used)."""
 
@@ -222,7 +222,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         emit(state.events, LibraryRemoved(name=name, commits=removed))
         return {}
 
-    kinds = [
+    return [
         OperationKind(
             "library_pin",
             _answered(model_check),
@@ -242,4 +242,6 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         ),
         OperationKind("library_remove", no_check, _answered(remove_run), queue="library"),
     ]
-    return {kind.name: kind for kind in kinds}
+
+
+OPERATION_KINDS: KindsBuild = library_kinds

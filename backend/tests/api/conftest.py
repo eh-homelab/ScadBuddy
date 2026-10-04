@@ -19,6 +19,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
 from tests.conftest import write_openscad_3mf
 from tests.support.temporal import (
     WorkflowReaper,
@@ -103,7 +104,14 @@ def settings(
             "temporal_task_queue_bambuddy": f"{queue}-bambuddy",
             "temporal_task_queue_library": f"{queue}-library",
             "temporal_worker_inprocess": True,
+            # No sweep Schedule: its trigger at start would run every sweep once,
+            # beside the test's own (#1095 CI). A test of the sweeps sets its interval.
+            "asset_sweep_interval": 0,
         }
+    )
+    # Before the runs: a Schedule left behind would start more on a queue nobody serves.
+    workflow_reaper.delete_schedules(
+        schedule_id_for(f"{queue}-library"), prune_schedule_id_for(f"{queue}-library")
     )
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")

@@ -95,9 +95,11 @@ async def start_command[T](
     search_attributes: TypedSearchAttributes | None = None,
     memo: Mapping[str, Any] | None = None,
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
+    update_id: str | None = None,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
-    ``update``'s answer."""
+    ``update``'s answer. ``update_id`` names the Update: Temporal answers a second one
+    with the same id on the same execution with the first's outcome."""
     operation: WithStartWorkflowOperation[object, object] = WithStartWorkflowOperation(
         workflow,
         arg,
@@ -108,14 +110,17 @@ async def start_command[T](
         search_attributes=search_attributes,
         memo=memo,
     )
-    # `rpc_timeout` bounds the Update; the outer bound is for the connect a lazy
-    # client makes on its first call, which retries for minutes on its own.
+    # `rpc_timeout` bounds each RPC, not the Update: the server may answer a poll
+    # with no outcome just before it, and the SDK then polls again. So the outer bound
+    # is what ends a slow Update, and it also covers the connect a lazy client makes
+    # on its first call, which retries for minutes on its own.
     bound = asyncio.timeout(deadline.total_seconds() + CONNECT_MARGIN_SECONDS)
     try:
         async with bound:
             answer: T = await client.execute_update_with_start_workflow(
                 update,
                 start_workflow_operation=operation,
+                id=update_id,
                 result_type=result_type,
                 rpc_timeout=deadline,
             )

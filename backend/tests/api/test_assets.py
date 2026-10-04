@@ -464,6 +464,7 @@ def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
 ) -> None:
     """No backfill (#591): the usage is the rows, whatever an old ledger says, and the
     boot's sweep removes the ledger and the sidecars; an upload writes neither."""
+    settings = settings.model_copy(update={"asset_sweep_interval": 86400.0})  # the boot's sweep
     ledger = paths.assets.with_name(f".{paths.assets.name}.usage.json")
     sidecar = paths.assets / f"{'e' * 64}.json"
     for path in (ledger, sidecar):

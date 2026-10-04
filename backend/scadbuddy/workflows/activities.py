@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from scadbuddy.render.jobs import (
     timed_stage,
 )
 from scadbuddy.render.previews import PreviewFailedError, render_preview
-from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
@@ -57,6 +58,8 @@ logger = logging.getLogger(__name__)
 
 #: The finished piece, written last: a blob that has it is never rendered again.
 PIECE_NAME = "piece.json"
+#: How long `render_accept` asks Temporal about an older build's row holding its key.
+LEGACY_DESCRIBE = timedelta(seconds=5)
 
 
 @dataclass
@@ -487,7 +490,25 @@ class RenderActivities:
             kind=start.kind,
             created_at=now(),
         )
+        orphaned: str | None = None
         try:
+            try:
+                return await asyncio.to_thread(
+                    self.deps.projection.accept,
+                    job,
+                    start.render_key,
+                    workflow_id=accept.workflow_id,
+                    run_id=accept.run_id,
+                    max_pending=start.max_pending,
+                )
+            except LegacyPendingError as waiting:
+                # An older build's row holds the key: retried until that build runs it,
+                # unless no workflow ever will (it would block the key for good).
+                if not await legacy_unrun(
+                    activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
+                ):
+                    raise
+                orphaned = waiting.job.id
             return await asyncio.to_thread(
                 self.deps.projection.accept,
                 job,
@@ -495,6 +516,7 @@ class RenderActivities:
                 workflow_id=accept.workflow_id,
                 run_id=accept.run_id,
                 max_pending=start.max_pending,
+                orphaned=orphaned,
             )
         except QueueFullError as error:
             raise ApplicationError(

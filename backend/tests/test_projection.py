@@ -24,7 +24,9 @@ from scadbuddy.render.job_models import (
 from scadbuddy.render.projection import (
     LEGACY_RUNNING_ERROR,
     LEGACY_UNSTARTED_ERROR,
+    ORPHANED_ERROR,
     JobProjection,
+    LegacyPendingError,
 )
 from scadbuddy.render.schema import ParamValue
 from tests.support.renders import legacy_row as _row
@@ -96,8 +98,9 @@ def test_the_migrations_add_the_projection_and_drop_the_queues_lease(
     assert {"workflow_id", "kind", "inputs", "pipeline_version", "steps"} <= columns
     assert "heartbeat_at" not in columns
     assert "render_jobs_running" not in indexes
-    # Coalescing is the workflow's (#1053): rows are unique per execution instead.
-    assert "render_jobs_pending_key" not in indexes
+    # Coalescing is the workflow's (#1053): rows are unique per execution. The pending
+    # key stays while a pre-#1053 API may still insert against it (expand/contract).
+    assert "render_jobs_pending_key" in indexes
     assert "render_jobs_execution" in indexes
     assert "workflow_run_id" in columns
     assert MIGRATION_ID in applied
@@ -367,6 +370,35 @@ def test_two_executions_of_one_key_each_get_a_row(projection: JobProjection) -> 
     second = _accept(projection, "run-2", width=43)
     assert first.id != second.id
     assert projection.read(second.id).state == "pending"
+    # Only one run of `render-<key>` is open, so the other's pending row is an orphan
+    # (its run closed before it ran): failed, so the pending key holds the new one.
+    orphan = projection.read(first.id)
+    assert (orphan.state, orphan.error) == ("failed", ORPHANED_ERROR)
+
+
+def test_accept_waits_for_a_legacy_row_pending_on_the_same_key(
+    projection: JobProjection,
+) -> None:
+    legacy = _row(projection, _job(width=47))
+    with pytest.raises(LegacyPendingError) as waiting:
+        _accept(projection, "run-1", width=47)
+    assert waiting.value.job.id == legacy.id
+    assert projection.read(legacy.id).state == "pending"
+    # Once the older build runs it, the key is free.
+    assert projection.mark_started(legacy.id) is not None
+    assert projection.read(_accept(projection, "run-1", width=47).id).state == "pending"
+
+
+def test_accept_fails_a_legacy_row_its_caller_found_orphaned(projection: JobProjection) -> None:
+    legacy = _row(projection, _job(width=49))
+    job = _job("demo", width=49)
+    key = render_key("demo", job.params, None)
+    ours = projection.accept(
+        job, key, workflow_id=f"render-{key}", run_id="run-1", orphaned=legacy.id
+    )
+    assert projection.read(ours.id).state == "pending"
+    stored = projection.read(legacy.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
 
 
 def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> None:
@@ -380,10 +412,23 @@ def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> N
 
 
 def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProjection) -> None:
-    legacy = _job(width=45)
+    legacy, named = _job(width=45), _job(width=48)
     _row(announcing, legacy)
+    _row(announcing, named)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_id = NULL, created_at = now() - interval '1 hour'"
+            " WHERE id = %s",
+            (legacy.id,),
+        )
+        conn.execute(
+            "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = %s",
+            (named.id,),
+        )
     ours = _accept(announcing, "run-1", width=46)
-    assert [job.id for job in announcing.legacy_pending()] == [legacy.id]
+    stale = announcing.legacy_pending(timedelta(minutes=1))
+    assert {job.id for job in stale} == {legacy.id, named.id}
+    assert announcing.legacy_pending(timedelta(hours=2)) == []
 
     failed = announcing.fail_legacy([legacy.id, ours.id], LEGACY_UNSTARTED_ERROR)
 
@@ -391,5 +436,6 @@ def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProject
     assert announcing.read(legacy.id).state == "failed"
     assert announcing.read(legacy.id).error == LEGACY_UNSTARTED_ERROR
     assert announcing.read(ours.id).state == "pending"
-    assert announcing.legacy_pending() == []
-    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.failed"]
+    assert announcing.read(named.id).state == "pending"
+    assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [named.id]
+    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.pending", "job.failed"]

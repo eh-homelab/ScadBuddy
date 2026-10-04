@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.workflows.housekeeping import SWEEPS
 from tests.test_print_worker_task import StubWorker
 
 
@@ -35,7 +39,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
-        operations=SimpleNamespace(store=None, kinds={}),
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
     )
     stop = asyncio.Event()
@@ -73,3 +77,90 @@ async def test_a_library_worker_still_connecting_stops_at_once(
     await asyncio.wait_for(connecting.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 1)
+
+
+async def test_the_schedules_are_set_up_once_temporal_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I2: a create that fails after the connect (a frontend up before its
+    history service) is retried, not left to the next restart."""
+    calls: list[float] = []
+
+    async def flaky(client: object, queue: str, interval: float) -> None:
+        calls.append(interval)
+        if len(calls) == 1:
+            raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    stop = asyncio.Event()
+    await asyncio.wait_for(main._set_up_housekeeping(object(), "library", 600.0, stop), 5)  # type: ignore[arg-type]
+    assert calls == [600.0, 600.0]
+
+
+def _broken(error: Exception) -> Callable[..., Any]:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return fail
+
+
+async def _broken_async(*args: Any, **kwargs: Any) -> None:
+    raise RuntimeError("the projection is gone")
+
+
+@pytest.mark.parametrize("sweep", SWEEPS)
+async def test_a_failing_sweep_fails_its_activity(
+    sweep: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1095 1: a sweep that fails is logged and fails its activity, so the
+    workflow reports it and Temporal's UI shows it."""
+    monkeypatch.setattr(main, "_remote_assets", lambda state: None)
+    monkeypatch.setattr(main, "sweep_assets", _broken(RuntimeError("the volume is gone")))
+    monkeypatch.setattr(main, "sweep_blobs", _broken(RuntimeError("the refs are gone")))
+    state = SimpleNamespace(
+        render=SimpleNamespace(prune=_broken_async),
+        store=SimpleNamespace(content=None),
+        blobs=object(),
+        refs=object(),
+        config=SimpleNamespace(job_ttl=60.0),
+        catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(OSError("read-only"))),
+    )
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    with (
+        caplog.at_level(logging.ERROR, logger="scadbuddy.main"),
+        pytest.raises((RuntimeError, OSError)),
+    ):
+        await ActivityEnvironment().run(activities[sweep])
+    assert caplog.records, "the failure is logged too"
+
+
+async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #1095 2: a lost worker is noticed within the heartbeat timeout, not the
+    sweep's whole start-to-close timeout."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+
+    async def slow() -> None:
+        await asyncio.sleep(0.1)
+
+    await env.run(main._heartbeating, slow())
+    assert len(beats) >= 3
+
+
+@pytest.mark.parametrize("name", ["print", "library"])
+async def test_a_worker_that_does_not_stop_is_logged_under_its_name(
+    name: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1095 3: the library worker's shutdown is not the print worker's."""
+    monkeypatch.setattr(main, "PRINT_WORKER_STOP_TIMEOUT", 0.01)
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(forever())
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+        await main._stop_queue_worker(task, name)
+    assert f"the {name} worker did not stop in time" in caplog.text
