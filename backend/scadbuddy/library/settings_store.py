@@ -436,7 +436,9 @@ class SettingsStore:
         out raises ``PoolTimeout``; a statement that does raises ``QueryCanceled``.
 
         It bounds a read Postgres is slow to answer (a held lock, a slow plan), since
-        ``statement_timeout`` is enforced by the server. A connection that gets no reply
+        ``statement_timeout`` is enforced by the server. The bound starts at the first
+        ``set_config``, so the ``BEGIN`` and ``SET TRANSACTION`` before it are not bounded
+        by it. A connection that gets no reply
         at all (a half-open socket) is not bounded here: that is #1226. It bounds this
         read only: a pool-wide statement timeout would also cut short the saves'
         deliberate lock waits and the migration."""
