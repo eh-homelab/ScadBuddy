@@ -282,12 +282,24 @@ export function AiCredentialSection() {
       void recheckAiAvailability({ force: true })
       return { ok: true }
     } catch (caught) {
-      setError(describeError(caught, fallback))
+      setError(rowError(caught, next?.id, fallback))
       refreshIfStale(caught)
       return { ok: false, error: caught }
     } finally {
       setBusy(null)
     }
+  }
+
+  /**
+   * A row action's error. The agent's 404 names the credential by its id, which the page never
+   * shows, so it is said with the credential's name instead.
+   */
+  function rowError(caught: unknown, id: string | undefined, fallback: string): string {
+    const entry = credentials.find((c) => c.id === id)
+    if (entry && caught instanceof ApiError && caught.status === 404) {
+      return `${nameOf(entry)} was deleted elsewhere; the list has been read again.`
+    }
+    return describeError(caught, fallback)
   }
 
   /** A stale order, a credential deleted elsewhere, or a full list: show what the agent has now. */
@@ -349,7 +361,7 @@ export function AiCredentialSection() {
       const wait = retryAfter(caught)
       setError(
         wait === undefined
-          ? describeError(caught, 'Could not test the credential')
+          ? rowError(caught, entry.id, 'Could not test the credential')
           : `${describeError(caught, 'A test ran moments ago')} (wait ${wait} s).`,
       )
       refreshIfStale(caught)

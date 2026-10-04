@@ -343,7 +343,9 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     // Another tab deletes the gateway.
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
     await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('no such credential')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(`${GATEWAY} was deleted elsewhere; the list has been read again.`)
+    expect(alert).not.toHaveTextContent('c2')
     await waitFor(() => expect(rows()).toHaveLength(1))
     // A test that never ran starts no cooldown (agent `lastTestEnded`).
     await user.click(screen.getByRole('button', { name: `Test ${KEY}` }))
@@ -457,7 +459,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await screen.findAllByTestId('ai-credential')
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
     await user.click(screen.getByRole('button', { name: `Test ${GATEWAY}` }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('no such credential')
+    expect(await screen.findByRole('alert')).toHaveTextContent(`${GATEWAY} was deleted elsewhere`)
     await waitFor(() => expect(rows()).toHaveLength(1))
   })
 

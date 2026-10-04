@@ -173,7 +173,7 @@ export const handlers = [
 
   http.put(`${base}/entries/:id`, async ({ params, request }) => {
     const current = find(params.id)
-    if (!current) return detail('no such credential', 404)
+    if (!current) return detail(`no credential ${String(params.id)}`, 404)
     const body = (await request.json()) as AiCredentialSave
     const ok = checked(body)
     if (ok instanceof Response) return ok
@@ -205,14 +205,14 @@ export const handlers = [
   }),
 
   http.delete(`${base}/entries/:id`, ({ params }) => {
-    if (!find(params.id)) return detail('no such credential', 404)
+    if (!find(params.id)) return detail(`no credential ${String(params.id)}`, 404)
     state.credentials = state.credentials.filter((c) => c.id !== params.id).map((c, priority) => ({ ...c, priority }))
     return HttpResponse.json(listView())
   }),
 
   http.post(`${base}/entries/:id/reset`, ({ params }) => {
     const current = find(params.id)
-    if (!current) return detail('no such credential', 404)
+    if (!current) return detail(`no credential ${String(params.id)}`, 404)
     const reset: AiCredentialEntry = {
       ...current,
       status: 'active',
@@ -234,7 +234,7 @@ export const handlers = [
       )
     }
     const current = find(params.id)
-    if (!current) return detail('no such credential', 404)
+    if (!current) return detail(`no credential ${String(params.id)}`, 404)
     if (!current.usable) {
       return detail('the stored credential cannot be decrypted: no key opens it; save it again', 409)
     }
