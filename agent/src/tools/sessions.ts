@@ -309,7 +309,7 @@ export const sessionTools: Tool[] = [
           id: z.string().min(1).max(ID_MAX),
         })
         .optional()
-        .describe('A resource: a model by slug (anything of that model matches), or a revision, preset, asset, render_job, output, print_run or print by id.'),
+        .describe('A resource: a model by slug (anything of that model matches), or any other kind by its id (sessions_resources shows the kinds and ids).'),
     }),
     risk: 'read',
     routes: [],
