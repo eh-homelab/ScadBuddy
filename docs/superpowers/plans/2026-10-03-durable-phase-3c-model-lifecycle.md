@@ -2,6 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **As built (PR #1126, review fixes).** Where this plan and the code differ, the code
+> holds:
+> - `ClaimStore` keeps flat files named by the sha256 of their bytes,
+>   `cache/claims/<digest>`, not `cache/claims/<operation key>/<part>`. Its API is
+>   `put(data) -> name`, `get(name)`, `drop(name)` and `sweep(max_age)`. A put always
+>   writes a fresh file, which renews it; the sweep moves a claim aside before removing
+>   it and puts it back if a put renewed it meanwhile.
+> - The run does not remove its claims. The route drops a request's claims once its
+>   answer is final (a refusal before any operation, the 413 cap, a recorded failure
+>   or a result), unless an operation still `running` names the same digest
+>   (`OperationStore.named_by_running`). A 202 leaves them to the day-long sweep.
+> - Claimed parts: a create's source, thumbnail and README; a patch's `presets`; an
+>   import's URL. The import's request holds the URL without its query.
+> - The subject is the slug, except for an import, whose subject is the URL's host.
+> - A keyed create first looks up its recorded operation (`recorded`); if there is
+>   none, a taken slug is refused before anything is claimed.
+
 **Goal:** Five model writes become `Operation` commands (§4.2) on the `library` queue:
 - create (`POST /models`, all three bodies)
 - import (`POST /models/import`)

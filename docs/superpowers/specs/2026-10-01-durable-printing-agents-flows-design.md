@@ -1047,15 +1047,19 @@ Each phase is its own implementation plan and ships alone.
      model create (all three bodies), import, patch, duplicate and delete are `library`
      kinds (`library/model_operations.py`). Each route keeps the refusals that read only
      the request. The check makes the ones that read the volume, and the run makes them
-     again just before the effect. A create's source, thumbnail and README travel by
-     claim check (`operations/claims.py`): the route writes them to `cache/claims/`,
-     named by their sha256, and the operation carries only the names, because a source
-     may be 1M characters and a thumbnail 10 MB, past Temporal's payload limits. Since
-     the name is the digest, a re-send reaches the same operation key. A claim is
-     removed by the claim sweep (`housekeeping_sweep_claims`, on the prune Schedule
-     every 300 s whatever the sweep interval, a day after the last request put it), not
-     by its run, because two requests may share the same bytes. An operation's inline
-     request is capped at 128 KB (413 past it), and an import's subject is the URL's host. The UI's and the agent's calls to these routes go through `command()`.
+     again just before the effect. A create's source, thumbnail and README, a patch's
+     presets and an import's URL travel by claim check (`operations/claims.py`): the
+     route writes them to `cache/claims/`, named by their sha256, and the operation
+     carries only the names, because a source may be 1M characters and a thumbnail
+     10 MB, past Temporal's payload limits. Since the name is the digest, a re-send
+     reaches the same operation key. The route drops a request's claims once its answer
+     is final (a refusal, the record's failure or its result), unless an operation
+     still running names the same digest; a request answered 202 leaves them to the
+     claim sweep (`housekeeping_sweep_claims`, on the prune Schedule every 300 s
+     whatever the sweep interval, a day after the last request put it). An operation's
+     inline request is capped at 128 KB (413 past it). An import's subject is the URL's
+     host, and its request holds the URL without its query. The UI's and the agent's
+     calls to these routes go through `command()`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
