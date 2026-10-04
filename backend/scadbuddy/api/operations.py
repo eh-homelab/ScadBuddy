@@ -214,6 +214,7 @@ async def _run_operation(
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
+        idempotency_key=idempotency_key,
     )
     try:
         answer = await start_command(
@@ -268,7 +269,11 @@ def operation_answer[M: BaseModel](
 
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
-    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"}
+    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"},
+    413: {
+        "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
+        "bytes; nothing was started"
+    },
 }
 
 

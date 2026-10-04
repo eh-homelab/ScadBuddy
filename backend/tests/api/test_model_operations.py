@@ -22,6 +22,8 @@ from temporalio.client import Client
 from scadbuddy.api import models as models_api
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.library import scad
+from scadbuddy.library.catalogue import MAX_DESCRIPTION_CHARS, MAX_TAG_CHARS, MAX_TAGS
 from scadbuddy.library.history import GIT, git_env
 from scadbuddy.library.presets import MAX_PRESETS
 from scadbuddy.operations.component import OPERATIONS
@@ -182,16 +184,51 @@ def test_patch_duplicate_and_delete_are_operations(client: TestClient, app: Fast
 
 
 def test_a_request_too_large_for_history_is_refused_before_any_operation(
-    client: TestClient, app: FastAPI
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review 3c I2: a field that is not a claim is still bounded, so Temporal never
     refuses the input as a 503 that a retry repeats."""
     created = client.post("/api/v1/models", json={"name": "Wordy", "source": SOURCE})
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
-    response = client.patch(f"/api/v1/models/{slug}", json={"description": "x" * 300_000})
+    monkeypatch.setattr(operations_api, "MAX_REQUEST_BYTES", 1000)
+    response = client.patch(f"/api/v1/models/{slug}", json={"description": "x" * 2000})
     assert response.status_code == 413, response.text
     assert _workflow_ids(app, "model_patch") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"description": "x" * (MAX_DESCRIPTION_CHARS + 1)},
+        {"tags": ["t"] * (MAX_TAGS + 1)},
+        {"tags": ["x" * (MAX_TAG_CHARS + 1)]},
+    ],
+)
+def test_a_description_or_tags_past_their_caps_are_a_422_naming_the_field(
+    client: TestClient, model: str, body: dict[str, Any]
+) -> None:
+    """Review #1126 1.4: inside the inline cap, so the 413 is never what they meet."""
+    (field,) = body
+    capped = {"name": "Capped", "source": SOURCE, **body}
+    responses = [
+        client.patch(f"/api/v1/models/{model}", json=body),
+        client.post("/api/v1/models", json=capped),
+        client.post(
+            "/api/v1/models",
+            files={"file": ("capped.scad", SOURCE.encode(), "text/plain")},
+            data={field: body[field] if field == "description" else json.dumps(body[field])},
+        ),
+    ]
+    for response in responses:
+        assert response.status_code == 422, response.text
+        assert field in response.text
+    worst = {
+        "name": "n" * 200,
+        "description": "\u00e9" * MAX_DESCRIPTION_CHARS,
+        "tags": ["\u00e9" * MAX_TAG_CHARS] * MAX_TAGS,
+    }
+    assert len(json.dumps(worst).encode()) < operations_api.MAX_REQUEST_BYTES
 
 
 def _claims(app: FastAPI) -> set[str]:
@@ -239,12 +276,38 @@ def test_a_refused_keyed_upload_writes_no_claims(client: TestClient, app: FastAP
     assert len(_workflow_ids(app, "model_create")) == 1
 
 
-def test_a_request_refused_by_the_cap_drops_its_claims(
-    client: TestClient, model: str, app: FastAPI
+def test_a_keyed_upload_over_a_taken_slug_is_refused_before_its_parts_are_read(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Review #1126 1.3, 3.2: the browser keys every upload, so the early taken-slug
+    refusal (#436) holds for a keyed one too, unless that key's create already ran."""
+    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE})
+    assert taken.status_code == 201, taken.text
+    decoded: list[bytes] = []
+    decode = scad.decode_source
+
+    def recording(raw: bytes) -> str:
+        decoded.append(raw)
+        return decode(raw)
+
+    monkeypatch.setattr(models_api, "decode_source", recording)
+    refused = client.post(
+        "/api/v1/models",
+        files={"file": ("taken.scad", b"cube(2);\n", "text/plain")},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
+    )
+    assert refused.status_code == 409, refused.text
+    assert decoded == []
+    assert _claims(app) == set()
+
+
+def test_a_request_refused_by_the_cap_drops_its_claims(
+    client: TestClient, model: str, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(operations_api, "MAX_REQUEST_BYTES", 1000)
     response = client.patch(
         f"/api/v1/models/{model}",
-        json={"description": "x" * 300_000, "presets": [{"name": "One"}]},
+        json={"description": "x" * 2000, "presets": [{"name": "One"}]},
     )
     assert response.status_code == 413, response.text
     assert _claims(app) == set()

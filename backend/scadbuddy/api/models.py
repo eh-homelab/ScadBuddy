@@ -59,7 +59,11 @@ from scadbuddy.core.paths import DataPaths, is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.assets import with_samples
 from scadbuddy.library.catalogue import (
+    MAX_DESCRIPTION_CHARS,
+    MAX_TAG_CHARS,
+    MAX_TAGS,
     Catalogue,
+    Description,
     InvalidModelMetaError,
     ModelExistsError,
     ModelMeta,
@@ -68,6 +72,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
     SidecarNotFoundError,
     StaleVersionError,
+    Tags,
     meta_from_raw,
 )
 from scadbuddy.library.history import (
@@ -123,6 +128,7 @@ from scadbuddy.library.url_import import (
     ResolverBusyError,
     fetch_model,
     parse_import_url,
+    resolver_busy,
     shown_url,
 )
 from scadbuddy.operations.claims import ClaimStore, Held
@@ -239,8 +245,16 @@ def _parse_tags(raw: str | None) -> list[str] | None:
         decoded = _client_json(text, "tags is not valid JSON")
         if not isinstance(decoded, list):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "tags must be a list")
-        return [str(tag) for tag in decoded]
-    return [tag.strip() for tag in text.split(",") if tag.strip()]
+        parsed = [str(tag) for tag in decoded]
+    else:
+        parsed = [tag.strip() for tag in text.split(",") if tag.strip()]
+    # The caps `PastedSource` and `ModelPatch` hold them to (review #1126 1.4).
+    if len(parsed) > MAX_TAGS or any(len(tag) > MAX_TAG_CHARS for tag in parsed):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"tags may be at most {MAX_TAGS}, each at most {MAX_TAG_CHARS} characters",
+        )
+    return parsed
 
 
 @router.get("/models", response_model=list[ModelRecord], summary="List models")
@@ -253,8 +267,8 @@ class PastedSource(BaseModel):
 
     name: str = Field(description="Display name; its slug is derived from it")
     source: str = Field(max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source")
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    description: Description = ""
+    tags: Tags = Field(default_factory=list)
     force: bool = Field(default=False, description="Save even when the parse check fails")
     libraries: list[Annotated[str, Field(pattern=NAME_PATTERN)]] = Field(
         default_factory=list,
@@ -467,7 +481,7 @@ async def create_model(
         ),
     ] = None,
     name: Annotated[str | None, Form()] = None,
-    description: Annotated[str | None, Form()] = None,
+    description: Annotated[str | None, Form(max_length=MAX_DESCRIPTION_CHARS)] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
     library_names: Annotated[
         list[str] | None,
@@ -559,9 +573,14 @@ async def create_model(
         ) from None
     # Before the parts are read, and so before any library is cloned (#436). The
     # operation's check makes it again: this one spares a taken slug the reads. Not
-    # for a keyed re-send, whose slug its own first send took (review 3c I1): its key
-    # needs the parts, and `_create_command` refuses it before they are claimed.
-    if idempotency_key is None:
+    # for a keyed re-send whose slug its own first send may have taken (review 3c I1):
+    # its key needs the parts, and `_create_command` refuses it before they are
+    # claimed. The browser keys every upload, so only a key a create of this slug is
+    # on record for counts as a re-send (review #1126 1.3).
+    if catalogue.exists(slug) and (
+        idempotency_key is None
+        or not await ops.store.keyed(ops.kinds["model_create"].name, slug, idempotency_key)
+    ):
         _require_new(catalogue, slug)
 
     try:
@@ -849,6 +868,8 @@ async def _create(
 #: lookup (#631). A full import budget says instead when its oldest fetch must end
 #: (`ImportPermits.retry_after`).
 RESOLVER_RETRY_AFTER = math.ceil(RESOLVE_TIMEOUT)
+#: How often an import's run looks again for a free resolver thread.
+RESOLVER_POLL = 0.5
 
 
 def fetch_busy(why: str, retry_after: int) -> ApiError:
@@ -904,9 +925,13 @@ async def import_model(
     paths: PathsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
-    # Here as well as in the run, so a full budget answers with its Retry-After header
-    # and starts no operation.
+    # Here, so a full budget or busy resolver threads answer with Retry-After and start
+    # no operation; the run waits for either on its own replica.
     _require_import_permit(imports)
+    if resolver_busy():
+        # Library installs vet clone URLs on the same resolver threads. None free says
+        # nothing about the host: the same retry as a full import budget.
+        raise fetch_busy("every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER)
     try:
         # Refusals that quote the URL whole: here, so no operation records them.
         parse_import_url(body.url)
@@ -946,21 +971,25 @@ def _require_import_permit(imports: ImportPermits) -> None:
 
 
 async def import_url(body: UrlImport, state: AppState) -> ModelRecord:
-    """The ``model_import`` operation's run (#1054): the fetch, then the create."""
+    """The ``model_import`` operation's run (#1054): the fetch, then the create.
+
+    The route refused a full budget or busy resolver threads on its own replica; here,
+    on whichever replica's worker runs it, they are waited out instead (review #1126
+    1.1): a 503 recorded as the operation's answer would be replayed to every re-send
+    of its key. The run's own timeout bounds the wait."""
     imports = state.imports
-    _require_import_permit(imports)
+    await imports.wait()
     with imports.hold():
-        try:
-            imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
-        except ImportRefusedError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        except ResolverBusyError:
-            # Library installs vet clone URLs on the same resolver threads. None free
-            # is decided before the host is looked up, so it says nothing about the
-            # host: the same retry as a full import budget, not the refusal.
-            raise fetch_busy(
-                "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
-            ) from None
+        while True:
+            try:
+                imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
+                break
+            except ImportRefusedError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            except ResolverBusyError:
+                # Library installs vet clone URLs on the same resolver threads, and
+                # give no signal when one is free.
+                await asyncio.sleep(RESOLVER_POLL)
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(
