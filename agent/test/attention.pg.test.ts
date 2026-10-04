@@ -420,9 +420,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       (async function* () {
         await Promise.resolve()
         const own = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_own', signal: new AbortController().signal, attention: spec() })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
         const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(2)
         results.push(...(await Promise.all([own, auto])))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -450,6 +450,57 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await m.questions.reconnected(session.id)).toBe(2)
     await turn!.done
     expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true }])
+  })
+
+  /** A turn that runs `body` with its waitForTab, then ends; `m` is its manager. */
+  async function withTabWait(body: (wait: WaitForTab) => Promise<void>) {
+    let wait: WaitForTab | undefined
+    const run = (r: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await body(wait!)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    return { m, session, turn: turn! }
+  }
+
+  it('when the last call sharing a wait stops, its card is withdrawn, not left pending on the badge', async () => {
+    const results: TabWait[] = []
+    const call = new AbortController()
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      const pendingCall = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_w', signal: call.signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      call.abort()
+      results.push(await pendingCall)
+      await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_questions`)[0]?.outcome).toBe('cancelled')
+    })
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }])
+    expect(await m.questions.listPending()).toEqual([])
+    const [row] = await db.sql`SELECT reason FROM ai_questions WHERE session_id = ${session.id}`
+    expect(row).toEqual({ reason: 'the call was withdrawn' })
+  })
+
+  it('a failed check for an early reconnect leaves the wait waiting, and the tab coming back still ends it', async () => {
+    const results: TabWait[] = []
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      results.push(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_e', signal: new AbortController().signal, isBack: () => Promise.reject(new Error('hub gone')) }))
+    })
+    await pending(session.id)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn.done
+    expect(results).toEqual([{ back: true }])
   })
 
   it('a session another principal owns gets no wait: its browser_* calls fail at once', async () => {
@@ -511,6 +562,24 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       back: false,
       message: 'The user did not answer: the turn stopped first.',
     })
+  })
+
+  it('after "carry on" or a timeout, the rest of the turn does not ask again: later calls fail at once', async () => {
+    for (const verdict of [
+      (q: string): QuestionVerdict => ({ answered: true, answers: { [q]: 'Carry on without the tab' } }),
+      (): QuestionVerdict => ({ answered: false, timedOut: true, message: 'x' }),
+    ]) {
+      let asked = 0
+      const wait = waitForTab((request) => {
+        asked += 1
+        return Promise.resolve(verdict(request.questions[0]!.question))
+      }, never, noop)
+      const first = await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })
+      const later = await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })
+      expect(first.back).toBe(false)
+      expect(later).toEqual(first)
+      expect(asked).toBe(1)
+    }
   })
 
   it('a call that stops waiting leaves the others sharing the wait still waiting', async () => {

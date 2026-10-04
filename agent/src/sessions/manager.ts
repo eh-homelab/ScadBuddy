@@ -179,11 +179,32 @@ export const TAB_WAIT_S = 300
 const CARRY_ON = 'Carry on without the tab'
 
 export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
-  let open: Promise<TabWait> | undefined
+  let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
+  // Once the user said to carry on, or nobody came back in time, the rest of the
+  // turn does not ask again: each later call that finds no tab fails at once.
+  let gaveUp: string | undefined
   return ({ tool, toolUseId, signal, isBack }) => {
-    // One wait for the turn's calls, on the turn's signal: a call that stops
-    // waiting (its own signal) leaves the others waiting.
-    open ??= (async (): Promise<TabWait> => {
+    if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
+    // One wait for the turn's calls: a call that stops waiting (its own signal)
+    // leaves the others waiting, and the last one to stop withdraws the request.
+    open ??= start(tool, toolUseId, isBack)
+    const shared = open
+    shared.waiters += 1
+    return new Promise<TabWait>((resolve, reject) => {
+      const withdrawn = () => {
+        resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
+        shared.waiters -= 1
+        if (shared.waiters === 0) shared.stop.abort()
+      }
+      if (signal.aborted) return withdrawn()
+      signal.addEventListener('abort', withdrawn, { once: true })
+      shared.wait.then(resolve, reject).finally(() => signal.removeEventListener('abort', withdrawn))
+    })
+  }
+
+  function start(tool: string, toolUseId: string | undefined, isBack: () => Promise<boolean>): NonNullable<typeof open> {
+    const stop = new AbortController()
+    const wait = (async (): Promise<TabWait> => {
       const parsed = parseAttention({
         reason: 'tab_disconnected',
         message:
@@ -198,7 +219,8 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         tool: `mcp__scadbuddy__${tool}`,
         questions: [card],
         toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
-        signal: turn,
+        // Withdrawn by the turn, or once no call waits on it any more.
+        signal: AbortSignal.any([turn, stop.signal]),
         attention: {
           ...attentionSpec(parsed.input),
           // The tab may have come back between the failed call and the row: the
@@ -213,20 +235,18 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
         if (reply !== CARRY_ON) return { back: true }
-        return { back: false, message: `The user replied ${JSON.stringify(reply)}: carry on without the tab.` }
+        gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`
+        return { back: false, message: gaveUp }
       }
-      if ('timedOut' in verdict && verdict.timedOut) return { back: false, message: timedOutText(TAB_WAIT_S) }
+      if ('timedOut' in verdict && verdict.timedOut) {
+        gaveUp = timedOutText(TAB_WAIT_S)
+        return { back: false, message: gaveUp }
+      }
       return { back: false, message: verdict.message }
     })().finally(() => {
       open = undefined
     })
-    const shared = open
-    return new Promise<TabWait>((resolve, reject) => {
-      const withdrawn = () => resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
-      if (signal.aborted) return withdrawn()
-      signal.addEventListener('abort', withdrawn, { once: true })
-      shared.then(resolve, reject).finally(() => signal.removeEventListener('abort', withdrawn))
-    })
+    return { wait, waiters: 0, stop }
   }
 }
 
