@@ -62,6 +62,8 @@ class SendResult(BaseModel):
     bambuddy_url: str | None = None
     #: The "Edit in ScadBuddy" link attached to the library file, when one is known.
     edit_url: str | None = None
+    #: Uploaded by this send, rather than a copy already in the inbox reused (#931).
+    created: bool
 
 
 class SidebarLink(BaseModel):
@@ -697,12 +699,13 @@ async def send_output(
 
     A copy already in the inbox for the same target is reused rather than uploaded again.
     """
-    library_file_id, filename, _ = await ensure_copy(
+    library_file_id, filename, created = await ensure_copy(
         client, store, uploads, meta, settings, target=None, folder_id=None
     )
     return SendResult(
         library_file_id=library_file_id,
         filename=filename,
+        created=created,
         bambuddy_url=client.config.web_url(LIBRARY_PATH),
         edit_url=await attach_edit_link(client, library_file_id, meta, settings),
     )
