@@ -84,8 +84,10 @@ needs it, and its values travel as plain text to whatever is called next.
 process-wide (no `HTTPXClientInstrumentor().instrument()`).
 `HTTPXClientInstrumentor.instrument_client` is applied only to clients that
 call ScadBuddy's own services. The Bambuddy client (`bambuddy/client.py`)
-instead gets a manual client span per call (`bambuddy.<operation>`, with the
-status code and the client's `Scope`) and **injects no headers**. A test
+instead gets a manual client span per call (`bambuddy.<operation>`, the
+operation one of a closed set the client names, such as `printers.list` or
+`library.download`, never an id or free text; with the method, the status
+code and the client's `Scope`) and **injects no headers**. A test
 asserts that a Bambuddy request carries no `traceparent`. The relay's
 forwarder to the collector is not instrumented at all (§6).
 
