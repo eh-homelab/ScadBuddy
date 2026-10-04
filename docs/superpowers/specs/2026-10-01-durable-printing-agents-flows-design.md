@@ -358,7 +358,7 @@ new serialises across models.
 |---|---|
 | render reconciler (started at `render/submit.py:112`; `reconcile_once` at `:192`) | deleted: renders are created by §4.2, so nothing needs reconciling |
 | print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
-| print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by the `PrintRun` workflow, after its `print_record` activity, as an abandoned child (§5.3). It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
+| print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by the `PrintRun` workflow, after its `print_succeed` activity, as an abandoned child (§5.3). It polls Bambuddy inside a heartbeating activity, on the `<bambuddy queue>-follow` queue, until the print ends, then writes the outcome and the event |
 | asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
 | preview scheduler (`PreviewScheduler.start`, `render/previews.py:155`) and its boot pass over every model (`request_all`, `:184`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
 | PgNotify bus, settings follower, in-process dev worker, openscad version probe, git reaper thread, LSP subprocesses | stay. They are the process's own plumbing, not operations |
@@ -1014,9 +1014,13 @@ Each phase is its own implementation plan and ships alone.
      A boot pass fails legacy pending rows that no workflow will run.
    - As built (2c, #1053, plan `2026-10-03-durable-phase-2c-follow-print.md`): `FollowPrint`
      (`follow-print-<output id>`, `bambuddy` queue) runs one heartbeating activity,
-     `follow_print`, with the watcher's loop. The heartbeat carries when the print last
+     `follow_print`, with the watcher's loop, on a queue of its own,
+     `<bambuddy queue>-follow` (`follow_queue`): an attempt holds its slot for as long as
+     the print moves, so it must never take one a `PrintRun` or an `Operation` is
+     waiting for. That worker's slots are explicit (`FOLLOW_SLOTS`, gauge
+     `scadbuddy_print_follows_running`). The heartbeat carries when the print last
      moved, so a retried attempt keeps its age. `PrintRun` starts it as an abandoned
-     child after `print_finish`, or pokes the one already running (starting it again if
+     child after `print_succeed`, or pokes the one already running (starting it again if
      it closed in between). The progress route only starts it when none is running,
      never pokes. A poke cancels the attempt (`TRY_CANCEL`) and starts a fresh one that
      reads at once, then backs off as usual. A worker shutdown ends an attempt at once. `bambuddy/watcher.py` and its lock and

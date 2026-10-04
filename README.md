@@ -390,7 +390,11 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   `FollowPrint`) and their activities to that queue, and a second queue beside it,
   `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
   `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
-  slot a print run or an operation needs. A replica still on the old build takes the
+  slot a print run or an operation needs. That worker has `FOLLOW_SLOTS` (200,
+  `bambuddy/follow.py`) slots per process: each print holds one while it moves (a
+  poke's old attempt holds its own for up to about 24 s more). Past them, new prints
+  wait on the queue unfollowed: watch `scadbuddy_print_follows_running`, and the
+  warning "every follow slot is taken". A replica still on the old build takes the
   new tasks on the `bambuddy` queue and fails them as unregistered; nothing is
   corrupted (the task is retried), but each Bambuddy write that lands there stalls
   until the old pod is gone. Roll this release
