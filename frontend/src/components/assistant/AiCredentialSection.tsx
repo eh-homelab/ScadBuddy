@@ -146,10 +146,12 @@ const OVERDUE_MAX_MS = 30_000
 /** What deleting `entry` does to the assistant, for the confirmation. */
 function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[]): string {
   const live = (c: AiCredentialEntry) => c.usable && c.status === 'active'
+  // Named by position in the list as it will be once the delete lands.
+  const left = credentials.filter((c) => c.id !== entry.id)
   const inUse = credentials.find(live)
-  if (inUse && inUse.id !== entry.id) return `The assistant keeps using ${nameOf(inUse, credentials)}.`
-  const next = credentials.find((c) => c.id !== entry.id && live(c))
-  if (next) return `The assistant falls back to ${nameOf(next, credentials)}.`
+  if (inUse && inUse.id !== entry.id) return `The assistant keeps using ${nameOf(inUse, left)}.`
+  const next = left.find(live)
+  if (next) return `The assistant falls back to ${nameOf(next, left)}.`
   return 'No other credential is usable now, so the assistant stops working until one is.'
 }
 
@@ -436,8 +438,10 @@ export function AiCredentialSection() {
                   <span className="font-medium">{KIND_LABEL[entry.kind]}</span>
                   {entry.base_url && <span className="text-muted">at {entry.base_url}</span>}
                   {entry.last4 && (
-                    <span className="font-mono text-muted" aria-label={`ending in ${entry.last4}`}>
-                      ••••{entry.last4}
+                    <span className="font-mono text-muted" data-testid="ai-credential-last4">
+                      <span aria-hidden="true">••••</span>
+                      <span className="sr-only">ending in </span>
+                      {entry.last4}
                     </span>
                   )}
                   <StatusBadge entry={entry} />
@@ -590,7 +594,7 @@ export function AiCredentialSection() {
       )}
 
       <form className="flex flex-col gap-3" onSubmit={(event) => void add(event)}>
-        <fieldset className="flex flex-wrap gap-4">
+        <fieldset className="flex flex-wrap gap-4" disabled={!current.can_save}>
           <legend className="mb-1 text-[12px] text-muted">{credentials.length === 0 ? 'Save' : 'Add another'}</legend>
           {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
             <label key={option} className="flex items-center gap-1.5">
@@ -619,6 +623,7 @@ export function AiCredentialSection() {
               placeholder="https://gateway.example/anthropic"
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
+              disabled={!current.can_save}
               className="sb-field max-w-md"
               autoComplete="off"
             />
@@ -631,6 +636,7 @@ export function AiCredentialSection() {
             required
             value={secret}
             onChange={(event) => setSecret(event.target.value)}
+            disabled={!current.can_save}
             placeholder={SECRET_FIELD[kind].placeholder}
             className="sb-field max-w-md"
             autoComplete="new-password"

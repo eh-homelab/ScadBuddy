@@ -187,3 +187,19 @@ it('tells refresh when its read fails', async () => {
   await waitFor(() => expect(failed).toHaveBeenCalledOnce())
   expect(result.current.data).toBe(1)
 })
+
+it('tells every caller merged into one read that it failed', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const first = vi.fn()
+  const second = vi.fn()
+  act(() => {
+    result.current.refresh(undefined, first)
+    result.current.refresh()
+    result.current.refresh(undefined, second)
+  })
+  await waitFor(() => expect(second).toHaveBeenCalledOnce())
+  expect(first).toHaveBeenCalledOnce()
+})

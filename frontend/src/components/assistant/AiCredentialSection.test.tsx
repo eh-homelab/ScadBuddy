@@ -42,7 +42,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await screen.findAllByTestId('ai-credential')
     const [first, second] = rows()
     expect(first).toHaveTextContent('1.Anthropic API key')
-    expect(within(first!).getByLabelText('ending in Q7xA')).toBeInTheDocument()
+    expect(within(first!).getByTestId('ai-credential-last4')).toHaveTextContent('ending in Q7xA')
     expect(first).toHaveTextContent('Active')
     expect(second).toHaveTextContent('2.Gateway')
     expect(second).toHaveTextContent('at https://gateway.example/anthropic')
@@ -119,7 +119,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await user.type(field, 'gw-token-new-NEW1')
     await user.click(screen.getByRole('button', { name: 'Save key' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for credential 2 (Gateway ••••NEW1).')
-    await waitFor(() => expect(within(rows()[1]!).getByLabelText('ending in NEW1')).toBeInTheDocument())
+    await waitFor(() => expect(within(rows()[1]!).getByTestId('ai-credential-last4')).toHaveTextContent('ending in NEW1'))
     expect(rows()[1]).toHaveTextContent('Active')
     expect(screen.queryByLabelText('New gateway token')).not.toBeInTheDocument()
     expect(saves).toEqual([{ kind: 'gateway', base_url: 'https://gateway.example/anthropic', secret: 'gw-token-new-NEW1' }])
@@ -169,7 +169,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Added last')
     await waitFor(() => expect(rows()).toHaveLength(3))
     expect(rows()[2]).toHaveTextContent('3.Claude Code OAuth token')
-    expect(within(rows()[2]!).getByLabelText('ending in abcd')).toBeInTheDocument()
+    expect(within(rows()[2]!).getByTestId('ai-credential-last4')).toHaveTextContent('ending in abcd')
     expect(creates).toEqual([{ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-ZZ34abcd' }])
   })
 
@@ -327,7 +327,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
 
   it.each([
     ['one behind the one in use', 'c3', `The assistant keeps using ${KEY}.`],
-    ['the one in use, with a usable one behind it', 'default', 'The assistant falls back to credential 2 (Anthropic API key ••••BBBB).'],
+    ['the one in use, with a usable one behind it', 'default', 'The assistant falls back to credential 1 (Anthropic API key ••••BBBB).'],
   ])('says what deleting %s does', async (_, id, message) => {
     setCredentials([
       credentialEntry({ id: 'default', last4: 'Q7xA' }),
@@ -675,7 +675,11 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })], false)
     const { user } = renderPage(<AiCredentialSection />)
     expect(await screen.findByText(/Saving is not possible: no key-encryption key/)).toBeInTheDocument()
+    // Nothing to paste a key into that could never be sent.
+    expect(screen.getByLabelText('Anthropic API key')).toBeDisabled()
+    expect(screen.getByRole('radio', { name: 'Gateway (base URL and token)' })).toBeDisabled()
     await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-abcd')
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
     expect(screen.getByRole('button', { name: `Replace the key of ${KEY}` })).toBeDisabled()
   })
