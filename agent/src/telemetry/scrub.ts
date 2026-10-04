@@ -13,14 +13,31 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 //   - `exception.stacktrace` keeps only its V8 frame lines, after the
 //     message is cut out of the stack's head (a message can imitate a frame);
 //   - a non-empty status description becomes the exception's type, or `error`;
-//   - `url.query` and user agents are dropped; URLs lose their query.
+//   - `url.query` and user agents are dropped; URLs lose their query;
+//   - the Host header (`http.host`, `http.server_name`, `server.address`), the
+//     client's address (`http.client_ip`, `client.*`, `net.peer.*`,
+//     `net.sock.peer.*`, `network.peer.*`) and captured headers are dropped,
+//     as the backend's scrub drops them.
 
 const DROPPED: ReadonlySet<string> = new Set([
   'url.query',
   'user_agent.original',
   'user_agent.synthetic.type',
   'http.user_agent',
+  'http.host',
+  'http.server_name',
+  'server.address',
+  'http.client_ip',
+  'http.status_text',
 ])
+const DROPPED_PREFIXES: readonly string[] = [
+  'client.',
+  'net.peer.',
+  'net.sock.peer.',
+  'network.peer.',
+  'http.request.header.',
+  'http.response.header.',
+]
 const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url', 'http.target'])
 
 const FRAME_NEXT = /^\n\s+at \S/
@@ -55,7 +72,7 @@ export function framesOnly(stacktrace: string, message?: string): string {
 export function scrubAttributes(attributes: Attributes): Attributes {
   const out: Attributes = {}
   for (const [key, value] of Object.entries(attributes)) {
-    if (DROPPED.has(key)) continue
+    if (DROPPED.has(key) || DROPPED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue
     out[key] = URLS.has(key) && typeof value === 'string' ? (value.split('?')[0] ?? '') : value
   }
   return out

@@ -39,9 +39,10 @@ describe('backend client tracing', () => {
     expect(call.attributes).toMatchObject({
       'http.request.method': 'GET',
       'url.template': '/api/v1/models',
-      'server.address': 'backend.test',
       'http.response.status_code': 200,
     })
+    // Spec §6 drops `server.address` wherever it appears (telemetry/scrub.ts).
+    expect(call.attributes).not.toHaveProperty('server.address')
     expect(headers).toEqual([`00-${parent.spanContext().traceId}-${call.spanContext().spanId}-01`])
   })
 

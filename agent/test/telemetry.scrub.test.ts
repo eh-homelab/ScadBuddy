@@ -81,6 +81,31 @@ describe('ScrubbingSpanExporter', () => {
     })
   })
 
+  it("drops the Host header, the client's address and captured headers, keeping the server's port", async () => {
+    const spans = await exported((span) =>
+      span.setAttributes({
+        'http.host': SENTINEL,
+        'http.server_name': SENTINEL,
+        'server.address': SENTINEL,
+        'server.port': 8787,
+        'http.client_ip': SENTINEL,
+        'client.address': SENTINEL,
+        'net.peer.ip': SENTINEL,
+        'net.sock.peer.addr': SENTINEL,
+        'network.peer.address': SENTINEL,
+        'http.request.header.cookie': SENTINEL,
+        'http.response.header.set_cookie': SENTINEL,
+        'http.status_text': SENTINEL,
+        'http.request.method': 'POST',
+      }),
+    )
+    expect(everything(spans)).not.toContain(SENTINEL)
+    expect(spans.getFinishedSpans()[0]!.attributes).toEqual({
+      'server.port': 8787,
+      'http.request.method': 'POST',
+    })
+  })
+
   it('passes a clean span through unchanged', async () => {
     const spans = await exported((span) => span.setAttribute('scadbuddy.tool', 'list_models'))
     const [span] = spans.getFinishedSpans()
