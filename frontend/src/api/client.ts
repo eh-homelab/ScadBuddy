@@ -22,6 +22,7 @@ import type {
   AiSessionView,
   SessionLimits,
   SessionResource,
+  ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -1205,6 +1206,12 @@ export const api = {
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
   listAiSessionResources: (id: string) =>
     request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
+
+  /** #931 — the sessions whose tool calls touched a resource, newest first. */
+  listAiResourceSessions: (resource: ResourceRef, limit: number) =>
+    request<{ sessions: AiSessionView[] }>(
+      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions?limit=${limit}`,
+    ),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),

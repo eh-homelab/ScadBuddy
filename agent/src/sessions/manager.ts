@@ -75,7 +75,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
-import { SessionResources, type TouchedRecord } from './touched.js'
+import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -365,7 +365,13 @@ export type SendOptions = {
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
 export type TurnPrincipal = { tiers?: readonly Tier[] }
 
-export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
+export type ListFilter = {
+  status?: SessionStatus
+  origin?: Origin
+  limit?: number
+  /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
+  resource?: ResourceRef
+}
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
@@ -593,6 +599,18 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
   if (filter.origin) {
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
+  }
+  if (filter.resource) {
+    // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
+    let match: string
+    if (filter.resource.type === 'model') {
+      params.push(filter.resource.id)
+      match = `r.model_slug = $${params.length}`
+    } else {
+      params.push(filter.resource.type, filter.resource.id)
+      match = `r.resource_type = $${params.length - 1} AND r.resource_id = $${params.length}`
+    }
+    where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
   }
   params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
   const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}

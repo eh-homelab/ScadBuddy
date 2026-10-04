@@ -5,6 +5,7 @@ import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api } from '../api/client'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
+import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
@@ -856,6 +857,15 @@ export function CustomizePage() {
           >
             Prints
           </Link>
+          {/* #931 — the assistant sessions that changed this model, and the output reopened here. */}
+          <ResourceSessions resource={{ type: 'model', id: slug }} model={slug} />
+          {reopenId && (
+            <ResourceSessions
+              resource={{ type: 'output', id: reopenId }}
+              model={slug}
+              label="Output changed by assistant"
+            />
+          )}
           {modelState.data && origin && (
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
