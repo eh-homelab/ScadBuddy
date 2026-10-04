@@ -58,6 +58,7 @@ from scadbuddy.workflows.print_models import (
 from scadbuddy.workflows.printing import (
     ACCEPT_TIMEOUT,
     CANCELLED,
+    CANCELLED_QUEUEING,
     CLIENT_ACCEPTING,
     READ_RETRY,
     UNWAITED,
@@ -102,6 +103,12 @@ class Fake:
         #: Set, the insert waits on it, then records its row anyway (it never heartbeats).
         self.insert_gate: asyncio.Event | None = None
         self.project_id: int | None = None
+        #: An activity named here waits on its event, so a test can cancel while it runs.
+        self.gates: dict[str, asyncio.Event] = {}
+
+    async def _gate(self, name: str) -> None:
+        if name in self.gates:
+            await self.gates[name].wait()
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -137,6 +144,7 @@ class Fake:
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
         self.calls.append("plan")
+        await self._gate("plan")
         if self.plan_error is not None:
             raise self.plan_error
         return PlannedRun(
@@ -174,6 +182,7 @@ class Fake:
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
         self.calls.append("record")
+        await self._gate("record")
         if self.record_error is not None:
             raise self.record_error
         return input.sent
@@ -181,6 +190,7 @@ class Fake:
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         self.calls.append("finish")
+        await self._gate("finish")
         if self.finish_failures:
             self.finish_failures -= 1
             raise RuntimeError("the settings could not be read")
@@ -192,6 +202,7 @@ class Fake:
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:
         self.calls.append("succeed")
+        await self._gate("succeed")
         if self.succeed_failures:
             self.succeed_failures -= 1
             raise RuntimeError("the database blinked")
@@ -716,3 +727,55 @@ async def test_a_cancel_during_the_insert_answers_the_run_recorded_as_cancelled(
         assert fake.calls == ["check", "insert", f"fail:409:{CANCELLED.detail}"]
     finally:
         fake.insert_gate.set()
+
+
+async def cancel_during(client: Client, worker: str, fake: Fake, activity_name: str) -> PrintRun:
+    """Start a run, cancel it while ``activity_name`` runs, and return how it ended."""
+    gate = fake.gates[activity_name] = asyncio.Event()
+    arg = run_input()
+    try:
+        await start(client, worker, arg)
+        while activity_name not in fake.calls:
+            await asyncio.sleep(0.05)
+        handle = client.get_workflow_handle(f"print-{arg.key}")
+        await handle.cancel()
+        while not any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in (await handle.fetch_history()).events
+        ):
+            await asyncio.sleep(0.05)
+        gate.set()
+        finished = await asyncio.wait_for(ended(client, arg), timeout=60)
+        assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+        return finished
+    finally:
+        gate.set()
+
+
+@pytest.mark.parametrize("activity_name", ["finish", "succeed"])
+async def test_a_cancel_once_every_plate_is_queued_still_ends_succeeded(
+    client: Client, worker: str, fake: Fake, activity_name: str
+) -> None:
+    """Review #1061 (3) 1: from ``print_finish`` on, the print is queued, so a cancel
+    must not record it failed; both are shielded, as the insert is."""
+    finished = await cancel_during(client, worker, fake, activity_name)
+    assert finished.status == "succeeded"
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+async def test_a_cancel_before_any_enqueue_is_recorded_cancelled(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (3) 1: a cancel, never "failed unexpectedly while preparing"."""
+    finished = await cancel_during(client, worker, fake, "plan")
+    assert finished.status == "failed"
+    assert fake.calls[-1] == f"fail:409:{CANCELLED.detail}"
+
+
+async def test_a_cancel_after_the_enqueue_says_the_print_may_be_queued(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    finished = await cancel_during(client, worker, fake, "record")
+    assert finished.status == "failed" and finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
+    assert "check Bambuddy's queue" in CANCELLED_QUEUEING.detail

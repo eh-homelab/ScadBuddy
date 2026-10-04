@@ -7,12 +7,13 @@ this test is what says so.
 
 These histories are the phase-1 baseline (#1052), recorded before any ``PrintRun`` ran in
 the wild: ``succeeded``, ``refused``, ``enqueue_failed``, ``cancelled_during_print`` (a
-cancel while ``print_plan`` runs: the run is recorded failed) and
+cancel while ``print_plan`` runs: the run is recorded cancelled) and
 ``cancelled_during_insert`` (a cancel while ``print_insert`` runs: the row is recorded
-cancelled). They were re-recorded once, when the pre-merge patches came out (#1236).
-Never re-record them again: a later change to the workflow's commands, including a new
-activity, goes behind ``workflow.patched`` and adds a history recorded on the changed
-code beside them, so both replay.
+cancelled). They were re-recorded once, when the pre-merge patches came out (#1236), and
+``cancelled_during_print`` once more, when a cancel stopped being recorded as an
+unexpected failure (review #1061 (3) 1). Never re-record them again: a later change to
+the workflow's commands, including a new activity, goes behind ``workflow.patched`` and
+adds a history recorded on the changed code beside them, so both replay.
 """
 
 from __future__ import annotations
