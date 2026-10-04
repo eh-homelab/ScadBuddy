@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, printRunPoll } from '../api/client'
+import { api, ApiError, printRunPoll, rackAlgorithmSave } from '../api/client'
 import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
@@ -2252,6 +2252,31 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     answer(1, 200)
     await act(() => Promise.allSettled(saves))
     expect(stored()).toBe('bambuddy')
+  })
+
+  it('counts a save that never answers as not remembered, and sends the next one', async () => {
+    // #1086 review: saves go one at a time, so one PUT left unanswered held every later
+    // save back for the life of the page, with nothing shown.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves, stored } = heldSaves()
+    rackAlgorithmSave.timeoutMs = 100
+    try {
+      renderPicker()
+      await loaded()
+      await showAdvanced()
+      const select = await screen.findByLabelText('Rack algorithm')
+      fireEvent.change(select, { target: { value: 'oldest_first' } })
+      expect(await screen.findByTestId('rack-algorithm-unsaved')).toBeInTheDocument()
+
+      fireEvent.change(select, { target: { value: 'bambuddy' } })
+      await waitFor(() => expect(answers.length).toBe(2))
+      answer(1, 200)
+      await act(() => Promise.allSettled(saves))
+      expect(stored()).toBe('bambuddy')
+      expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
+    } finally {
+      rackAlgorithmSave.timeoutMs = 25_000
+    }
   })
 
   it('keeps showing a save that lands while the reopened dialog is still reading', async () => {

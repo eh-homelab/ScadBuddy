@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api } from '../api/client'
+import { api, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   FilamentWarning,
@@ -191,7 +191,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     const save = ++algorithmSave.current
     const savedOn = printerId
     if (savedOn === null) return
-    const saving = algorithmSaves.current.then(() => api.putPrinterRackAlgorithm(savedOn, next))
+    const saving = algorithmSaves.current.then(() =>
+      api.putPrinterRackAlgorithm(savedOn, next, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+    )
     algorithmSaves.current = saving.catch(() => undefined)
     void saving.then(
       () => {

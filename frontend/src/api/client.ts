@@ -316,6 +316,13 @@ const seg = encodeURIComponent
 export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
 
 /**
+ * How long the print dialog waits for one rack-algorithm save before counting it as
+ * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
+ * later one back (#1086 review). Past the server's own bound on the write.
+ */
+export const rackAlgorithmSave = { timeoutMs: 25_000 }
+
+/**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
  * a retry of that press re-attaches to its run and the next press is a new print.
  * `getRandomValues`, not `randomUUID`, which only secure contexts have.
@@ -823,10 +830,11 @@ export const api = {
     }),
 
   /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
-  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null) =>
+  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null, signal?: AbortSignal) =>
     request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
       method: 'PUT',
       body: JSON.stringify({ algorithm }),
+      signal,
     }),
 
   /**
