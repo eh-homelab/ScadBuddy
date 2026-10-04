@@ -12,7 +12,12 @@ import pytest
 from scadbuddy.bambuddy.filaments import FilamentWarning, SpoolOption
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink
-from scadbuddy.bambuddy.print_run import rack_chooser
+from scadbuddy.bambuddy.print_run import (
+    RACK_FALLBACKS,
+    RACK_PICK_FALLBACK,
+    RACK_USAGE_FALLBACK,
+    rack_chooser,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, record_seen, record_settled, save_picks
@@ -140,6 +145,38 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         assert record.exc_info is None and record.exc_text is None
     assert [w.kind for w in warnings] == ["rack-left-to-bambuddy"]
     assert not [s for s in INVENTED_SERIALS if s in repr(warnings)]
+
+
+@pytest.mark.parametrize("message", sorted(RACK_FALLBACKS))
+def test_the_guard_covers_every_rack_fallback(message: str) -> None:
+    """#1081: the preview and the usage read swallow exceptions too."""
+    made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+    made.error = "KeyError"
+    assert foreign_rack_errors([made]) == ["KeyError"]
+
+
+def test_the_guard_expects_postgres_failures_only_from_the_usage_read() -> None:
+    """#1086 review: a usage read's Postgres failure is infrastructure, not a bug; the
+    pick and the preview make no Postgres read, so there it still trips the guard."""
+
+    def record(message: str, error: str) -> logging.LogRecord:
+        made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+        made.error = error
+        return made
+
+    usage = [
+        record(RACK_USAGE_FALLBACK, name)
+        for name in (
+            "QueryCanceled",
+            "OperationalError",
+            "PoolTimeout",
+            "TypeError",
+            "UndefinedColumn",
+            "DataError",
+        )
+    ]
+    assert foreign_rack_errors(usage) == ["TypeError", "UndefinedColumn", "DataError"]
+    assert foreign_rack_errors([record(RACK_PICK_FALLBACK, "QueryCanceled")]) == ["QueryCanceled"]
 
 
 def test_the_guard_flags_a_programming_error_but_not_an_api_one() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ import respx
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.bambuddy import follow as follow_module
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
@@ -441,3 +443,58 @@ def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> No
     follower.on_settled.extend([broken, after])
     assert follow(follower) == "settled"
     assert ran == [OUTPUT]
+
+
+def test_a_settled_hook_that_hangs_is_cut_off_and_the_print_still_settles(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1083: a hook is awaited inside the follow, so one that never returns (a slow
+    Bambuddy, a stuck pool) is bounded and logged like any other failure."""
+    write_output(paths)
+    follower, seen = follower_for(
+        paths, Script(progress("done", settled=True, done=1)), settle_timeout=0.05
+    )
+
+    async def hook(meta: OutputMeta) -> None:
+        await asyncio.Event().wait()
+
+    follower.on_settled.append(hook)
+    with caplog.at_level(logging.DEBUG):
+        assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "TimeoutError"
+
+
+def test_the_activity_heartbeats_while_a_settled_hook_runs(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1083: a hook longer than ``FOLLOW_HEARTBEAT`` must not time the attempt out
+    before ``settle_timeout`` cuts it off, or the retry would run the hook again, and
+    again: the follow never ends."""
+    monkeypatch.setattr(follow_module, "HEARTBEAT_SLICE", 0.01)
+    write_output(paths)
+    follower, _ = follower_for(paths, Script(progress("done", settled=True)))
+    finished: list[str] = []
+
+    async def hook(meta: OutputMeta) -> None:
+        await asyncio.sleep(0.2)
+        finished.append(meta.id)
+
+    follower.on_settled.append(hook)
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    env.on_heartbeat = lambda *details: beats.append(details)
+    reason = asyncio.run(
+        asyncio.wait_for(
+            env.run(
+                FollowActivities(follower).follow_print,
+                FollowInput(output_id=OUTPUT, fresh=True),
+            ),
+            5,
+        )
+    )
+    assert reason == "settled" and finished == [OUTPUT]
+    # A fresh first attempt reads at once: every beat is the hook's, carrying the age.
+    assert len(beats) >= 2
+    assert set(beats) == {(NOW.isoformat(),)}
