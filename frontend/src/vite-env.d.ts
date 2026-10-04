@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_MOCK_API?: string
+  /** The build's version (the Dockerfile's `SCADBUDDY_VERSION`), as the browser's `service.version`. */
+  readonly VITE_SCADBUDDY_VERSION?: string
 }
 
 interface ImportMeta {

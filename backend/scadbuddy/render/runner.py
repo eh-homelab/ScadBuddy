@@ -16,6 +16,7 @@ from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
+from scadbuddy.core.tracing import span
 from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
 from scadbuddy.render.schema import (
     CustomizerSchema,
@@ -310,7 +311,7 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
 
-async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
@@ -381,6 +382,42 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     )
 
 
+def _export_attributes(args: Sequence[str]) -> dict[str, str]:
+    """What the call renders, never its defines: those carry parameter values."""
+    attributes: dict[str, str] = {}
+    if "-o" in args:
+        index = args.index("-o")
+        if index + 1 < len(args):
+            attributes["scadbuddy.openscad.format"] = Path(args[index + 1]).suffix.lstrip(".")
+    for arg in args:
+        if arg.startswith("--backend="):
+            attributes["scadbuddy.openscad.backend"] = arg.removeprefix("--backend=")
+    return attributes
+
+
+async def run_openscad(
+    args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+) -> ProcessOutput:
+    """``failure_is_fallback``: the caller handles an `OpenSCADError` as a fallback, not
+    a failure (a colour's solid, spec 09-22 §6.3), so the span records the exit code and
+    ends without ERROR: a trace's spans are ERROR exactly when its job fails (spec
+    2026-10-01 §6)."""
+    fallback: OpenSCADError | None = None
+    with span("openscad.export", attributes=_export_attributes(args)) as current:
+        try:
+            output = await _run_openscad(args, cwd=cwd, config=config)
+        except OpenSCADError as error:
+            if error.returncode is not None:
+                current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
+            if not failure_is_fallback:
+                raise
+            fallback = error
+        else:
+            current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
+            return output
+    raise fallback
+
+
 async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="scadbuddy-param-") as tmp:
         target = Path(tmp) / "model.param"
@@ -430,6 +467,7 @@ async def render_3mf(
     *,
     config: Config,
     extra_defines: Sequence[str] = (),
+    failure_is_fallback: bool = False,
 ) -> ProcessOutput:
     args = [
         "--backend=Manifold",
@@ -441,4 +479,6 @@ async def render_3mf(
         str(out_path.resolve()),
         scad_path.name,
     ]
-    return await run_openscad(args, cwd=scad_path.parent, config=config)
+    return await run_openscad(
+        args, cwd=scad_path.parent, config=config, failure_is_fallback=failure_is_fallback
+    )
