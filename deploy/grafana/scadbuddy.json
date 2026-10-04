@@ -283,7 +283,7 @@
       "id": 14,
       "type": "table",
       "title": "Turns and their tool calls",
-      "description": "Recent agent.turn spans; listed through their tool-call children, so a turn with no tool call does not appear; expand a row for its tool calls and their count. A parked turn ends with scadbuddy.outcome=parked. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "Recent agent.turn spans. Target B lists every turn with its scadbuddy.outcome, so a turn that parks or errors before any tool call still appears; target A lists the turns that made tool calls, through those child spans (expand a row for them and their count). A parked turn ends with scadbuddy.outcome=parked. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 35, "w": 8, "h": 8 },
       "targets": [
@@ -294,6 +294,15 @@
           "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\"} > {resource.service.name=\"scadbuddy-agent\"}",
           "limit": 20,
           "spss": 20,
+          "tableType": "traces"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\"} | select(span.scadbuddy.outcome)",
+          "limit": 20,
+          "spss": 3,
           "tableType": "traces"
         }
       ]
