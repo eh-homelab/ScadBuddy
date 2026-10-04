@@ -1351,6 +1351,19 @@ describe("a model's lifecycle as operations (#1054)", () => {
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
+
+  it('delete_model accepts a 204 at once', async () => {
+    let key: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
 })
 
 describe('get_output_preview (#308)', () => {
