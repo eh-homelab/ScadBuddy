@@ -11,6 +11,7 @@ from typing import cast
 import trimesh
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.tracing import span
 from scadbuddy.render.colours import CSS_COLOURS
 from scadbuddy.render.runner import OpenSCADError, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -125,20 +126,28 @@ async def render_solids(
             if stopping:
                 raise asyncio.CancelledError
             try:
-                await render_3mf(
-                    wrapper,
-                    schema,
-                    params,
-                    out_path,
-                    config=config,
-                    extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
-                )
-                # Parsing and joining the mesh is CPU work: off the loop, which every
-                # other job's drain, the queue and /healthz share -- and several colours
-                # can now finish their `openscad` at nearly the same moment.
-                mesh = await asyncio.to_thread(solid_mesh, out_path)
-            except OpenSCADError as error:
-                return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
+                # The colour's whole work, its mesh parse included: a failed parse is
+                # the job's failure, so it fails this span too.
+                with span("render.solid", attributes={"scadbuddy.colour_index": index}) as current:
+                    try:
+                        await render_3mf(
+                            wrapper,
+                            schema,
+                            params,
+                            out_path,
+                            config=config,
+                            extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
+                            failure_is_fallback=True,
+                        )
+                    except OpenSCADError as error:
+                        # The colour's fallback, not the job's failure: no ERROR span.
+                        # The exit code is on the `openscad.export` span beneath.
+                        current.set_attribute("scadbuddy.solid.fallback", True)
+                        return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
+                    # Parsing and joining the mesh is CPU work: off the loop, which every
+                    # other job's drain, the queue and /healthz share -- and several
+                    # colours can now finish their `openscad` at nearly the same moment.
+                    mesh = await asyncio.to_thread(solid_mesh, out_path)
             except BaseException:
                 stopping = True
                 raise

@@ -182,6 +182,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
+- `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
+  standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
+  helpers every traced file uses (`span`, `detached_span` for a span exited in another
+  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  `core/trace_scrub.py` strips exception messages and status
+  descriptions before anything is exported; never record a parameter value, a log
+  line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
+  fixture `spans`); the Bambuddy client injects no trace headers.
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).

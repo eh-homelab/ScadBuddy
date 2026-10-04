@@ -773,6 +773,22 @@ worker's exists) by hand and merging does
 exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
 what makes the running image knowable.
 
+### Tracing (#988)
+
+The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
+exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
+`otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
+also turns it off, with a warning in the log, since only the OTLP exporter ships.
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
+variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
+database queries and Bambuddy calls from background loops; it keeps everything that
+starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
+problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
+
 ## Development
 
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked

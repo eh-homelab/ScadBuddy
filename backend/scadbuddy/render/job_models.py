@@ -109,6 +109,10 @@ class Job(BaseModel):
     result: JobResult | None = None
     #: Which workflow `render-<id>` runs (spec §3.4): a render, or (phase 5) an arrange.
     kind: JobTableKind = "render"
+    #: The first caller's ``traceparent`` (spec 2026-10-01 §4): what a coalesced
+    #: request links to and the reconciler starts a late workflow under. None before
+    #: tracing, when the sampler dropped the request, or with the SDK disabled.
+    traceparent: str | None = None
     #: Template-owned inputs (spec §4.3). For a params-only template, `{"params": …}`;
     #: `params` is kept beside it through phase 1 and dropped by phase 2's migration.
     inputs: dict[str, Any] = Field(default_factory=dict)
