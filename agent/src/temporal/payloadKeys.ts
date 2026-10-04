@@ -64,6 +64,40 @@ export class PgPayloadKeys implements PayloadKeys {
     return key
   }
 
+  /**
+   * Key rotation (spec §9): re-wraps every data key sealed under `previous` under
+   * `current`. The data keys, and so every sealed payload, are unchanged. A row that
+   * does not open with `previous` counts as failed and is left as it is.
+   */
+  async rewrapFrom(previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
+    const result = { rewrapped: 0, failed: 0 }
+    if (previous.id === current.id) return result
+    const rows = await this.#sql<{ subject: string; dek_sealed: Buffer }[]>`
+      SELECT subject, dek_sealed FROM ai_payload_keys WHERE kek_id = ${previous.id}`
+    for (const row of rows) {
+      let dek: Buffer
+      try {
+        dek = unwrapDataKey(previous.key, row.subject, row.dek_sealed)
+      } catch (err) {
+        if (err instanceof SealError) {
+          result.failed++
+          continue
+        }
+        throw err
+      }
+      try {
+        const sealed = wrapDataKey(current.key, row.subject, dek)
+        const updated = await this.#sql`
+          UPDATE ai_payload_keys SET dek_sealed = ${sealed}, kek_id = ${current.id}
+          WHERE subject = ${row.subject} AND kek_id = ${previous.id}`
+        result.rewrapped += updated.count
+      } finally {
+        dek.fill(0)
+      }
+    }
+    return result
+  }
+
   async forget(subject: string, tx?: TransactionSql): Promise<void> {
     await (tx ?? this.#sql)`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
     this.#evict(subject)

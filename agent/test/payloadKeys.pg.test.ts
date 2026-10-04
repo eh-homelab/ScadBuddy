@@ -58,9 +58,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await expect(new PgPayloadKeys(db.sql, { current: newKek() }).dataKey(subject)).rejects.toThrow(SealError)
     })
 
+    it('re-wraps keys from the previous KEK, leaving rows that do not open', async () => {
+      const previous = newKek()
+      const current = newKek()
+      const old = new PgPayloadKeys(db.sql, { current: previous })
+      await old.createKey(subject)
+      const dek = await old.dataKey(subject)
+      // A row stamped with the previous KEK's id that it cannot open.
+      const broken = `flow-${randomUUID()}`
+      await new PgPayloadKeys(db.sql, { current: { id: previous.id, key: randomBytes(32) } }).createKey(broken)
+      expect(await new PgPayloadKeys(db.sql, { current }).rewrapFrom(previous, current)).toEqual({ rewrapped: 1, failed: 1 })
+      expect(await new PgPayloadKeys(db.sql, { current }).dataKey(subject)).toEqual(dek)
+      const rows = await db.sql<{ subject: string; kek_id: string }[]>`SELECT subject, kek_id FROM ai_payload_keys`
+      expect(Object.fromEntries(rows.map((r) => [r.subject, r.kek_id]))).toEqual({ [subject]: current.id, [broken]: previous.id })
+    })
+
     it('rejects a subject that is not a session or flow id', async () => {
       const keys = new PgPayloadKeys(db.sql, { current: newKek() })
-      await expect(keys.createKey('render-x')).rejects.toThrow()
+      await expect(keys.createKey('render-x')).rejects.toThrow('render-x is not a session or flow workflow id')
     })
 
     it('forgets at once here, and within the cache window elsewhere', async () => {

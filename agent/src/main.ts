@@ -125,6 +125,13 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const payloadKeys = await new PgPayloadKeys(sql, { current: kek.kek }).rewrapFrom(previousKek.kek, kek.kek)
+        if (payloadKeys.rewrapped || payloadKeys.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${payloadKeys.rewrapped} payload key(s)` +
+              (payloadKeys.failed ? `; ${payloadKeys.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
