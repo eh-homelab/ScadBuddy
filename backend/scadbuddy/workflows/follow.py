@@ -36,6 +36,9 @@ FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=5), maximum_interval=timedelta(minutes=1)
 )
+#: Each poke adds an attempt's events to the history: past this many, or when the
+#: server suggests it, the follow continues as new (with a fresh attempt).
+MAX_POKES = 100
 #: The progress route's start or poke never holds its read up for long.
 RPC_TIMEOUT = timedelta(seconds=5)
 
@@ -54,8 +57,8 @@ class FollowPrint:
         self.poked = True
 
     @workflow.run
-    async def run(self, output_id: str) -> str:
-        fresh = False
+    async def run(self, output_id: str, fresh: bool = False) -> str:
+        pokes = 0
         while True:
             self.poked = False
             attempt: workflow.ActivityHandle[str] = workflow.start_activity(
@@ -79,13 +82,16 @@ class FollowPrint:
             with suppress(ActivityError, asyncio.CancelledError):
                 await attempt
             fresh = True
+            pokes += 1
+            if pokes >= MAX_POKES or workflow.info().is_continue_as_new_suggested():
+                workflow.continue_as_new(args=[output_id, fresh])
 
 
-async def follow(client: Client, task_queue: str, output_id: str) -> None:
+async def follow(client: Client, task_queue: str, output_id: str) -> bool:
     """Make sure ``output_id``'s print is followed: start its `FollowPrint` unless one
     is running. It never pokes: only a new print does (`PrintRun`), and a poke on every
     read would restart the attempt each time. Best effort: the caller's read has
-    answered either way."""
+    answered either way. True when a follow is running."""
     try:
         # The outer bound is for a lazy client's first connect, which retries for minutes.
         async with asyncio.timeout(RPC_TIMEOUT.total_seconds() + 2):
@@ -101,21 +107,36 @@ async def follow(client: Client, task_queue: str, output_id: str) -> None:
         pass
     except Exception:
         logger.warning("could not follow a print", extra={"output_id": output_id}, exc_info=True)
+        return False
+    return True
 
 
 def _recent_watches(pool: ConnectionPool[Any], cutoff: datetime) -> list[str]:
-    with pool.connection() as conn, conn.transaction():
-        rows = conn.execute("DELETE FROM print_watches RETURNING output_id, printed_at").fetchall()
-    return [row["output_id"] for row in rows if row["printed_at"] >= cutoff]
+    with pool.connection() as conn:
+        found = conn.execute("SELECT to_regclass('print_watches') AS t").fetchone()
+        if found is None or found["t"] is None:
+            return []
+        with conn.transaction():
+            conn.execute("DELETE FROM print_watches WHERE printed_at < %s", (cutoff,))
+            rows = conn.execute("SELECT output_id FROM print_watches").fetchall()
+    return [row["output_id"] for row in rows]
+
+
+def _forget_watches(pool: ConnectionPool[Any], output_ids: list[str]) -> None:
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM print_watches WHERE output_id = ANY(%s)", (output_ids,))
 
 
 async def resume_followed(
     pool: ConnectionPool[Any], client: Client, task_queue: str, now: datetime
 ) -> list[str]:
-    """Once, after the upgrade from the in-process watcher (#268): follow on Temporal
-    the prints it recorded within `MAX_AGE`, and empty its `print_watches` log, which
-    nothing writes any more."""
+    """On each boot after the upgrade from the in-process watcher (#268): follow on
+    Temporal the prints it recorded within `MAX_AGE`, and empty its `print_watches` log,
+    which nothing writes any more. A row leaves only once its follow is running, so one
+    that did not start waits for the next boot. The migration that drops the table
+    removes this call."""
     recent = await asyncio.to_thread(_recent_watches, pool, now - MAX_AGE)
-    for output_id in recent:
-        await follow(client, task_queue, output_id)
-    return recent
+    followed = [output_id for output_id in recent if await follow(client, task_queue, output_id)]
+    if followed:
+        await asyncio.to_thread(_forget_watches, pool, followed)
+    return followed

@@ -32,6 +32,7 @@ from scadbuddy.api.deps import (
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
@@ -514,7 +515,7 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
-    runs: PrintRunsDep,
+    state: StateDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
@@ -530,20 +531,21 @@ async def get_progress(
         )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
-    # (#268), and read now (#1053: a poke). Its follow may have given up on a quiet
-    # print, or been sent before there was one. In the background: a Temporal that
-    # does not answer never holds this read up.
+    # (#268, #1053). Its follow may have given up on a quiet print, or been sent before
+    # there was one. In the background: a Temporal that does not answer never holds this
+    # read up. It needs only the client and queue, never the print runs' store.
     if progress is not None and not progress.settled:
+        runs = state.print_runs
         _following(follow(runs.client, runs.task_queue, meta.id))
     return progress
 
 
 #: The follows the progress route started, kept until they finish (a task nothing
 #: references may be collected mid-flight).
-_FOLLOWS: set[asyncio.Task[None]] = set()
+_FOLLOWS: set[asyncio.Task[bool]] = set()
 
 
-def _following(start: Coroutine[Any, Any, None]) -> None:
+def _following(start: Coroutine[Any, Any, bool]) -> None:
     task = asyncio.create_task(start)
     _FOLLOWS.add(task)
     task.add_done_callback(_FOLLOWS.discard)
