@@ -136,7 +136,23 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    * while the new printer's choices are read (claude-review on #1043).
    */
   const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
-  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? choices?.rack_algorithm ?? 'least_used'
+  /**
+   * A printer's algorithm as an earlier session's save left it, when that save landed
+   * after this dialog read the choices (#1086 review). Shown only, never sent, and only
+   * on that printer; the next choices read supersedes it.
+   */
+  const [savedAlgorithm, setSavedAlgorithm] = useState<{
+    printerId: number
+    algorithm: RackAlgorithm
+  } | null>(null)
+  useEffect(() => {
+    setSavedAlgorithm(null)
+  }, [choices])
+  const storedAlgorithm =
+    savedAlgorithm && savedAlgorithm.printerId === printerId
+      ? savedAlgorithm.algorithm
+      : choices?.rack_algorithm
+  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
   const [rackPosition, setRackPosition] = useState<number | null>(null)
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
@@ -146,11 +162,6 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** Bumped by each algorithm save: only the latest one's outcome counts, whatever
    *  order the answers arrive in (#1086 review). */
   const algorithmSave = useRef(0)
-  /** The choices read, for a save that lands after its session ended. */
-  const reloadChoices = useRef(picker.reload)
-  useEffect(() => {
-    reloadChoices.current = picker.reload
-  }, [picker.reload])
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
@@ -172,13 +183,16 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     setAlgorithmUnsaved(false)
     const session = algorithmSession.current
     const save = ++algorithmSave.current
-    if (printerId !== null)
-      void api.putPrinterRackAlgorithm(printerId, next).then(
+    const savedOn = printerId
+    if (savedOn !== null)
+      void api.putPrinterRackAlgorithm(savedOn, next).then(
         () => {
-          // Saved after its session ended (#1086 review): the printer's stored algorithm
-          // changed under a dialog that may already have read it. Read it again rather
-          // than carry the old session's choice in; a closed dialog reads it on opening.
-          if (algorithmSession.current !== session) reloadChoices.current()
+          // Saved after its session ended (#1086 review): the printer now stores `next`,
+          // which a dialog that already read its choices does not know. Show it for that
+          // printer without carrying it in as a choice, and without re-reading the
+          // choices, which would reset the bed type and filament plan set since.
+          if (algorithmSession.current !== session)
+            setSavedAlgorithm({ printerId: savedOn, algorithm: next })
         },
         () => {
           if (algorithmSave.current === save && algorithmSession.current === session)

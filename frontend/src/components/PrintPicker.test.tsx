@@ -2104,6 +2104,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       return save
     })
     const checks = watch('POST', '/check')
+    const choiceReads = watch('GET', '/choices')
     const { user } = renderReopenable()
     await loaded()
     await showAdvanced()
@@ -2116,10 +2117,19 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await showAdvanced()
     const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
     expect(select.value).toBe('least_used')
+    // What the reopened dialog sets before the save lands must survive it.
+    await user.selectOptions(screen.getByLabelText('Plate'), 'Engineering Plate')
+    const spool = within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')
+    fireEvent.click(spool)
+    expect(spool).toBeChecked()
+    const reads = choiceReads.urls.length
     release()
     await act(() => Promise.allSettled(saves))
 
     await waitFor(() => expect(select.value).toBe('oldest_first'))
+    expect(screen.getByLabelText('Plate')).toHaveValue('Engineering Plate')
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')).toBeChecked()
+    expect(choiceReads.urls.length).toBe(reads)
     expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
 
     // A third open reads the choices again, which now carry the saved algorithm.
@@ -2137,7 +2147,11 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     // The printer's stored algorithm, as the choices read reports it.
     let stored = 'least_used'
     server.use(
-      http.get('/api/v1/print/outputs/:id/choices', () => HttpResponse.json({ ...choicesView, rack_algorithm: stored })),
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        const printer_id = asked === null ? choicesView.printer_id : Number(asked)
+        return HttpResponse.json({ ...choicesView, printer_id, rack_algorithm: stored })
+      }),
       http.put('/api/v1/print/printers/:id/rack-algorithm', async ({ request }) => {
         const { algorithm } = (await request.json()) as { algorithm: string }
         const status = await new Promise<number>((resolve) => answers.push(resolve))
@@ -2201,6 +2215,33 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(select.value).toBe('bambuddy'))
     expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: null })
+  })
+
+  it('shows a save on another printer nowhere, and leaves this one alone', async () => {
+    // #1086 review: a save on printer 1 landing after a switch to printer 2 re-read
+    // printer 2's choices and reset what had been set there.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves } = heldSaves()
+    const choiceReads = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await waitFor(() => expect(answers.length).toBe(1))
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
+    await loaded()
+    const select = await screen.findByLabelText<HTMLSelectElement>('Rack algorithm')
+    await waitFor(() => expect(select.value).toBe('least_used'))
+    await user.selectOptions(screen.getByLabelText('Plate'), 'Engineering Plate')
+    const reads = choiceReads.urls.length
+    answer(0, 200)
+    await act(() => Promise.allSettled(saves))
+
+    expect(select.value).toBe('least_used')
+    expect(screen.getByLabelText('Plate')).toHaveValue('Engineering Plate')
+    expect(choiceReads.urls.length).toBe(reads)
   })
 
   it('drops the hand pick when going back to Simple, which cannot show it', async () => {
