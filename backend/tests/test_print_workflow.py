@@ -4,6 +4,7 @@ under the real names, on a dev server: the shape every command copies."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -16,6 +17,7 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 from temporalio.worker import (
     Interceptor,
     SignalExternalWorkflowInput,
@@ -43,6 +45,7 @@ from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.workflows import printing
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.follow import FollowPrint, follow_id, follow_queue
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
@@ -106,6 +109,8 @@ class Fake:
         self.succeed_failures = 0
         #: Set, the check waits on it, so a test can act while it is in flight.
         self.check_gate: asyncio.Event | None = None
+        #: Set, the insert waits on it, then records its row anyway (it never heartbeats).
+        self.insert_gate: asyncio.Event | None = None
         self.project_id: int | None = None
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
@@ -131,6 +136,8 @@ class Fake:
     @activity.defn(name="print_insert")
     async def insert(self, input: InsertInput) -> PrintRun:
         self.calls.append("insert")
+        if self.insert_gate is not None:
+            await self.insert_gate.wait()
         if self.insert_failures:
             self.insert_failures -= 1
             raise RuntimeError("the database blinked")
@@ -610,6 +617,7 @@ async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
             scheduled = event.activity_task_scheduled_event_attributes
             attempts[scheduled.activity_type.name] = scheduled.retry_policy.maximum_attempts
     assert attempts["print_succeed"] == 0  # unlimited, as every record write
+    assert attempts["print_finish"] == 0  # review #1061 1: every plate is queued
 
 
 async def test_a_cancel_during_the_check_answers_the_update_before_the_execution_ends(
@@ -711,11 +719,11 @@ async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeed
     assert not any(call.startswith("fail") for call in fake.calls)
 
 
-async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
-    client: Client, fake: Fake
-) -> None:
+async def test_a_check_no_client_waits_for_any_more_refuses_the_print() -> None:
     """Review #1061 1b: a run whose worker picked it up after every client stopped
-    re-sending it (`CLIENT_ACCEPTING`) is refused, never printed with nobody watching."""
+    re-sending it (`CLIENT_ACCEPTING`) is refused, never printed with nobody watching.
+    Measured on the server's clock (review #1061 3): the execution's start, which the
+    workflow passes in, against the attempt's start, never the worker's own clock."""
     unused: Any = None
     real = PrintActivities(
         PrintDeps(
@@ -727,42 +735,75 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
             observer=unused,
         )
     )
-    activities = [real.check if a == fake.check else a for a in fake.all()]
-    queue = f"print-{uuid.uuid4().hex[:8]}"
-    arg = run_input().model_copy(
-        update={"accepted_at": datetime.now(UTC) - CLIENT_ACCEPTING - timedelta(seconds=1)}
+    # A worker whose clock is behind: by its own, the run is a few seconds old.
+    accepted_at = datetime.now(UTC) - timedelta(seconds=10)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(
+        env.info, started_time=accepted_at + CLIENT_ACCEPTING + timedelta(seconds=1)
     )
-    async with Worker(
-        client, task_queue=queue, workflows=[PrintRunWorkflow], activities=activities
-    ):
-        answer = await start(client, queue, arg)
-        with pytest.raises(WorkflowFailureError):
-            await ended(client, arg)
-    assert answer.run is None and answer.refusal is not None
-    assert answer.refusal.status == 409
-    assert "Nothing was queued" in answer.refusal.detail
-    assert fake.calls == []
+    arg = run_input().model_copy(update={"accepted_at": accepted_at})
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(real.check, arg)
+    assert raised.value.type == REFUSED
+    assert raised.value.details[0] == UNWAITED
 
 
 async def test_a_check_that_ends_after_every_client_stopped_waiting_records_nothing(
-    client: Client, worker: str, fake: Fake
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review #1061 (2) 2: the check started inside `CLIENT_ACCEPTING` but ended past
-    it. The workflow refuses before `print_insert`, so nothing prints unwatched."""
-    fake.check_gate = asyncio.Event()
-    accepted_at = datetime.now(UTC) - CLIENT_ACCEPTING + timedelta(seconds=1)
-    arg = run_input().model_copy(update={"accepted_at": accepted_at})
-    accepting = asyncio.create_task(start(client, worker, arg))
-    try:
-        while "check" not in fake.calls:
-            await asyncio.sleep(0.05)
-        while datetime.now(UTC) - accepted_at <= CLIENT_ACCEPTING:
-            await asyncio.sleep(0.05)
-        fake.check_gate.set()
-        answer = await accepting
+    it. The workflow refuses before `print_insert`, so nothing prints unwatched. The
+    budget runs from the execution's start (review #1061 3), so the route sends no
+    time of its own; unsandboxed, so a test can shorten it. Both ends are the server's
+    wall clock, which on a loaded host jumps seconds against this test's sleeps (+8 s
+    and -0.5 s within 10 s, measured), so no hold is timed against a short budget: the
+    shortest one is past at any clock reading, and the fake check, which never reads it,
+    stands for one that started inside it."""
+    monkeypatch.setattr(printing, "CLIENT_ACCEPTING", timedelta.min)
+    arg = run_input()
+    assert arg.accepted_at is None
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[PrintRunWorkflow],
+        activities=fake.all(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    ):
+        answer = await start(client, queue, arg)
         assert answer.run is None and answer.refusal == UNWAITED
         with pytest.raises(WorkflowFailureError):
             await ended(client, arg)
         assert fake.calls == ["check"]
+
+
+async def test_a_cancel_during_the_insert_answers_the_run_recorded_as_cancelled(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 2: the insert may commit after the cancel, so it is shielded; its
+    row is recorded failed with `CANCELLED`, and the Update answers it, rather than an
+    orphaned `running` row the reconciler fails minutes later."""
+    fake.insert_gate = asyncio.Event()
+    arg = run_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "insert" not in fake.calls:
+            await asyncio.sleep(0.05)
+        handle = client.get_workflow_handle(f"print-{arg.key}")
+        await handle.cancel()
+        # The cancel is in the history before the insert finishes.
+        while not any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in (await handle.fetch_history()).events
+        ):
+            await asyncio.sleep(0.05)
+        fake.insert_gate.set()
+        answer = await accepting
+        assert answer.run is not None and answer.run.status == "failed"
+        assert answer.run.error == CANCELLED
+        finished = await ended(client, arg)
+        assert finished.status == "failed"
+        assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+        assert fake.calls == ["check", "insert", f"fail:409:{CANCELLED.detail}"]
     finally:
-        fake.check_gate.set()
+        fake.insert_gate.set()

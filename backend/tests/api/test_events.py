@@ -3,8 +3,11 @@ the app's own bus. Payloads carry ids only, so what is checked is kind and ids."
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +21,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, get_fonts, get_libraries
 from scadbuddy.core.events import Event, EventBus, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
+from scadbuddy.operations.component import OPERATIONS
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.api.test_fonts import FakeBackedService, FakeClient
 from tests.api.test_print_filaments import queue_route, slice_routes
@@ -345,9 +349,69 @@ def test_repinning_and_removing_checkouts_publish_their_events(
         {"kind": "library.changed", "slug": mine, "name": "BOSL2"},
         {"kind": "model.updated", "slug": mine},
     ]
-    # The removal is an operation (#1054), announced as `operation.changed` beside it.
-    assert [event for event in published(events) if event["kind"] == "library.removed"] == [
+    # The removal is an operation (#1054), announced as `operation.changed` beside it;
+    # review #1119 2: nothing else, in particular no `model.updated`.
+    assert [event for event in published(events) if event["kind"] != "operation.changed"] == [
         {"kind": "library.removed", "name": "BOSL2", "commits": [commits["v1"]]}
+    ]
+
+
+@pytest.fixture
+def short_pins(app: FastAPI) -> None:
+    """``library_pin`` with a 2 s run timeout; before the app starts, so its worker
+    serves the kind as replaced."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    pin = dataclasses.replace(ops.kinds["library_pin"], run_timeout=timedelta(seconds=2))
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, kinds={**ops.kinds, "library_pin": pin})
+    )
+
+
+@pytest.mark.requires_git
+def test_a_pin_that_lands_after_its_run_was_cancelled_still_publishes(
+    app: FastAPI,
+    short_pins: None,
+    client: TestClient,
+    mine: str,
+    events: Recorded,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1119 1: the commit in its thread cannot be stopped, so a pin past its
+    timeout still lands, and is announced like any other."""
+    url, _ = make_library_upstream(tmp_path, {"v1": "module marker() cube(1);\n"})
+    state: AppState = getattr(app.state, STATE_ATTR)
+    store = LibraryStore(
+        state.paths,
+        catalogue=(
+            CatalogueLibrary(
+                name="BOSL2", url=url, ref="v1", licence="BSD-2-Clause", homepage="https://x"
+            ),
+        ),
+        protocols=("file",),
+    )
+    app.dependency_overrides[get_libraries] = lambda: store
+    state.libraries = store
+    pin_library = state.catalogue.pin_library
+
+    def slow_pin(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(12)  # past the 2 s timeout and the heartbeat that delivers it
+        return pin_library(*args, **kwargs)
+
+    monkeypatch.setattr(state.catalogue, "pin_library", slow_pin)
+
+    response = client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={})
+    assert response.status_code == 500, response.text
+    assert "may have been done" in response.json()["detail"]
+    events.wait_for_kind("model.updated", timeout=40)
+    assert [
+        event
+        for event in published(events)
+        if event["kind"] in ("library.changed", "model.updated")
+    ] == [
+        {"kind": "library.changed", "slug": mine, "name": "BOSL2"},
+        {"kind": "model.updated", "slug": mine},
     ]
 
 

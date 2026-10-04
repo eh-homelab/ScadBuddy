@@ -15,6 +15,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
+from scadbuddy.bambuddy.follow import FOLLOW_SLOTS
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
@@ -115,12 +116,14 @@ def follow_worker(
 ) -> Worker:
     """``FollowPrint``'s activity on its own queue beside ``task_queue`` (review #1091
     1): each follow holds its slot for as long as the print moves, so it never takes a
-    slot from the ``bambuddy`` worker's short activities. An attempt ends at once on a
+    slot from the ``bambuddy`` worker's short activities. Its `FOLLOW_SLOTS` are set
+    here, not left to the SDK's default (review #1091 2). An attempt ends at once on a
     shutdown (`FollowActivities`)."""
     return Worker(
         client,
         task_queue=follow_queue(task_queue),
         activities=[follow_print],
+        max_concurrent_activities=FOLLOW_SLOTS,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
 

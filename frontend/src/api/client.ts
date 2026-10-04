@@ -328,15 +328,17 @@ const seg = encodeURIComponent
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
  * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
- * longest kind's `run_timeout` plus the run's cancel grace (library pins: 600 s + 30 s),
- * as the agent's `operationFollowMs` does (agent/src/tools/registry.ts).
+ * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
+ * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent's
+ * `operationFollowMs` is the same (agent/src/tools/registry.ts).
  */
 export const printRunPoll = {
   intervalMs: 1000,
   reattempts: 3,
   acceptingMs: 240_000,
   followMs: 3_600_000,
-  operationFollowMs: 900_000,
+  operationFollowMs: 1_260_000,
 }
 
 /**
@@ -391,21 +393,37 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+/**
+ * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
+ * giving up: the request may already hold a claim, and that answer names it (review #1066
+ * 1.1). Still unanswered then, it gives up.
+ */
+async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal, finish = false): Promise<T> {
   const began = Date.now()
+  let last = false
   for (let tries = 0; ; ) {
     try {
       return await attempt()
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught)) throw caught
+      if (last || !unanswered(caught)) throw caught
+      if (signal?.aborted) {
+        if (!finish) throw caught
+        last = true
+        continue
+      }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
       if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
       // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
       const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
-      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      try {
+        await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      } catch (reason) {
+        if (!finish) throw reason
+        last = true
+      }
     }
   }
 }
@@ -822,9 +840,11 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` stops the
-   * re-sends (a superseded preview), never a request already sent: its answer names the
-   * job the next render supersedes.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` (a superseded
+   * preview) stops the re-sends after one more, sent at once: the request may already
+   * hold a claim on a job, and that answer names the job the next render supersedes. A
+   * request already sent is never aborted, for the same reason. Unanswered even then, the
+   * claim is left to the render it made, which runs to its end (review #1066 1.1).
    */
   render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string, signal?: AbortSignal) => {
     // Sent again while the server is still accepting it (#1053), with one
@@ -842,6 +862,7 @@ export const api = {
           }),
         }),
       signal,
+      true,
     )
   },
 

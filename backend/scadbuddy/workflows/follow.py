@@ -52,6 +52,8 @@ MAX_POKES = 100
 RPC_TIMEOUT = timedelta(seconds=5)
 #: How long the progress route trusts a follow it found running (review #1091 4).
 FOLLOWED_FOR = 60.0
+#: How long it waits to try again after a start failed (review #1091).
+RETRY_AFTER = 15.0
 
 
 def follow_id(output_id: str) -> str:
@@ -78,7 +80,11 @@ class FollowPrint:
     async def run(self, output_id: str, fresh: bool = False) -> str:
         pokes = 0
         while True:
-            self.poked = False
+            if self.poked:
+                # Cleared only here, so a poke in the first activation (review #1091 4)
+                # also makes this attempt the fresh one.
+                self.poked = False
+                fresh = True
             attempt: workflow.ActivityHandle[str] = workflow.start_activity(
                 FOLLOW_ACTIVITY,
                 FollowInput(output_id=output_id, fresh=fresh),
@@ -98,10 +104,9 @@ class FollowPrint:
             attempt.cancel()
             with suppress(ActivityError, asyncio.CancelledError):
                 await attempt
-            fresh = True
             pokes += 1
             if pokes >= MAX_POKES or workflow.info().is_continue_as_new_suggested():
-                workflow.continue_as_new(args=[output_id, fresh])
+                workflow.continue_as_new(args=[output_id, True])
 
 
 async def follow(client: Client, task_queue: str, output_id: str) -> bool:
@@ -132,8 +137,9 @@ class Follows:
     """The progress route's follows (#268, review #1091 4, 5): each started in the
     background, so a Temporal that does not answer never holds a read up. An output
     found followed is not asked about again for `FOLLOWED_FOR`: each change of a print
-    re-reads its progress in every open UI. The lifespan cancels what is still starting
-    (`aclose`)."""
+    re-reads its progress in every open UI. Nor is one whose start is in flight, or
+    failed within `RETRY_AFTER`: a Temporal that is down or slow costs one attempt per
+    output, not one per read. The lifespan cancels what is still starting (`aclose`)."""
 
     def __init__(
         self,
@@ -141,30 +147,39 @@ class Follows:
         task_queue: str,
         *,
         followed_for: float = FOLLOWED_FOR,
+        retry_after: float = RETRY_AFTER,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.client = client
         self.task_queue = task_queue
         self.followed_for = followed_for
+        self.retry_after = retry_after
         self.clock = clock
         #: Kept until they finish: a task nothing references may be collected mid-flight.
         self.starting: set[asyncio.Task[bool]] = set()
-        self._followed: dict[str, float] = {}
+        self._in_flight: set[str] = set()
+        #: Until when each output is not asked about again, followed or failed.
+        self._quiet_until: dict[str, float] = {}
 
     def ensure(self, output_id: str) -> None:
-        if self._followed.get(output_id, float("-inf")) > self.clock():
+        if output_id in self._in_flight:
             return
+        if self._quiet_until.get(output_id, float("-inf")) > self.clock():
+            return
+        self._in_flight.add(output_id)
         task = asyncio.create_task(self._start(output_id))
         self.starting.add(task)
         task.add_done_callback(self.starting.discard)
 
     async def _start(self, output_id: str) -> bool:
-        if not await follow(self.client, self.task_queue, output_id):
-            return False
+        try:
+            followed = await follow(self.client, self.task_queue, output_id)
+        finally:
+            self._in_flight.discard(output_id)
         now = self.clock()
-        self._followed = {key: until for key, until in self._followed.items() if until > now}
-        self._followed[output_id] = now + self.followed_for
-        return True
+        self._quiet_until = {key: until for key, until in self._quiet_until.items() if until > now}
+        self._quiet_until[output_id] = now + (self.followed_for if followed else self.retry_after)
+        return followed
 
     async def aclose(self) -> None:
         for task in self.starting:
