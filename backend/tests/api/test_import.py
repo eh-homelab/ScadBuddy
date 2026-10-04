@@ -238,3 +238,16 @@ def test_import_retry_after_counts_down_from_the_oldest_held_fetch() -> None:
         assert permits.retry_after() == 1
     assert not permits.full()
     assert permits.retry_after() == 1
+
+
+@respx.mock
+def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -> None:
+    """Review 3c M6: the subject is a search attribute, shown in the Temporal UI; a URL
+    may carry a token, and past 2 KB it would fail the workflow task."""
+    url = RAW_URL + "?token=secret"
+    respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
+    assert client.post("/api/v1/models/import", json={"url": url}).status_code == 201
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.operations.store._require().connection() as conn:
+        rows = conn.execute("SELECT subject FROM operations WHERE kind = 'model_import'").fetchall()
+    assert [row["subject"] for row in rows] == ["raw.githubusercontent.com"]

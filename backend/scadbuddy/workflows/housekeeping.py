@@ -3,11 +3,11 @@
 The API process's periodic loops are two Schedules that start ``Housekeeping`` on the
 ``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
 ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
-``scadbuddy-prune-<queue>`` prunes settled render jobs every `PRUNE_INTERVAL`, as the
-render service's loop did, whatever that interval. The queue is served in the API
-process, which holds the data volume the sweeps read. Each sweep is best effort, as the
-loop's were: one that fails is logged and the rest still run, and the next tick tries
-again.
+``scadbuddy-prune-<queue>`` prunes settled render jobs (as the render service's loop
+did) and sweeps old request claims every `PRUNE_INTERVAL`, whatever that interval. The
+queue is served in the API process, which holds the data volume the sweeps read. Each
+sweep is best effort, as the loop's were: one that fails is logged and the rest still
+run, and the next tick tries again.
 """
 
 from __future__ import annotations
@@ -59,8 +59,11 @@ SWEEPS = (
     "housekeeping_sweep_assets",
     "housekeeping_sweep_blobs",
     "housekeeping_sweep_staging",
+    "housekeeping_sweep_claims",
 )
-PRUNE_SWEEPS = SWEEPS[:1]
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
+#: which would otherwise pile up for good with the sweeps off (review 3c M1).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 

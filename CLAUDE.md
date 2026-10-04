@@ -169,8 +169,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   kind (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
   `GET /operations/{id}`. Each worker serves only its queue's kinds: the Bambuddy kinds
   are `bambuddy/operations.py` (`bambuddy_kinds`, queue `bambuddy`), the library pins
-  `library/operations.py` (`library_kinds`, queue `library`, #1054), both registered in
-  `create_app`. A kind reads the state when it runs, never a route dependency, so a test
+  `library/operations.py` (`library_kinds`, queue `library`, #1054) and a model's
+  lifecycle `library/model_operations.py` (`model_kinds`), all registered in
+  `create_app`. Request bytes too large for a workflow payload (a create's source,
+  thumbnail, README) go by claim check: `operations/claims.py` `ClaimStore`, under
+  `cache/claims/`, named by sha256 so a re-send keeps its key, and removed only by the
+  `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
+  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB) with
+  413. A kind reads the state when it runs, never a route dependency, so a test
   replaces a store on the state (`state.libraries = store`). The browser's `command()`
   (`frontend/src/api/client.ts`) and the agent's (`agent/src/api/command.ts`) send the
   key, re-send it after an answer that never arrived, and follow a 202.

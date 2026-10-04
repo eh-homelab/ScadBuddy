@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ok } from './call.js'
+import { command } from '../api/command.js'
 import { slug } from './common.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
@@ -101,14 +101,14 @@ export const templateTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models', 'POST /api/v1/models/{slug}/duplicate'],
-    handler: async ({ name, from, description, tags }, { backend }) => {
+    handler: async ({ name, from, description, tags }, ctx) => {
       if (from === 'blank') {
         return json(
-          await ok(
-            backend.POST('/api/v1/models', {
+          await command(ctx, `create ${name} from the blank template`, (headers) =>
+            ctx.backend.POST('/api/v1/models', {
               body: { name, source: BLANK_TEMPLATE, description: description ?? '', tags: tags ?? [], force: false },
+              headers,
             }),
-            `create ${name} from the blank template`,
           ),
         )
       }
@@ -121,9 +121,8 @@ export const templateTools: Tool[] = [
         )
       }
       return json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/duplicate', { params: { path: { slug: from } }, body: { name } }),
-          `create ${name} from ${from}`,
+        await command(ctx, `create ${name} from ${from}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/duplicate', { params: { path: { slug: from } }, body: { name }, headers }),
         ),
       )
     },

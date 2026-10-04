@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, ScheduleOverlapPolicy
+from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverlapPolicy
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -139,6 +139,11 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         await prune.delete()
     assert described.schedule.spec.intervals[0].every == timedelta(seconds=PRUNE_INTERVAL)
     assert PRUNE_INTERVAL == 300.0
+    # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good.
+    action = described.schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    (sweeps,) = await client.data_converter.decode(action.args)
+    assert list(sweeps) == ["housekeeping_prune_jobs", "housekeeping_sweep_claims"]
 
 
 async def test_the_schedules_are_set_up_once_temporal_answers(
