@@ -157,6 +157,7 @@ def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
     assert again.status_code == 409, again.text
     assert "may have been done" in again.json()["detail"]
     assert "Check Bambuddy" in again.json()["detail"]
+    assert again.json()["type"] == operations_api.RECORD_GONE_PROBLEM
     assert counts.runs == 1
 
 

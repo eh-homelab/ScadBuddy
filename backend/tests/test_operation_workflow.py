@@ -4,6 +4,7 @@ the real names, on a dev server: the generic command every Bambuddy write runs a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -18,10 +19,11 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
-from scadbuddy.workflows import print_activities
+from scadbuddy.workflows import operation_activities, print_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import _kind_activities
@@ -38,6 +40,7 @@ from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED_RUNNING,
     OPERATION_UNEXPECTED_DETAIL,
     OPERATION_UNEXPECTED_RUNNING_DETAIL,
+    problem_of,
 )
 from tests.support.temporal import temporal_client
 
@@ -58,6 +61,8 @@ class Fake:
         self.check_gate: asyncio.Event | None = None
         #: Set, the insert waits on it.
         self.insert_gate: asyncio.Event | None = None
+        #: Set, the finish waits on it.
+        self.finish_gate: asyncio.Event | None = None
 
     def _op(self, status: str = "running", **fields: Any) -> Operation:
         return Operation(
@@ -97,6 +102,8 @@ class Fake:
     @activity.defn(name="op_finish")
     async def finish(self, input: FinishOp) -> Operation:
         self.calls.append("finish:ok" if input.error is None else f"finish:{input.error.status}")
+        if self.finish_gate is not None:
+            await self.finish_gate.wait()
         if input.error is not None:
             return self._op("failed", error=input.error)
         return self._op("succeeded", result=input.result)
@@ -282,6 +289,26 @@ async def test_a_cancel_during_the_insert_still_records_and_ends_the_operation(
     assert fake.calls == ["check", "insert", "finish:409"]
 
 
+async def test_a_cancel_during_the_finish_still_records_the_effects_outcome(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 third review 1: the effect ran, so a cancel while its outcome is being
+    recorded waits the finish out; the row is never left for the reconciler to call lost."""
+    fake.finish_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    while "finish:ok" not in fake.calls:
+        await asyncio.sleep(0.05)
+    await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+    await asyncio.sleep(0.5)
+    fake.finish_gate.set()
+    answer = await accepting
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    done = await ended(client, arg)
+    assert done.status == "succeeded" and done.result == {"queue_item_id": 7}
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
 async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     client: Client, worker: str, fake: Fake
 ) -> None:
@@ -322,3 +349,53 @@ async def test_the_run_activity_heartbeats_while_the_effect_runs(
     env.on_heartbeat = lambda *details: beats.append(details)
     assert await env.run(run, RunOp(request={}, checked={})) == {"done": True}
     assert beats
+
+
+@pytest.mark.parametrize(
+    ("raised", "still_waiting"),
+    [(None, False), (LookupError, False), (TimeoutError, True), (asyncio.CancelledError, True)],
+)
+async def test_only_a_timeout_leaves_the_check_waiting_on_bambuddy(
+    raised: type[BaseException] | None, still_waiting: bool
+) -> None:
+    """Review #1063 third review 2: a check that catches a Bambuddy error and goes on to
+    slow work of its own must not blame Bambuddy when that work runs out of time."""
+    waiting = [False]
+    token = CHECK_ON_BAMBUDDY.set(waiting)
+    try:
+        with pytest.raises(raised) if raised is not None else contextlib.nullcontext():
+            async with waiting_on_bambuddy():
+                assert waiting == [True]
+                if raised is not None:
+                    raise raised
+    finally:
+        CHECK_ON_BAMBUDDY.reset(token)
+    assert waiting == [still_waiting]
+
+
+@pytest.mark.parametrize("bambuddy_answered", [False, True])
+async def test_a_check_out_of_time_blames_bambuddy_only_while_waiting_on_it(
+    monkeypatch: pytest.MonkeyPatch, bambuddy_answered: bool
+) -> None:
+    """The budget cuts the check with a cancel inside ``waiting_on_bambuddy``, which keeps
+    the blame; a check that left it with an error and then ran out of time does not."""
+    monkeypatch.setattr(operation_activities, "CHECK_BUDGET_SECONDS", 0.2)
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        with contextlib.suppress(LookupError):
+            async with waiting_on_bambuddy():
+                if bambuddy_answered:
+                    raise LookupError
+                await asyncio.Event().wait()
+        await asyncio.Event().wait()
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    activity_check, _ = _kind_activities(OperationKind(name="slow", check=check, run=run))
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_check, {})
+    answer = problem_of(caught.value)
+    assert answer.status == 504
+    assert (answer.type == UNAVAILABLE_PROBLEM) is not bambuddy_answered
