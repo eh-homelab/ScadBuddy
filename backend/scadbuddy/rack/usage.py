@@ -46,7 +46,9 @@ STATEMENT_TIMEOUT_MS = 15_000
 ARCHIVE_TIMEOUT = 15.0
 #: The whole budget of a settle's settings read, its wait for a connection included (#1111):
 #: well inside the watcher's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
-#: answer, not a connection that gets no reply at all (#1226).
+#: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
+#: off records nothing: its archives are recorded only by that output's next settle,
+#: which a one-off output may never have. That loss is the price of freeing the thread.
 SETTINGS_READ_TIMEOUT = 10.0
 
 

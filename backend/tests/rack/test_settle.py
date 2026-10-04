@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -406,10 +407,14 @@ async def test_a_real_stuck_settings_read_gives_its_thread_back(
         hook = settle_hook(store, PrintLinkStore(pool), settings_store.load)
         with psycopg.connect(pg_conninfo) as holder, holder.transaction():
             holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            started = time.monotonic()
             with pytest.raises(psycopg.errors.QueryCanceled):
                 await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=30)
+            elapsed = time.monotonic() - started
     finally:
         settings_store.close()
+    # Ended at the hook's bound, not the real SETTINGS_READ_TIMEOUT or the wait_for.
+    assert elapsed < 2
 
 
 async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(

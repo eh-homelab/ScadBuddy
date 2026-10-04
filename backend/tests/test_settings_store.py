@@ -526,8 +526,18 @@ def test_a_settings_read_timeout_bounds_the_whole_read(
         release.cancel()
         release.join()
         settings_holder.close()
-    # A per-statement bound would take about 1.6 budgets here.
-    assert elapsed < 1.3 * budget
+    # The read waits 0.6 budgets on one table and the rest on the other: about one
+    # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
+    # unit would give up at once.
+    assert 0.9 * budget < elapsed < 1.3 * budget
+
+
+def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
+    store: SettingsStore,
+) -> None:
+    """#1111: the bound leaves an ordinary read alone."""
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
+    assert store.load(timeout=5) == store.load()
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
