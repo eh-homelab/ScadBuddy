@@ -1,8 +1,12 @@
-import { fireEvent, screen } from '@testing-library/react'
+import { trace } from '@opentelemetry/api'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Job, Output } from '../api/types'
 import { NO_EXTRA } from '../lib/inputs'
+import { outputs } from '../mocks/fixtures'
+import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
 
@@ -107,5 +111,42 @@ describe('Generate', () => {
     const { user } = setup(false, job, undefined, { upToDate: false, onGenerated })
     await user.click(screen.getByRole('button', { name: 'Generate' }))
     expect(onGenerated).not.toHaveBeenCalled()
+  })
+})
+
+describe('Generate, traced', () => {
+  it('is one generate span, with the output request and the later thumbnail inside it', async () => {
+    const tracing = installTestTracing()
+    try {
+      const active: Record<string, string | undefined> = {}
+      vi.spyOn(api, 'createOutput').mockImplementation(async () => {
+        active.create = trace.getActiveSpan()?.spanContext().spanId
+        return outputs[0]!
+      })
+      vi.spyOn(api, 'putThumbnail').mockImplementation(async () => {
+        active.thumbnail = trace.getActiveSpan()?.spanContext().spanId
+      })
+      const onGenerated = vi.fn()
+      const { user } = setup(false, job, undefined, {
+        onGenerated,
+        capture: async () => new Blob(['png'], { type: 'image/png' }),
+      })
+      await user.click(screen.getByRole('button', { name: 'Generate' }))
+      await waitFor(() => expect(onGenerated).toHaveBeenCalled())
+      await waitFor(() => expect(tracing.exporter.getFinishedSpans()).toHaveLength(1))
+
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.name).toBe('generate')
+      expect(span?.attributes).toEqual({
+        'scadbuddy.slug': 'name-keychain',
+        'scadbuddy.job_id': job.id,
+        'scadbuddy.output_id': outputs[0]!.id,
+      })
+      // The thumbnail goes after an await (the capture): only `within` keeps it in the trace.
+      expect(active).toEqual({ create: span?.spanContext().spanId, thumbnail: span?.spanContext().spanId })
+    } finally {
+      vi.restoreAllMocks()
+      tracing.uninstall()
+    }
   })
 })

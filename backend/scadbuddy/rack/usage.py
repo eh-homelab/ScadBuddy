@@ -45,6 +45,16 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
 
+#: What each advisory store write or read below logs when it swallows an exception, by
+#: type (#1112). Named so the tests' programming-error guard reads the same strings.
+RACK_SEEN_FALLBACK = "could not record the rack's hotends"
+RACK_PICKS_FALLBACK = "could not record the rack picks"
+RACK_SETTLE_READ_FALLBACK = "could not read a settled print's rack picks"
+RACK_SETTLE_FALLBACK = "could not record a rack nozzle's print"
+RACK_STORE_FALLBACKS = frozenset(
+    {RACK_SEEN_FALLBACK, RACK_PICKS_FALLBACK, RACK_SETTLE_READ_FALLBACK, RACK_SETTLE_FALLBACK}
+)
+
 
 class PickedHotend(BaseModel):
     """A sent pick with the hotend it named. Carries a serial: backend only (spec §7)."""
@@ -293,7 +303,7 @@ async def record_seen(
         await store.seen(printer_id, rack_serials(status.nozzle_rack))
     except Exception as exc:
         logger.warning(
-            "could not record the rack's hotends",
+            RACK_SEEN_FALLBACK,
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
 
@@ -325,7 +335,7 @@ async def save_picks(
                 )
     except Exception as exc:
         logger.warning(
-            "could not record the rack picks",
+            RACK_PICKS_FALLBACK,
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
 
@@ -373,7 +383,7 @@ async def record_settled(
         recorded = await store.recorded_archives(archive for archive, _ in linked)
     except Exception as exc:
         logger.warning(
-            "could not read a settled print's rack picks",
+            RACK_SETTLE_READ_FALLBACK,
             extra={"output_id": output_id, "error": type(exc).__name__},
         )
         return 0
@@ -405,7 +415,7 @@ async def record_settled(
             written += await record_one(archive_id, queue_item_id)
         except Exception as exc:
             logger.warning(
-                "could not record a rack nozzle's print",
+                RACK_SETTLE_FALLBACK,
                 extra={
                     "output_id": output_id,
                     "archive_id": archive_id,

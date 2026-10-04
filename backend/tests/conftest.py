@@ -5,10 +5,11 @@ import os
 import shutil
 import struct
 import subprocess
+import time
 import uuid
 import zipfile
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ import numpy as np
 import psycopg
 import pytest
 import trimesh
+from opentelemetry import trace
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import Connection
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import DictRow, dict_row
@@ -26,6 +31,8 @@ from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
+from scadbuddy.core.tracing import DEFAULT_SAMPLER
 from scadbuddy.library import url_import
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
@@ -42,6 +49,38 @@ from tests.support.temporal import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
+
+#: Every span any test makes, after the same scrub production uses (spec §6).
+_SPANS = InMemorySpanExporter()
+_provider = TracerProvider(sampler=DEFAULT_SAMPLER)
+_provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(_SPANS)))
+trace.set_tracer_provider(_provider)
+
+
+@pytest.fixture(autouse=True)
+def _clear_spans() -> Iterator[None]:
+    """Every test's spans go after it, whether it read them or not: the exporter lives
+    for the whole session and would otherwise hold every span every test made."""
+    yield
+    _SPANS.clear()
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    return _SPANS
+
+
+def wait_for_span(
+    spans: InMemorySpanExporter, predicate: Callable[[ReadableSpan], bool], timeout: float = 30
+) -> ReadableSpan:
+    """Spans end on the worker's own tasks after the job settles: poll, bounded."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for finished in spans.get_finished_spans():
+            if predicate(finished):
+                return finished
+        time.sleep(0.05)
+    raise AssertionError("no matching span was recorded")
 
 
 def load_fixture_param(stem: str) -> dict[str, Any]:
@@ -523,10 +562,12 @@ def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 def rack_pick_swallows_only_expected_errors(
     request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
 ) -> Iterator[None]:
-    """A rack fallback (the pick, the /check preview, or the usage read) swallows every
-    exception by spec, so this is where a programming error (TypeError, KeyError...)
-    surfaces. A test that injects another type on purpose opts out with
-    ``@pytest.mark.rack_injects_errors``."""
+    """A rack fallback (the pick, the /check preview, the usage read, or the store's
+    seen, picks and settle writes and reads, #1112) swallows every exception by spec, so
+    this is where a programming error (TypeError, KeyError...) surfaces. A test that
+    needs another type on purpose opts out with ``@pytest.mark.rack_injects_errors``,
+    which turns the guard off for every fallback in that test: when an expected type
+    (``ApiError``, ``psycopg.OperationalError``) proves the same point, inject that."""
     yield
     if request.node.get_closest_marker("rack_injects_errors"):
         return
