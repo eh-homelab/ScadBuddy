@@ -104,6 +104,12 @@ def _nullable(name: str) -> bool:
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 
 
+#: How long a printer's rack-algorithm save may wait for a connection, and then how
+#: long its write may run (#1129). Together well under the print dialog's 25 s give-up
+#: (``rackAlgorithmSave`` in ``frontend/src/api/client.ts``): the dialog then sends its
+#: next choice, and a save it gave up on must not commit after that one.
+RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
+
 #: The settings `StoreNotReadyError` is decided from.
 STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
@@ -591,8 +597,17 @@ class SettingsStore:
     def set_printer_rack_algorithm(
         self, printer_id: int, algorithm: RackAlgorithm | None
     ) -> StoredSettings:
-        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it."""
-        with self._pool.connection() as conn:
+        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
+
+        Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
+        write, so it commits well inside the print dialog's give-up or not at all
+        (#1129)."""
+        bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
+        with (
+            self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
+            conn.transaction(),
+        ):
+            conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
             _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
         return self._written("printer_rack_algorithm")
 

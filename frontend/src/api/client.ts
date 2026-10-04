@@ -319,9 +319,9 @@ export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
- * later one back (#1086 review). Aborting only stops the browser waiting: the server has
- * no shorter bound on this write, so a save given up on can still commit after the next
- * one and leave the printer on the earlier choice (tracked in #1129).
+ * later one back (#1086 review). Aborting only stops the browser waiting, so the server
+ * bounds the write well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): a save given
+ * up on has already failed there, and cannot commit after the next one.
  */
 export const rackAlgorithmSave = { timeoutMs: 25_000 }
 

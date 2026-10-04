@@ -20,6 +20,7 @@ import pytest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
     STORE_READINESS_LOCK,
     ModelPrintChoices,
@@ -475,6 +476,32 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
 
     store.forget_remembered()
     assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the print dialog gives up on a save after 25 s and sends the next choice.
+    A save that is still waiting in Postgres must give up first, or it could commit
+    after the one that replaced it and leave the printer on the older choice."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
+        writer = threading.Thread(target=save)
+        writer.start()
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+    assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
