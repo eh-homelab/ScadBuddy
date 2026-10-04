@@ -1,5 +1,5 @@
 // agent/test/telemetry.scrub.test.ts
-import { type Span, SpanStatusCode } from '@opentelemetry/api'
+import { type Span, SpanKind, SpanStatusCode } from '@opentelemetry/api'
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace'
 import { describe, expect, it } from 'vitest'
 import { framesOnly, ScrubbingSpanExporter } from '../src/telemetry/scrub.js'
@@ -104,6 +104,38 @@ describe('ScrubbingSpanExporter', () => {
       'server.port': 8787,
       'http.request.method': 'POST',
     })
+  })
+
+  it("drops a server span's URL, path and host, keeping its route", async () => {
+    const inner = new InMemorySpanExporter()
+    const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter: new ScrubbingSpanExporter(inner) })] })
+    const span = provider.getTracer('t').startSpan('POST /p/:token', { kind: SpanKind.SERVER })
+    span.setAttributes({
+      'url.full': `http://agent.test/p/${SENTINEL}`,
+      'http.url': `http://agent.test/p/${SENTINEL}`,
+      'http.target': `/p/${SENTINEL}`,
+      'url.path': `/p/${SENTINEL}`,
+      'net.host.name': SENTINEL,
+      'http.route': '/p/:token',
+      'http.request.method': 'POST',
+    })
+    span.end()
+    await provider.forceFlush()
+    expect(everything(inner)).not.toContain(SENTINEL)
+    expect(inner.getFinishedSpans()[0]!.attributes).toEqual({ 'http.route': '/p/:token', 'http.request.method': 'POST' })
+  })
+
+  it('scrubs the attributes of every event and link', async () => {
+    const spans = await exported((span) => {
+      span.addEvent('request', { 'url.query': SENTINEL, 'client.address': SENTINEL, kept: 1 })
+      span.addLink({
+        context: span.spanContext(),
+        attributes: { 'http.request.header.cookie': SENTINEL, 'url.full': `https://x.test/?q=${SENTINEL}` },
+      })
+    })
+    expect(JSON.stringify(spans.getFinishedSpans()[0]!.links)).not.toContain(SENTINEL)
+    expect(everything(spans)).not.toContain(SENTINEL)
+    expect(spans.getFinishedSpans()[0]!.events[0]!.attributes).toEqual({ kept: 1 })
   })
 
   it('passes a clean span through unchanged', async () => {

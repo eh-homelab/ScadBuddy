@@ -1,5 +1,5 @@
 // agent/src/telemetry/scrub.ts
-import type { Attributes } from '@opentelemetry/api'
+import { type Attributes, SpanKind } from '@opentelemetry/api'
 import type { ExportResult } from '@opentelemetry/core'
 import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-trace'
 
@@ -17,7 +17,11 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 //   - the Host header (`http.host`, `http.server_name`, `server.address`), the
 //     client's address (`http.client_ip`, `client.*`, `net.peer.*`,
 //     `net.sock.peer.*`, `network.peer.*`) and captured headers are dropped,
-//     as the backend's scrub drops them.
+//     as the backend's scrub drops them;
+//   - on a server span the request's URL and path are data (a `/p/<token>`
+//     forwarder path, a session id) and its host is the Host header: only
+//     `http.route` stays, as on the backend's server spans;
+//   - every event and link passes through the same attribute scrub.
 
 const DROPPED: ReadonlySet<string> = new Set([
   'url.query',
@@ -39,6 +43,15 @@ const DROPPED_PREFIXES: readonly string[] = [
   'http.response.header.',
 ]
 const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url', 'http.target'])
+/** What a server span drops on top of `DROPPED`: the request's URL, path and host. */
+const SERVER_DROPPED: ReadonlySet<string> = new Set([
+  'url.full',
+  'http.url',
+  'http.target',
+  'url.path',
+  'net.host.name',
+  'host.name',
+])
 
 const FRAME_NEXT = /^\n\s+at \S/
 
@@ -69,18 +82,20 @@ export function framesOnly(stacktrace: string, message?: string): string {
     .join('\n')
 }
 
-export function scrubAttributes(attributes: Attributes): Attributes {
+export function scrubAttributes(attributes: Attributes, kind?: SpanKind): Attributes {
   const out: Attributes = {}
   for (const [key, value] of Object.entries(attributes)) {
     if (DROPPED.has(key) || DROPPED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue
+    if (kind === SpanKind.SERVER && SERVER_DROPPED.has(key)) continue
     out[key] = URLS.has(key) && typeof value === 'string' ? (value.split('?')[0] ?? '') : value
   }
   return out
 }
 
 function scrubEvent(event: TimedEvent): TimedEvent {
-  if (event.name !== 'exception' || !event.attributes) return event
-  const { 'exception.message': message, ...rest } = event.attributes
+  if (!event.attributes) return event
+  if (event.name !== 'exception') return { ...event, attributes: scrubAttributes(event.attributes) }
+  const { 'exception.message': message, ...rest } = scrubAttributes(event.attributes)
   const stack = rest['exception.stacktrace']
   if (typeof stack === 'string') {
     rest['exception.stacktrace'] = framesOnly(stack, typeof message === 'string' ? message : undefined)
@@ -108,8 +123,8 @@ export function scrubSpan(span: ReadableSpan): ReadableSpan {
     startTime: span.startTime,
     endTime: span.endTime,
     status,
-    attributes: scrubAttributes(span.attributes),
-    links: span.links,
+    attributes: scrubAttributes(span.attributes, span.kind),
+    links: span.links.map((link) => (link.attributes ? { ...link, attributes: scrubAttributes(link.attributes) } : link)),
     events,
     duration: span.duration,
     ended: span.ended,
