@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import asyncio
 from typing import Annotated
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, File, Path, Request, UploadFile, status
+from fastapi import APIRouter, FastAPI, File, Path, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -18,13 +19,24 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     FetcherDep,
     HistoryDep,
+    ImportPermits,
     ImportsDep,
     PathsDep,
-    SettingsStoreDep,
     SlugPath,
-    StateDep,
 )
-from scadbuddy.api.models import RESOLVER_RETRY_AFTER, fetch_busy, require_model_exists
+from scadbuddy.api.models import (
+    RESOLVER_RETRY_AFTER,
+    fetch_busy,
+    require_model_exists,
+    shown_url,
+)
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    Claimed,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.asset_fetch import fetch_file
@@ -44,6 +56,8 @@ from scadbuddy.library.assets import (
 )
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, ImportRefusedError, ResolverBusyError
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 from scadbuddy.store.content import StoreFullError, template_title
@@ -116,28 +130,42 @@ def _require_asset(store: AssetStore, asset_id: str) -> AssetMeta:
         "SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries "
         "the store's `usage`; re-uploading stored content is never refused."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def upload_asset(
     slug: SlugPath,
-    catalogue: CatalogueDep,
-    assets: AssetsDep,
-    state: StateDep,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
     file: Annotated[UploadFile, File(description="An SVG or PNG")],
-) -> AssetMeta:
-    require_model_exists(catalogue, slug)
+    idempotency_key: IdempotencyKey = None,
+) -> AssetMeta | JSONResponse:
     data = await file.read(MAX_ASSET_BYTES + 1)
     if len(data) > MAX_ASSET_BYTES:
         raise ApiError(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"the file is larger than {MAX_ASSET_BYTES} bytes",
         )
-    return await _store(slug, data, file.filename, assets=assets, state=state)
+    # By claim: up to MAX_ASSET_BYTES, past a workflow payload's limit (#1054).
+    claims = ClaimStore(paths.claims)
+    held = await asyncio.to_thread(claims.hold, data)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["asset_upload"],
+        subject=slug,
+        request={"slug": slug, "file": held.name, "file_name": file.filename},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [held]),
+    )
+    return operation_answer(result, AssetMeta)
 
 
-async def _store(
+async def store_asset(
     slug: str, data: bytes, filename: str | None, *, assets: AssetStore, state: AppState
 ) -> AssetMeta:
-    """An upload's bytes into the store, and mirrored where workers read them."""
+    """An upload's bytes into the store, and mirrored where workers read them: the
+    ``asset_upload`` and ``asset_fetch`` operations' runs (#1054)."""
     try:
         # Decoding a PNG and parsing an SVG are CPU work; keep them off the loop.
         meta = await asyncio.to_thread(assets.put, data, filename)
@@ -167,9 +195,10 @@ class AssetFetch(BaseModel):
 
 
 class FetchedAsset(AssetMeta):
-    #: The URL as given, to credit and to fetch again. Not capped: it is the parsed
-    #: form, which percent-encodes what the request's 2048 characters allowed, and
-    #: can be longer (as `ModelRecord.origin_url`).
+    #: The URL fetched, to credit: its scheme, host, port and path, never its query,
+    #: userinfo or fragment, which may carry a token (#1054, as `ModelRecord.origin_url`).
+    #: Not capped: it is the parsed form, which percent-encodes what the request's 2048
+    #: characters allowed, and can be longer.
     source_url: str
 
 
@@ -188,45 +217,75 @@ class FetchedAsset(AssetMeta):
         "the upload's 413."
     ),
     responses={
+        **OPERATION_RESPONSES,
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "the replica's fetch budget (shared with imports) or its resolver threads "
                 "are all in use; retry after `Retry-After` seconds"
             )
-        }
+        },
     },
 )
 async def fetch_asset(
     slug: SlugPath,
     body: AssetFetch,
-    catalogue: CatalogueDep,
-    assets: AssetsDep,
-    settings: SettingsStoreDep,
+    response: Response,
+    ops: OperationsDep,
     imports: ImportsDep,
-    state: StateDep,
-) -> FetchedAsset:
-    require_model_exists(catalogue, slug)
-    # Off the loop, like the store's own work below: `load` is blocking psycopg I/O,
-    # and this route is async (it awaits the fetch). The sync routes that call it
-    # inline already run on FastAPI's threadpool.
-    domains = (await asyncio.to_thread(settings.load)).allowed_asset_domains()
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> FetchedAsset | JSONResponse:
+    # The URL by claim, so its query, which may carry a token, is in neither the
+    # operation's record nor its history (as an import's, review 3c 1.5).
+    claims = ClaimStore(paths.claims)
+    url = await asyncio.to_thread(claims.hold, body.url.encode())
+
+    async def permit() -> None:
+        # Before the operation starts, so a full budget answers with its Retry-After
+        # header and records nothing; the run asks again.
+        _require_fetch_permit(imports)
+
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["asset_fetch"],
+        # The host, never the URL: the subject is a search attribute.
+        subject=urlsplit(body.url).hostname or "url",
+        request={"slug": slug, "url": url.name, "shown": shown_url(body.url)},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [url]),
+        before_start=permit,
+    )
+    return operation_answer(result, FetchedAsset)
+
+
+def _require_fetch_permit(imports: ImportPermits) -> None:
     # As the import: no await between the check and the hold.
     if imports.full():
         raise fetch_busy(
             f"{IMPORT_CONCURRENCY} fetches are already running on this replica",
             imports.retry_after(),
         )
+
+
+async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
+    """The ``asset_fetch`` operation's run (#1054): the fetch, then the store."""
+    # Off the loop: `load` is blocking psycopg I/O.
+    domains = (await asyncio.to_thread(state.settings_store.load)).allowed_asset_domains()
+    imports = state.imports
+    _require_fetch_permit(imports)
     with imports.hold():
         try:
-            fetched = await fetch_file(body.url, domains=domains, limit=MAX_ASSET_BYTES)
+            fetched = await fetch_file(url, domains=domains, limit=MAX_ASSET_BYTES)
         except ImportRefusedError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except ResolverBusyError:
             raise fetch_busy(
                 "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
             ) from None
-    meta = await _store(slug, fetched.data, fetched.filename, assets=assets, state=state)
-    return FetchedAsset(**meta.model_dump(), source_url=fetched.source_url)
+    meta = await store_asset(slug, fetched.data, fetched.filename, assets=state.assets, state=state)
+    # Never the URL as given: its query may carry a token, and this answer is recorded.
+    return FetchedAsset(**meta.model_dump(), source_url=shown_url(fetched.source_url))
 
 
 @router.get(

@@ -250,9 +250,11 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     """The pins, a model's lifecycle and edits (``model_operations.py``), its media
-    (``media_operations.py``) and its outputs (``output_operations.py``). Imported
+    (``media_operations.py``), its outputs (``output_operations.py``) and the uploads
+    for its file parameters (``asset_operations.py``). Imported
     here, as they import this module. Their runs are the routes' former bodies, which
     take the whole ``AppState``; the core is one."""
+    from scadbuddy.library.asset_operations import asset_kinds
     from scadbuddy.library.media_operations import media_kinds
     from scadbuddy.library.model_operations import model_kinds
     from scadbuddy.library.output_operations import output_kinds
@@ -263,6 +265,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         *model_kinds(state),
         *media_kinds(state),
         *output_kinds(state),
+        *asset_kinds(state),
     ]
 
 
