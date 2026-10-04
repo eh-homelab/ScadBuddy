@@ -21,6 +21,7 @@ import type {
   HttpRequestSetting,
   AiSessionView,
   SessionLimits,
+  SessionResource,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -1190,6 +1191,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ add_usd: addUsd }),
     }),
+
+  /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
+  listAiSessionResources: (id: string) =>
+    request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
