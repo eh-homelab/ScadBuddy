@@ -34,7 +34,7 @@ import {
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
-import { ASK_USER_QUESTION, askThroughGate, type QuestionGate } from './questions.js'
+import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -101,7 +101,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     that origin for the session (browserOrigins.ts).
 //   - the AskUserQuestion built-in (#940, questions.ts) when the run has a
 //     question gate: the call is answered in `canUseTool`, where it parks
-//     until the user answers in the panel;
+//     until the user answers in the panel; and, for subagents, which Claude
+//     Code refuses AskUserQuestion, the `scadbuddy_questions` server's ask_user tool on
+//     the same gate;
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -338,11 +340,16 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const base = buildQueryOptions(run.paths)
   const harnessTiers = harnessTierOf(run)
   const questions = run.questionGate
-  // AskUserQuestion only asks the user; it is answered in canUseTool below.
+  // AskUserQuestion and ask_user only ask the user; the first is answered in
+  // canUseTool below, the second by its own handler.
   const ownTiers: TierResolver = questions
-    ? (name, input) => (name === ASK_USER_QUESTION ? 'read' : harnessTiers(name, input))
+    ? (name, input) => (isQuestionTool(name) ? 'read' : harnessTiers(name, input))
     : harnessTiers
-  const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
+  const local = { ...(run.mcpServers ?? {}), ...(questions ? { [QUESTION_SERVER]: questionServer(questions) } : {}) }
+  if (questions && Object.hasOwn(run.mcpServers ?? {}, QUESTION_SERVER)) {
+    throw new PluginConfigError(`MCP server name "${QUESTION_SERVER}" is used twice`)
+  }
+  const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(local)))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
   let gate = run.approvalGate
@@ -415,7 +422,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
     },
-    mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
+    mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),

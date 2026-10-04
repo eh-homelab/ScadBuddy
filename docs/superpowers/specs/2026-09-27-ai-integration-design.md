@@ -799,7 +799,15 @@ including `disabled`. Where it is enforced:
   `waiting_input`. Questions live in `ai_questions`, so any replica can take the
   answer, but unlike an approval a question never outlives its turn: interrupt,
   handoff, a shutdown and every other end of the turn cancel it, and the model is told
-  nobody answered. Nothing answers a question by itself. Expiry and notifications
+  nobody answered. Nothing answers a question by itself. A subagent cannot use
+  `AskUserQuestion` (Claude Code refuses it there without asking `canUseTool`, measured
+  on 2.1.283), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
+  in-process tool with the same input that parks on the same gate
+  (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
+  (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
+  answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
+  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
+  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.

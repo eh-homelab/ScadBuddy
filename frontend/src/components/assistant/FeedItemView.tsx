@@ -214,7 +214,7 @@ function previewOf(q: AskedQuestion, c: Choice): string | undefined {
 }
 
 /**
- * #940 — the agent asks the user (AskUserQuestion): pick an option, or several when
+ * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
  * the question allows it, or answer in your own words. A question with a draft (an
  * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
  * starting from that draft, so editing it returns the edited text.
