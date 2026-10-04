@@ -63,7 +63,11 @@ from scadbuddy.render.thumbnail import (
 )
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
-from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+)
 
 router = APIRouter(tags=["jobs"])
 
@@ -275,8 +279,9 @@ async def render_model(
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
         ) from None
-    except CommandStillAcceptingError:
-        # The render's first activity has not answered yet; the same request joins it.
+    except (CommandStillAcceptingError, CommandClosedError):
+        # The render's first activity has not answered yet, or its execution ended before
+        # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
     except TemporalUnavailableError:
         raise temporal_unavailable("renders") from None

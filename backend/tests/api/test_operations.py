@@ -16,11 +16,13 @@ import pytest
 from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.client import connect_lazily
+from scadbuddy.workflows.commands import CommandClosedError
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
 PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5 = (uuid.uuid4().hex for _ in range(5))
@@ -156,3 +158,18 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.json()["type"].endswith("/temporal-unavailable")
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+
+
+def test_an_execution_ended_before_it_answered_is_still_accepting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 1c: a terminate before the Update answered recorded nothing, so the
+    client sends the same request again, never a bare 500."""
+
+    async def closed_start(*args: Any, **kwargs: Any) -> Any:
+        raise CommandClosedError("op-x")
+
+    monkeypatch.setattr(operations_api, "start_command", closed_start)
+    response = post(client, {})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM

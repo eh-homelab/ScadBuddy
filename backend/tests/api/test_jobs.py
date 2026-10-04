@@ -17,7 +17,11 @@ from scadbuddy.render.job_models import Job, QueueFullError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
-from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+)
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 
 
@@ -177,6 +181,18 @@ def test_a_render_still_being_accepted_is_a_503_to_send_again(
     assert response.status_code == 503
     assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
     assert response.headers["retry-after"] == "2"
+
+
+def test_a_render_whose_execution_ended_before_it_answered_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    """Review #1061 1c: an execution that ended before its Update answered recorded
+    nothing; the same request starts it again, never a bare 500."""
+    closed = mock.AsyncMock(side_effect=CommandClosedError("render-x"))
+    with mock.patch.object(RenderService, "submit", closed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
 
 
 def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
