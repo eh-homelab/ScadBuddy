@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+import { installTestTracing } from '../../test/tracing'
 import { PROTOCOL_VERSION, type ClientMessage } from './protocol'
 import type { ChatTransport, SendResult, TransportHandlers } from './transport'
 import { useAgentChat } from './useAgentChat'
@@ -312,5 +313,34 @@ describe('useAgentChat', () => {
     act(() => result.current.send('hello', { route: '/' }))
     expect(result.current.state.awaitingStart).toBe(false)
     expect(result.current.state.notice).toMatch(/try again once it reconnects/)
+  })
+
+  it('sends each turn with the traceparent of its own assistant.message span once tracing runs', () => {
+    const tracing = installTestTracing()
+    try {
+      const t = scripted()
+      const { result } = renderHook(() => useAgentChat(t.factory))
+      act(() => t.h().onOpen?.())
+      act(() => result.current.send('hello', { route: '/' }))
+      act(() => result.current.send('again', { route: '/' }))
+      const turns = t.chat().filter((m) => m.type === 'user.message')
+      const spans = tracing.exporter.getFinishedSpans()
+      expect(spans.map((s) => s.name)).toEqual(['assistant.message', 'assistant.message'])
+      expect(turns.map((m) => (m.type === 'user.message' ? m.traceparent : undefined))).toEqual(
+        spans.map((s) => `00-${s.spanContext().traceId}-${s.spanContext().spanId}-01`),
+      )
+      // Each turn is its own trace (§4).
+      expect(spans[0]?.spanContext().traceId).not.toBe(spans[1]?.spanContext().traceId)
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
+  it('sends a turn with no traceparent before tracing has loaded', () => {
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => t.h().onOpen?.())
+    act(() => result.current.send('hello', { route: '/' }))
+    expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' } })
   })
 })

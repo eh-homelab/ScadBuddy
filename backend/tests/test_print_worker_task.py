@@ -251,3 +251,38 @@ def test_the_api_serves_the_print_queue_only_when_told_to(
         temporal_print_worker_inprocess=print_inprocess,
     )
     assert main.serves_print_queue(settings) is serves
+
+
+async def test_the_old_watchers_handoff_does_not_hold_the_upkeep_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1091 4: each follow the boot handoff starts may wait out an RPC timeout on
+    a slow Temporal; lost runs are ended meanwhile, and a stop cancels a handoff still
+    pending rather than waiting for it."""
+    reconciled = asyncio.Event()
+    handing_off = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def pending(*args: Any) -> list[str]:
+        handing_off.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return []
+
+    async def reconcile(*args: Any, **kwargs: Any) -> int:
+        reconciled.set()
+        return 0
+
+    monkeypatch.setattr(main, "resume_followed", pending)
+    monkeypatch.setattr(main, "reconcile_lost_runs", reconcile)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._print_upkeep(_state(), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(handing_off.wait(), 5)
+    await asyncio.wait_for(reconciled.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert cancelled.is_set()

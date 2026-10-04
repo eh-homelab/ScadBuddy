@@ -152,7 +152,8 @@ class Follows:
     found followed is not asked about again for `FOLLOWED_FOR`: each change of a print
     re-reads its progress in every open UI. Nor is one whose start is in flight, or
     failed within `RETRY_AFTER`: a Temporal that is down or slow costs one attempt per
-    output, not one per read. The lifespan cancels what is still starting (`aclose`)."""
+    output, not one per read. Its component (`component.py`) cancels what is still
+    starting when the app stops (`aclose`)."""
 
     def __init__(
         self,

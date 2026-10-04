@@ -8,12 +8,13 @@ import secrets
 import shutil
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
+    contextmanager,
     nullcontext,
     suppress,
 )
@@ -31,6 +32,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
+from scadbuddy.core.tracing import span
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
@@ -694,10 +696,21 @@ def no_stage(name: RenderStage) -> AbstractContextManager[None]:
     return nullcontext()
 
 
+@contextmanager
+def _traced_stage(name: RenderStage, timed: AbstractContextManager[None]) -> Iterator[None]:
+    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing."""
+    with span(f"render.{name}"), timed:
+        yield
+
+
 def timed_stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
-    """A stage timed into `stage_duration`, as `render_job`'s are; untimed without
-    metrics."""
-    return metrics.stage if metrics is not None else no_stage
+    """A stage timed into `stage_duration`, as `render_job`'s are, and traced; untimed
+    without metrics."""
+
+    def stage(name: RenderStage) -> AbstractContextManager[None]:
+        return _traced_stage(name, metrics.stage(name) if metrics is not None else nullcontext())
+
+    return stage
 
 
 @dataclass(frozen=True)
@@ -912,7 +925,7 @@ async def render_job(
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         if on_stage is not None:
             on_stage(name)
-        return metrics.stage(name) if metrics is not None else nullcontext()
+        return _traced_stage(name, metrics.stage(name) if metrics is not None else nullcontext())
 
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then

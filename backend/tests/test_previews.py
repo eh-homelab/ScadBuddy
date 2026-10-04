@@ -15,6 +15,9 @@ from unittest import mock
 import psycopg
 import pytest
 import trimesh
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
@@ -492,3 +495,27 @@ def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -
 def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
     """Infrastructure: the scheduler tries again rather than blaming the source."""
     assert not is_render_error(error)
+
+
+async def test_a_preview_render_starts_a_root_span_its_workflow_joins(
+    spans: InMemorySpanExporter,
+) -> None:
+    async def runner(slug: str, timeout: float) -> bytes:
+        # Stands in for the traced Temporal client's StartWorkflow, a CLIENT span the
+        # default sampler drops unless something sampled is above it.
+        with trace.get_tracer("t").start_as_current_span(
+            "StartWorkflow:RenderPreview", kind=SpanKind.CLIENT
+        ):
+            return b"png"
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    with mock.patch.object(scheduler, "plan", return_value="key"):
+        assert await scheduler._refresh(SLUG, raise_unrun=False) is True
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    root = finished["render.preview"]
+    assert root.parent is None
+    assert (root.attributes or {})["scadbuddy.slug"] == SLUG
+    start = finished["StartWorkflow:RenderPreview"]
+    assert start.context.trace_id == root.context.trace_id
