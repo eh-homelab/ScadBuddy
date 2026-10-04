@@ -18,6 +18,8 @@ from psycopg_pool import PoolTimeout
 from scadbuddy.api.analyzers import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.settings import Settings
+from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
@@ -68,6 +70,29 @@ def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
     response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+
+
+def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129 review: the whole route, against a real row lock, not a stubbed store."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    path = "/api/v1/print/printers/1/rack-algorithm"
+    assert client.put(path, json={"algorithm": "oldest_first"}).status_code == 200
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
+        response = client.put(path, json={"algorithm": "bambuddy"})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
+
+
+def test_the_rack_algorithm_routes_503_is_declared(client: TestClient) -> None:
+    put = client.get("/openapi.json").json()["paths"][
+        "/api/v1/print/printers/{printer_id}/rack-algorithm"
+    ]["put"]
+    assert "503" in put["responses"]
 
 
 def test_an_unknown_algorithm_is_refused(client: TestClient) -> None:

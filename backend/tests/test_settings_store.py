@@ -499,7 +499,7 @@ def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
         holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
         took = _timed_in_thread(save)
-    assert took < 2.0
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
     assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
@@ -525,7 +525,7 @@ def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
             took = _timed_in_thread(save)
     finally:
         store.close()
-    assert took < 2.0
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
     assert [type(exc) for exc in failed] == [PoolTimeout]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
@@ -542,9 +542,16 @@ def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back
         took = _timed_in_thread(
             lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
         )
-    assert took < 2.0
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
     assert answered == ["bambuddy"]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+
+#: The rack tests patch the bound to 0.2 s. A save that gave up in under half the
+#: real 5 s bound gave up on the patched one; one that ran past it is the regression
+#: this tells apart (a dropped ``SET LOCAL`` or pool timeout), with over ten times the
+#: patched bound to spare for a loaded runner.
+GAVE_UP_ON_THE_PATCHED_BOUND = settings_store.RACK_ALGORITHM_WRITE_TIMEOUT / 2
 
 
 def _timed_in_thread(call: Callable[[], object]) -> float:

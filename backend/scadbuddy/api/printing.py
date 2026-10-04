@@ -142,6 +142,14 @@ def put_printer_bed_type(
     "/printers/{printer_id}/rack-algorithm",
     response_model=PrinterRackAlgorithm,
     summary="Remember how this printer's rack nozzle is picked",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "Nothing was saved: the database did not answer within the save's bound "
+                "(#1129). Whether resending is safe is #1216."
+            )
+        }
+    },
 )
 def put_printer_rack_algorithm(
     printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
@@ -154,7 +162,7 @@ def put_printer_rack_algorithm(
         # The store gives up on purpose rather than commit after the dialog has (#1129).
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"the rack algorithm was not saved ({type(error).__name__})",
+            f"nothing was saved: the database did not answer in time ({type(error).__name__})",
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
