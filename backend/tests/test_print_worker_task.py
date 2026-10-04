@@ -231,3 +231,35 @@ async def test_a_failed_follow_worker_restarts_both_workers(
     assert len(prints) == len(follows) == 2
     assert prints[0].stopped.is_set()
     assert "the print worker failed" in caplog.text
+
+
+async def test_the_old_watchers_handoff_does_not_hold_the_worker_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1091 4: each follow the boot handoff starts may wait out an RPC timeout on
+    a slow Temporal; the ``bambuddy`` queue is polled meanwhile, and a stop cancels a
+    handoff still pending rather than waiting for it."""
+    entered = asyncio.Event()
+    handing_off = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def pending(*args: Any) -> list[str]:
+        handing_off.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return []
+
+    monkeypatch.setattr(main, "resume_followed", pending)
+    monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, entered))
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(handing_off.wait(), 5)
+    await asyncio.wait_for(entered.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert cancelled.is_set()
