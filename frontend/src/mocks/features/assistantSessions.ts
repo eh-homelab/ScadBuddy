@@ -80,7 +80,24 @@ export function setSessionResources(
   state.views.set(sessionId, view({ ...state.views.get(sessionId), ...session, id: sessionId }))
 }
 
-const VALID_TYPES: readonly string[] = ['model', 'revision', 'preset', 'asset', 'render_job', 'output', 'print_run', 'print']
+/** Every kind the agent looks up (agent `sessions/touched.ts` LOOKUP_TYPES); a kind missing here fails typecheck. */
+const LOOKUP: Record<ResourceRef['type'], true> = {
+  model: true,
+  revision: true,
+  preset: true,
+  asset: true,
+  render_job: true,
+  output: true,
+  print_run: true,
+  print: true,
+  library: true,
+  font: true,
+  setting: true,
+  project: true,
+  bambuddy_file: true,
+  print_archive: true,
+}
+const VALID_TYPES: readonly string[] = Object.keys(LOOKUP)
 
 function touched(rows: readonly SessionResource[], ref: ResourceRef): boolean {
   return rows.some((r) => (ref.type === 'model' ? r.model === ref.id : r.type === ref.type && r.id === ref.id))
