@@ -1035,3 +1035,25 @@ async def test_the_reconciler_records_its_own_span_when_it_rejoins_a_trace(
     (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
     assert start.parent is not None
     assert start.parent.span_id == reconcile.context.span_id
+
+
+async def test_a_reconcile_that_finds_its_workflow_running_is_not_an_error_span(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # Review 7 of #1064: a pending row whose workflow is already running (a busy
+    # worker) is left alone, which is not a failure of the render.
+    async with temporal_client() as plain:
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        # No worker: the job stays pending with its workflow running.
+        await service.submit(SLUG, {"width": 16})
+        spans.clear()
+        assert await service.reconcile_once() == 0
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (reconcile,) = [s for s in finished if s.name == "render.reconcile"]
+    assert reconcile.status.status_code == trace.StatusCode.UNSET
+    assert (reconcile.attributes or {})["scadbuddy.reconcile.already_started"] is True
+    assert "scadbuddy.failure_class" not in (reconcile.attributes or {})

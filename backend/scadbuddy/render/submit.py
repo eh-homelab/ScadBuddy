@@ -252,11 +252,15 @@ class RenderService:
                     span(
                         "render.reconcile",
                         attributes={"scadbuddy.slug": job.slug, "scadbuddy.job_id": job.id},
-                    ),
+                    ) as reconcile,
                 ):
-                    await self._start(job, WorkflowIDConflictPolicy.FAIL)
-            except WorkflowAlreadyStartedError:
-                continue
+                    try:
+                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
+                    except WorkflowAlreadyStartedError:
+                        # Expected, not a failure: the workflow is running (a busy
+                        # worker), so the span stays UNSET (spec §6).
+                        reconcile.set_attribute("scadbuddy.reconcile.already_started", True)
+                        continue
             except Exception as error:
                 # One row that cannot start must not hold back the rows behind it.
                 self.metrics.store_errors.labels("start_workflow").inc()
