@@ -106,6 +106,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
     expect(await db.ready()).toBe(true)
     store = new OperationStore(db.sql)
     runs = 0
+    release = undefined
     agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -117,7 +118,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
   afterEach(async () => {
     await agent.stop()
     await drop()
-  })
+  }, 30_000)
 
   it('runs the effect, records it, and answers with the record', async () => {
     const id = `op-ok-${randomUUID()}`
@@ -169,14 +170,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
 
   it('answers 202 past the deadline, and records an execution terminated after its record as lost', async () => {
     const commands = new AgentCommands({ client: env.client, store, kinds, searchAttributes: false, deadlineMs: 1_000 })
-    const outcome = await commands.run('slow', {}, 'lost-key')
-    expect(outcome).toMatchObject({ status: 'running', operation: { kind: 'slow', status: 'running' } })
-    const op = (outcome as { operation: { id: string } }).operation
-    expect(await commands.get(op.id)).toMatchObject({ status: 'running' })
-    const execution = (await store.execution(op.id))!
-    await env.client.workflow.getHandle(execution.workflowId).terminate('test')
-    release!()
-    expect(await commands.get(op.id)).toMatchObject({ status: 'failed', error: { status: 500 } })
+    try {
+      // Before the record exists the answer is still-accepting (503); a client re-sends.
+      let outcome = await commands.run('slow', {}, 'lost-key')
+      for (let i = 0; outcome.status === 'problem' && outcome.problem.status === 503 && i < 20; i++) {
+        outcome = await commands.run('slow', {}, 'lost-key')
+      }
+      expect(outcome).toMatchObject({ status: 'running', operation: { kind: 'slow', status: 'running' } })
+      const op = (outcome as { operation: { id: string } }).operation
+      expect(await commands.get(op.id)).toMatchObject({ status: 'running' })
+      const execution = (await store.execution(op.id))!
+      await env.client.workflow.getHandle(execution.workflowId).terminate('test')
+      expect(await commands.get(op.id)).toMatchObject({ status: 'failed', error: { status: 500 } })
+    } finally {
+      release?.()
+    }
     // The same press answers from the record.
     expect(await commands.run('slow', {}, 'lost-key')).toMatchObject({ status: 'problem', problem: { status: 500 } })
   }, 60_000)
