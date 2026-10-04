@@ -9,7 +9,7 @@ import {
   type PooledCredential,
   runWithFallback,
 } from '../src/harness/fallback.js'
-import { DEFAULT_COOLDOWN_MS, type ProbeVerdict } from '../src/harness/credentialErrors.js'
+import { DEFAULT_COOLDOWN_MS, type FailureEvidence, type ProbeVerdict } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
@@ -62,6 +62,7 @@ function harness(script: Script) {
   const runs: HarnessRun[] = []
   const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
   const probes: (Credential & { model: string | undefined; signal: AbortSignal | undefined })[] = []
+  const refusals: { failure: FailureEvidence; requests: number }[] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -78,6 +79,7 @@ function harness(script: Script) {
     runs,
     reports,
     probes,
+    refusals,
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
@@ -102,6 +104,9 @@ function harness(script: Script) {
               return typeof probeVerdict === 'function' ? probeVerdict() : Promise.resolve(probeVerdict)
             },
             ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
+            onRefused: (failure, requests) => {
+              refusals.push({ failure, requests })
+            },
           },
         )) {
           messages.push(m)
@@ -317,6 +322,27 @@ describe('runWithFallback (#1093)', () => {
     const { messages } = await h.collect([A, B])
     // B resumed: its 0.05 already holds A's 0.03.
     expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 3 })
+  })
+
+  it('says what the turn ended on, and how many refused requests its turns count (#1101)', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), retry(529, 'server_error'), apiError('API Error: 429 slow down', 'rate_limit'), errorResult(429, 'API Error: 429 slow down', 0.03, 2)], throws: new Error('x') }
+        : { messages: [init(), apiError('API Error: 400 bad', 'invalid_request'), errorResult(null, 'API Error: 400 bad', 0.03, 1)], throws: new Error('x') },
+    )
+    const { messages } = await h.collect([A, B], {}, { verdict: 'unknown', until: new Date(Date.now() + 60_000) })
+    // B's own evidence: neither A's 529 retry nor its rate_limit category.
+    expect(h.refusals).toEqual([{ failure: { status: null, category: 'invalid_request', message: 'API Error: 400 bad' }, requests: 2 }])
+    // A's tool call (1 turn) and the two refused requests.
+    expect(messages.at(-1)).toMatchObject({ type: 'result', num_turns: 3 })
+    expect(kinds(messages).slice(-2)).toEqual(['assistant', 'result/success'])
+  })
+
+  it('reports no refusal when the turn ends on a reply, or on a synthetic message it went on from (#1101)', async () => {
+    const h = harness(() => [init(), apiError('API Error: 529', 'server_error'), text('Carried on.'), success('Carried on.')])
+    const { messages } = await h.collect([A])
+    expect(kinds(messages)).toEqual(['system/init', 'assistant', 'assistant', 'result/success'])
+    expect(h.refusals).toEqual([])
   })
 
   it('disables a rate-limited credential the probe finds refused outright', async () => {

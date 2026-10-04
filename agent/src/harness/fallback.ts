@@ -138,6 +138,13 @@ export type FallbackOptions = {
    * resumed query's `total_cost_usd` includes it (see `Spend`). 0 by default.
    */
   priorCostUsd?: number
+  /**
+   * Called when the turn ends on a failed model request, before its held
+   * synthetic message and result are yielded (#1101): the failure as this
+   * file judged it, and how many refused requests the result's `num_turns`
+   * counts (each attempt that ended on one counts its own).
+   */
+  onRefused?: (failure: FailureEvidence, refusedRequests: number) => void
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -156,11 +163,8 @@ function textOf(message: Extract<SDKMessage, { type: 'assistant' }>): string {
     .trim()
 }
 
-/**
- * The failed model request a result reports, if it reports one. Also how the
- * session manager tells a refused request from a reply (#1101).
- */
-export function apiFailure(
+/** The failed model request a result reports, if it reports one. */
+function apiFailure(
   result: SDKResultMessage | undefined,
   synthetic: FailureEvidence | undefined,
   lastRetry: FailureEvidence | undefined,
@@ -249,6 +253,8 @@ export async function* runWithFallback(
   let sawInit = false
   /** Whether this attempt resumes a session, so its total carries what came before. */
   let resumed = base.resume !== undefined
+  /** Earlier attempts that ended on a refused request, which their turns (in `spend`) count. */
+  let refusedRequests = 0
 
   for (let i = 0; i < candidates.length; i++) {
     const current = candidates[i] as PooledCredential
@@ -353,6 +359,8 @@ export async function* runWithFallback(
     }
 
     const release = function* (): Generator<SDKMessage> {
+      const ended = resultHeld ? apiFailure(result, synthetic, lastRetry) : undefined
+      if (ended) options.onRefused?.(ended, refusedRequests + 1)
       for (const m of held) yield withSpent(m, spend, resumed)
     }
     if (base.signal?.aborted) {
@@ -444,6 +452,7 @@ export async function* runWithFallback(
     }
     spend.usd += own
     spend.turns += turns
+    if (resultHeld) refusedRequests += 1
     if (sessionSeen !== undefined) {
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT

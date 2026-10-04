@@ -157,9 +157,7 @@ export class SdkEventMapper {
         }
       }
       case 'assistant': {
-        // `error` marks Claude Code's synthetic "API Error: …" message: not a
-        // reply. The turn's result reports the failure (manager.ts, #1101).
-        if (message.parent_tool_use_id !== null || message.error) return []
+        if (message.parent_tool_use_id !== null) return []
         const out: ServerEvent[] = []
         const apiId = message.message.id
         const streamed = this.streamedMessages.has(apiId)

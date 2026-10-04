@@ -77,19 +77,6 @@ describe('SdkEventMapper', () => {
     ])
   })
 
-  it('drops Claude Code’s synthetic API-error message: it is not a reply (#1101)', () => {
-    const synthetic = {
-      ...(assistant('msg_3', [{ type: 'text', text: 'Failed to authenticate. API Error: 401 API key is invalid.' }]) as object),
-      error: 'authentication_failed',
-    } as unknown as SDKMessage
-    expect(mapAll([synthetic])).toEqual([])
-    // Control: the same message without `error` is a reply.
-    expect(mapAll([assistant('msg_3', [{ type: 'text', text: 'Failed to authenticate.' }])]).map((e) => e.type)).toEqual([
-      'assistant.text.delta',
-      'assistant.text.done',
-    ])
-  })
-
   it('maps tool_use to tool.call with its tier, unknown tools as outward, once per id', () => {
     const events = mapAll([
       stream({ type: 'message_start', message: { id: 'msg_3' } }),

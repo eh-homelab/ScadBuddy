@@ -190,13 +190,21 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       says: /refused the request \(HTTP 400\): .*text content blocks must be non-empty/,
     },
     {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'Your credit balance is too low to access the Anthropic API',
+      code: 'api_error',
+      says: /the Claude credential was rejected \(HTTP 400\); check it under Settings → AI: .*credit balance is too low/i,
+    },
+    // A guard for the #1093 path: fallback.ts stops a 401 at its first retry and throws.
+    {
       status: 401,
       type: 'authentication_error',
       message: 'invalid x-api-key',
       code: 'turn_failed',
       says: /the Claude credential \(.*\) was refused: HTTP 401/,
     },
-  ])('a $status from the API ends the turn as an error, not as a reply, and counts no turn (#1101)', async (c) => {
+  ])('a $status ($type) from the API ends the turn as an error ($code), not as a reply, and counts no turn (#1101)', async (c) => {
     script = (r) =>
       conversation(r).includes('second')
         ? { text: 'second answer' }
@@ -233,6 +241,36 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
   }, 60_000)
 
+  it('a refusal on every credential counts no turn for any of them, and names the last one’s failure (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-refused-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    expect(fake.messageCalls().map((c) => c.headers.authorization)).toEqual([`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'api_error' })])
+  }, 60_000)
+
   it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
     script = (r) =>
       conversation(r).includes('tool_result')
@@ -252,6 +290,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 1 })
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)
+    // The panel's count follows the row's.
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 1 })])
     expect(events.map((e) => e.type).filter((t) => t.startsWith('tool.') || t.startsWith('assistant.') || t === 'error')).toEqual([
       'tool.call',
       'tool.result',
