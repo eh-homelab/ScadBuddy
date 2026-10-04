@@ -4,6 +4,7 @@ under the real names, on a dev server: the shape every command copies."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -43,7 +44,7 @@ from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.commands import start_command
-from scadbuddy.workflows.follow import FollowPrint, follow_id
+from scadbuddy.workflows.follow import FollowPrint, follow_id, follow_queue
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -234,11 +235,14 @@ def fake() -> Fake:
 @pytest.fixture
 async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
-    async with Worker(
-        client,
-        task_queue=queue,
-        workflows=[PrintRunWorkflow, FollowPrint],
-        activities=[*fake.all(), fake.follow_print],
+    async with (
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[PrintRunWorkflow, FollowPrint],
+            activities=fake.all(),
+        ),
+        Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
     ):
         yield queue
 
@@ -516,13 +520,16 @@ async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
     handle = client.get_workflow_handle(follow_id(output))
     queue = f"print-{uuid.uuid4().hex[:8]}"
     try:
-        async with Worker(
-            client,
-            task_queue=queue,
-            workflows=[PrintRunWorkflow, FollowPrint],
-            activities=[*fake.all(), fake.follow_print],
-            interceptors=[LosePokes()],
-            workflow_runner=UnsandboxedWorkflowRunner(),
+        async with (
+            Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LosePokes()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ),
+            Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
         ):
             arg = run_input(output_id=output)
             await start(client, queue, arg)
@@ -535,6 +542,54 @@ async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
         assert len(signals) == 1
     finally:
         await handle.terminate()
+
+
+class _LoseEveryPoke(WorkflowOutboundInterceptor):
+    async def signal_external_workflow(self, input: SignalExternalWorkflowInput) -> None:
+        raise ApplicationError("workflow execution already completed")
+
+
+class _LosingEveryPoke(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_LoseEveryPoke(outbound))
+
+
+class LoseEveryPoke(Interceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> type[WorkflowInboundInterceptor]:
+        return _LosingEveryPoke
+
+
+async def test_a_print_left_unfollowed_is_logged(
+    client: Client, fake: Fake, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 3: both rounds of start and poke failing leave the print to the
+    progress route; the run still succeeds, and says so."""
+    output = uuid.uuid4().hex
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    try:
+        with caplog.at_level(logging.WARNING, logger="temporalio.workflow"):
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LoseEveryPoke()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                arg = run_input(output_id=output)
+                await start(client, queue, arg)
+                assert (await ended(client, arg)).status == "succeeded"
+                # The follow comes after the record: the run's execution ends after it.
+                await client.get_workflow_handle(f"print-{arg.key}").result()
+    finally:
+        await handle.terminate()
+    assert any("could not follow the print" in r.message for r in caplog.records)
 
 
 async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
