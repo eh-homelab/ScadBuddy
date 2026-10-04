@@ -256,6 +256,35 @@ def test_any_other_otel_traces_exporter_turns_export_off_with_one_warning(
     assert value in warning.getMessage()
 
 
+@pytest.mark.parametrize(
+    ("value", "exports", "warns"),
+    [
+        ("", True, False),
+        ("otlp", True, False),
+        ("OTLP , console", True, False),
+        ("none", False, False),
+        ("console", False, True),
+        (",", False, True),
+    ],
+)
+def test_traces_exporter_value_decides_export_and_warning_together(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    value: str,
+    exports: bool,
+    warns: bool,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.core.tracing"):
+        provider, _ = _provider(
+            monkeypatch,
+            OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318",
+            OTEL_TRACES_EXPORTER=value,
+        )
+    assert tracing.traces_export_enabled() is exports
+    assert _processors(provider) == (2 if exports else 1)
+    assert ("OTEL_TRACES_EXPORTER" in caplog.text) is warns
+
+
 def test_export_is_off_without_an_endpoint_or_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -12,6 +12,8 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.render.jobs import timed_stage
 from scadbuddy.render.runner import OpenSCADError, run_openscad
 
+SENTINEL = "SECRET LINE"
+
 
 def test_a_timed_stage_is_a_span_and_still_timed(spans: InMemorySpanExporter) -> None:
     metrics = Metrics()
@@ -27,15 +29,18 @@ def test_a_timed_stage_is_a_span_and_still_timed(spans: InMemorySpanExporter) ->
 
 
 def test_a_failed_stage_is_an_error_with_its_class(spans: InMemorySpanExporter) -> None:
-    with pytest.raises(OpenSCADError), timed_stage(None)("render"):
-        raise OpenSCADError("openscad exited with 1", ["SECRET LINE"], 1, [], 0)
+    with pytest.raises(OpenSCADError) as raised, timed_stage(None)("render"):
+        raise OpenSCADError(f"openscad exited with 1: {SENTINEL}", [SENTINEL], 1, [], 0)
+    # The path under guard ran: the unscrubbed message carries the line, so the absence
+    # below comes from the scrubbing exporter, not from the constructor dropping it.
+    assert SENTINEL in str(raised.value)
     (failed,) = spans.get_finished_spans()
     assert (failed.attributes or {})["scadbuddy.failure_class"] == "OpenSCADError"
     # The stderr line is what must never be exported (spec §6), in any part of the span.
     assert [event.name for event in failed.events] == ["exception"]
     for part in (failed.attributes, [e.attributes for e in failed.events], failed.status):
-        assert "SECRET LINE" not in repr(part)
-    assert "SECRET LINE" not in str(failed.status.description)
+        assert SENTINEL not in repr(part)
+    assert SENTINEL not in str(failed.status.description)
 
 
 async def test_an_openscad_call_is_an_export_span(

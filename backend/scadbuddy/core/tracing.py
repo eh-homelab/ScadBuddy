@@ -69,14 +69,23 @@ def tracing_disabled() -> bool:
     return os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true"
 
 
+def _traces_exporters() -> frozenset[str] | None:
+    """``OTEL_TRACES_EXPORTER`` parsed once: the trimmed, lower-cased names of its comma
+    list, or ``None`` when it is unset or empty. Both `_unsupported_exporter` and
+    `traces_export_enabled` read it here, so they cannot disagree about a value."""
+    raw = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
+    if not raw:
+        return None
+    return frozenset(name.strip().lower() for name in raw.split(","))
+
+
 def _unsupported_exporter() -> str | None:
     """``OTEL_TRACES_EXPORTER`` when it names neither ``otlp`` (the one exporter shipped)
     nor ``none``: such a value turns export off rather than being read as ``otlp``."""
-    raw = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
-    names = {name.strip().lower() for name in raw.split(",")}
-    if not raw or "otlp" in names or names == {"none"}:
+    names = _traces_exporters()
+    if names is None or "otlp" in names or names == {"none"}:
         return None
-    return raw
+    return os.environ["OTEL_TRACES_EXPORTER"].strip()
 
 
 def traces_export_enabled() -> bool:
@@ -86,8 +95,8 @@ def traces_export_enabled() -> bool:
     any case, alone or in a comma list)."""
     if tracing_disabled():
         return False
-    exporters = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
-    if exporters and "otlp" not in {name.strip().lower() for name in exporters.split(",")}:
+    names = _traces_exporters()
+    if names is not None and "otlp" not in names:
         return False
     return any(
         os.environ.get(name, "").strip()
