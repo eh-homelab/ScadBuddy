@@ -113,7 +113,8 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   from the returned job and adds a **span link** to it on its own submit span,
   not a parent. The reconciler starts a stale row's workflow under that same
   `traceparent`, so a render started late still lands in its first caller's
-  trace. The column is written whenever the submit span's context is valid
+  trace, under a `render.reconcile` span that shows the reconciler started it
+  (a row with no valid `traceparent` gets that span as a root). The column is written whenever the submit span's context is valid
   and sampled. That includes a process with no exporter, which still creates
   and propagates spans (§3); persisting a context nobody exports is harmless.
   A row gets no `traceparent`, and a coalesced request no link, only when:
