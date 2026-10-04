@@ -246,7 +246,7 @@ check 'a TraceQL query naming two services fails' \
 # The agent's span names are checked once its tracing module exists (row 3).
 good
 mkdir -p "$r/agent/src"
-: > "$r/agent/src/telemetry.ts"
+mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
 turn=$(tempo_panel 'agent.turn')
 approval=$(tempo_panel 'agent.approval')
 check 'agent span names absent from agent/src fail once it traces' \
@@ -255,20 +255,20 @@ check 'agent span names absent from agent/src fail once it traces' \
 
 good
 mkdir -p "$r/agent/src"
-: > "$r/agent/src/telemetry.ts"
+mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
 printf 'const t = tracer()\nt.startSpan("agent.turn")\nwithSpan("agent.approval", {}, run)\n' > "$r/agent/src/spans.ts"
 check 'agent span names passed to a tracer call pass' '0:' "$(run)"
 
 good
 mkdir -p "$r/agent/src"
-: > "$r/agent/src/telemetry.ts"
+mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
 printf 'export const TURN_SPAN = "agent.turn"\nexport const APPROVAL_SPAN = "agent.approval"\n' > "$r/agent/src/spans.ts"
 check 'agent span-name constants pass' '0:' "$(run)"
 
 # Only a constant named *_SPAN is a span name; other SPAN-ish constants are not.
 good
 mkdir -p "$r/agent/src"
-: > "$r/agent/src/telemetry.ts"
+mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
 printf 'export const SPAN_ATTR_TURN = "agent.turn"\nexport const SPAN_NAME_APPROVAL = "agent.approval"\n' > "$r/agent/src/spans.ts"
 check 'SPAN_ATTR_* and SPAN_NAME_* constants are not span names' \
   "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $turn target B: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
@@ -277,7 +277,7 @@ check 'SPAN_ATTR_* and SPAN_NAME_* constants are not span names' \
 # A name that is only quoted somewhere else is not a span the agent emits.
 good
 mkdir -p "$r/agent/src/mocks" "$r/agent/test"
-: > "$r/agent/src/telemetry.ts"
+mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
 printf 'const x = ["agent.turn", "agent.approval"]\nlog("agent.turn")\n' > "$r/agent/src/log.ts"
 printf 'startSpan("agent.turn")\n' > "$r/agent/src/spans.test.ts"
 printf 'startSpan("agent.turn")\n' > "$r/agent/src/mocks/m.ts"

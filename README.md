@@ -800,38 +800,6 @@ database queries and Bambuddy calls from background loops; it keeps everything t
 starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
 
-The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
-directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
-in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
-rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
-overlay will list it as a remote resource pinned to a full commit SHA, once
-clusters#1596 Phase 5 adds the line, and the deploy
-moves that pin with the image (above), so the dashboard shown is the one written
-for the build that is serving. The overlay must namespace its own resources with
-an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
-ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
-Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default
-uid `tempo`); until clusters#1596 Phase 4 adds Tempo the trace tables are empty
-and the metric panels are unaffected. CI's `lint` job checks the dashboard
-(`.github/scripts/lint-dashboard.sh`): every series it reads must be declared in
-`core/metrics.py`, and every span name must be one the service emits.
-
-### Tracing (#988)
-
-The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
-cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
-exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
-`otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
-also turns it off, with a warning in the log, since only the OTLP exporter ships.
-`OTEL_EXPORTER_OTLP_TRACES_HEADERS`
-and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
-variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
-`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
-database queries and Bambuddy calls from background loops; it keeps everything that
-starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
-problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
-
 **Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
 `POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
 (`backend/scadbuddy/telemetry/`) forwards it in the background to
@@ -861,6 +829,22 @@ only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvic
 that flag lets any loopback caller name its own client.
 `scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
 `queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+
+The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
+directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
+in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
+rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
+overlay will list it as a remote resource pinned to a full commit SHA, once
+clusters#1596 Phase 5 adds the line, and the deploy
+moves that pin with the image (above), so the dashboard shown is the one written
+for the build that is serving. The overlay must namespace its own resources with
+an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
+ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
+Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default
+uid `tempo`); until clusters#1596 Phase 4 adds Tempo the trace tables are empty
+and the metric panels are unaffected. CI's `lint` job checks the dashboard
+(`.github/scripts/lint-dashboard.sh`): every series it reads must be declared in
+`core/metrics.py`, and every span name must be one the service emits.
 
 ## Development
 

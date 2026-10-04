@@ -46,7 +46,7 @@
 #     in a non-test source file under agent/src or frontend/src: files named
 #     `*.test.*` and the `test`, `mocks` and `e2e` directories are excluded,
 #     so a name that only a fixture or log line quotes does not count. That
-#     search runs once the service's tracing module (agent/src/telemetry.ts,
+#     search runs once the service's tracing module (agent/src/telemetry/setup.ts,
 #     frontend/src/lib/tracing.ts) exists, and is noted as unchecked until then
 #   - `kustomize build deploy/grafana` succeeds and yields exactly one
 #     ConfigMap, `scadbuddy-dashboard` in `cattle-dashboards`, labelled
@@ -239,7 +239,7 @@ emitted() { # service name -> 0 when that service emits a span of that name
   case "$service" in
     scadbuddy-api) grep -qxF "$name" <<< "$api_names"$'\n'"$both_names"; return ;;
     scadbuddy-worker) grep -qxF "$name" <<< "$worker_names"$'\n'"$both_names"; return ;;
-    scadbuddy-agent) src="$root/agent/src" probe="$root/agent/src/telemetry.ts" ;;
+    scadbuddy-agent) src="$root/agent/src" probe="$root/agent/src/telemetry/setup.ts" ;;
     scadbuddy-web) src="$root/frontend/src" probe="$root/frontend/src/lib/tracing.ts" ;;
   esac
   if [ ! -f "$probe" ]; then
