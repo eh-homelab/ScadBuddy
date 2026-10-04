@@ -105,9 +105,6 @@ STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 MAY_HAVE_QUEUED = SearchAttributeKey.for_bool("ScadbuddyMayHaveQueued")
 
 
-#: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
-FOLLOW_PATCH = "follow-print"
-
 #: What a run cancelled before it printed answers, before or during its record: nothing
 #: was queued.
 CANCELLED = PrintRunError(
@@ -326,12 +323,7 @@ class PrintRunWorkflow:
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
-        # Patched: a run started before #1053 replays without the follow (review #1061).
-        if (
-            workflow.patched(FOLLOW_PATCH)
-            and input.source.kind == "output"
-            and input.source.output_id is not None
-        ):
+        if input.source.kind == "output" and input.source.output_id is not None:
             await self._follow(input.source.output_id)
         return finished
 

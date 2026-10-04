@@ -9,10 +9,12 @@ These histories are the phase-1 baseline (#1052), recorded before any ``PrintRun
 the wild: ``succeeded``, ``refused``, ``enqueue_failed``, ``cancelled_during_print`` (a
 cancel while ``print_plan`` runs: the run is recorded failed) and
 ``cancelled_during_insert`` (a cancel while ``print_insert`` runs: the row is recorded
-cancelled). They were re-recorded once, when the pre-merge patches came out (#1236).
-Never re-record them again: a later change to the workflow's commands, including a new
-activity, goes behind ``workflow.patched`` and adds a history recorded on the changed
-code beside them, so both replay.
+cancelled), with ``succeeded_followed`` (an output's run that starts its ``FollowPrint``,
+#1053). All six were re-recorded once, for #1236, when the pre-merge patches came out
+(the follow's included, so every output's run follows its print). Never re-record them
+again: a later change to the workflow's commands, including a new activity, goes behind
+``workflow.patched`` and adds a history recorded on the changed code beside them, so
+both replay.
 """
 
 from __future__ import annotations
