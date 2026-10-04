@@ -786,6 +786,34 @@ database queries and Bambuddy calls from background loops; it keeps everything t
 starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
 
+**Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
+`POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
+(`backend/scadbuddy/telemetry/`) forwards it in the background to
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is) or else
+`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
+`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
+public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
+`same-origin`, so a page on another allowed origin is refused), at
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
+`service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
+reduced to the backend route template its path matches, or to its origin (a relative
+one on no route is dropped), as a server span keeps only its route; a URL on any host
+but those same origins keeps only its origin, since that host has none of the routes.
+No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
+answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
+export, arrives with row 4 of #988). Its rate
+limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+client), so with more than one API replica the overall ceiling multiplies.
+**`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
+whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
+`SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
+gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
+`FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
+that flag lets any loopback caller name its own client.
+`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
+`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+
 ## Development
 
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
