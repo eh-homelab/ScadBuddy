@@ -15,6 +15,9 @@
 #     by one of those variables, never by a hard-coded uid; a TraceQL target
 #     uses ${DS_TEMPO}, and a PromQL target or a query variable
 #     ${DS_PROMETHEUS}, so a missing Tempo empties the trace panels only
+#   - every target is TraceQL (queryType `traceql`) or PromQL (has `expr`);
+#     anything else, a Tempo `traceqlSearch` target included, is rejected as an
+#     unsupported target kind, since the checks below would not see it
 #   - every `scadbuddy_*` series a query reads is one backend/scadbuddy/core/
 #     metrics.py exposes, by its constructor: a Gauge as its name, a Counter as
 #     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
@@ -25,8 +28,14 @@
 #     checked against the service that says it), and every span `name="…"` in
 #     it is one that service emits; `name=~`, `name!~` and `name!=` are
 #     rejected, since this lint cannot check them. Emitted means, for
-#     scadbuddy-api and scadbuddy-worker, `render.<RenderStage>` or a literal
-#     passed to `span(`/`detached_span(` in backend/scadbuddy; for
+#     scadbuddy-worker, `render.<RenderStage>` or a literal passed to
+#     `span(`/`detached_span(` under backend/scadbuddy/render/ (not submit.py),
+#     workflows/ or worker.py; for scadbuddy-api, such a literal anywhere else
+#     in backend/scadbuddy (render/submit.py included: render.submit,
+#     render.reconcile). `openscad.export` is allowed on both, since the API
+#     runs openscad too (schema and parameter checks). The in-process worker
+#     mode (a dev setting) would put worker spans on the API; it is not modelled.
+#     For
 #     scadbuddy-agent and scadbuddy-web, a literal passed to a tracer call
 #     (`startSpan(`, `startActiveSpan(`, `withSpan(`, `traceAction(`) or
 #     assigned to a `*_SPAN` constant (the agent's `TURN_SPAN = 'agent.turn'`)
@@ -112,12 +121,16 @@ done < <(jq -r "$panels"'
 # datasource, a Tempo panel shows no data and nothing else is affected, so no
 # PromQL target and no variable may sit on ${DS_TEMPO}.
 while IFS=$'\t' read -r where want ds; do
+  if [ "$want" = UNSUPPORTED ]; then
+    problem "$rel" "$where: unsupported target kind (queryType \"$ds\"); a target is TraceQL (queryType traceql) or PromQL (expr)"
+    continue
+  fi
   [ "$ds" = "\${$want}" ] || problem "$rel" "$where: must use \${$want}, not \"$ds\""
 done < <(jq -r "$panels"'
   [ (panels | . as $p | .targets[]?
       | if .queryType == "traceql" then ["panel \($p.id) target \(.refId)", "DS_TEMPO", (.datasource.uid // "")]
         elif has("expr") then ["panel \($p.id) target \(.refId)", "DS_PROMETHEUS", (.datasource.uid // "")]
-        else empty end),
+        else ["panel \($p.id) target \(.refId)", "UNSUPPORTED", (.queryType // "")] end),
     (.templating.list[]? | select(.type == "query") | ["variable \(.name)", "DS_PROMETHEUS", (.datasource.uid // "")]) ]
   | .[] | @tsv' "$dash")
 
@@ -147,13 +160,30 @@ done < <(jq -r "$panels"' [panels | .targets[]? | .expr // empty] + [.templating
 
 # The span names the backend emits: one per render stage (render/jobs.py's
 # `render.{name}`), and every literal its code passes to span()/detached_span().
-backend_names=$(
+span_literals() { # python files... -> the literals passed to span()/detached_span()
+  cat "$@" | tr '\n' ' ' \
+    | grep -oE '(^|[^A-Za-z_])(detached_)?span\(\s*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"'
+}
+bk="$root/backend/scadbuddy"
+# The worker runs the render pipeline: render/ (but for submit.py, which the API
+# calls), workflows/ and worker.py.
+mapfile -t worker_files < <(
+  { find "$bk/render" "$bk/workflows" -name '*.py' ! -path "$bk/render/submit.py"; echo "$bk/worker.py"; } | sort
+)
+mapfile -t api_files < <(
+  find "$bk" -name '*.py' ! -path "$bk/render/*" ! -path "$bk/workflows/*" ! -path "$bk/worker.py"
+  echo "$bk/render/submit.py"
+)
+worker_names=$(
   {
     grep -E '^RenderStage = Literal\[' "$metrics_py" | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./'
-    find "$root/backend/scadbuddy" -name '*.py' -exec cat {} + | tr '\n' ' ' \
-      | grep -oE '(^|[^A-Za-z_])(detached_)?span\(\s*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"'
+    span_literals "${worker_files[@]}"
   } | sort -u
 )
+api_names=$(span_literals "${api_files[@]}" | sort -u)
+# openscad.export is run_openscad's span, and the API calls run_openscad too
+# (library/scad.py, api/params.py, api/models.py): both services emit it.
+both_names="openscad.export"
 # The names a TS tree passes to a tracer, outside its tests and fixtures (the
 # header says which calls and files count).
 ts_names() { # source dir
@@ -167,7 +197,8 @@ unchecked=""
 emitted() { # service name -> 0 when that service emits a span of that name
   local service=$1 name=$2 src probe
   case "$service" in
-    scadbuddy-api | scadbuddy-worker) grep -qxF "$name" <<< "$backend_names"; return ;;
+    scadbuddy-api) grep -qxF "$name" <<< "$api_names"$'\n'"$both_names"; return ;;
+    scadbuddy-worker) grep -qxF "$name" <<< "$worker_names"$'\n'"$both_names"; return ;;
     scadbuddy-agent) src="$root/agent/src" probe="$root/agent/src/telemetry.ts" ;;
     scadbuddy-web) src="$root/frontend/src" probe="$root/frontend/src/lib/tracing.ts" ;;
   esac

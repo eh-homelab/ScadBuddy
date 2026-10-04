@@ -168,6 +168,40 @@ check 'an unknown service.name fails' \
 
 good
 p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-api\\\" && name=\\\"render.render\\\"}\""
+check 'a worker-only span named under scadbuddy-api fails' \
+  "1:$f: panel $p target A: scadbuddy-api emits no span named \"render.render\"" \
+  "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=\\\"render.submit\\\"}\""
+check 'an API-only span named under scadbuddy-worker fails' \
+  "1:$f: panel $p target A: scadbuddy-worker emits no span named \"render.submit\"" \
+  "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-api\\\" && name=\\\"openscad.export\\\"}\""
+check 'a span both backend services emit passes under either' '0:' "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
+edit "(.panels[] | select(.id == $p) | .targets[0].queryType) = \"traceqlSearch\""
+check 'a Tempo search target that is not TraceQL fails' \
+  "1:$f: panel $p target A: unsupported target kind (queryType \"traceqlSearch\"); a target is TraceQL (queryType traceql) or PromQL (expr)" \
+  "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
+# shellcheck disable=SC2016 # a literal ${DS_PROMETHEUS}, for jq
+edit "(.panels[] | select(.id == $p) | .targets[0].datasource.uid) = \"\${DS_PROMETHEUS}\""
+check 'a TraceQL target on the Prometheus datasource fails' \
+  "1:$f: panel $p target A: must use \${DS_TEMPO}, not \"\${DS_PROMETHEUS}\"" \
+  "$(run)"
+
+good
+p=$(tempo_panel 'render.render')
 edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=~\\\"render.*\\\"}\""
 check 'a span-name regex fails' \
   "1:$f: panel $p target A: match span names exactly (name=\"…\"), so this lint can check them" \
