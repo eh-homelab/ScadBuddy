@@ -203,9 +203,7 @@ async def run_operation(
             before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and (
-            refused or error.status != status.HTTP_503_SERVICE_UNAVAILABLE
-        ):
+        if claimed is not None and (refused or error.status != status.HTTP_503_SERVICE_UNAVAILABLE):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
