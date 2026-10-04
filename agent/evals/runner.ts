@@ -158,6 +158,7 @@ export async function runScenario(
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
     renderWaitMs: 5_000,
+    operationFollowMs: 15 * 60_000,
   }
   const principal = { id: `eval:${scenario.id}`, kind: 'browser' as const, tiers: tiersUpTo('outward') }
   const stop = new AbortController()

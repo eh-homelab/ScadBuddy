@@ -17,6 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
 from tests.api.test_print_history import link, mock_archive
@@ -117,6 +118,35 @@ def test_a_slow_bambuddy_read_in_the_check_is_bambuddys_504_not_an_unexpected_50
     assert response.json()["type"].endswith("/bambuddy-unavailable")
     assert time.monotonic() - began < 12
     assert not queue.called
+
+
+@respx.mock
+def test_a_slow_check_that_is_not_bambuddy_is_not_blamed_on_bambuddy(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file-into-project check never calls Bambuddy: a slow read of the template is
+    ScadBuddy's own timeout, not ``bambuddy-unavailable`` (review #1063 1)."""
+    configure(client)
+    output_id = make_output(client, model)
+    effect = uploads(41)
+
+    async def slow_stem(*args: Any) -> str:
+        await asyncio.sleep(9)
+        return "never"
+
+    monkeypatch.setattr(bambuddy_operations, "output_stem", slow_stem)
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/project-file",
+        json={"project_id": 7},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
+    )
+
+    assert response.status_code == 504, response.text
+    problem = response.json()
+    assert problem["type"] == "about:blank"
+    assert problem["detail"] == "the check did not finish within 6s; nothing was done"
+    assert not effect.called
 
 
 # --- every Bambuddy kind (review #1063 7) ----------------------------------------

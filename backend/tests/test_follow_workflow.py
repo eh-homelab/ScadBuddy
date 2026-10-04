@@ -5,17 +5,26 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.common import RetryPolicy
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, MAX_AGE, FollowInput
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows import follow as follow_module
-from scadbuddy.workflows.follow import FollowPrint, follow, follow_id, resume_followed
+from scadbuddy.workflows.follow import (
+    FollowPrint,
+    follow,
+    follow_id,
+    follow_queue,
+    resume_followed,
+)
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -43,6 +52,22 @@ class FakeFollow:
         return "settled"
 
 
+@asynccontextmanager
+async def serving(
+    client: Client, queue: str, fake: FakeFollow, **kwargs: Any
+) -> AsyncIterator[None]:
+    """`FollowPrint` on ``queue``; its activity only on the follow queue (review #1091
+    1), so a follow scheduled anywhere else never runs."""
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            Worker(client, task_queue=queue, workflows=[FollowPrint], **kwargs)
+        )
+        await stack.enter_async_context(
+            Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print])
+        )
+        yield
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[Client]:
     async with temporal_client() as connected:
@@ -59,9 +84,7 @@ async def test_it_completes_when_the_follow_ends(client: Client) -> None:
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
     fake.end.set()
-    async with Worker(
-        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-    ):
+    async with serving(client, queue, fake):
         await follow(client, queue, output)
         result = await client.get_workflow_handle(follow_id(output)).result()
     assert result == "settled"
@@ -71,9 +94,7 @@ async def test_it_completes_when_the_follow_ends(client: Client) -> None:
 async def test_a_poke_restarts_the_follow_fresh(client: Client) -> None:
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
-    async with Worker(
-        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-    ):
+    async with serving(client, queue, fake):
         await follow(client, queue, output)
         await _until(lambda: len(fake.attempts) == 1)
         handle = client.get_workflow_handle(follow_id(output))
@@ -92,14 +113,8 @@ async def test_pokes_past_the_bound_continue_as_new(
     monkeypatch.setattr(follow_module, "MAX_POKES", 2)
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
-    async with Worker(
-        client,
-        task_queue=queue,
-        workflows=[FollowPrint],
-        activities=[fake.follow_print],
-        # Unsandboxed, so the patched bound is the one the workflow reads.
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    ):
+    # Unsandboxed, so the patched bound is the one the workflow reads.
+    async with serving(client, queue, fake, workflow_runner=UnsandboxedWorkflowRunner()):
         await follow(client, queue, output)
         handle = client.get_workflow_handle(follow_id(output))
         first = (await handle.describe()).run_id
@@ -118,9 +133,7 @@ async def test_a_finished_follow_can_start_again(client: Client) -> None:
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
     fake.end.set()
-    async with Worker(
-        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-    ):
+    async with serving(client, queue, fake):
         await follow(client, queue, output)
         await client.get_workflow_handle(follow_id(output)).result()
         await follow(client, queue, output)
@@ -153,9 +166,7 @@ async def test_resume_followed_starts_recent_prints_and_clears_the_old_log(
     fake = FakeFollow()
     fake.end.set()
     try:
-        async with Worker(
-            client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-        ):
+        async with serving(client, queue, fake):
             resumed = await resume_followed(projection.pool, client, queue, now)
             await client.get_workflow_handle(follow_id(recent)).result()
         with projection.pool.connection() as conn:
@@ -212,9 +223,7 @@ async def test_follow_starts_one_execution_and_leaves_it_running(client: Client)
     `PrintRun`."""
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
-    async with Worker(
-        client, task_queue=queue, workflows=[FollowPrint], activities=[fake.follow_print]
-    ):
+    async with serving(client, queue, fake):
         await follow(client, queue, output)
         await _until(lambda: len(fake.attempts) == 1)
         first = (await client.get_workflow_handle(follow_id(output)).describe()).run_id
@@ -225,3 +234,48 @@ async def test_follow_starts_one_execution_and_leaves_it_running(client: Client)
         await client.get_workflow_handle(follow_id(output)).result()
     assert first == second
     assert len(fake.attempts) == 1
+
+
+class SlowFirstAttempt:
+    """`follow_print` whose first attempt outlives its start-to-close timeout."""
+
+    def __init__(self) -> None:
+        self.attempts: list[int] = []
+
+    @activity.defn(name=FOLLOW_ACTIVITY)
+    async def follow_print(self, input: FollowInput) -> str:
+        self.attempts.append(activity.info().attempt)
+        if activity.info().attempt == 1:
+            while True:
+                activity.heartbeat()
+                await asyncio.sleep(0.05)
+        return "settled"
+
+
+async def test_an_attempt_that_times_out_is_retried(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1091 2: the start-to-close timeout is just another retry; only the age
+    the heartbeat carries (`MAX_AGE`) ends a follow."""
+    monkeypatch.setattr(follow_module, "ATTEMPT_TIMEOUT", timedelta(seconds=1))
+    monkeypatch.setattr(
+        follow_module, "FOLLOW_RETRY", RetryPolicy(initial_interval=timedelta(milliseconds=100))
+    )
+    queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
+    slow = SlowFirstAttempt()
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=queue,
+                workflows=[FollowPrint],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            )
+        )
+        await stack.enter_async_context(
+            Worker(client, task_queue=follow_queue(queue), activities=[slow.follow_print])
+        )
+        await follow(client, queue, output)
+        result = await asyncio.wait_for(client.get_workflow_handle(follow_id(output)).result(), 20)
+    assert result == "settled"
+    assert slow.attempts == [1, 2]

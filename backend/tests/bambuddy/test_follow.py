@@ -370,6 +370,46 @@ def test_a_worker_shutdown_ends_the_attempt_at_once(paths: DataPaths) -> None:
     assert isinstance(error, ApplicationError) and not error.non_retryable
 
 
+def test_a_cancelled_attempt_stops_reading(paths: DataPaths) -> None:
+    """Review #1091 8: a poke cancels the running attempt; its inner follow ends with
+    it, so it never reads beside the fresh attempt."""
+    meta = write_output(paths)
+    read = Script(progress("running"))
+    follower, _ = follower_for(paths, read, min_interval=0.02, max_interval=0.02)
+    follower.observer.observe(meta, progress("running"))
+    inner = follower.follow
+    ended: list[BaseException] = []
+
+    async def following(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await inner(*args, **kwargs)
+        except BaseException as error:
+            ended.append(error)
+            raise
+
+    follower.follow = following  # type: ignore[method-assign]
+    env = ActivityEnvironment()
+
+    async def scenario() -> int:
+        attempt = asyncio.ensure_future(
+            env.run(FollowActivities(follower).follow_print, FollowInput(output_id=OUTPUT))
+        )
+        async with asyncio.timeout(2):
+            while read.reads < 2:
+                await asyncio.sleep(0.01)
+        env.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(attempt, 2)
+        await asyncio.sleep(0)
+        reads = read.reads
+        await asyncio.sleep(0.2)
+        return reads
+
+    reads = asyncio.run(scenario())
+    assert len(ended) == 1 and isinstance(ended[0], asyncio.CancelledError)
+    assert read.reads == reads
+
+
 def test_a_settled_print_runs_each_settled_hook_once(paths: DataPaths) -> None:
     """#836: a feature hears that a print settled (the rack credits its hotends), after
     its ``print.settled`` is published."""

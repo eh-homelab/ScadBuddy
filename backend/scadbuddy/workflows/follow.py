@@ -2,7 +2,8 @@
 
 It replaces the API process's watcher tasks (#268): Temporal keeps the follow across a
 restart, so nothing records prints to resume or locks one per replica. The reads are
-one heartbeating activity (`bambuddy/follow.py`), on the ``bambuddy`` queue.
+one heartbeating activity (`bambuddy/follow.py`), on a queue of its own beside the
+``bambuddy`` one (`follow_queue`).
 
 The ``poke`` signal is a new print of the output (`PrintRun`): the running attempt is
 cancelled and a fresh one reads at once, with its age from now. A progress read only
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
@@ -32,19 +35,34 @@ FOLLOW_WORKFLOW = "FollowPrint"
 POKE_SIGNAL = "poke"
 #: Each wait heartbeats at least every `HEARTBEAT_SLICE` (5 s).
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
-#: Bambuddy down for a while is the attempt's own error interval; a crash retries.
+#: Bambuddy down for a while is the attempt's own error interval; a crash or a
+#: timeout retries, without end.
 FOLLOW_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=5), maximum_interval=timedelta(minutes=1)
 )
+#: Not a bound on the follow: a print that keeps moving past it (a long print, a
+#: multi-plate queue) times the attempt out, and `FOLLOW_RETRY` starts the next, which
+#: resumes the age its heartbeat carried. Only `MAX_AGE` without a change, counted
+#: from that age, ends a follow (or the print settling, or going).
+ATTEMPT_TIMEOUT = MAX_AGE * 2
 #: Each poke adds an attempt's events to the history: past this many, or when the
 #: server suggests it, the follow continues as new (with a fresh attempt).
 MAX_POKES = 100
 #: The progress route's start or poke never holds its read up for long.
 RPC_TIMEOUT = timedelta(seconds=5)
+#: How long the progress route trusts a follow it found running (review #1091 4).
+FOLLOWED_FOR = 60.0
 
 
 def follow_id(output_id: str) -> str:
     return f"follow-print-{output_id}"
+
+
+def follow_queue(task_queue: str) -> str:
+    """Where ``follow_print`` runs, beside ``task_queue`` (``bambuddy``) on a worker of
+    its own: a follow holds its slot for hours, and must never take one a ``PrintRun``
+    or an ``Operation`` is waiting for (review #1091 1)."""
+    return f"{task_queue}-follow"
 
 
 @workflow.defn(name=FOLLOW_WORKFLOW)
@@ -65,9 +83,8 @@ class FollowPrint:
                 FOLLOW_ACTIVITY,
                 FollowInput(output_id=output_id, fresh=fresh),
                 result_type=str,
-                # A print that keeps moving is followed past `MAX_AGE`; a quiet one
-                # ends within it, so a day more is the attempt's outer bound.
-                start_to_close_timeout=MAX_AGE * 2,
+                task_queue=follow_queue(workflow.info().task_queue),
+                start_to_close_timeout=ATTEMPT_TIMEOUT,
                 heartbeat_timeout=FOLLOW_HEARTBEAT,
                 retry_policy=FOLLOW_RETRY,
             )
@@ -109,6 +126,50 @@ async def follow(client: Client, task_queue: str, output_id: str) -> bool:
         logger.warning("could not follow a print", extra={"output_id": output_id}, exc_info=True)
         return False
     return True
+
+
+class Follows:
+    """The progress route's follows (#268, review #1091 4, 5): each started in the
+    background, so a Temporal that does not answer never holds a read up. An output
+    found followed is not asked about again for `FOLLOWED_FOR`: each change of a print
+    re-reads its progress in every open UI. The lifespan cancels what is still starting
+    (`aclose`)."""
+
+    def __init__(
+        self,
+        client: Client,
+        task_queue: str,
+        *,
+        followed_for: float = FOLLOWED_FOR,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.client = client
+        self.task_queue = task_queue
+        self.followed_for = followed_for
+        self.clock = clock
+        #: Kept until they finish: a task nothing references may be collected mid-flight.
+        self.starting: set[asyncio.Task[bool]] = set()
+        self._followed: dict[str, float] = {}
+
+    def ensure(self, output_id: str) -> None:
+        if self._followed.get(output_id, float("-inf")) > self.clock():
+            return
+        task = asyncio.create_task(self._start(output_id))
+        self.starting.add(task)
+        task.add_done_callback(self.starting.discard)
+
+    async def _start(self, output_id: str) -> bool:
+        if not await follow(self.client, self.task_queue, output_id):
+            return False
+        now = self.clock()
+        self._followed = {key: until for key, until in self._followed.items() if until > now}
+        self._followed[output_id] = now + self.followed_for
+        return True
+
+    async def aclose(self) -> None:
+        for task in self.starting:
+            task.cancel()
+        await asyncio.gather(*self.starting, return_exceptions=True)
 
 
 def _recent_watches(pool: ConnectionPool[Any], cutoff: datetime) -> list[str]:

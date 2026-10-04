@@ -399,10 +399,14 @@ print runs and every other Bambuddy write (send, project files, projects, reprin
 timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
 **not** versioned: any replica polling the queue may take any task on it.
 
-- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
-  activities to that queue. A replica still on the old build takes those tasks and
-  fails them as unregistered; nothing is corrupted (the task is retried), but each
-  Bambuddy write that lands there stalls until the old pod is gone. Roll this release
+- **Upgrading to the release with #1053** adds two workflow types (`Operation`,
+  `FollowPrint`) and their activities to that queue, and a second queue beside it,
+  `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
+  `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
+  slot a print run or an operation needs. A replica still on the old build takes the
+  new tasks on the `bambuddy` queue and fails them as unregistered; nothing is
+  corrupted (the task is retried), but each Bambuddy write that lands there stalls
+  until the old pod is gone. Roll this release
   out with `Recreate`, or scale the old replicas to 0 before the new ones start.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   should be at least the Temporal namespace's retention. A retry of an operation whose

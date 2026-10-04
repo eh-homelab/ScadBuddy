@@ -47,6 +47,12 @@ export type ToolServices = {
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
   renderWaitMs: number
+  /**
+   * How long a command follows an operation's 202 (tools/command.ts, review #1063), as the
+   * browser's `printRunPoll.operationFollowMs` does. It must exceed the longest kind's
+   * `run_timeout` plus the run's cancel grace (library pins: 600 s + 30 s).
+   */
+  operationFollowMs: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */

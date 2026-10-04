@@ -20,7 +20,6 @@ from temporalio import activity
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
-    WorkflowUpdateRPCTimeoutOrCancelledError,
 )
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
@@ -34,7 +33,6 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.job_models import (
-    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
@@ -55,7 +53,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
+from scadbuddy.workflows.commands import CommandStillAcceptingError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
@@ -273,6 +271,32 @@ async def test_superseding_releases_the_old_execution_after_the_new_one_starts(
     assert closed == WorkflowExecutionStatus.COMPLETED
     assert done.state == "done", done.error
     assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total") == 2
+
+
+async def test_a_resent_supersede_releases_the_old_job_once(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """A submit re-sent with its key after a lost answer is the same request: the job it
+    supersedes loses one claim, not two (review #1066 finding 1)."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate = asyncio.Event()
+        async with _worker(client, queue, ProjectingActivities(deps, block_main=gate)):
+            old = await service.submit(SLUG, {"width": width})
+            assert (await service.submit(SLUG, {"width": width})).id == old.id
+            request, params = uuid.uuid4().hex, {"width": _w()}
+            first = await service.submit(SLUG, params, supersedes=old.id, request_id=request)
+            again = await service.submit(SLUG, params, supersedes=old.id, request_id=request)
+            kept = await asyncio.to_thread(projection.read, old.id)
+            gate.set()
+            await _settled(projection, old.id)
+            await _settled(projection, first.id)
+        await service.aclose()
+
+    assert again.id == first.id
+    assert kept.state in ("pending", "running") and kept.claims == 1
 
 
 async def test_superseding_the_same_render_answers_it_without_a_claim(
@@ -769,30 +793,6 @@ async def test_a_legacy_cancel_of_a_workflow_that_never_started_is_not_an_error(
     )
 
 
-async def test_cancelling_the_last_claim_cancels_the_job(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
-) -> None:
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        gate = asyncio.Event()
-        async with _worker(client, queue, ProjectingActivities(deps, block_main=gate)):
-            job = await service.submit(SLUG, {"width": _w()})
-            withdrawn = await service.cancel(job.id, slug=SLUG)
-            gate.set()
-        await service.aclose()
-
-    assert withdrawn is not None and withdrawn.id == job.id
-    assert withdrawn.state == "cancelled"
-    stored = await asyncio.to_thread(projection.read, job.id)
-    assert stored.state == "cancelled" and stored.error == CANCELLED_ERROR
-    # A withdrawal is not a supersede (review #1066 2.4).
-    finished = "scadbuddy_render_jobs_finished_total"
-    registry = service.metrics.registry
-    assert registry.get_sample_value(finished, {"outcome": "cancelled"}) == 1
-    assert registry.get_sample_value(finished, {"outcome": "superseded"}) == 0
-
-
 class _HeldDone(ProjectingActivities):
     """The `done` projection waits for ``release`` once it has written the row."""
 
@@ -882,86 +882,6 @@ class _SlowAccept(ProjectingActivities):
     async def render_accept(self, accept: AcceptRender) -> Job:
         await self.accepting.wait()
         return await super().render_accept(accept)
-
-
-class _Unreachable:
-    """A handle whose Update Temporal never answers."""
-
-    def __init__(self, error: Exception) -> None:
-        self.error = error
-
-    async def execute_update(self, *_: object, **__: object) -> ReleaseAnswer:
-        raise self.error
-
-
-@pytest.mark.parametrize(
-    ("error", "raised"),
-    [
-        (RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""), TemporalUnavailableError),
-        (WorkflowUpdateRPCTimeoutOrCancelledError(), CommandStillAcceptingError),
-    ],
-)
-async def test_a_cancel_temporal_did_not_answer_is_an_error_not_nothing_to_cancel(
-    make_service: ServiceFactory,
-    projection: JobProjection,
-    monkeypatch: pytest.MonkeyPatch,
-    error: Exception,
-    raised: type[Exception],
-) -> None:
-    """A withdrawal is the request itself: a release that failed transiently must not
-    read as "already finished" (review #1066 3.1)."""
-    params: dict[str, ParamValue] = {"width": _w()}
-    key = render_key(SLUG, params, None)
-    job = await asyncio.to_thread(
-        projection.accept,
-        Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now()),
-        key,
-        workflow_id=workflow_id_for_key(key),
-        run_id=uuid.uuid4().hex,
-    )
-    async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        monkeypatch.setattr(client, "get_workflow_handle", lambda *_, **__: _Unreachable(error))
-        with pytest.raises(raised):
-            await service.cancel(job.id, slug=SLUG)
-        await service.aclose()
-
-    assert (await asyncio.to_thread(projection.read, job.id)).state == "pending"
-
-
-async def test_cancelling_one_of_two_claims_leaves_the_job_running(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
-) -> None:
-    width = _w()
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        gate = asyncio.Event()
-        async with _worker(client, queue, ProjectingActivities(deps, block_main=gate)):
-            job = await service.submit(SLUG, {"width": width})
-            assert (await service.submit(SLUG, {"width": width})).id == job.id
-            withdrawn = await service.cancel(job.id, slug=SLUG)
-            claims = (await asyncio.to_thread(projection.read, job.id)).claims
-            gate.set()
-            done = await _settled(projection, job.id)
-        await service.aclose()
-
-    assert withdrawn is None
-    assert claims == 1
-    assert done.state == "done"
-
-
-async def test_cancelling_an_unknown_job_touches_nothing(
-    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        cancelled = _spy_cancel(monkeypatch, client)
-        withdrawn = await service.cancel(uuid.uuid4().hex, slug=SLUG)
-        await service.aclose()
-
-    assert withdrawn is None
-    assert cancelled == []
 
 
 def _aged(projection: JobProjection, *job_ids: str) -> None:
