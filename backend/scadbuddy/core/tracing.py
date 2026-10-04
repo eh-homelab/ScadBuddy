@@ -13,7 +13,6 @@ import socket
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Final
-from urllib.parse import unquote
 
 from opentelemetry import context, propagate, trace
 from opentelemetry.context import Context
@@ -67,35 +66,15 @@ def tracing_disabled() -> bool:
     return os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true"
 
 
-def otlp_traces_target() -> tuple[str, dict[str, str]] | None:
-    """Where traces go and the headers sent, by the SDK's precedence, or ``None`` when
-    export is off (no endpoint, ``OTEL_TRACES_EXPORTER=none`` or ``OTEL_SDK_DISABLED``).
-    ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` is used as is; ``OTEL_EXPORTER_OTLP_ENDPOINT``
-    gets ``/v1/traces``."""
+def traces_export_enabled() -> bool:
+    """Whether the process exports its spans: an OTLP endpoint is set, and neither
+    ``OTEL_TRACES_EXPORTER=none`` nor ``OTEL_SDK_DISABLED`` turns export off."""
     if tracing_disabled() or os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none":
-        return None
-    traces = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
-    general = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
-    if traces:
-        url = traces
-    elif general:
-        url = general.rstrip("/") + "/v1/traces"
-    else:
-        return None
-    raw = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_HEADERS") or os.environ.get(
-        "OTEL_EXPORTER_OTLP_HEADERS", ""
+        return False
+    return any(
+        os.environ.get(name, "").strip()
+        for name in ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
     )
-    return url, _parse_headers(raw)
-
-
-def _parse_headers(raw: str) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for entry in raw.split(","):
-        name, separator, value = entry.partition("=")
-        name = unquote(name.strip())
-        if separator and name:
-            headers[name] = unquote(value.strip())
-    return headers
 
 
 def build_provider(
@@ -107,7 +86,7 @@ def build_provider(
     exporter: SpanExporter | None = None,
 ) -> TracerProvider:
     """The process's provider. ``exporter`` is for tests; otherwise the OTLP/HTTP one,
-    and only when `otlp_traces_target` says export is on. The exporter reads the endpoint
+    and only when `traces_export_enabled`. The exporter reads the endpoint
     and header variables itself, so nothing is passed to it. Whatever exports is behind
     `ScrubbingSpanExporter`."""
     attributes: dict[str, AttributeValue] = {
@@ -122,7 +101,7 @@ def build_provider(
     resource = Resource.create(attributes)
     sampler = None if os.environ.get("OTEL_TRACES_SAMPLER") else DEFAULT_SAMPLER
     provider = TracerProvider(resource=resource, sampler=sampler)
-    if exporter is None and otlp_traces_target() is not None:
+    if exporter is None and traces_export_enabled():
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         exporter = OTLPSpanExporter()
@@ -281,6 +260,7 @@ __all__ = [
     "failure_class",
     "link_to",
     "span",
+    "traces_export_enabled",
     "tracing_disabled",
     "use_traceparent",
     "valid_traceparent",

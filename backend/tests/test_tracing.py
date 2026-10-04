@@ -212,6 +212,19 @@ def test_a_traces_only_endpoint_turns_export_on(monkeypatch: pytest.MonkeyPatch)
     assert _processors(provider) == 2
 
 
+def test_export_is_enabled_only_by_an_endpoint_and_not_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_otel(monkeypatch)
+    assert not tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", " ")
+    assert not tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://t:4318/v1/traces")
+    assert tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    assert not tracing.traces_export_enabled()
+
+
 def test_otel_traces_exporter_none_exports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     for value in ("none", "NONE"):
         provider, _ = _provider(
@@ -220,48 +233,4 @@ def test_otel_traces_exporter_none_exports_nothing(monkeypatch: pytest.MonkeyPat
             OTEL_TRACES_EXPORTER=value,
         )
         assert _processors(provider) == 1
-        assert tracing.otlp_traces_target() is None
-
-
-def test_target_is_none_without_an_endpoint_or_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_otel(monkeypatch)
-    assert tracing.otlp_traces_target() is None
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    assert tracing.otlp_traces_target() is None
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
-    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
-    assert tracing.otlp_traces_target() is None
-
-
-def test_target_appends_v1_traces_with_one_slash(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_otel(monkeypatch)
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
-    assert tracing.otlp_traces_target() == ("http://c:4318/v1/traces", {})
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318/")
-    assert tracing.otlp_traces_target() == ("http://c:4318/v1/traces", {})
-
-
-def test_the_traces_endpoint_wins_and_is_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_otel(monkeypatch)
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://general:4318")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://t:4318/custom/")
-    assert tracing.otlp_traces_target() == ("http://t:4318/custom/", {})
-
-
-def test_target_headers_prefer_the_traces_variable_and_are_parsed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_otel(monkeypatch)
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "general=1")
-    target = tracing.otlp_traces_target()
-    assert target is not None and target[1] == {"general": "1"}
-    monkeypatch.setenv(
-        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
-        " Authorization = Basic%20abc%3D%3D , bad, =nokey, x-k=a=b,%6Bey=v%2Cw",
-    )
-    target = tracing.otlp_traces_target()
-    assert target is not None
-    assert target[1] == {"Authorization": "Basic abc==", "x-k": "a=b", "key": "v,w"}
+        assert not tracing.traces_export_enabled()
