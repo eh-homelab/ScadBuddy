@@ -189,6 +189,11 @@ on shutdown.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
+  - The `library` queue's worker is not versioned: any API replica may take any of
+    its tasks. A release that adds a sweep (a new activity) says so here and needs a
+    `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
+    old build takes the new sweep's task and fails it as unregistered, and since a
+    sweep is not retried, that sweep waits for the next tick (a day, by default).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -392,6 +397,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading to the release with #1053** moves renders onto the command shape: the
+  workflow `render-<render key>` inserts its own row. Do not let an older API overlap a
+  new one: stop the old API pods (or use a `Recreate` rollout, as the manifest does)
+  before the new API starts. An older API beside it would restart this release's
+  waiting renders as its own (its reconciler) and count requests into them that the
+  workflow never sees (its insert). The older render workers may keep running: they
+  finish the renders pinned to their build. A pending row of the older API's that no
+  workflow will run is failed, once it is 30 s old, by the next render of its key or
+  the API's next pass over such rows.
 - **Upgrading from a release with the in-process print watcher** (before #1053): roll
   it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
   `print_watches` after the new one hands that log to `FollowPrint` at start, and

@@ -31,7 +31,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     async def no_schedules(*args: Any) -> bool:
         return False
 
-    monkeypatch.setattr(main, "Worker", build)
+    monkeypatch.setattr(main, "library_worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "ensure_schedules", no_schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
@@ -116,7 +116,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
         backfilled.append(assets)
         return 0
 
-    monkeypatch.setattr(main, "Worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     state = SimpleNamespace(
@@ -151,12 +151,16 @@ async def _broken_async(*args: Any, **kwargs: Any) -> None:
     raise RuntimeError("the projection is gone")
 
 
+@pytest.mark.parametrize("staging_error", [OSError("read-only"), ValueError("a bad name")])
 @pytest.mark.parametrize("sweep", SWEEPS)
 async def test_a_failing_sweep_fails_its_activity(
-    sweep: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    sweep: str,
+    staging_error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Review #1095 1: a sweep that fails is logged and fails its activity, so the
-    workflow reports it and Temporal's UI shows it."""
+    workflow reports it and Temporal's UI shows it; whatever the error (review #1095b 4)."""
     monkeypatch.setattr(main, "_remote_assets", lambda state: None)
     monkeypatch.setattr(main, "sweep_assets", _broken(RuntimeError("the volume is gone")))
     monkeypatch.setattr(main, "sweep_blobs", _broken(RuntimeError("the refs are gone")))
@@ -166,12 +170,12 @@ async def test_a_failing_sweep_fails_its_activity(
         blobs=object(),
         refs=object(),
         config=SimpleNamespace(job_ttl=60.0),
-        catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(OSError("read-only"))),
+        catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
         caplog.at_level(logging.ERROR, logger="scadbuddy.main"),
-        pytest.raises((RuntimeError, OSError)),
+        pytest.raises((RuntimeError, OSError, ValueError)),
     ):
         await ActivityEnvironment().run(activities[sweep])
     assert caplog.records, "the failure is logged too"

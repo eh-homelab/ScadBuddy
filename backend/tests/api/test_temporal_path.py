@@ -26,6 +26,7 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.conftest import fake_3mf_openscad
+from tests.support.temporal import NO_TICK
 
 pytestmark = [
     pytest.mark.requires_postgres,
@@ -157,7 +158,7 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
         return sweep_assets(state)
 
     monkeypatch.setattr(main, "sweep_assets", counted)
-    settings = settings.model_copy(update={"asset_sweep_interval": 3600.0})
+    settings = settings.model_copy(update={"asset_sweep_interval": NO_TICK})
     app = create_app(settings)
     queue = settings.temporal_task_queue_library
 
@@ -185,6 +186,6 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
 
     with TestClient(app):
         every, result = asyncio.run(described())
-    assert every == timedelta(seconds=3600)
+    assert every == timedelta(seconds=NO_TICK)
     assert result == "[]"  # every sweep ran, none failed
     assert len(walks) == 1

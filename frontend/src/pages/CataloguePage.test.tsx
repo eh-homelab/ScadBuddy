@@ -487,13 +487,18 @@ describe('CataloguePage cards (#277)', () => {
 
   /** The coaster's card, scrolled near enough to have mounted its carousel. */
   async function coasterCard() {
-    const card = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
-      'li',
-    ) as HTMLElement
-    intersect(card)
-    // The carousel mounts once the card nears the viewport (#593); wait for it, or a
-    // query for its buttons can run before it renders.
-    await within(card).findByRole('region', { name: 'Crème Coaster' })
+    // The carousel mounts once its card nears the viewport (#593). The list can render
+    // the card again after the first sight of its heading, so the card is found again
+    // and brought into view until its carousel is there.
+    let card!: HTMLElement
+    await waitFor(
+      () => {
+        card = screen.getByRole('heading', { name: 'Crème Coaster' }).closest('li') as HTMLElement
+        intersect(card)
+        within(card).getByRole('region', { name: 'Crème Coaster' })
+      },
+      { timeout: 5000 },
+    )
     return card
   }
 

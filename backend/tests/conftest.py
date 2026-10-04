@@ -9,6 +9,7 @@ import uuid
 import zipfile
 import zlib
 from collections.abc import Iterator, Mapping
+from datetime import timedelta
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.workflows.commands import start_command
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     TEST_TEMPORAL_ADDRESS_ENV,
@@ -143,6 +145,21 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
             f"no Temporal: set {TEST_TEMPORAL_ADDRESS_ENV} (a running server) or"
             f" {TEST_TEMPORAL_DEV_SERVER_ENV} (a temporal CLI), or put `temporal` on PATH"
         )
+
+
+#: The answer deadline `start_command` takes when its caller names none: a route's
+#: inline window and its accept bound. Production's 10 s is a promise about latency
+#: that a loaded machine breaks (a 202, or a 503 `command-still-accepting`, where the
+#: test asserts the final answer), so tests wait this long instead. A test of the
+#: deadline itself names one, or sets this default back.
+TEST_ANSWER_DEADLINE = timedelta(seconds=60)
+
+
+@pytest.fixture(autouse=True)
+def _answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    defaults = start_command.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "deadline", TEST_ANSWER_DEADLINE)
 
 
 #: For a `Settings` whose app never starts: the database URL is required (#401), but

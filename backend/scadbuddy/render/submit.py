@@ -343,11 +343,14 @@ class RenderService:
 
     async def prune(self) -> None:
         """Settled jobs past `job_ttl` (and their blob refs), and revision exports; then
-        the rows nothing will settle (review #1066 1.2)."""
+        the rows nothing will settle (review #1066 1.2), even when the prune fails
+        (review #1095b 1)."""
         ttl = self.config.job_ttl
-        await asyncio.to_thread(self.store.prune, ttl)
-        await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
-        await self.settle()
+        try:
+            await asyncio.to_thread(self.store.prune, ttl)
+            await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
+        finally:
+            await self.settle()
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
