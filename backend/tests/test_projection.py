@@ -439,3 +439,12 @@ def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProject
     assert announcing.read(named.id).state == "pending"
     assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [named.id]
     assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.pending", "job.failed"]
+
+
+def test_accept_writes_the_first_callers_traceparent(projection: JobProjection) -> None:
+    job = _job("demo", width=50)
+    job.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    key = render_key("demo", job.params, None)
+    accepted = projection.accept(job, key, workflow_id=f"render-{key}", run_id="run-1")
+    assert accepted.traceparent == job.traceparent
+    assert projection.read(accepted.id).traceparent == job.traceparent
