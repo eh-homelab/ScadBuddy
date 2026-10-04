@@ -159,7 +159,8 @@ class RackUsageStore:
                 " SELECT serial, %s FROM unnest(%s::text[]) AS serial"
                 " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id"
                 # Rewrite only a hotend that moved: /check re-records the rack on every
-                # debounced re-check (#1082).
+                # debounced re-check (#1082). A row this skips makes no new version, but
+                # is still locked, so a re-check is cheap rather than free.
                 " WHERE rack_nozzle_seen.printer_id IS DISTINCT FROM excluded.printer_id",
                 (printer_id, unique),
             )

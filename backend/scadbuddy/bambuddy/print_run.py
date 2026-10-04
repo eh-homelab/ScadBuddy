@@ -407,7 +407,8 @@ def rack_chooser(
                 else {}
             )
             # Recorded again on purpose: this is a fresh read, per plate, and can show a
-            # hotend swapped in since prepare_run's. An unchanged rack writes nothing (#1082).
+            # hotend swapped in since prepare_run's. An unchanged rack makes no new row
+            # version (#1082), though the upsert still locks its rows.
             await record_seen(rack, printer_id, status_read)
             stage = "rack pick failed"
             picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)

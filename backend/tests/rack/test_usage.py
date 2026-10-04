@@ -68,11 +68,12 @@ def _row_version(conninfo: str, serial: str) -> str:
     return str(row[0])
 
 
-async def test_seeing_a_hotend_again_on_the_same_printer_writes_nothing(
+async def test_seeing_a_hotend_again_on_the_same_printer_makes_no_new_row_version(
     store: RackUsageStore, pg_conninfo: str
 ) -> None:
     """#1082: /check records the rack on every debounced re-check, so an unchanged row
-    must not be rewritten; a move to another printer still is."""
+    must not get a new version (its ``xmin`` stays); a move to another printer still does.
+    The skipped row is still locked, which this does not check."""
     await store.seen(1, [A])
     before = _row_version(pg_conninfo, A)
     await store.seen(1, [A])
