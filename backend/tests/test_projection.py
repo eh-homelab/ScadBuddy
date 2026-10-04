@@ -380,12 +380,25 @@ def test_accept_waits_for_a_legacy_row_pending_on_the_same_key(
     projection: JobProjection,
 ) -> None:
     legacy = _row(projection, _job(width=47))
-    with pytest.raises(LegacyPendingError):
+    with pytest.raises(LegacyPendingError) as waiting:
         _accept(projection, "run-1", width=47)
+    assert waiting.value.job.id == legacy.id
     assert projection.read(legacy.id).state == "pending"
     # Once the older build runs it, the key is free.
     assert projection.mark_started(legacy.id) is not None
     assert projection.read(_accept(projection, "run-1", width=47).id).state == "pending"
+
+
+def test_accept_fails_a_legacy_row_its_caller_found_orphaned(projection: JobProjection) -> None:
+    legacy = _row(projection, _job(width=49))
+    job = _job("demo", width=49)
+    key = render_key("demo", job.params, None)
+    ours = projection.accept(
+        job, key, workflow_id=f"render-{key}", run_id="run-1", orphaned=legacy.id
+    )
+    assert projection.read(ours.id).state == "pending"
+    stored = projection.read(legacy.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
 
 
 def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> None:
@@ -413,15 +426,16 @@ def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProject
             (named.id,),
         )
     ours = _accept(announcing, "run-1", width=46)
-    assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [legacy.id]
+    stale = announcing.legacy_pending(timedelta(minutes=1))
+    assert {job.id for job in stale} == {legacy.id, named.id}
     assert announcing.legacy_pending(timedelta(hours=2)) == []
 
-    failed = announcing.fail_legacy([legacy.id, named.id, ours.id], LEGACY_UNSTARTED_ERROR)
+    failed = announcing.fail_legacy([legacy.id, ours.id], LEGACY_UNSTARTED_ERROR)
 
     assert [job.id for job in failed] == [legacy.id]
     assert announcing.read(legacy.id).state == "failed"
     assert announcing.read(legacy.id).error == LEGACY_UNSTARTED_ERROR
     assert announcing.read(ours.id).state == "pending"
     assert announcing.read(named.id).state == "pending"
-    assert announcing.legacy_pending(timedelta(minutes=1)) == []
+    assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [named.id]
     assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.pending", "job.failed"]

@@ -47,8 +47,10 @@ from scadbuddy.render.jobs import (
     prune_revision_exports,
 )
 from scadbuddy.render.projection import (
+    LEGACY_GRACE,
     LEGACY_UNSTARTED_ERROR,
     JobProjection,
+    legacy_unrun,
     workflow_id_for,
     workflow_id_for_key,
 )
@@ -68,9 +70,6 @@ logger = logging.getLogger(__name__)
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
 RPC_TIMEOUT = timedelta(seconds=5)
-#: How old a legacy pending row with no workflow must be before `settle_legacy` fails
-#: it: a few of the older API's own start timeouts.
-LEGACY_GRACE = 6 * RPC_TIMEOUT
 #: How long a submit that reached an execution closing on its last release waits for it
 #: to close before it starts again (ruling 10 of the phase 2b plan).
 CLOSING_WAIT = 5.0
@@ -292,11 +291,21 @@ class RenderService:
 
     async def settle_legacy(self) -> list[str]:
         """Once at start: fail the pending rows an older release inserted that no
-        workflow will run. Only a row naming none, past `LEGACY_GRACE`, is certainly
-        orphaned; one naming its workflow is left to the older build, which starts it
-        after its insert (review #1066 1.2)."""
-        stale = await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE)
-        failed = [job.id for job in stale]
+        workflow will run. Only a row past `LEGACY_GRACE` is judged: a younger one may
+        be between the older API's insert and its start (review #1066 1.2)."""
+        failed: list[str] = []
+        for job in await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE):
+            try:
+                if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
+                    continue
+            except RPCError as error:
+                logger.warning(
+                    "could not ask Temporal about the renders an older release left"
+                    " pending; the next start tries again",
+                    extra={"status": error.status.name},
+                )
+                break
+            failed.append(job.id)
         if failed:
             settled = await asyncio.to_thread(
                 self.store.fail_legacy, failed, LEGACY_UNSTARTED_ERROR

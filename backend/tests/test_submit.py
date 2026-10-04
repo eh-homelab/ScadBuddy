@@ -964,34 +964,68 @@ async def test_cancelling_an_unknown_job_touches_nothing(
     assert cancelled == []
 
 
-async def test_settle_legacy_fails_only_old_rows_that_name_no_workflow(
-    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+def _aged(projection: JobProjection, *job_ids: str) -> None:
+    """Older than `LEGACY_GRACE`: past any older API's insert-then-start."""
+    with psycopg.connect(projection.conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = ANY(%s)",
+            (list(job_ids),),
+        )
+
+
+async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
+    make_service: ServiceFactory, projection: JobProjection
 ) -> None:
-    """Only a row with no workflow, old enough that no older API is still between its
-    insert and its start, is certainly orphaned (review #1066 1.2). A row naming a
-    workflow is the older build's to start, whether or not Temporal knows it yet."""
+    """Past `LEGACY_GRACE`, a row naming no workflow, or one Temporal does not have
+    running, is orphaned. A younger row may be between the older API's insert and its
+    start (review #1066 1.2), and a running one is that build's."""
     async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        unstarted, ancient, fresh = (_legacy(projection) for _ in range(3))
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        orphan, draining, ancient, fresh = (_legacy(projection) for _ in range(4))
         with psycopg.connect(projection.conninfo) as conn:
-            conn.execute(
-                "UPDATE render_jobs SET workflow_id = NULL WHERE id = ANY(%s)",
-                ([ancient.id, fresh.id],),
-            )
-            conn.execute(
-                "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = ANY(%s)",
-                ([unstarted.id, ancient.id],),
-            )
-        # Nothing asks Temporal: a handle here has no `describe`.
-        _spy_cancel(monkeypatch, client)
-        failed = await service.settle_legacy()
+            conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (ancient.id,))
+        _aged(projection, orphan.id, draining.id, ancient.id)
+        # The old build's execution of `draining`: no worker here, so it stays running.
+        await client.start_workflow(
+            "TemplatePipeline", id=workflow_id_for(draining.id), task_queue=queue
+        )
+        try:
+            failed = await service.settle_legacy()
+        finally:
+            await client.get_workflow_handle(workflow_id_for(draining.id)).terminate()
         await service.aclose()
 
-    assert failed == [ancient.id]
-    stored = await asyncio.to_thread(projection.read, ancient.id)
-    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
-    for job_id in (unstarted.id, fresh.id):
+    assert sorted(failed) == sorted([orphan.id, ancient.id])
+    for job_id in (orphan.id, ancient.id):
+        stored = await asyncio.to_thread(projection.read, job_id)
+        assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    for job_id in (draining.id, fresh.id):
         assert (await asyncio.to_thread(projection.read, job_id)).state == "pending"
+
+
+async def test_an_old_legacy_row_whose_workflow_never_ran_does_not_block_its_key(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """The pending key holds one row per render key (expand/contract): a legacy row
+    past `LEGACY_GRACE` whose workflow Temporal does not have is failed by the next
+    render of its key, which then runs (lead follow-up to review #1066 1.1)."""
+    params: dict[str, ParamValue] = {"width": _w()}
+    old = legacy_row(
+        projection, Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
+    )
+    _aged(projection, old.id)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            job = await service.submit(SLUG, params)
+            done = await _settled(projection, job.id)
+        await service.aclose()
+
+    assert done.state == "done", done.error
+    stored = await asyncio.to_thread(projection.read, old.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
 
 
 # ── inputs Temporal can never take (final review I2) ────────────────────────────
