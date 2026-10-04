@@ -520,7 +520,13 @@ or anyone. A subagent cannot ask the user with `AskUserQuestion`: Claude Code re
 there ("not available inside subagents") and never asks `canUseTool`. A session the
 browser user owns therefore also gets `mcp__scadbuddy_questions__ask_user` (#940,
 [`agent/src/harness/questions.ts`](../../agent/src/harness/questions.ts)), an in-process
-tool at `read` that parks on the same question gate, so only the user answers it. A query
+tool at `read` that parks on the same question gate, so only the user answers it. The same
+server carries `request_user_attention` (#815,
+[`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts)), which parks there
+too and is answered the same way. It is the one entry with a timer, and the timer never
+answers for the user: on `proceed` the call returns `timed_out` and every outward call the
+agent then makes still parks for its own approval; `wait` and `stop` end the turn. The
+`approval_pending` reason is refused, so an approval can never time out to proceed. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 

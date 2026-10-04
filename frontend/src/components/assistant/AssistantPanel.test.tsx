@@ -5,7 +5,7 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/approvals'
+import { setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
@@ -251,13 +251,13 @@ describe('assistant panel', () => {
     setPendingApprovals(2)
     document.title = 'ScadBuddy'
     const { user } = renderShell()
-    const button = await screen.findByRole('button', { name: 'Assistant, 2 actions waiting for your approval' })
-    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 actions waiting for your approval')
+    const button = await screen.findByRole('button', { name: 'Assistant, 2 waiting for you' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 waiting for you (2 approvals)')
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('2')
     // Announced, not only shown: the badge appears while focus is elsewhere.
     const live = screen.getByTestId('assistant-attention-live')
     expect(live).toHaveAttribute('aria-live', 'polite')
-    expect(live).toHaveTextContent('2 actions waiting for your approval')
+    expect(live).toHaveTextContent('2 waiting for you')
     await waitFor(() => expect(document.title).toBe('(2) ScadBuddy'))
 
     // Decided elsewhere: toggling the panel reads again, and the badge goes.
@@ -281,7 +281,7 @@ describe('assistant panel', () => {
       </Routes>,
       { route: '/' },
     )
-    const button = await screen.findByRole('button', { name: 'Assistant, 1 action waiting for your approval' })
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' })
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
     expect(document.title).toBe('ScadBuddy')
   })
