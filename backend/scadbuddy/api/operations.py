@@ -139,7 +139,8 @@ async def run_operation(
             raise still_accepting() from None
         return _answer(recorded, response, repeated=False)
     except CommandClosedError:
-        # Ended before it answered: nothing was recorded, and the same request starts again.
+        # Ended before it answered. A re-send reads whatever it recorded (the reconciler
+        # ends a row it left running); with no record, the same request starts again.
         raise still_accepting() from None
     except (RPCError, TemporalUnavailableError):
         raise temporal_unavailable("operations") from None
