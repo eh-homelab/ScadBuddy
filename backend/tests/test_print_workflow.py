@@ -54,6 +54,7 @@ from scadbuddy.workflows.print_models import (
     REFUSED,
     AcceptAnswer,
     Checked,
+    CheckInput,
     EnqueueInput,
     FailInput,
     FinishInput,
@@ -125,14 +126,15 @@ class Fake:
         )
 
     @activity.defn(name="print_check")
-    async def check(self, input: PrintRunInput) -> Checked:
+    async def check(self, check: CheckInput) -> Checked:
         self.calls.append("check")
         if self.check_gate is not None:
             await self.check_gate.wait()
         if self.refuse:
             raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)
         return Checked(
-            source=input.source, prepared=PreparedPlates(plate_ids=self.plates, printer_id=1)
+            source=check.input.source,
+            prepared=PreparedPlates(plate_ids=self.plates, printer_id=1),
         )
 
     @activity.defn(name="print_insert")
@@ -811,14 +813,13 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print() -> None:
         )
     )
     # A worker whose clock is behind: by its own, the run is a few seconds old.
-    accepted_at = datetime.now(UTC) - timedelta(seconds=10)
+    started_at = datetime.now(UTC) - timedelta(seconds=10)
     env = ActivityEnvironment()
     env.info = dataclasses.replace(
-        env.info, started_time=accepted_at + CLIENT_ACCEPTING + timedelta(seconds=1)
+        env.info, started_time=started_at + CLIENT_ACCEPTING + timedelta(seconds=1)
     )
-    arg = run_input().model_copy(update={"accepted_at": accepted_at})
     with pytest.raises(ApplicationError) as raised:
-        await env.run(real.check, arg)
+        await env.run(real.check, CheckInput(input=run_input(), started_at=started_at))
     assert raised.value.type == REFUSED
     assert raised.value.details[0] == UNWAITED
 
@@ -836,7 +837,6 @@ async def test_a_check_that_ends_after_every_client_stopped_waiting_records_noth
     stands for one that started inside it."""
     monkeypatch.setattr(printing, "CLIENT_ACCEPTING", timedelta.min)
     arg = run_input()
-    assert arg.accepted_at is None
     queue = f"print-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client,

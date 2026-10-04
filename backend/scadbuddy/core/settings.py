@@ -42,6 +42,7 @@ from scadbuddy.core.config import (
     Config,
     StoreBackend,
 )
+from scadbuddy.core.proxies import Network, parse_cidr_list
 
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
 # The curated libraries the image bakes in (#169); no dev equivalent.
@@ -123,6 +124,21 @@ class Settings(BaseSettings):
     # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
     # pages may reach the server, so it belongs to the deployment.
     allowed_origins: str = ""
+
+    # SCADBUDDY_TRUSTED_PROXIES: comma-separated CIDRs (a bare address is one host) whose
+    # `X-Forwarded-For` is believed, and then only its last value (`core/proxies.py`, the
+    # agent's SCADBUDDY_AGENT_TRUSTED_PROXIES rules). The browser trace relay's per-client
+    # rate limit keys on it (spec 2026-10-01 §5.2). Empty, no forwarding header is
+    # believed and every browser behind the gateway shares one client bucket (uvicorn
+    # runs with --no-proxy-headers in the image, so it believes none either). Not a
+    # stored setting: it decides who the server believes about who it is talking to.
+    trusted_proxies: str = ""
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _trusted_proxies_are_cidrs(cls, value: str) -> str:
+        parse_cidr_list(value)
+        return value
 
     @field_validator("bambuddy_web_urls")
     @classmethod
@@ -267,6 +283,11 @@ class Settings(BaseSettings):
         """`SCADBUDDY_ALLOWED_ORIGINS` split on commas, blanks dropped."""
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
 
+    @property
+    def trusted_proxy_networks(self) -> tuple[Network, ...]:
+        """`SCADBUDDY_TRUSTED_PROXIES` parsed; the validator has already refused a bad one."""
+        return parse_cidr_list(self.trusted_proxies)
+
     @field_validator("revision")
     @classmethod
     def _revision_fits_a_visibility_query(cls, value: str) -> str:
@@ -349,6 +370,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "allowed_origins": (
             "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
             " decides who can reach the server, so it belongs to the deployment."
+        ),
+        "trusted_proxies": (
+            "Which peers are believed about the client they forward for. Like the allowed"
+            " origins, it decides who the server believes it is talking to, so it belongs"
+            " to the deployment."
         ),
         "seed_models_dir": "Image layout, fixed when the image is built.",
         "seed_libraries_dir": "Image layout, fixed when the image is built.",
