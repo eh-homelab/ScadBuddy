@@ -168,6 +168,67 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(JSON.stringify(events)).not.toMatch(/API Error|Not logged in|gw-sessions/)
   }, 60_000)
 
+  // #1101: Claude Code reports a request the API refused as a `success`
+  // result with `is_error: true`, and its text as a synthetic assistant
+  // message. Neither a 429 with a long retry-after nor a 400 is retried, so
+  // the single credential's attempt ends with exactly those. A 401 is
+  // retried, and fallback.ts stops the attempt at the first retry and throws.
+  it.each([
+    {
+      status: 429,
+      type: 'rate_limit_error',
+      message: 'This request would exceed your rate limit',
+      headers: { 'retry-after': '120' },
+      code: 'api_error',
+      says: /rate limited \(HTTP 429\); try again later: .*exceed your rate limit/,
+    },
+    {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'messages: text content blocks must be non-empty',
+      code: 'api_error',
+      says: /refused the request \(HTTP 400\): .*text content blocks must be non-empty/,
+    },
+    {
+      status: 401,
+      type: 'authentication_error',
+      message: 'invalid x-api-key',
+      code: 'turn_failed',
+      says: /the Claude credential \(.*\) was refused: HTTP 401/,
+    },
+  ])('a $status from the API ends the turn as an error, not as a reply, and counts no turn (#1101)', async (c) => {
+    script = (r) =>
+      conversation(r).includes('second')
+        ? { text: 'second answer' }
+        : { error: { status: c.status, type: c.type, message: c.message, headers: c.headers ?? {} } }
+    const m = await replica({
+      probe: () =>
+        Promise.resolve(
+          c.status === 401
+            ? { verdict: 'refused', reason: 'the probe was refused (HTTP 401)' }
+            : { verdict: 'unknown', until: new Date(Date.now() + 60_000) },
+        ),
+    })
+
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(c.says) })
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, turnActive: false })
+
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    const errors = events.filter((e) => e.type === 'error')
+    expect(errors).toEqual([expect.objectContaining({ code: c.code, message: expect.stringMatching(c.says) })])
+    expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+
+    // The session is not spent: the next message is answered as usual.
+    expect(await (await m.send(session.id, browser, 'second question')).done).toMatchObject({
+      kind: 'result',
+      subtype: 'success',
+      turns: 1,
+    })
+  }, 60_000)
+
   it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
     script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })
     const m = await replica({ newSessions: { max: 3, windowMs: 60_000 } })

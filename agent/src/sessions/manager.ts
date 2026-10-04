@@ -10,7 +10,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
-import type { ProbeVerdict } from '../harness/credentialErrors.js'
+import { classifyFailure, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
@@ -151,6 +151,29 @@ export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 export const MAX_SESSION_BUDGET_USD = 100
 /** The largest `max_turns` per reply Settings takes. */
 export const MAX_SESSION_MAX_TURNS = 200
+
+/**
+ * What to say about a turn the model API refused, or undefined when the
+ * result is not one (#1101). Claude Code reports a refused request as a
+ * `success` result with `is_error` set, whose `result` is its own
+ * "API Error: …" text; that text is not the model's reply.
+ */
+function apiRefusal(result: SDKResultMessage): string | undefined {
+  if (result.subtype !== 'success' || !result.is_error) return undefined
+  const status = typeof result.api_error_status === 'number' ? result.api_error_status : null
+  const http = status === null ? 'no response' : `HTTP ${status}`
+  const detail = result.result.trim() ? `: ${result.result.trim()}` : ''
+  switch (classifyFailure({ status, message: result.result })) {
+    case 'permanent':
+      return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+    case 'rate_limited':
+      return `the Claude credential is rate limited (${http}); try again later${detail}`
+    case 'transient':
+      return `the model endpoint failed (${http}); try again${detail}`
+    default:
+      return `the model API refused the request (${http})${detail}`
+  }
+}
 
 /** Money as the user reads it: dollars, rounded to cents ("$0.03", never "$0.025546000000000007"). */
 export function usd(amount: number): string {
@@ -1311,20 +1334,29 @@ export class SessionManager {
       // and it is added instead.
       const total = result.total_cost_usd
       costUsd = total >= session.costUsd ? total : session.costUsd + total
-      turns = session.turns + result.num_turns
-      status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
-      // Its budget is filled in from the row once the claim is released below.
-      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      if (result.subtype === 'error_max_budget_usd') {
-        // The SDK's own text names this turn's share of the budget as an
-        // unrounded float; the session's budget, in cents, is what the user
-        // set. Worded below, once the row says what the budget is now.
-        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: 'the chat used its budget' }))
-      } else if (result.subtype !== 'success') {
-        const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
-        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
+      const refusal = apiRefusal(result)
+      if (refusal !== undefined) {
+        // Not a reply, so no turn: only what it spent counts (#1101).
+        status = 'failed'
+        tail.push(event({ type: 'session.budget', sessionId: id, costUsd, budgetUsd: session.budgetUsd }))
+        tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal }))
+        outcome = { kind: 'failed', message: refusal }
+      } else {
+        turns = session.turns + result.num_turns
+        status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
+        // Its budget is filled in from the row once the claim is released below.
+        tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+        if (result.subtype === 'error_max_budget_usd') {
+          // The SDK's own text names this turn's share of the budget as an
+          // unrounded float; the session's budget, in cents, is what the user
+          // set. Worded below, once the row says what the budget is now.
+          tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: 'the chat used its budget' }))
+        } else if (result.subtype !== 'success') {
+          const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
+          tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
+        }
+        outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
       }
-      outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
     } else if (stopped !== undefined) {
       status = 'idle'
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
@@ -1348,7 +1380,7 @@ export class SessionManager {
     // Read from the row, not `session`: the user may have raised it while the turn ran.
     const budgetUsd = released.budget_usd
     const worded = tail.map((e): ServerEvent => {
-      if (e.type === 'session.result') return { ...e, budgetUsd }
+      if (e.type === 'session.result' || e.type === 'session.budget') return { ...e, budgetUsd }
       if (e.type === 'error' && e.code === 'error_max_budget_usd') {
         return { ...e, message: `this chat used its ${usd(budgetUsd)} budget (${usd(costUsd)} spent)` }
       }
