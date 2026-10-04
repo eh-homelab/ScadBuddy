@@ -1089,7 +1089,16 @@ export class SessionManager {
         // a session the browser user owns is given the tool. Any other
         // owner's turn would wait on someone who is not asked.
         ...(asksUser
-          ? { questionGate: this.questions.gate({ sessionId: id, turnId, secrets: () => secrets, signal: controller.signal }) }
+          ? {
+              questionGate: this.questions.gate({
+                sessionId: id,
+                turnId,
+                secrets: () => secrets,
+                signal: controller.signal,
+                // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
+                stopTurn: (why) => controller.abort(new Error(why)),
+              }),
+            }
           : {}),
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
         // user's messages are instructions; tool results are data. Then which
