@@ -39,7 +39,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.problems import ApiError, problem_response
-from scadbuddy.library.asset_fetch import fetch_file
+from scadbuddy.library.asset_fetch import fetch_file, parse_fetch_url
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
     MAX_ASSET_BYTES,
@@ -235,6 +235,11 @@ async def fetch_asset(
     paths: PathsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> FetchedAsset | JSONResponse:
+    try:
+        # Refusals that quote the URL whole: here, so no operation records them.
+        parse_fetch_url(body.url)
+    except ImportRefusedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history (as an import's, review 3c 1.5).
     claims = ClaimStore(paths.claims)

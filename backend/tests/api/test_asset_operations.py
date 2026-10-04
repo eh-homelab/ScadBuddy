@@ -100,3 +100,16 @@ def test_an_asset_fetch_never_records_the_urls_query(
     assert len(rows) == 1
     assert rows[0]["subject"] == "openmoji.org"
     assert "s3cret" not in json.dumps(rows[0], default=str)
+
+
+@pytest.mark.usefixtures("fake_dns")
+def test_a_fetch_url_refused_on_its_shape_is_refused_before_any_record(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """Its refusal quotes the URL, query and all: made in the route, it is never
+    recorded in an operation's error."""
+    url = "http://openmoji.org/x.svg?token=s3cret"
+    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    assert response.status_code == 422, response.text
+    assert "https" in response.json()["detail"]
+    assert _workflow_ids(app, "asset_fetch") == []
