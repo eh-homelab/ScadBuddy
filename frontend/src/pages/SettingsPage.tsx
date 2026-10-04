@@ -62,7 +62,7 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
-  printing: ['printer_id'],
+  printing: ['printer_id', 'print_run_retention_seconds'],
   // #426 — the blob store beside the inbox folder it needs.
   projects: ['library_folder_id', 'last_project_id', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
@@ -103,8 +103,15 @@ function fieldsOf(section: SectionId, settings: Settings | undefined): FieldName
   ]
 }
 
+/** A day, in the seconds `print_run_retention_seconds` is stored in (#1052). */
+const DAY_SECONDS = 86400
+
 function baseline(settings: Settings, name: FieldName): string {
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
+  if (name === 'print_run_retention_seconds') {
+    const seconds = settings.print_run_retention_seconds
+    return seconds == null ? '' : String(seconds / DAY_SECONDS)
+  }
   return serverValue(settings, name)
 }
 
@@ -114,6 +121,13 @@ type Problem = { problem: string }
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
   if (name === 'display_unit') return raw
+  if (name === 'print_run_retention_seconds') {
+    // Empty keeps every run; a number of days prunes the older ones.
+    if (raw.trim() === '') return null
+    const days = Number(raw)
+    if (!Number.isFinite(days) || days < 1) return { problem: 'Enter at least 1 day, or leave it empty to keep every run.' } satisfies Problem
+    return days * DAY_SECONDS
+  }
   const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind
   if (kind === 'bool') return raw === 'true'
   if (kind === 'seconds' || kind === 'count' || kind === 'bytes') {
@@ -894,6 +908,24 @@ export function SettingsPage() {
                     </option>
                   ))}
                 </select>
+              </FieldRow>
+              <FieldRow
+                id="print-run-retention"
+                label="Keep finished print runs for (days)"
+                help="Empty keeps every run, the start of print history. A number deletes runs that finished longer ago."
+                error={errors.print_run_retention_seconds}
+              >
+                <input
+                  id="print-run-retention"
+                  type="number"
+                  min="1"
+                  step="any"
+                  inputMode="decimal"
+                  placeholder="Forever"
+                  value={value('print_run_retention_seconds')}
+                  onChange={(event) => setField('print_run_retention_seconds', event.target.value)}
+                  className="sb-field"
+                />
               </FieldRow>
             </>,
           )}
