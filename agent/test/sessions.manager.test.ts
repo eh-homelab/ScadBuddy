@@ -148,6 +148,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false, turns: 2 })
     })
 
+    it('shows a synthetic API-error message the turn went on from, as it came (#1101)', async () => {
+      const paths = await tempPaths()
+      const say = (id: string, text: string, error?: string) =>
+        ({
+          type: 'assistant',
+          message: { id, content: [{ type: 'text', text }] },
+          parent_tool_use_id: null,
+          ...(error ? { error } : {}),
+        }) as unknown as SDKMessage
+      const runner = (): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          yield say('msg_syn', 'API Error: 529 Overloaded', 'server_error')
+          yield say('msg_2', 'Carried on.')
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'Carried on.', total_cost_usd: 0.01, num_turns: 1 } as unknown as SDKMessage
+        })()
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+      const said = (await m.events.read(session.id, 0, 1000))
+        .map((e) => e.event)
+        .flatMap((e) => (e.type === 'assistant.text.delta' ? [e.delta] : []))
+      expect(said).toEqual(['API Error: 529 Overloaded', 'Carried on.'])
+      expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
+    })
+
     it("passes ScadBuddy's own plugin to each turn, and says so when Claude Code did not load it (#896)", async () => {
       const paths = await tempPaths()
       const scripted = scriptedRunner(() => ({ reply: 'ok' }))

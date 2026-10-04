@@ -8,16 +8,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime
 from functools import partial
-from typing import Any
+from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models
+from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
@@ -31,6 +32,7 @@ from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
@@ -59,6 +61,13 @@ from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
 
+#: Never traced (spec §6): set in code so no deployment can drop it.
+#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
+#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
+EXCLUDED_URLS: Final = ",".join(
+    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
+)
+
 logger = logging.getLogger(__name__)
 
 DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
@@ -66,7 +75,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 
 #: The `scadbuddy.api` modules whose router sits at the root rather than under
 #: :data:`API_PREFIX`.
-ROOT_ROUTE_MODULES = frozenset({"health", "metrics"})
+ROOT_ROUTE_MODULES = frozenset({"health", "metrics", "telemetry"})
 
 
 def _api_router() -> APIRouter:
@@ -669,6 +678,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings_override: Settings | None = None) -> FastAPI:
     app_settings = settings_override or Settings()
     configure_logging(app_settings.log_level)
+    configure_tracing(
+        "scadbuddy-api",
+        version=app_settings.version,
+        revision=app_settings.revision,
+        inprocess_worker=app_settings.temporal_worker_inprocess,
+    )
 
     app = FastAPI(
         title="ScadBuddy",
@@ -703,7 +718,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
-            )
+            ),
+            # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
+            telemetry.RELAY_ROUTE_LIMIT,
         ],
     )
     # Outermost of all (added last): the gate answers a 413 itself without calling
@@ -713,6 +730,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(metrics.router)
+    # The browser trace relay: at the root like the two above, before the SPA's mount.
+    app.include_router(telemetry.router)
     app.include_router(_api_router())
     _name_in_openapi(app, models.PastedSource, media.MediaUpload)
 
@@ -722,4 +741,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         app.mount("/", SPAStaticFiles(frontend), name="frontend")
     else:
         logger.info("no frontend bundle found; serving the API only")
+    # Outermost, so the server span covers every middleware, the body gate included.
+    FastAPIInstrumentor.instrument_app(
+        app, excluded_urls=EXCLUDED_URLS, exclude_spans=["receive", "send"]
+    )
     return app

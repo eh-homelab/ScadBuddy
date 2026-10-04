@@ -31,6 +31,11 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import (
+    current_traceparent,
+    link_to,
+    span,
+)
 from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
@@ -156,6 +161,36 @@ class RenderService:
         """Start the job's execution, or join the open one rendering the same content,
         and answer the row its first activity wrote. ``request_id`` (the request's
         `Idempotency-Key`) makes a re-sent request the same claim, not another."""
+        with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
+            job, coalesced = await self._submit(
+                slug,
+                params,
+                model_version=model_version,
+                supersedes=supersedes,
+                inputs=inputs,
+                request_id=request_id,
+            )
+            current.set_attribute("scadbuddy.job_id", job.id)
+            current.set_attribute("scadbuddy.coalesced", coalesced)
+            # A coalesced request links to the trace of the render it joined.
+            if (
+                coalesced
+                and job.traceparent != current_traceparent()
+                and (link := link_to(job.traceparent)) is not None
+            ):
+                current.add_link(link.context)
+            return job
+
+    async def _submit(
+        self,
+        slug: str,
+        params: Mapping[str, ParamValue],
+        *,
+        model_version: str | None = None,
+        supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
@@ -174,6 +209,7 @@ class RenderService:
             render_key=render_key(slug, params, model_version),
             max_pending=self.config.render_queue_max,
             search_attributes=self.search_attributes,
+            traceparent=current_traceparent(),
         )
         size = len(pydantic_data_converter.payload_converter.to_payload(start).data)
         if size > MAX_WORKFLOW_INPUT_BYTES:
@@ -186,7 +222,7 @@ class RenderService:
         if previous is not None and previous.workflow_id == workflow_id_for_key(start.render_key):
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.inc()
-            return previous
+            return previous, True
         answer = await self._accepted(start, request_id)
         if answer.queue_full is not None:
             self.metrics.render_rejected.inc()
@@ -199,7 +235,7 @@ class RenderService:
             self.metrics.render_coalesced.inc()
         else:
             self.metrics.render_submitted.inc()
-        return answer.job
+        return answer.job, answer.coalesced
 
     async def _superseded(self, job_id: str, slug: str) -> Job | None:
         try:

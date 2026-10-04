@@ -54,12 +54,12 @@ from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
     Checked,
+    CheckInput,
     EnqueueInput,
     FailInput,
     FinishInput,
     InsertInput,
     PlanInput,
-    PrintRunInput,
     RecordInput,
     SliceStartInput,
     SourceSpec,
@@ -144,12 +144,10 @@ class PrintActivities:
         )
 
     @activity.defn(name="print_check")
-    async def check(self, input: PrintRunInput) -> Checked:
+    async def check(self, check: CheckInput) -> Checked:
         """Today's refusals before the 202 (§5.1 step 2); nothing is written."""
-        if (
-            input.accepted_at is not None
-            and activity.info().started_time - input.accepted_at > CLIENT_ACCEPTING
-        ):
+        input = check.input
+        if activity.info().started_time - check.started_at > CLIENT_ACCEPTING:
             # No worker ran this in time and every client has stopped re-sending it, so
             # nobody would see it print (review #1061 1b). The workflow checks again
             # once the check has ended, right before the record. Both times are the
