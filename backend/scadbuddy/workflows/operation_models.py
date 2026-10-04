@@ -23,6 +23,14 @@ def run_activity(kind: str) -> str:
     return f"op.{kind}.run"
 
 
+class OperationAuthor(BaseModel):
+    """The agent the request was made on behalf of (``core/authorship.py``), so the
+    run's commits are authored as it."""
+
+    principal: str | None = None
+    session: str | None = None
+
+
 class OperationInput(BaseModel):
     kind: str
     subject: str
@@ -36,6 +44,8 @@ class OperationInput(BaseModel):
     run_timeout_s: float | None = None
     #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
     search_attributes: bool = False
+    #: The request's agent author, when an agent made it.
+    author: OperationAuthor | None = None
 
 
 class OperationAnswer(BaseModel):
@@ -54,6 +64,7 @@ class RunOp(BaseModel):
     request: dict[str, Any]
     #: What the check returned.
     checked: dict[str, Any]
+    author: OperationAuthor | None = None
 
 
 class FinishOp(BaseModel):
