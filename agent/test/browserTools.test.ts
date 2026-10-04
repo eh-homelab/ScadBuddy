@@ -8,7 +8,7 @@ import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { browserTools } from '../src/tools/browser.js'
+import { browserTools, tabBackNotRun } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -460,7 +460,8 @@ describe('waiting for the tab (#815)', () => {
     expect(hub.sessionHasTab('s1')).toBe(true)
   })
 
-  it('waits on no tab, then runs the call once the tab is back', async () => {
+  it('waits on no tab, then runs a read call once the tab is back', async () => {
+    expect(tool('browser_snapshot').risk).toBe('read')
     const hub = new TabHub()
     const waits: { tool: string; toolUseId: string | undefined }[] = []
     const c: ToolContext = {
@@ -477,6 +478,28 @@ describe('waiting for the tab (#815)', () => {
     expect(result.isError).toBeFalsy()
     expect(firstText(result)).toEqual({ snapped: true })
     expect(waits).toEqual([{ tool: 'browser_snapshot', toolUseId: 'toolu_b1' }])
+  })
+
+  // A write or outward call is never re-run on a page that may have reloaded; the model re-checks and calls again.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call is not re-run when the tab is back: it says so and does nothing', async (tier, name, args) => {
+    expect(tool(name).risk).toBe(tier)
+    const hub = new TabHub()
+    let back: Awaited<ReturnType<typeof tab>> | undefined
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: async () => {
+        back = await tab(hub)
+        hub.pairSession('s1', TAB)
+        return { back: true }
+      },
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe(tabBackNotRun(name))
+    expect(back!.calls()).toEqual([])
   })
 
   it('fails with the wait\'s outcome when the tab did not come back, and retries only once', async () => {

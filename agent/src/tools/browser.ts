@@ -108,8 +108,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
         tabs(ctx).call(target(ctx), spec.tool, input, { signal: ctx.signal, ...(wait === undefined ? {} : { timeoutMs: wait }) })
       let outcome = await call()
       // #815 §2: in a session the user owns, a call that finds no tab waits for
-      // it as an attention request, and runs once more when the tab is back.
-      // Once only: a tab that came back on another replica is still not here.
+      // it as an attention request. When the tab is back, a read runs once more
+      // (once only: a tab that came back on another replica is still not here).
+      // A write or outward call is never re-run: the page may have reloaded or
+      // changed while the tab was away, and an outward call's approval was given
+      // for the page as it was. The model re-checks the page and calls again.
       if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
         const waited = await ctx.waitForTab({
           tool: `browser_${spec.tool}`,
@@ -117,8 +120,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           signal: ctx.signal,
           isBack: async () => (await tabs(ctx).status(target(ctx))).attached,
         })
-        if (waited.back) outcome = await call()
-        else throw new ToolError(`${outcome.error.message} ${waited.message}`)
+        if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
+        if (spec.risk !== 'read') throw new ToolError(tabBackNotRun(`browser_${spec.tool}`))
+        outcome = await call()
       }
       if (outcome.ok) return json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
@@ -128,6 +132,14 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       throw new ToolError(`the tab answered ${spec.tool} with ${code}`, undefined, detail)
     },
   })
+}
+
+/** #815 §2: a write or outward call that waited for the tab is not re-run when it is back. */
+export function tabBackNotRun(tool: string): string {
+  return (
+    `the tab is back, but ${tool} was not run: the page may have reloaded or changed while the tab was away. ` +
+    `Re-check the page (browser_snapshot) and call ${tool} again if it is still what you want.`
+  )
 }
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */

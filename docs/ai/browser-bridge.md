@@ -190,8 +190,13 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
   card and the Assistant badge), and calls that fail together share one request. When
   the session has a connected tab again (its tab reconnects, or the user opens the chat
-  from another tab, which pairs it), the hub resolves the request as `reconnected` and
-  the call runs once more. A reply other than "Carry on without the tab" also retries.
+  from another tab, which pairs it), the hub resolves the request as `reconnected`. A
+  read-tier call (`browser_snapshot`, `browser_get_params`, …) then runs once more. A
+  write or outward call (`browser_click`, `browser_set_param`, `browser_open_print_dialog`,
+  …) is never re-run: the page may have reloaded or changed while the tab was away, and an
+  outward call's approval was given for the page as it was. It fails with "the tab is back,
+  but <tool> was not run … Re-check the page (browser_snapshot) and call <tool> again", and
+  the model decides. A reply other than "Carry on without the tab" counts as back too.
   After 5 minutes with no reply the call fails with `timed_out`, and the agent carries on
   with what needs no tab; a timeout never approves anything. Only once per call: a tab
   that came back on another replica is still not here, so the retry fails with the
