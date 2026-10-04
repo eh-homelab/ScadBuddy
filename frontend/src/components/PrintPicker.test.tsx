@@ -1736,6 +1736,7 @@ describe('PrintPicker · A library file (#313)', () => {
       89,
       expect.objectContaining({ printer_id: expect.any(Number) }),
       expect.any(AbortSignal),
+      expect.any(Function),
     )
     await waitFor(() =>
       expect(remember).toHaveBeenCalledWith(89, expect.objectContaining({ nozzles: expect.any(Array) })),
@@ -1768,6 +1769,7 @@ describe('PrintPicker · A library file (#313)', () => {
       89,
       expect.objectContaining({ project_id: 2 }),
       expect.any(AbortSignal),
+      expect.any(Function),
     )
   })
 

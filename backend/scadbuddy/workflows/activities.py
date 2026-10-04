@@ -489,6 +489,7 @@ class RenderActivities:
             model_version=start.model_version,
             kind=start.kind,
             created_at=now(),
+            traceparent=start.traceparent,
         )
         orphaned: str | None = None
         try:

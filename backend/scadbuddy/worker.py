@@ -40,6 +40,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -740,6 +741,7 @@ def main() -> None:
     queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
+    configure_tracing("scadbuddy-worker", version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 
 

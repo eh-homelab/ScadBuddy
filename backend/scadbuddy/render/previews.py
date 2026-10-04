@@ -29,6 +29,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.tracing import span
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
@@ -264,7 +265,10 @@ class PreviewScheduler:
         if key is None:
             return False
         try:
-            png = await self.runner(slug, self.timeout)
+            # A root span: Temporal's StartWorkflow is a CLIENT span, which the default
+            # sampler drops when nothing is above it, and the workflow goes with it.
+            with span("render.preview", attributes={"scadbuddy.slug": slug}):
+                png = await self.runner(slug, self.timeout)
         except asyncio.CancelledError:
             raise
         except Exception as error:

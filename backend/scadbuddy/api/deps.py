@@ -59,7 +59,6 @@ from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs, BlobStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.workflows.client import connect_lazily
-from scadbuddy.workflows.follow import Follows
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +157,6 @@ class AppState:
     print_progress: ProgressObserver
     #: What `FollowPrint`'s activity reads with (#1053), on the follow worker.
     print_follower: Follower
-    #: The progress route's follows of a print still moving (#268, #1053).
-    print_follows: Follows
     #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
     #: start them.
     print_runs: PrintCommands
@@ -402,7 +399,6 @@ def _build_core(settings: Settings) -> AppState:
             read=read_progress,
             events=events,
         ),
-        print_follows=Follows(temporal, settings.temporal_task_queue_bambuddy),
         print_runs=PrintCommands(
             store=PrintRunStore(pool, events=transactional_events(events)),
             client=temporal,

@@ -22,6 +22,7 @@ import type {
   AiSessionView,
   SessionLimits,
   SessionResource,
+  ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -90,10 +91,17 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
-import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
+import type {
+  AiConnectionTest,
+  AiCredentialCreate,
+  AiCredentialEntry,
+  AiCredentialList,
+  AiCredentialSave,
+} from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
+import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
 
@@ -399,18 +407,18 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
  * counts toward `reattempts` like any other, for a body too large to send that often.
  * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
  * giving up: the request may already hold a claim, and that answer names it (review #1066
- * 1.1). Still unanswered then, it gives up.
+ * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
  */
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
-  { bounded = false, finish = false }: { bounded?: boolean; finish?: boolean } = {},
+  { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
 ): Promise<T> {
   const began = Date.now()
   let last = false
   for (let tries = 0; ; ) {
     try {
-      return await attempt()
+      return await (within ? within(attempt) : attempt())
     } catch (caught) {
       if (last || !unanswered(caught)) throw caught
       if (signal?.aborted) {
@@ -502,16 +510,19 @@ async function followOperation<T>(
  * slices and queues in the background, since that takes longer than the proxies in
  * front wait. A repeat of the same request (the same `request_id`) is the same run, so
  * re-sending it after an answer that never arrived re-attaches to that run and never
- * queues a second print. `signal` stops following; the run itself goes on.
+ * queues a second print. `signal` stops following; the run itself goes on. `within`
+ * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
  */
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,
   signal?: AbortSignal,
+  within?: Within,
 ): Promise<PrintRunResult> {
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    { within },
   )
   const began = Date.now()
   while (run.status === 'running') {
@@ -1039,8 +1050,8 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal, within),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -1175,8 +1186,8 @@ export const api = {
   },
 
   /** #742 — followed to its end like an output's run (`runPrint`). */
-  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/library/${fileId}/run`, body, signal),
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
@@ -1360,6 +1371,12 @@ export const api = {
   listAiSessionResources: (id: string) =>
     request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
 
+  /** #931 — the sessions whose tool calls touched a resource, newest first. */
+  listAiResourceSessions: (resource: ResourceRef, limit: number) =>
+    request<{ sessions: AiSessionView[] }>(
+      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions?limit=${limit}`,
+    ),
+
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
 
@@ -1376,14 +1393,14 @@ export const api = {
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
   /**
-   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
-   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
-   * parse is a real failure and rejects as it would anywhere.
+   * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
+   * four and status only. A non-JSON answer is the backend's SPA fallback (nothing routes
+   * `/api/v1/ai/*` to the agent), and rejects with a problem of type `AI_NOT_ROUTED`; a
+   * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
-  getAiCredential: async (): Promise<AiCredentialView> => {
-    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+  listAiCredentials: async (): Promise<AiCredentialList> => {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
       throw new ApiError({
@@ -1393,14 +1410,28 @@ export const api = {
         detail: 'The agent service did not answer at /api/v1/ai.',
       })
     }
-    return (await response.json()) as AiCredentialView
+    return (await response.json()) as AiCredentialList
   },
 
-  putAiCredential: (body: AiCredentialUpdate) =>
-    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+  /** Added last, so it is tried after every existing one. */
+  createAiCredential: (body: AiCredentialCreate) =>
+    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+  /** Every id exactly once, first tried first; a stale list answers 409. */
+  reorderAiCredentials: (ids: string[]) =>
+    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+
+  saveAiCredential: (id: string, body: AiCredentialSave) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: (id: string) =>
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+
+  /** Back to `active`, for one disabled or cooling down. */
+  resetAiCredential: (id: string) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
-  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
+  testAiCredential: (id: string) =>
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
 }

@@ -11,9 +11,11 @@ from temporalio.api.workflowservice.v1 import (
 )
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import VersioningBehavior
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy.bambuddy.follow import FOLLOW_SLOTS
 from scadbuddy.bambuddy.runs import PrintRunStore
@@ -34,9 +36,15 @@ RPC_TIMEOUT = timedelta(seconds=10)
 
 async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
     """``lazy`` connects on the first call instead of here (the API, which must boot
-    with Temporal down); the worker connects eagerly and fails fast."""
+    with Temporal down); the worker connects eagerly and fails fast. Every client
+    traces (spec 2026-10-01 §4): context rides in workflow headers, and a worker built
+    on this client takes the same interceptor."""
     return await Client.connect(
-        address, namespace=namespace, data_converter=pydantic_data_converter, lazy=lazy
+        address,
+        namespace=namespace,
+        data_converter=pydantic_data_converter,
+        lazy=lazy,
+        interceptors=[TracingInterceptor()],
     )
 
 
@@ -70,6 +78,11 @@ def render_worker(
         task_queue=task_queue,
         workflows=[TemplatePipeline, RenderPiece, RenderPreview],
         activities=activities.all(),
+        # The interceptor's workflow spans run inside the sandbox; OpenTelemetry's
+        # module state must be the process's, not a sandboxed copy.
+        workflow_runner=SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
+        ),
         max_concurrent_activities=max_concurrent_activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=WorkerDeploymentConfig(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
 import { TAB_ID } from '../tabId'
+import { messageTraceparent } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
@@ -87,12 +88,14 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
     if (!activeId) dispatch({ type: 'started-new' })
+    const traceparent = messageTraceparent()
     const result = transport.current.send(
       clientMessage({
         type: 'user.message',
         ...(activeId ? { sessionId: activeId } : {}),
         text: trimmed,
         context,
+        ...(traceparent ? { traceparent } : {}),
       }),
     )
     // Like a decision, a message held for the reconnect is shown as such (the
