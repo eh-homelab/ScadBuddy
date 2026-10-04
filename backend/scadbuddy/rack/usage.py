@@ -12,7 +12,6 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -45,6 +44,9 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: covers one or two slow archives; it can cut the hook off mid-write, and that
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
+#: How long a settle's settings read may wait for a connection, and then run (#1111):
+#: well inside the watcher's ``SETTLE_TIMEOUT``.
+SETTINGS_READ_TIMEOUT = 10.0
 
 
 class PickedHotend(BaseModel):
@@ -417,7 +419,7 @@ async def record_settled(
 
 
 def settle_hook(
-    store: RackUsage, links: PrintLinkStore, load: Callable[[], StoredSettings]
+    store: RackUsage, links: PrintLinkStore, load: Callable[[float], StoredSettings]
 ) -> SettledHook:
     """The watcher's ``on_settled`` hook for the rack (spec §4).
 
@@ -426,19 +428,14 @@ def settle_hook(
     the hook runs after that read. So a print dispatched and settled between two polls is
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
 
-    # One thread of its own for the settings read (#1111). A read cut off at the
-    # watcher's timeout runs on until Postgres answers: the settings pool has no
-    # statement timeout (only this store's queries do). On the loop's shared default
-    # executor every settle in a stall would hold another thread that the routes'
-    # to_thread calls need; here later reads queue behind the stuck one instead.
-    reads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rack-settle-settings")
-
     async def hook(meta: OutputMeta) -> None:
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the watcher stops
-        # waiting on it at its timeout (#1083).
-        settings = await asyncio.get_running_loop().run_in_executor(reads, load)
+        # waiting on it at its timeout (#1083), and bounded itself (#1111), so a stuck
+        # read gives its thread back to the shared executor rather than holding it
+        # until Postgres answers.
+        settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 

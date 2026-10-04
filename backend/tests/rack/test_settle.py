@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -18,11 +19,18 @@ from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.watcher import SETTLE_TIMEOUT
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
+from scadbuddy.rack.usage import (
+    SETTINGS_READ_TIMEOUT,
+    PickedHotend,
+    RackUsageStore,
+    record_settled,
+    settle_hook,
+)
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.bambuddy.test_watcher import OUTPUT as WATCHED
 from tests.bambuddy.test_watcher import (
@@ -344,7 +352,7 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     write_output(paths)
     assert await links.for_output(OUTPUT) == []
     watcher, seen = watcher_for(paths, read)
-    watcher.on_settled.append(settle_hook(store, links, lambda: settings))
+    watcher.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
     watcher.watch(OUTPUT)
     await until_idle(watcher)
 
@@ -353,31 +361,27 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
 
 
-async def test_stuck_settings_reads_hold_one_thread_not_one_per_settle(
+async def test_the_settings_read_is_bounded_and_the_next_settle_reads_again(
     store: RackUsageStore, pool: PgPool
 ) -> None:
-    """#1111: a settings read cut off at the settle timeout runs on in its thread. Each
-    settle used to start another on the loop's shared default executor, so a stalled
-    settings database could fill it; they now queue behind the one stuck read."""
-    release = threading.Event()
-    entered = 0
-    lock = threading.Lock()
+    """#1111: the hook bounds its settings read, so a stuck one gives its thread back
+    rather than holding it until Postgres answers; a read that failed does not stop the
+    next settle from reading."""
+    asked: list[float] = []
 
-    def load() -> StoredSettings:
-        nonlocal entered
-        with lock:
-            entered += 1
-        release.wait(timeout=10)
+    def load(timeout: float) -> StoredSettings:
+        asked.append(timeout)
+        if len(asked) == 1:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
         return StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
 
     hook = settle_hook(store, PrintLinkStore(pool), load)
-    try:
-        for _ in range(3):
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=0.2)
-        assert entered == 1
-    finally:
-        release.set()
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        await hook(OutputMeta.model_construct(id=OUTPUT))
+    with respx.mock(base_url=BASE_URL, assert_all_called=False):
+        await hook(OutputMeta.model_construct(id=OUTPUT))
+    assert asked == [SETTINGS_READ_TIMEOUT, SETTINGS_READ_TIMEOUT]
+    assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
 
 
 async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
@@ -388,7 +392,7 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
     release, returned = threading.Event(), threading.Event()
     settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
 
-    def load() -> StoredSettings:
+    def load(timeout: float) -> StoredSettings:
         release.wait(timeout=10)
         returned.set()
         return settings

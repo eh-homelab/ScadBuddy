@@ -429,11 +429,16 @@ class SettingsStore:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def snapshot(self) -> SettingsSnapshot:
+    def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
+        """``timeout``, in seconds, bounds the wait for a connection and then the read,
+        for this read only (#1111): a pool-wide statement timeout would also cut short
+        the saves' deliberate lock waits and the migration."""
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection(timeout=timeout) as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            if timeout is not None:
+                conn.execute(f"SET LOCAL statement_timeout = {max(1, int(timeout * 1000))}")
             rows = conn.execute("SELECT name, value FROM settings").fetchall()
             choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
             beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
@@ -476,8 +481,8 @@ class SettingsStore:
             stored=StoredSettings.model_validate(values), runtime=runtime, sources=sources
         )
 
-    def load(self) -> StoredSettings:
-        return self.snapshot().stored
+    def load(self, timeout: float | None = None) -> StoredSettings:
+        return self.snapshot(timeout).stored
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""

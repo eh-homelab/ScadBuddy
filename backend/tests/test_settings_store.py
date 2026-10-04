@@ -477,6 +477,20 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     assert _fresh_load(settings).printer_rack_algorithms == {}
 
 
+def test_a_bounded_settings_read_gives_up_on_a_held_table(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
+    the bound is this read's own, so the next read is not bounded by it."""
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            store.load(timeout=0.2)
+    with store.pool.connection() as conn:
+        row = conn.execute("SHOW statement_timeout").fetchone()
+    assert row is not None and row["statement_timeout"] == "0"
+
+
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
     """A newer version's algorithm must not stop this one loading its settings."""
     loaded = StoredSettings.model_validate(
