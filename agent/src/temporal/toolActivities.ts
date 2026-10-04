@@ -28,7 +28,11 @@ export interface SessionOwners {
 }
 
 export class PgSessionOwners implements SessionOwners {
-  constructor(private readonly sql: Sql) {}
+  private readonly sql: Sql
+
+  constructor(sql: Sql) {
+    this.sql = sql
+  }
 
   async ownerOf(sessionId: string): Promise<Owner | undefined> {
     const [row] = await this.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
