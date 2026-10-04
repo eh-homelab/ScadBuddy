@@ -104,8 +104,10 @@ async def start_command[T](
         id_reuse_policy=reuse,
         search_attributes=search_attributes,
     )
-    # `rpc_timeout` bounds the Update; the outer bound is for the connect a lazy
-    # client makes on its first call, which retries for minutes on its own.
+    # `rpc_timeout` bounds each RPC, not the Update: the server may answer a poll
+    # with no outcome just before it, and the SDK then polls again. So the outer bound
+    # is what ends a slow Update, and it also covers the connect a lazy client makes
+    # on its first call, which retries for minutes on its own.
     bound = asyncio.timeout(deadline.total_seconds() + CONNECT_MARGIN_SECONDS)
     try:
         async with bound:
