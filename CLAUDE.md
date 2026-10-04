@@ -288,7 +288,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
   panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
-  #940, and never outlives its turn);
+  #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
+  `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
+  `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
+  `stop` end the turn; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
+  the one read of every parked call, approvals and answers, that the badge counts);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,

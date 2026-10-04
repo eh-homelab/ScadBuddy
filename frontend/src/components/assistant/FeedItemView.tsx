@@ -213,6 +213,23 @@ function previewOf(q: AskedQuestion, c: Choice): string | undefined {
   return picked.length === 1 ? picked[0]!.preview : picked.map((o) => o.preview).join('\n\n---\n\n') || undefined
 }
 
+/** #815 — what an attention request's timer does, as its card says it. */
+function attentionTimer(a: NonNullable<QuestionItem['attention']>): string {
+  const at = new Date(a.expiresAt)
+  // A wait can last a day: past today, the day is named, or tomorrow's 09:05 would read as this morning's.
+  const today = at.toDateString() === new Date().toDateString()
+  const time = at.toLocaleString([], { ...(today ? {} : { weekday: 'short' }), hour: '2-digit', minute: '2-digit' })
+  const when = Number.isNaN(at.getTime()) ? 'soon' : `by ${time}`
+  switch (a.onTimeout) {
+    case 'proceed':
+      return `No reply ${when}: it carries on with work that needs no approval. A timeout never approves anything.`
+    case 'stop':
+      return `No reply ${when}: it stops.`
+    case 'wait':
+      return `It waits for you until ${when.replace(/^by /, '')}, then stops.`
+  }
+}
+
 /**
  * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
  * the question allows it, or answer in your own words. A question with a draft (an
@@ -230,11 +247,20 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
     <section
       aria-labelledby={headingId}
       className="rounded-[6px] border border-accent/60 bg-accent/5 px-3 py-2.5 text-[13px]"
-      data-testid="agent-question"
+      data-testid={item.attention ? 'agent-attention' : 'agent-question'}
     >
       <h3 id={headingId} className="text-[12.5px] font-semibold">
-        {item.questions.length === 1 ? 'A question for you' : 'Questions for you'}
+        {item.attention
+          ? `The assistant needs you: ${item.questions[0]?.header ?? ''}`
+          : item.questions.length === 1
+            ? 'A question for you'
+            : 'Questions for you'}
       </h3>
+      {item.attention && item.state === 'pending' && (
+        <p className="mt-1 text-[12px] text-muted" data-testid="agent-attention-timer">
+          {attentionTimer(item.attention)}
+        </p>
+      )}
       {item.state === 'pending' ? (
         <form
           className="mt-1.5 space-y-3"
@@ -323,7 +349,7 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
             )
           })}
           <Button type="submit" variant="primary" size="sm" disabled={!complete}>
-            Send answer
+            {item.attention ? 'Send reply' : 'Send answer'}
           </Button>
         </form>
       ) : (
@@ -340,7 +366,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                 ? 'Not connected: your answer goes first when the assistant reconnects.'
               : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
-                : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
+                : item.attention
+                  ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
+                  : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
           </p>
         </div>
       )}

@@ -89,7 +89,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const owned = !active || isOwnedByBrowser(active)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
-  const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending') ?? false
+  const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
+  const pendingAttention = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention) ?? false
   const itemCount = active?.items.length ?? 0
   const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 
@@ -362,7 +363,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           ? 'The assistant needs your approval.'
           : pendingQuestion
             ? 'The assistant has a question for you.'
-            : ''}
+            : pendingAttention
+              ? 'The assistant needs your attention.'
+              : ''}
       </p>
 
       {/* The user's own voice: the bridge's fill/click never type or send here (#254). */}

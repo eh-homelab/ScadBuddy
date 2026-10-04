@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { attentionCount, attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import { attentionCount, attentionDetail, attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -84,11 +84,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       setOpenRequest(null)
     }
   }, [shown])
-  // #815 — approvals waiting on the user, shown on the toggle so a closed panel (or a
-  // background session's approval, which never reaches this tab's socket) still says so.
+  // #815 — what waits on the user (approvals, questions, attention requests), shown on the
+  // toggle so a closed panel (or a background session's, which never reaches this tab's
+  // socket) still says so.
   const attention = useAttention(shown)
   const refreshAttention = attention.refresh
   const waitingLabel = attentionLabel(attention.waiting)
+  const waitingDetail = attentionDetail(attention.counts)
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
@@ -209,7 +211,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 aria-controls={mounted ? PANEL_ID : undefined}
                 aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                 aria-label={waitingLabel ? `Assistant, ${waitingLabel}` : undefined}
-                title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${waitingLabel ? `: ${waitingLabel}` : ''}`}
+                title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${waitingLabel ? `: ${waitingLabel} (${waitingDetail})` : ''}`}
                 className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                   open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                 }`}
