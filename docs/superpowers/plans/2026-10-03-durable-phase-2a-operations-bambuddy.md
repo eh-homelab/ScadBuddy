@@ -416,7 +416,7 @@ def test_create_project_with_a_key_twice_creates_once(client, ...):
 - Test: `frontend/src/api/client.test.ts`, `frontend/src/pages/SettingsPage.test.tsx`
 
 **Interfaces:**
-- Produces: `command<T>(path: string, init: RequestInit & { signal?: AbortSignal }): Promise<T>`. It sends `Idempotency-Key: newRequestId()` (one per call; re-sends reuse it); a 2xx other than 202 is `T`; a 202 is an `Operation` followed through `GET /operations/{id}` every `printRunPoll.intervalMs` until it ends; `succeeded` → its `result` as `T`; `failed` → `new ApiError(error.status, error)`; re-sends while `unanswered()` (the same rule `reattach` uses, including `command-still-accepting`).
+- Produces: `command<T>(path: string, init: RequestInit & { signal?: AbortSignal }): Promise<T>`. It sends `Idempotency-Key: newRequestId()` (one per call; re-sends reuse it); a 2xx other than 202 is `T`; a 202 is an `Operation` followed through `GET /operations/{id}` every `printRunPoll.intervalMs` until it ends, for at most `printRunPoll.operationFollowMs` (15 min; past it, a 504 `urn:scadbuddy:operation-unfinished` saying it may have been done: review #1063, so the follow is bounded, not a deferred gap); `succeeded` → its `result` as `T`; `failed` → `new ApiError(error.status, error)`; re-sends while `unanswered()` (the same rule `reattach` uses, including `command-still-accepting`).
 - `sendOutput`, `createProject`, `fileIntoProject`, `attachToProject`, `reprint`, `pullTimelapse`, `registerSidebar` call `command()` instead of `request()`.
 
 - [ ] **Step 1: Failing tests:** `sends one Idempotency-Key and re-sends it after an unanswered answer`; `follows a 202 to the operation's result`; `turns a failed operation into the route's ApiError`; `reprint goes through command()` (asserts the header on the msw request); Settings: `keeps finished operations for the days given`.
@@ -433,7 +433,7 @@ def test_create_project_with_a_key_twice_creates_once(client, ...):
 - Test: `agent/test/command.test.ts`, `agent/test/tools.test.ts`, `agent/test/coverage.test.ts` (must stay green with the new route)
 
 **Interfaces:**
-- Produces: `command<T>(ctx: ToolContext, what: string, send: (headers: { 'Idempotency-Key': string }) => Promise<FetchResult<T | Operation>>): Promise<T>`, with `print.ts`'s `reattach` rules (re-send on `TypeError`, a proxy's own 502/503/504/524, and `command-still-accepting`; up to `RUN_REATTEMPTS` and then a `ToolError` that says the effect may have happened), and a 202 followed through `GET /api/v1/operations/{id}` every `ctx.pollIntervalMs`.
+- Produces: `command<T>(ctx: ToolContext, what: string, send: (headers: { 'Idempotency-Key': string }) => Promise<FetchResult<T | Operation>>): Promise<T>`, with `print.ts`'s `reattach` rules (re-send on `TypeError`, a proxy's own 502/503/504/524, and `command-still-accepting`; up to `RUN_REATTEMPTS` and then a `ToolError` that says the effect may have happened), and a 202 followed through `GET /api/v1/operations/{id}` every `ctx.pollIntervalMs` for at most `ctx.operationFollowMs` (15 min, as the browser; review #1063), then a `ToolError` naming the operation for `get_operation`.
 
 - [ ] **Step 1: Failing tests:** `re-sends with the same Idempotency-Key`; `follows a 202 to the result`; `print_again sends an Idempotency-Key`; `get_operation reads an operation`.
 - [ ] **Step 2: Run** `pnpm exec vitest run test/command.test.ts test/tools.test.ts test/coverage.test.ts`; expect FAIL.
