@@ -197,7 +197,10 @@ on shutdown.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
     (`render_jobs`), so accepted renders survive a restart. A row is written by its
     workflow's first activity, so it exists only once Temporal has the render; with
-    Temporal unreachable a render is refused (503 `temporal-unavailable`).
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
+    every five minutes the API fails the rows nothing will settle: one whose workflow
+    closed without settling it (terminated by hand, say), and a pending one an older
+    release left with no workflow running.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend

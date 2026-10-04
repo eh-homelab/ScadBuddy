@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         PrepareResult,
         Projection,
         ReleaseAnswer,
+        ReleaseReason,
         RenderAnswer,
         RenderMainResult,
         RenderStart,
@@ -273,6 +274,9 @@ class TemplatePipeline:
         #: The release cancelled the job; False when its work settled it first.
         self._cancelled = False
         self._work: asyncio.Task[None] | None = None
+        #: One claim projection at a time, each with the count when it runs: concurrent
+        #: ones could commit out of order (review #1066 2.1).
+        self._claims_lock = asyncio.Lock()
         self._search_attributes = False
 
     @workflow.signal
@@ -305,7 +309,7 @@ class TemplatePipeline:
         )
 
     @workflow.update(name=RELEASE_UPDATE)
-    async def release(self, reason: str) -> ReleaseAnswer:
+    async def release(self, reason: ReleaseReason) -> ReleaseAnswer:
         await workflow.wait_condition(
             lambda: self._work is not None or self._queue_full is not None
         )
@@ -335,12 +339,34 @@ class TemplatePipeline:
 
     async def _project_claims(self) -> None:
         assert self._job is not None
+        async with self._claims_lock:
+            await workflow.execute_local_activity(
+                CLAIMS_ACTIVITY,
+                args=[self._job.id, self._claims],
+                start_to_close_timeout=SHORT,
+                retry_policy=PROJECT_RETRY,
+            )
+
+    async def _project_released(self, job: Job, steps: list[StepInfo]) -> None:
+        """The cancelled job its last release leaves. Local, so it never waits behind
+        openscad runs (the piece goes on) for one of the worker's activity slots:
+        `release` waits for it."""
         await workflow.execute_local_activity(
-            CLAIMS_ACTIVITY,
-            args=[self._job.id, self._claims],
+            "project",
+            Projection(
+                job_id=job.id,
+                slug=job.slug,
+                state="cancelled",
+                failure=Failure(error=self._released or "cancelled"),
+                steps=steps,
+            ),
             start_to_close_timeout=SHORT,
             retry_policy=PROJECT_RETRY,
         )
+        self._cancelled = True
+
+    def _released_by(self, error: BaseException) -> bool:
+        return self._released is not None and is_cancelled_exception(error)
 
     def _upsert(self, *pairs: SearchAttributeUpdate[Any]) -> None:
         """§4.2's attributes: identifiers and states only, never content."""
@@ -408,7 +434,13 @@ class TemplatePipeline:
 
         problem = input_problem(job.slug, job.model_version)
         if problem is not None:
-            await project(state="failed", failure=Failure(error=problem))
+            try:
+                await project(state="failed", failure=Failure(error=problem))
+            except BaseException as error:
+                # Released while the write waited for a worker (review #1066 2.2).
+                if not self._released_by(error):
+                    raise
+                await self._project_released(job, [])
             return
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
@@ -442,29 +474,15 @@ class TemplatePipeline:
                 blob_key=key,
             )
         except BaseException as error:
-            released = self._released is not None and is_cancelled_exception(error)
+            released = self._released_by(error)
             if released or (
                 is_cancelled_exception(error) and workflow.cancellation_reason() is not None
             ):
-                # Its last claim released (superseded or withdrawn), or the run cancelled
+                # Its last claim released (superseded, or by hand), or the run cancelled
                 # by hand: the piece goes on (ABANDON), the job is cancelled.
                 steps[0].state = "cancelled"
                 if released:
-                    # Local, so it never waits behind openscad runs (the piece goes on)
-                    # for one of the worker's activity slots: `release` waits for it.
-                    await workflow.execute_local_activity(
-                        "project",
-                        Projection(
-                            job_id=job.id,
-                            slug=job.slug,
-                            state="cancelled",
-                            failure=Failure(error=self._released or "cancelled"),
-                            steps=steps,
-                        ),
-                        start_to_close_timeout=SHORT,
-                        retry_policy=PROJECT_RETRY,
-                    )
-                    self._cancelled = True
+                    await self._project_released(job, steps)
                     return  # a released job is an outcome: the run completes
                 await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
                 raise
@@ -472,11 +490,19 @@ class TemplatePipeline:
                 raise  # the SDK's own (an eviction), or another cancel: not a job outcome
             # Anything else ends in a terminal row too, never one left at `running`.
             steps[0].state = "failed"
-            await project(
-                state="failed",
-                failure=Failure(error=f"{type(error).__name__}: {error}"),
-                steps=steps,
-            )
+            try:
+                await project(
+                    state="failed",
+                    failure=Failure(error=f"{type(error).__name__}: {error}"),
+                    steps=steps,
+                )
+            except BaseException as cancel:
+                # Released while the write waited for a worker (review #1066 2.2).
+                if not self._released_by(cancel):
+                    raise
+                steps[0].state = "cancelled"
+                await self._project_released(job, steps)
+                return
             if isinstance(error, FailureError):
                 raise
             # A plain exception would fail only the workflow task, which Temporal

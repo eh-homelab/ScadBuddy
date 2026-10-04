@@ -570,7 +570,7 @@ async def test_accepted_after_the_last_release_answers_closing() -> None:
             # The release waits for the cancelled render to project (held here); an
             # `accepted` sent meanwhile reaches the same, closing, execution.
             release = asyncio.create_task(
-                handle.execute_update(RELEASE_UPDATE, "withdrawn", result_type=ReleaseAnswer)
+                handle.execute_update(RELEASE_UPDATE, "cancelled", result_type=ReleaseAnswer)
             )
             while not [p for p in acts.projections if p.state == "cancelled"]:
                 await asyncio.sleep(0.01)
@@ -657,7 +657,7 @@ async def test_a_release_right_after_the_start_cancels_the_job() -> None:
             handle = client.get_workflow_handle(wid)
             try:
                 answer = await asyncio.wait_for(
-                    handle.execute_update(RELEASE_UPDATE, "withdrawn", result_type=ReleaseAnswer),
+                    handle.execute_update(RELEASE_UPDATE, "cancelled", result_type=ReleaseAnswer),
                     timeout=10,
                 )
                 await asyncio.wait_for(handle.result(), timeout=10)
