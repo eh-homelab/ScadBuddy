@@ -17,7 +17,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
@@ -35,7 +35,11 @@ with workflow.unsafe.imports_passed_through():
         run_activity,
     )
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
-    from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL, problem_of
+    from scadbuddy.workflows.problems import (
+        OPERATION_CANCELLED,
+        OPERATION_UNEXPECTED_DETAIL,
+        problem_of,
+    )
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
@@ -90,11 +94,18 @@ class OperationWorkflow:
                 start_to_close_timeout=CHECK_TIMEOUT,
                 retry_policy=READ_RETRY,
             )
-        except ActivityError as error:
-            # Nothing was written: the execution fails, and a retry may start again.
-            self.refusal = problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
+        except (ActivityError, asyncio.CancelledError) as error:
+            # Nothing was written: the execution fails, and a retry may start again. A
+            # cancel answers the Update too, so it is never outlived by its execution.
+            self.refusal = (
+                OPERATION_CANCELLED
+                if is_cancelled_exception(error)
+                else problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
+            )
             self._upsert(STATUS.value_set("refused"))
             await workflow.wait_condition(workflow.all_handlers_finished)
+            if is_cancelled_exception(error):
+                raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
         op: Operation = await workflow.execute_activity(
             INSERT_ACTIVITY,

@@ -21,6 +21,7 @@ from typing import Any
 from temporalio.client import (
     Client,
     WithStartWorkflowOperation,
+    WorkflowUpdateFailedError,
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
 from temporalio.common import (
@@ -28,7 +29,7 @@ from temporalio.common import (
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
 )
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 #: Below Envoy's 15 s route timeout (§1), so no command holds a request open past it.
@@ -48,6 +49,15 @@ class CommandStillAcceptingError(Exception):
 class TemporalUnavailableError(Exception):
     """Temporal did not answer at all within the deadline (its frontend is down or
     unreachable): nothing was started."""
+
+
+#: The failure Temporal gives an Update whose execution completed before it answered.
+UPDATE_OUTLIVED = "AcceptedUpdateCompletedWorkflow"
+
+
+class CommandClosedError(Exception):
+    """The execution ended (terminated or cancelled) before its Update answered: nothing
+    was recorded, and a failed-only reuse policy lets the same request start again."""
 
 
 class AlreadyClosedError(Exception):
@@ -128,4 +138,9 @@ async def start_command[T](
         raise CommandStillAcceptingError(id) from error
     except WorkflowAlreadyStartedError as error:
         raise AlreadyClosedError(id) from error
+    except WorkflowUpdateFailedError as error:
+        cause = error.cause
+        if isinstance(cause, ApplicationError) and cause.type == UPDATE_OUTLIVED:
+            raise CommandClosedError(id) from error
+        raise
     return answer

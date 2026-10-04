@@ -28,6 +28,7 @@ from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
+    CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     start_command,
@@ -142,6 +143,9 @@ async def run_operation(
         if recorded is None:
             raise still_accepting() from None
         return _answer(recorded, response, repeated=False)
+    except CommandClosedError:
+        # Ended before it answered: nothing was recorded, and the same request starts again.
+        raise still_accepting() from None
     except (RPCError, TemporalUnavailableError):
         raise temporal_unavailable("operations") from None
     if answer.refusal is not None:

@@ -1,0 +1,27 @@
+"""``PrintRun`` replays the histories it wrote (review #1061 1b).
+
+The ``bambuddy`` worker is unversioned and runs in every API replica, so during a
+rolling update an old pod and a new one share running executions. A change to
+``PrintRunWorkflow`` that would not replay these histories needs ``workflow.patched``;
+this test is what says so. Regenerate a history only for a deliberate, patched change.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from temporalio.client import WorkflowHistory
+from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.worker import Replayer
+
+from scadbuddy.workflows.printing import PrintRunWorkflow
+
+HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
+
+
+@pytest.mark.parametrize("name", ["succeeded", "succeeded_followed", "refused", "enqueue_failed"])
+async def test_print_run_replays_its_recorded_history(name: str) -> None:
+    history = WorkflowHistory.from_json(f"print-{name}", (HISTORIES / f"{name}.json").read_text())
+    replayer = Replayer(workflows=[PrintRunWorkflow], data_converter=pydantic_data_converter)
+    await replayer.replay_workflow(history)

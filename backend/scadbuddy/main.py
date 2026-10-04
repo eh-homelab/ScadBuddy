@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import logging
 import pkgutil
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial
@@ -468,11 +468,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
-        try:
-            async with bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities):
-                await _end_lost_runs_until(client, state.print_runs.store, stop)
-        except Exception:
-            logger.exception("the print worker failed; starting it again")
+        worker = bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities)
+        if not await _serve_until(
+            worker, stop, _end_lost_runs_until(client, state.print_runs.store, stop)
+        ):
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
@@ -503,16 +502,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     ]
     try:
         while not stop.is_set():
-            try:
-                async with Worker(
-                    client,
-                    task_queue=queue,
-                    workflows=[Housekeeping, OperationWorkflow],
-                    activities=activities,
-                ):
-                    await stop.wait()
-            except Exception:
-                logger.exception("the library worker failed; starting it again")
+            worker = Worker(
+                client,
+                task_queue=queue,
+                workflows=[Housekeeping, OperationWorkflow],
+                activities=activities,
+            )
+            if not await _serve_until(worker, stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
@@ -537,6 +533,39 @@ async def _set_up_housekeeping(
             logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+
+
+async def _serve_until(
+    worker: Worker,
+    stop: asyncio.Event,
+    alongside: Coroutine[Any, Any, None] | None = None,
+    *,
+    name: str = "print",
+) -> bool:
+    """Run ``worker`` (and ``alongside``) until ``stop``: True. A worker that ends
+    first, failed or not, is said at once (review #1061: a poller that dies while running
+    would otherwise leave the queue unpolled until the pod restarts): False."""
+    running = asyncio.create_task(worker.run())
+    beside = asyncio.create_task(alongside) if alongside is not None else None
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if beside is not None:
+            beside.cancel()
+        stopping.cancel()
+    if running.done():
+        error = running.exception()
+        logger.error(
+            "the %s worker failed; starting it again",
+            name,
+            exc_info=error if error is not None else RuntimeError("the worker stopped"),
+        )
+        return False
+    await worker.shutdown()
+    with suppress(Exception):
+        await running
+    return True
 
 
 async def _end_lost_runs_until(client: Client, store: PrintRunStore, stop: asyncio.Event) -> None:

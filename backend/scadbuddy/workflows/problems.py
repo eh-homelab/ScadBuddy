@@ -11,6 +11,12 @@ from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
+#: What an operation cancelled before its record answers: nothing was written or done.
+OPERATION_CANCELLED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This was cancelled before it started. Nothing was done; try again.",
+)
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
