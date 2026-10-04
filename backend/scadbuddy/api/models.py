@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import (
@@ -122,6 +122,8 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     ResolverBusyError,
     fetch_model,
+    parse_import_url,
+    shown_url,
 )
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
@@ -905,6 +907,11 @@ async def import_model(
     # Here as well as in the run, so a full budget answers with its Retry-After header
     # and starts no operation.
     _require_import_permit(imports)
+    try:
+        # Refusals that quote the URL whole: here, so no operation records them.
+        parse_import_url(body.url)
+    except ImportRefusedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history; they hold it without (review 3c 1.5).
     claims = ClaimStore(paths.claims)
@@ -925,21 +932,6 @@ async def import_model(
         claimed=Claimed(claims, [url]),
     )
     return operation_answer(result, ModelRecord)
-
-
-def shown_url(url: str) -> str:
-    """``url`` as an import records it: scheme, host, port and path. Never its userinfo,
-    query or fragment, any of which may carry a token (review 3c 1.5)."""
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:  # not a number; the fetch refuses the URL
-        port = None
-    netloc = host if port is None else f"{host}:{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _require_import_permit(imports: ImportPermits) -> None:
