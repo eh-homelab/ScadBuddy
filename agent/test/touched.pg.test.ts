@@ -16,7 +16,7 @@ import { SERVER_NAME } from '../src/tools/projections.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // What a session touched (#931, src/sessions/touched.ts) in Postgres: a
 // session's tool calls through the harness projection land in
@@ -238,5 +238,119 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       headers: { ...UI_READ, 'sec-fetch-site': 'cross-site' },
     })
     expect(foreign.status).toBe(403)
+  })
+
+  // The reverse direction (#931): which sessions touched a resource.
+  describe('sessions that touched a resource', () => {
+    const touch = (sessionId: string, name: string, input: Record<string, unknown>, result: unknown = {}) =>
+      store.record({
+        sessionId,
+        tool: { name, risk: 'write' },
+        input,
+        result: { content: [{ type: 'text', text: JSON.stringify(result) }] },
+      })
+
+    async function seed() {
+      const edit = (await m.start(agentA, { origin: 'mcp', title: 'edit box' })).session
+      await touch(edit.id, 'update_source', { slug: 'box', base: C1 }, { slug: 'box', version: C2 })
+      const preset = (await m.start(browser, { origin: 'chat', title: 'preset on box' })).session
+      await touch(preset.id, 'save_preset', { slug: 'box' }, { id: 'p1' })
+      const output = (await m.start(agentB, { origin: 'mcp', title: 'save an output' })).session
+      await touch(output.id, 'save_output', { slug: 'lid' }, { id: 'out-1', slug: 'lid' })
+      const other = (await m.start(browser, { origin: 'chat', title: 'unrelated' })).session
+      await touch(other.id, 'delete_model', { slug: 'boxes' })
+      return { edit, preset, output, other }
+    }
+
+    function app() {
+      return createApp({
+        database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+        backend: () => Promise.resolve(true),
+        kek: { ok: false, reason: 'unused' },
+        credentials: new MemoryCredentials(),
+        testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+        remoteAddress: () => '10.0.0.7',
+        origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+        approvals: m.approvals,
+        sessions: m,
+      })
+    }
+
+    it('a model matches every row of that model; any other kind matches its id', async () => {
+      const { edit, preset, output } = await seed()
+      const ids = async (resource: { type: 'model' | 'output' | 'revision' | 'preset'; id: string }) =>
+        (await m.list(browser, { resource })).map((s) => s.id).sort()
+      expect(await ids({ type: 'model', id: 'box' })).toEqual([edit.id, preset.id].sort())
+      expect(await ids({ type: 'revision', id: C2 })).toEqual([edit.id])
+      expect(await ids({ type: 'preset', id: 'p1' })).toEqual([preset.id])
+      expect(await ids({ type: 'output', id: 'out-1' })).toEqual([output.id])
+      expect(await ids({ type: 'output', id: 'out-2' })).toEqual([])
+    })
+
+    it('lists a session once however many times it touched the resource', async () => {
+      const { edit } = await seed()
+      await touch(edit.id, 'update_source', { slug: 'box', base: C2 }, { slug: 'box', version: C1 })
+      expect((await m.list(browser, { resource: { type: 'model', id: 'box' } })).filter((s) => s.id === edit.id)).toHaveLength(1)
+    })
+
+    it('keeps visibility: an agent sees only the sessions it may see', async () => {
+      const { edit } = await seed()
+      expect((await m.list(agentA, { resource: { type: 'model', id: 'box' } })).map((s) => s.id)).toEqual([edit.id])
+      expect(await m.list(agentB, { resource: { type: 'model', id: 'box' } })).toEqual([])
+    })
+
+    it('serves GET /api/v1/ai/resources/:type/:id/sessions to the UI', async () => {
+      const { edit, preset } = await seed()
+      const res = await app().request('/api/v1/ai/resources/model/box/sessions', { headers: UI_READ })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { sessions: { id: string; title: string }[] }
+      expect(body.sessions.map((s) => s.id).sort()).toEqual([edit.id, preset.id].sort())
+      expect(body.sessions.find((s) => s.id === edit.id)).toMatchObject({ title: 'edit box', owner: { kind: 'bearer', id: 'token:a' } })
+
+      const limited = await app().request('/api/v1/ai/resources/model/box/sessions?limit=1', { headers: UI_READ })
+      expect(((await limited.json()) as { sessions: unknown[] }).sessions).toHaveLength(1)
+
+      // An id with reserved characters arrives percent-encoded and is matched decoded.
+      const odd = (await m.start(browser, { origin: 'chat' })).session
+      await touch(odd.id, 'save_output', { slug: 'box' }, { id: 'out/7 a', slug: 'box' })
+      const encoded = await app().request(`/api/v1/ai/resources/output/${encodeURIComponent('out/7 a')}/sessions`, { headers: UI_READ })
+      expect(((await encoded.json()) as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual([odd.id])
+
+      for (const type of ['unclassified', 'nope']) {
+        const bad = await app().request(`/api/v1/ai/resources/${type}/box/sessions`, { headers: UI_READ })
+        expect(bad.status, type).toBe(400)
+      }
+      const foreign = await app().request('/api/v1/ai/resources/model/box/sessions', {
+        headers: { ...UI_READ, 'sec-fetch-site': 'cross-site' },
+      })
+      expect(foreign.status).toBe(403)
+    })
+
+    it('filters GET /api/v1/ai/sessions by resource_type and resource_id, together only', async () => {
+      const { output } = await seed()
+      const res = await app().request('/api/v1/ai/sessions?resource_type=output&resource_id=out-1', { headers: UI_READ })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual([output.id])
+      for (const query of ['resource_type=output', 'resource_id=out-1', 'resource_type=print_runs&resource_id=1']) {
+        const bad = await app().request(`/api/v1/ai/sessions?${query}`, { headers: UI_READ })
+        expect(bad.status, query).toBe(400)
+      }
+    })
+
+    it('filters sessions_list by resource, as its caller', async () => {
+      const { edit } = await seed()
+      const tool = ALL_TOOLS.find((t) => t.name === 'sessions_list')!
+      const call = async (owner: typeof agentA) =>
+        firstText(
+          await runTool(tool, { resource: { type: 'model', id: 'box' } }, {
+            ...services({ sessions: m }),
+            principal: harnessPrincipal(owner),
+            progress: async () => {},
+            signal: new AbortController().signal,
+          }),
+        ) as { id: string }[]
+      expect((await call(agentA)).map((s) => s.id)).toEqual([edit.id])
+      expect(await call(agentB)).toEqual([])
+    })
   })
 })

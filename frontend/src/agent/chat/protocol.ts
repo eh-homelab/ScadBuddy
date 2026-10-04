@@ -26,6 +26,7 @@
  * | `user` message with the matching `tool_result` block         | `tool.result`          |
  * | `canUseTool` / `PreToolUse` for an `outward` tool (§8.2)      | `approval.required`    |
  * | `canUseTool` for AskUserQuestion (#940)                       | `question.asked`       |
+ * | a subagent's `ask_user` MCP call (#940)                      | `question.asked`       |
  * | `result` (total cost, number of turns)                       | `session.result`       |
  *
  * The exact SDK field names (for example the result message's cost and turn fields)
@@ -240,7 +241,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
   }),
   /**
    * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.
-   * `tool` is the AskUserQuestion `tool.call` id.
+   * `tool` is the AskUserQuestion or `ask_user` tool_use id; a subagent's call
+   * has no `tool.call` in the feed (#1108).
    */
   z.object({
     v,

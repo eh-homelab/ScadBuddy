@@ -389,11 +389,13 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
   `secrets.ts` header. `seal()` writes version `0x02`, whose AAD is `v2|` + context, so
   the version byte is authenticated too. Version `0x01` (#354) is opened only by the
   generic `open()`, and is never written.
-- **AAD binding.** `credentialAad(kind, baseUrl)` is
-  `ai_credentials:default:` + `JSON.stringify({kind, base_url})`, and the data key's
-  AAD is `dek:` + that. Someone with write access to the table but without the KEK
-  therefore cannot re-point `base_url` to their own host, or change `kind`: the edited
-  row fails GCM authentication instead of sending the token elsewhere. The comment on
+- **AAD binding.** `credentialAad(id, kind, baseUrl)` is
+  `ai_credentials:<row id>:` + `JSON.stringify({kind, base_url})`, and the data key's
+  AAD is `dek:` + that. The credential saved before #1093 keeps the row id `default`,
+  so its AAD did not change. Someone with write access to the table but without the KEK
+  therefore cannot re-point `base_url` to their own host, change `kind`, or copy a
+  sealed secret onto another row (say, a higher-priority one): the edited row fails GCM
+  authentication instead of sending the token elsewhere. The comment on
   `credentialAad()` explains, and the PR #379 findings table (row 2) lists the tests.
 - **No legacy fallback.** A v1 row (#354, whose AAD did not bind `kind` and `base_url`)
   is refused (`openCredential()`). `/healthz` reports it as "outdated format". A
@@ -514,7 +516,11 @@ PreToolUse hook is where their tier applies. A subagent's own calls go through
 tasks are off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, #946), so a subagent asked to run in
 the background runs inside the turn too. Backgrounded, it outlived the turn, and Claude Code
 then refused its calls itself, as if the user had declined them, without asking `canUseTool`
-or anyone. A query
+or anyone. A subagent cannot ask the user with `AskUserQuestion`: Claude Code refuses it
+there ("not available inside subagents") and never asks `canUseTool`. A session the
+browser user owns therefore also gets `mcp__scadbuddy_questions__ask_user` (#940,
+[`agent/src/harness/questions.ts`](../../agent/src/harness/questions.ts)), an in-process
+tool at `read` that parks on the same question gate, so only the user answers it. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 

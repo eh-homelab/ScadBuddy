@@ -11,6 +11,7 @@ import {
   type SessionRecord,
 } from '../sessions/manager.js'
 import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -23,7 +24,14 @@ import { ready, type RouteModule } from './module.js'
 // same-origin GET shows it. Approvals are decided through
 // /api/v1/ai/approvals (routes/approvals.ts, #258).
 //
-//   GET  /api/v1/ai/sessions[?status=&limit=]     list, newest first
+//   GET  /api/v1/ai/sessions[?status=&limit=&resource_type=&resource_id=]
+//                                                 list, newest first; with both resource_*
+//                                                 only the sessions that touched it (#931)
+//   GET  /api/v1/ai/resources/:type/:id/sessions[?status=&limit=]
+//                                                 {sessions}: the same list, of the sessions
+//                                                 whose tool calls touched that resource (#931,
+//                                                 sessions/touched.ts ResourceRef: a `model`
+//                                                 matches anything of the model)
 //   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?};
 //                                                 429 past the owner's new-session limit
 //                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
@@ -155,6 +163,17 @@ function seqFrom(value: string | undefined): number | undefined {
   return Number(value.trim())
 }
 
+/** A resource to look sessions up by, or why the request's is not one. */
+function resourceRef(type: string, id: string): { ok: true; ref: ResourceRef } | { ok: false; detail: string } {
+  if (!(LOOKUP_TYPES as readonly string[]).includes(type)) {
+    return { ok: false, detail: `resource type must be one of ${LOOKUP_TYPES.join(', ')}` }
+  }
+  if (id === '' || id.length > ID_MAX) {
+    return { ok: false, detail: `resource id must be 1 to ${ID_MAX} characters` }
+  }
+  return { ok: true, ref: { type: type as LookupType, id } }
+}
+
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const base = '/api/v1/ai/sessions'
 
@@ -182,24 +201,47 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   }
 
+  /** GET's list, filtered by `?status=&limit=` and `resource`; a bad query is a 400. */
+  async function listed(c: Context, sessions: SessionManager, resource: ResourceRef | undefined): Promise<Response> {
+    const status = c.req.query('status')
+    if (status !== undefined && !(SESSION_STATUSES as readonly string[]).includes(status)) {
+      return c.json({ detail: `status must be one of ${SESSION_STATUSES.join(', ')}` }, 400)
+    }
+    const rawLimit = c.req.query('limit')
+    const limit = rawLimit === undefined ? undefined : seqFrom(rawLimit)
+    // Refused like a bad status, rather than silently replaced by the default.
+    if (rawLimit !== undefined && (limit === undefined || limit < 1 || limit > LIST_LIMIT_MAX)) {
+      return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
+    }
+    const list = await sessions.list(BROWSER_USER, {
+      ...(status ? { status: status as SessionRecord['status'] } : {}),
+      ...(limit ? { limit } : {}),
+      ...(resource ? { resource } : {}),
+    })
+    return c.json({ sessions: list.map((one) => sessionView(one, BROWSER_USER)) })
+  }
+
   app.get(
     base,
     route('read', async (c, sessions) => {
-      const status = c.req.query('status')
-      if (status !== undefined && !(SESSION_STATUSES as readonly string[]).includes(status)) {
-        return c.json({ detail: `status must be one of ${SESSION_STATUSES.join(', ')}` }, 400)
+      const type = c.req.query('resource_type')
+      const id = c.req.query('resource_id')
+      if ((type === undefined) !== (id === undefined)) {
+        return c.json({ detail: 'resource_type and resource_id go together' }, 400)
       }
-      const rawLimit = c.req.query('limit')
-      const limit = rawLimit === undefined ? undefined : seqFrom(rawLimit)
-      // Refused like a bad status, rather than silently replaced by the default.
-      if (rawLimit !== undefined && (limit === undefined || limit < 1 || limit > LIST_LIMIT_MAX)) {
-        return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
-      }
-      const list = await sessions.list(BROWSER_USER, {
-        ...(status ? { status: status as SessionRecord['status'] } : {}),
-        ...(limit ? { limit } : {}),
-      })
-      return c.json({ sessions: list.map((one) => sessionView(one, BROWSER_USER)) })
+      if (type === undefined) return listed(c, sessions, undefined)
+      const resource = resourceRef(type, id ?? '')
+      if (!resource.ok) return c.json({ detail: resource.detail }, 400)
+      return listed(c, sessions, resource.ref)
+    }),
+  )
+
+  app.get(
+    '/api/v1/ai/resources/:type/:id/sessions',
+    route('read', async (c, sessions) => {
+      const resource = resourceRef(c.req.param('type') ?? '', c.req.param('id') ?? '')
+      if (!resource.ok) return c.json({ detail: resource.detail }, 400)
+      return listed(c, sessions, resource.ref)
     }),
   )
 

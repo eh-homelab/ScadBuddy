@@ -90,14 +90,15 @@ describe('Markdown', () => {
       <Markdown
         text={
           '![remote](https://evil.example/x.png) ![proto](//evil.example/x.png) ' +
-          '![data](data:image/png;base64,AAAA) ![js](javascript:alert(1)) ![other](/assets/x.png) ' +
+          '![data](data:text/html;base64,PHNjcmlwdD4=) ![js](javascript:alert(1)) ![other](/assets/x.png) ' +
           '![dots](/api/v1/../../x.png) ![slash](/api/v1\\evil) ![settings](/api/v1/settings) ' +
-          '![print](/api/v1/prints/1/thumbnail) ![climb](/api/v1/models/m/../../settings#thumbnail)'
+          '![print](/api/v1/prints/1/thumbnail) ![climb](/api/v1/models/m/../../settings#thumbnail) ' +
+          '![rel](thumbnail.png)'
         }
       />,
     )
     expect(container.querySelector('img')).toBeNull()
-    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash', 'settings', 'print', 'climb']) {
+    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash', 'settings', 'print', 'climb', 'rel']) {
       expect(screen.getByText(alt)).toBeInTheDocument()
     }
   })
@@ -113,6 +114,42 @@ describe('Markdown', () => {
       />,
     )
     expect(container.querySelectorAll('img')).toHaveLength(6)
+  })
+
+  it('shows an inline data: image (#951)', () => {
+    render(<Markdown text={'![dot](data:image/png;base64,iVBORw0KGgo=)'} />)
+    expect(screen.getByRole('img', { name: 'dot' })).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=')
+  })
+
+  it('resolves a relative image against the model it is given as a base (#951)', () => {
+    const { container } = render(
+      <Markdown
+        text={'![cover](thumbnail.png) ![arch](images/arch-ring-stand.png) ![out](../x.png) ![abs](/etc/x.png)'}
+        base={{ slug: 'chunky-name-sign', revision: 'abc1234' }}
+      />,
+    )
+    expect(screen.getByRole('img', { name: 'cover' })).toHaveAttribute(
+      'src',
+      '/api/v1/models/chunky-name-sign/images/thumbnail.png?commit=abc1234',
+    )
+    expect(screen.getByRole('img', { name: 'arch' })).toHaveAttribute(
+      'src',
+      '/api/v1/models/chunky-name-sign/images/images/arch-ring-stand.png?commit=abc1234',
+    )
+    expect(container.querySelectorAll('img')).toHaveLength(2)
+    expect(screen.getByText('out')).toBeInTheDocument()
+    expect(screen.getByText('abs')).toBeInTheDocument()
+  })
+
+  it('resolves a relative image nested in a list, a table and bold text too', () => {
+    render(
+      <Markdown
+        text={'- **![a](a.png)**\n\n| x |\n|---|\n| ![b](b.png) |'}
+        base={{ slug: 'demo' }}
+      />,
+    )
+    expect(screen.getByRole('img', { name: 'a' })).toHaveAttribute('src', '/api/v1/models/demo/images/a.png')
+    expect(screen.getByRole('img', { name: 'b' })).toHaveAttribute('src', '/api/v1/models/demo/images/b.png')
   })
 
   it('renders an image and a link side by side', () => {

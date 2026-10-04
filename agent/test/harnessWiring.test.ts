@@ -12,6 +12,7 @@ import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
+import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -301,6 +302,101 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         expect(asked).toEqual(['mcp__scadbuddy__delete_model'])
         expect(deletes).toBe(1)
         expect(parent.join('')).toContain('BG-DONE')
+      }, 60_000)
+    })
+
+    // #940: a subagent asks the user too. Claude Code refuses AskUserQuestion
+    // inside a subagent ("AskUserQuestion is not available inside subagents",
+    // measured on Claude Code 2.1.283) and never hands the call to canUseTool,
+    // so a session with a question gate also gets ASK_USER_TOOL, an in-process
+    // MCP tool that parks on the same gate; a subagent's MCP calls reach the
+    // host like any other.
+    describe("a subagent's question (#940)", () => {
+      const QUESTIONS = [
+        {
+          question: 'Which colour should the base be?',
+          header: 'Colour',
+          multiSelect: false,
+          options: [
+            { label: 'Red', description: 'PLA Basic red' },
+            { label: 'Blue', description: 'PLA Basic blue' },
+          ],
+        },
+      ]
+
+      /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
+      function subagentAsks(tool: string) {
+        const parent: string[] = []
+        const subagent: string[] = []
+        script = (r) => {
+          const last = lastContent(r)
+          if (JSON.stringify(r.body?.messages?.[0] ?? '').includes('ASK-TASK')) {
+            if (!last.includes('tool_result')) return { toolUse: { name: tool, input: { questions: QUESTIONS } } }
+            subagent.push(last)
+            return { text: 'SUB-DONE' }
+          }
+          if (last.includes('tool_result')) {
+            parent.push(last)
+            return { text: 'done' }
+          }
+          return {
+            toolUse: { name: 'Agent', input: { subagent_type: 'scadbuddy:model-author', description: 'Ask', prompt: 'ASK-TASK' } },
+          }
+        }
+        return { parent, subagent }
+      }
+
+      function recordingGate(verdict: Awaited<ReturnType<QuestionGate>>) {
+        const asked: QuestionRequest[] = []
+        const gate: QuestionGate = (request) => {
+          asked.push(request)
+          return Promise.resolve(verdict)
+        }
+        return { asked, gate }
+      }
+
+      it('Claude Code refuses AskUserQuestion in a subagent before the gate sees it', async () => {
+        const { subagent, parent } = subagentAsks(ASK_USER_QUESTION)
+        const { asked, gate } = recordingGate({ answered: true, answers: { 'Which colour should the base be?': 'Blue' } })
+        const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(asked).toEqual([])
+        expect(decisions).toEqual([])
+        expect(subagent.join('')).toContain('AskUserQuestion is not available inside subagents')
+        expect(parent.join('')).toContain('SUB-DONE')
+      }, 60_000)
+
+      it("parks the subagent's ask_user call on the gate and hands it the answer", async () => {
+        const { subagent, parent } = subagentAsks(ASK_USER_TOOL)
+        const { asked, gate } = recordingGate({ answered: true, answers: { 'Which colour should the base be?': 'Blue' } })
+        const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(init.tools).toContain(ASK_USER_TOOL)
+        expect(decisions).toEqual([[ASK_USER_TOOL, 'allow']])
+        expect(asked).toHaveLength(1)
+        expect(asked[0]?.questions).toEqual(QUESTIONS)
+        // The tool_use block's id, as for AskUserQuestion: the panel's tool.call id.
+        expect(asked[0]?.toolUseId).toMatch(/^toolu_/)
+        const got = subagent.join('')
+        expect(got).toContain('Which colour should the base be?')
+        expect(got).toContain('Blue')
+        expect(got).not.toMatch(/"is_error":true/)
+        expect(parent.join('')).toContain('SUB-DONE')
+      }, 60_000)
+
+      it('an unanswered question reaches the subagent as the tool error, never as an answer', async () => {
+        const { subagent } = subagentAsks(ASK_USER_TOOL)
+        const { gate } = recordingGate({ answered: false, message: 'The user did not answer: the turn stopped first.' })
+        const { result } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(subagent.join('')).toContain('The user did not answer')
+        expect(subagent.join('')).toMatch(/"is_error":true/)
+      }, 60_000)
+
+      it('is not offered without a gate', async () => {
+        script = () => ({ text: 'Nothing to ask.' })
+        const { init } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+        expect(init.tools).not.toContain(ASK_USER_TOOL)
       }, 60_000)
     })
 

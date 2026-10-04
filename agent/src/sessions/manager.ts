@@ -11,6 +11,8 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { ProbeVerdict } from '../harness/credentialErrors.js'
+import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import {
@@ -53,7 +55,7 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { ASK_USER_QUESTION } from '../harness/questions.js'
+import { isQuestionTool } from '../harness/questions.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -72,7 +74,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
-import { SessionResources, type TouchedRecord } from './touched.js'
+import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -300,7 +302,13 @@ export type SendOptions = {
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
 export type TurnPrincipal = { tiers?: readonly Tier[] }
 
-export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
+export type ListFilter = {
+  status?: SessionStatus
+  origin?: Origin
+  limit?: number
+  /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
+  resource?: ResourceRef
+}
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
@@ -311,8 +319,14 @@ export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
 export type SessionManagerDeps = {
   sql: Sql
   paths: HarnessPaths
-  /** The Claude credential for a query; throws when there is none. */
-  credential: () => Promise<Credential>
+  /**
+   * The Claude credentials a turn may use, in priority order, and where what
+   * each attempt learned goes (harness/fallback.ts, #1093). `candidates`
+   * throws when none is usable now.
+   */
+  credentials: CredentialSource
+  /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
+  probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
@@ -518,6 +532,18 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
   }
+  if (filter.resource) {
+    // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
+    let match: string
+    if (filter.resource.type === 'model') {
+      params.push(filter.resource.id)
+      match = `r.model_slug = $${params.length}`
+    } else {
+      params.push(filter.resource.type, filter.resource.id)
+      match = `r.resource_type = $${params.length - 1} AND r.resource_id = $${params.length}`
+    }
+    where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
+  }
   params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
   const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY updated_at DESC LIMIT $${params.length}`
@@ -580,6 +606,7 @@ export class SessionManager {
       sql: deps.sql,
       events: this.events,
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.audit ? { audit: deps.audit } : {}),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -906,10 +933,10 @@ export class SessionManager {
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
     let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
-    // AskUserQuestion (#940) only asks the user: shown and audited as `read`, as the harness tiers it.
+    // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
-      asksUser && name === ASK_USER_QUESTION ? 'read' : eventTierOf(name, input)
+      asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf)
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
@@ -967,10 +994,11 @@ export class SessionManager {
       /** Whether this turn wrote headless-browser folders, removed when it ends. */
       let browserDirs = false
       try {
-        // The credential first, and into `secrets` at once: whatever fails
-        // after this point is redacted before it reaches the event log.
-        const credential = await this.deps.credential()
-        secrets = [credential.secret]
+        // The credentials first, and into `secrets` at once: whatever fails
+        // after this point is redacted before it reaches the event log. Every
+        // candidate's, since the turn may fall back to any of them.
+        const candidates = await this.deps.credentials.candidates()
+        secrets = candidates.map((c) => c.credential.secret)
         forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
         const remotePlugins = forwarded?.plugins ?? []
         // Plugin header values (and their bare tokens) are redacted from the
@@ -1081,9 +1109,8 @@ export class SessionManager {
               }
             : undefined
         browserDirs = browser !== undefined
-        const run: HarnessRun = {
+        const run: Omit<HarnessRun, 'credential'> = {
           paths: this.deps.paths,
-          credential,
           prompt,
           cwd,
           sessionStore: this.store,
@@ -1134,7 +1161,16 @@ export class SessionManager {
           traceHooks: traced.hooks(),
           ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
         }
-        for await (const message of otelContext.with(traced.context(), () => this.run(run))) {
+        const turn = runWithFallback(run, {
+          candidates,
+          report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+          // Each attempt's query starts inside the turn's span (runHarness starts it at once).
+          run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
+          ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+          // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
+          ...(resume ? { priorCostUsd: session.costUsd } : {}),
+        })
+        for await (const message of turn) {
           if (message.type === 'result') {
             result = message
             local.settling = true

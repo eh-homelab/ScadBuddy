@@ -45,7 +45,7 @@ export type FeedItem =
   | {
       kind: 'question'
       id: string
-      /** The AskUserQuestion `tool.call` id. */
+      /** The AskUserQuestion or `ask_user` tool_use id; a subagent's call has no `tool.call` in the feed (#1108). */
       tool: string
       questions: Question[]
       state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'

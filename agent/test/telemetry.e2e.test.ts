@@ -18,6 +18,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, tempPaths } from './support/sessions.js'
 import { exportedText, resetTracing, testTracing, waitForSpan } from './support/tracing.js'
+import { fixedCredentials } from './support/fixedCredentials.js'
 
 // The agent's trace on the real Agent SDK and its bundled Claude Code binary,
 // pointed at the fake Anthropic endpoint, with sessions and approvals in
@@ -104,7 +105,7 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
     return manager({
       sql: pool.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       approvalPollMs: 50,
       ...harnessTools(services, [LIST_MODELS, PING]),

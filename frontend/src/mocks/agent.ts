@@ -52,6 +52,8 @@ export interface MockAgentSessions {
   /** The new session's id and title, or an error to answer with. */
   fork(sessionId: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
+  /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
+  has(sessionId: string): boolean
 }
 
 let openAgent: MockAgentSessions | null = null
@@ -433,6 +435,9 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         { v: PROTOCOL_VERSION, type: 'session.status', sessionId: child.sessionId, status: 'idle' },
       )
       return { id: child.sessionId, title: child.title, budgetUsd, parentId: parent.sessionId }
+    },
+    has(sessionId) {
+      return sessions.has(sessionId)
     },
     raise(sessionId, addUsd) {
       const s = sessions.get(sessionId)

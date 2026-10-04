@@ -103,6 +103,8 @@ export type ChatConnectionOptions = {
   snapshotMs?: number
   /** The browser bridge's tabs (#254); without them `tab.bind` pairs nothing. */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
+  clientIp?: string | undefined
 }
 
 export type ChatRouteDeps = {
@@ -183,6 +185,7 @@ export class ChatConnection {
   private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
+  private readonly clientIp: string | undefined
 
   constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
@@ -193,6 +196,7 @@ export class ChatConnection {
     this.buffered = options.buffered ?? (() => 0)
     this.overflow = options.overflow ?? (() => {})
     this.tabs = options.tabs
+    this.clientIp = options.clientIp
     this.limits = {
       highWater: SEND_HIGH_WATER,
       bufferMax: SEND_BUFFER_MAX,
@@ -377,7 +381,7 @@ export class ChatConnection {
           await this.sessions.approvals.decision(this.principal, message)
           return
         case 'question.answer':
-          await this.sessions.questions.answer(this.principal, message)
+          await this.sessions.questions.answer(this.principal, message, { clientIp: this.clientIp })
           return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
@@ -464,8 +468,9 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
   app.get(
     CHAT_PATH,
     gate,
-    upgrade(() => {
+    upgrade((c) => {
       let connection: ChatConnection | undefined
+      const clientIp = deps.remoteAddress(c)
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
@@ -473,6 +478,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           const raw = ws.raw as { bufferedAmount?: number } | undefined
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
+            clientIp,
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             ...(deps.tabs ? { tabs: deps.tabs } : {}),
             buffered: () => raw?.bufferedAmount ?? 0,

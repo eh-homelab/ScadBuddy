@@ -8,6 +8,7 @@ import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
+import { CredentialPool } from './harness/fallback.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -264,12 +265,9 @@ const sessions =
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
-        credential: async () => {
-          if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
-          const credential = await credentials.reveal(kek.kek)
-          if (!credential) throw new Error('no Claude credential is configured')
-          return credential
-        },
+        // Every usable credential in priority order, with fallback; disables,
+        // cooldowns, recoveries and fallbacks are audited (#1093).
+        credentials: new CredentialPool({ repo: credentials, kek, audit }),
       })
     : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
