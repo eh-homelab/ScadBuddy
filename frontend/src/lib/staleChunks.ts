@@ -1,22 +1,30 @@
 const KEY = 'scadbuddy:stale-chunk-reload'
 
-/** Optional chunks whose import is in flight; a preload error meanwhile is theirs. */
-let optionalLoads = 0
+/** Matchers for the optional chunks whose import is in flight. */
+const optionalLoads = new Set<RegExp>()
 
 /**
  * Runs the dynamic import of a chunk the page can do without (the tracing SDK). Its
  * failure is often not staleness (blockers match names like `tracing-<hash>.js`), and a
- * reload would lose the user's first edits and fail again, so a `vite:preloadError` fired
- * while it is in flight (Vite dispatches it before the import rejects) does not reload.
- * The rejection still reaches the caller.
+ * reload would lose the user's first edits and fail again, so a `vite:preloadError`
+ * about it does not reload. Vite dispatches that event before the import rejects, with
+ * the error as `payload`; Chromium's message names the failing URL, which `chunk` must
+ * match. An error about any other chunk, or one whose message names no URL (Firefox's
+ * does not), is treated as stale as before. The rejection still reaches the caller.
  */
-export async function loadOptionalChunk<T>(load: () => Promise<T>): Promise<T> {
-  optionalLoads += 1
+export async function loadOptionalChunk<T>(load: () => Promise<T>, chunk: RegExp): Promise<T> {
+  optionalLoads.add(chunk)
   try {
     return await load()
   } finally {
-    optionalLoads -= 1
+    optionalLoads.delete(chunk)
   }
+}
+
+function isOptional(event: Event): boolean {
+  const payload = (event as Event & { payload?: unknown }).payload
+  const message = payload instanceof Error ? payload.message : String(payload ?? '')
+  return [...optionalLoads].some((chunk) => chunk.test(message))
 }
 
 /**
@@ -44,7 +52,7 @@ export function installStaleChunkReload(
   build: string = import.meta.url,
 ): () => void {
   const onPreloadError = (event: Event) => {
-    if (optionalLoads > 0) return
+    if (isOptional(event)) return
     if (read(target) === build) return
     if (!write(target, build)) return
     event.preventDefault()
