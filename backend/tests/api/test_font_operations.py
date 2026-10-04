@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -78,3 +79,17 @@ def test_a_family_not_in_the_catalogue_is_still_404(
     response = client.post(INSTALL, json={"family": "Comic Sans MS"})
     assert response.status_code == 404, response.text
     assert "not in the Google Fonts catalogue" in response.json()["detail"]
+
+
+def test_a_pruned_font_install_names_the_installed_fonts(
+    client: TestClient, fonts: FakeBackedService, pg_conninfo: str
+) -> None:
+    """Review 3e final M4: the 409 names what this kind changed, not every library
+    kind's "the model and its libraries"."""
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    assert client.post(INSTALL, json={"family": "Pacifico"}, headers=headers).status_code == 200
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = client.post(INSTALL, json={"family": "Pacifico"}, headers=headers)
+    assert again.status_code == 409, again.text
+    assert "Check the installed fonts" in again.json()["detail"]

@@ -167,7 +167,12 @@ def media_kinds(state: AppState) -> list[OperationKind]:
 
     def kind(name: str, check: Any, run: Any, **options: Any) -> OperationKind:
         return OperationKind(
-            name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
+            name,
+            answered_as_routes(check),
+            answered_as_routes(run),
+            queue="library",
+            where="the template's media",
+            **options,
         )
 
     return [

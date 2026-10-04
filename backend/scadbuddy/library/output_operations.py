@@ -158,13 +158,13 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         emit(state.events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
         return {}
 
-    def kind(name: str, check: Any, run: Any) -> OperationKind:
+    def kind(name: str, check: Any, run: Any, where: str) -> OperationKind:
         return OperationKind(
-            name, answered_as_routes(check), answered_as_routes(run), queue="library"
+            name, answered_as_routes(check), answered_as_routes(run), queue="library", where=where
         )
 
     return [
-        kind("output_create", create_check, create_run),
-        kind("output_thumbnail", output_check, thumbnail_run),
-        kind("output_delete", output_check, delete_run),
+        kind("output_create", create_check, create_run, "the template's outputs"),
+        kind("output_thumbnail", output_check, thumbnail_run, "the output"),
+        kind("output_delete", output_check, delete_run, "the output and Bambuddy's inbox folder"),
     ]

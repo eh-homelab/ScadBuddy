@@ -36,5 +36,6 @@ def font_kinds(state: AppState) -> list[OperationKind]:
             answered_as_routes(install_run),
             queue="library",
             run_timeout=FONT_INSTALL_TIMEOUT,
+            where="the installed fonts",
         )
     ]

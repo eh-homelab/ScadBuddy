@@ -79,6 +79,7 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
             answered_as_routes(_store_answered(check)),
             answered_as_routes(_store_answered(run)),
             queue="library",
+            where="the template's uploaded files",
         )
 
     return [
