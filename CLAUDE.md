@@ -162,7 +162,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
   `GET /operations/{id}`. The Bambuddy kinds are `bambuddy/operations.py`
   (`bambuddy_kinds`), registered in `create_app`. The browser's `command()`
-  (`frontend/src/api/client.ts`) and the agent's (`agent/src/api/command.ts`) send the
+  (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`) send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
