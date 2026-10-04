@@ -85,6 +85,9 @@ export function useRenderJob(
     if (!slug || !params || Object.keys(params).length === 0) return
 
     const mine = ++generation.current
+    // Aborted when a newer submit supersedes this one: it stops re-sending a render
+    // the server is still accepting.
+    const superseded = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let unfollow: (() => void) | undefined
     let stopped = false
@@ -181,7 +184,13 @@ export function useRenderJob(
       // the same `supersedes` still applies.
       for (;;) {
         try {
-          const { job_id } = await api.render(slug, joinInputs(params, extraRef.current), version, supersedes)
+          const { job_id } = await api.render(
+            slug,
+            joinInputs(params, extraRef.current),
+            version,
+            supersedes,
+            superseded.signal,
+          )
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
@@ -210,6 +219,7 @@ export function useRenderJob(
 
     return () => {
       stopped = true
+      superseded.abort()
       unfollow?.()
       if (timer) clearTimeout(timer)
       // The job is no longer followed, so its last step is no longer news: the

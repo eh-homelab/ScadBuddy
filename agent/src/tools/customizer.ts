@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { reattach } from '../api/command.js'
@@ -185,13 +186,15 @@ export const customizerTools: Tool[] = [
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        // Sent again while the backend is still accepting it (#1053): a render is keyed
-        // by its content, so the same request joins the job the first one is starting.
+        // Sent again while the backend is still accepting it (#1053), with one
+        // `Idempotency-Key`: the backend counts the re-sends as this one request's claim.
+        const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
         const accepted = await reattach(
           ctx,
           () =>
             ctx.backend.POST('/api/v1/models/{slug}/render', {
               params: { path: { slug } },
+              headers,
               body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
               signal: ctx.signal,
             }),

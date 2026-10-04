@@ -793,21 +793,28 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` stops the
+   * re-sends (a superseded preview), never a request already sent: its answer names the
+   * job the next render supersedes.
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    // Sent again while the server is still accepting it (#1053): a render is keyed by
-    // its content, so the same request joins the job the first one is starting.
-    reattach(() =>
-      request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-        method: 'POST',
-        body: JSON.stringify({
-          inputs,
-          version: version ?? null,
-          ...(supersedes ? { supersedes } : {}),
+  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string, signal?: AbortSignal) => {
+    // Sent again while the server is still accepting it (#1053), with one
+    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
+    const headers = { 'Idempotency-Key': newRequestId() }
+    return reattach(
+      () =>
+        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs,
+            version: version ?? null,
+            ...(supersedes ? { supersedes } : {}),
+          }),
         }),
-      }),
-    ),
+      signal,
+    )
+  },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 

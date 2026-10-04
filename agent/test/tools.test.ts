@@ -210,12 +210,14 @@ describe('render_model', () => {
     expect(posts).toBe(1)
   })
 
-  it('re-sends a render the backend is still accepting (#1053)', async () => {
+  it('re-sends a render the backend is still accepting, with the same key (#1053)', async () => {
     let posts = 0
+    const keys: (string | null)[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
-      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
         posts += 1
+        keys.push(request.headers.get('Idempotency-Key'))
         return posts === 1
           ? HttpResponse.json(
               {
@@ -234,6 +236,9 @@ describe('render_model', () => {
     expect(result.isError).toBeFalsy()
     expect(firstText(result)).toMatchObject({ status: 'done' })
     expect(posts).toBe(2)
+    // One request to the backend, so one claim on the job (review #1066 2.1).
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
   })
 
   it('refuses invalid parameters before queueing anything', async () => {
