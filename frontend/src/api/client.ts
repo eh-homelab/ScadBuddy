@@ -327,8 +327,16 @@ const seg = encodeURIComponent
 /**
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
+ * `operationFollowMs` is the same for an operation (review #1063): past its effect's
+ * five minutes and the server's reconcile of one whose execution is gone.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
+export const printRunPoll = {
+  intervalMs: 1000,
+  reattempts: 3,
+  acceptingMs: 240_000,
+  followMs: 3_600_000,
+  operationFollowMs: 600_000,
+}
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -403,7 +411,16 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op = first.body as Operation
+  const began = Date.now()
   while (op.status === 'running') {
+    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:operation-unfinished',
+        title: 'Still running',
+        status: 504,
+        detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = op.id
     op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)

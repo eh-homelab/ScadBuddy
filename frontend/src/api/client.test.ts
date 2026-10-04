@@ -772,6 +772,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
   afterEach(() => {
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
+    printRunPoll.operationFollowMs = 600_000
   })
 
   const operation = {
@@ -815,6 +816,21 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     )
 
     await expect(api.reprint(35)).resolves.toEqual(again)
+  })
+
+  it('stops following an operation that never ends, naming it (review #1063)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.operationFollowMs = 20
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () => HttpResponse.json(operation)),
+    )
+
+    const caught = await api.reprint(35).catch((e: unknown) => e)
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).status).toBe(504)
+    expect((caught as ApiError).problem.detail).toContain('op-1')
+    expect((caught as ApiError).problem.detail).toContain('check before trying again')
   })
 
   it("turns a failed operation into the route's ApiError", async () => {
