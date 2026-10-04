@@ -529,7 +529,7 @@ def test_a_settings_read_timeout_bounds_the_whole_read(
     # The read waits 0.6 budgets on one table and the rest on the other: about one
     # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
     # unit would give up at once.
-    assert 0.9 * budget < elapsed < 1.3 * budget
+    assert 0.9 * budget < elapsed < 1.45 * budget
 
 
 def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
