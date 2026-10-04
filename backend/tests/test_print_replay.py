@@ -20,7 +20,7 @@ from scadbuddy.workflows.printing import PrintRunWorkflow
 HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
 
 
-@pytest.mark.parametrize("name", ["succeeded", "refused", "enqueue_failed"])
+@pytest.mark.parametrize("name", ["succeeded", "succeeded_followed", "refused", "enqueue_failed"])
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(f"print-{name}", (HISTORIES / f"{name}.json").read_text())
     replayer = Replayer(workflows=[PrintRunWorkflow], data_converter=pydantic_data_converter)
