@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -24,6 +25,7 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.usage import (
     RACK_SETTLE_CUT_OFF,
+    RACK_SETTLE_FALLBACK,
     PickedHotend,
     RackUsageStore,
     record_settled,
@@ -203,7 +205,7 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
     with caplog.at_level(logging.DEBUG):
         assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 1
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert record.getMessage() == "could not record a rack nozzle's print"
+    assert record.getMessage() == RACK_SETTLE_FALLBACK
     assert (
         getattr(record, "output_id", None),
         getattr(record, "archive_id", None),
@@ -306,10 +308,9 @@ async def test_a_settle_cut_off_mid_write_still_records_that_archive(
 
 class FailingLinks:
     async def for_output(self, output_id: str) -> list[PrintLink]:
-        raise RuntimeError(f"connection lost near {A}")
+        raise psycopg.OperationalError(f"connection lost near {A}")
 
 
-@pytest.mark.rack_injects_errors
 async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -319,7 +320,7 @@ async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
         )
     assert written == 0
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert getattr(record, "error", None) == "RuntimeError"
+    assert getattr(record, "error", None) == "OperationalError"
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 

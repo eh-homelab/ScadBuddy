@@ -138,3 +138,68 @@ it('never asks accept about an answer a newer read has overtaken', async () => {
   expect(result.current.data).toBe('newest')
   expect(asked).toEqual([])
 })
+
+it('never lets a read in flight overwrite data set since', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.setData('set', { supersede: true }))
+  await act(async () => resolvers[1]?.('stale'))
+  expect(result.current.data).toBe('set')
+})
+
+it('lets a read in flight replace data set without supersede', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.setData('set'))
+  await act(async () => resolvers[1]?.('newer'))
+  expect(result.current.data).toBe('newer')
+})
+
+it('never settles a new key, or cancels its load, with data set after the deps changed', async () => {
+  const reads: Record<string, ((value: string) => void)[]> = { a: [], b: [] }
+  const { result, rerender } = renderHook(
+    ({ slug }) => useAsync(() => new Promise<string>((resolve) => reads[slug]!.push(resolve)), [slug]),
+    { initialProps: { slug: 'a' } },
+  )
+  await act(async () => reads.a![0]?.('a data'))
+  const fromA = result.current.setData
+  rerender({ slug: 'b' })
+  await waitFor(() => expect(reads.b).toHaveLength(1))
+  act(() => fromA('a edited', { supersede: true }))
+  expect(result.current).toMatchObject({ data: undefined, loading: true })
+  await act(async () => reads.b![0]?.('b data'))
+  expect(result.current).toMatchObject({ data: 'b data', loading: false })
+})
+
+it('tells refresh when its read fails', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const failed = vi.fn()
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(failed).toHaveBeenCalledOnce())
+  expect(result.current.data).toBe(1)
+})
+
+it('tells every caller merged into one read that it failed', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const first = vi.fn()
+  const second = vi.fn()
+  act(() => {
+    result.current.refresh(undefined, first)
+    result.current.refresh()
+    result.current.refresh(undefined, second)
+  })
+  await waitFor(() => expect(second).toHaveBeenCalledOnce())
+  expect(first).toHaveBeenCalledOnce()
+})

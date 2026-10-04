@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Path, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 
@@ -74,7 +74,9 @@ router = APIRouter(
 )
 
 
-async def _proxy(store: SettingsStore, request: Request, path: str, *, what: str) -> Response:
+async def _proxy(
+    store: SettingsStore, request: Request, path: str, *, operation: Operation, what: str
+) -> Response:
     """Stream ``path`` from Bambuddy, with the browser's ``Range`` passed through.
 
     The client and the upstream response stay open until the body has been sent, so
@@ -88,6 +90,7 @@ async def _proxy(store: SettingsStore, request: Request, path: str, *, what: str
         upstream = await stack.enter_async_context(
             client.stream(
                 path,
+                operation=operation,
                 what=what,
                 range_header=request.headers.get("range"),
                 if_range=request.headers.get("if-range"),
@@ -138,7 +141,11 @@ async def get_timelapse(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/archives/{archive_id}/timelapse", what="play the timelapse"
+        store,
+        request,
+        f"/archives/{archive_id}/timelapse",
+        operation="media.timelapse",
+        what="play the timelapse",
     )
 
 
@@ -150,7 +157,11 @@ async def get_photo(
     store: SettingsStoreDep,
 ) -> Response:
     return await _proxy(
-        store, request, f"/archives/{archive_id}/photos/{filename}", what="show the photo"
+        store,
+        request,
+        f"/archives/{archive_id}/photos/{filename}",
+        operation="media.photo",
+        what="show the photo",
     )
 
 
@@ -159,7 +170,11 @@ async def get_thumbnail(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/archives/{archive_id}/thumbnail", what="show the thumbnail"
+        store,
+        request,
+        f"/archives/{archive_id}/thumbnail",
+        operation="media.thumbnail",
+        what="show the thumbnail",
     )
 
 
@@ -174,6 +189,7 @@ async def get_plate_thumbnail(
         store,
         request,
         f"/archives/{archive_id}/plate-thumbnail/{index}",
+        operation="media.plate_thumbnail",
         what="show the plate image",
     )
 
@@ -183,7 +199,11 @@ async def get_sliced_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/archives/{archive_id}/download", what="download the sliced file"
+        store,
+        request,
+        f"/archives/{archive_id}/download",
+        operation="media.download",
+        what="download the sliced file",
     )
 
 
@@ -192,5 +212,9 @@ async def get_source_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
     return await _proxy(
-        store, request, f"/archives/{archive_id}/source", what="download the source 3MF"
+        store,
+        request,
+        f"/archives/{archive_id}/source",
+        operation="media.source",
+        what="download the source 3MF",
     )

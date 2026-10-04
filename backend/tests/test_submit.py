@@ -14,8 +14,11 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -25,6 +28,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import current_traceparent, use_traceparent
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
 from scadbuddy.render.jobs import SnapshotUnavailableError
@@ -847,3 +851,209 @@ async def test_with_a_snapshot_store_a_submit_names_the_pinned_revision(
     assert pinned.asked == [(SLUG, None)]
     assert job.model_version == "f" * 40
     assert (await asyncio.to_thread(projection.read, job.id)).model_version == "f" * 40
+
+
+async def test_a_coalesced_submit_links_to_the_render_it_joined(
+    make_service: ServiceFactory, spans: InMemorySpanExporter
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        # No worker: the first job stays pending, so the second coalesces onto it.
+        first = await service.submit(SLUG, {"width": 7})
+        second = await service.submit(SLUG, {"width": 7})
+        await service.aclose()
+    assert second.id == first.id
+    submits = [s for s in spans.get_finished_spans() if s.name == "render.submit"]
+    assert len(submits) == 2
+    opened, joined = submits
+    assert (joined.attributes or {})["scadbuddy.coalesced"] is True
+    assert (opened.attributes or {})["scadbuddy.coalesced"] is False
+    assert [link.context.span_id for link in joined.links] == [opened.context.span_id]
+
+
+async def test_a_row_without_a_traceparent_takes_the_trace_of_the_submit_that_joins_it(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # A pending row written before the migration, or by a caller the sampler dropped.
+    # Review 4 of #1064: a traced caller that joins it fills the column in, so the
+    # reconciler starts the row in a trace someone is looking at.
+    old = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 8},
+        inputs={"params": {"width": 8}},
+        created_at=now(),
+        traceparent=None,
+    )
+    await asyncio.to_thread(projection.submit, old, render_key(SLUG, {"width": 8}, None))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        joined = await service.submit(SLUG, {"width": 8})
+        await service.aclose()
+    assert joined.id == old.id
+    (submit,) = [s for s in spans.get_finished_spans() if s.name == "render.submit"]
+    stored = (await asyncio.to_thread(projection.read, old.id)).traceparent
+    assert stored is not None
+    assert stored.split("-")[1:3] == [
+        f"{submit.context.trace_id:032x}",
+        f"{submit.context.span_id:016x}",
+    ]
+    # Its own trace now, so no link to itself.
+    assert list(submit.links) == []
+
+
+async def test_the_reconciler_starts_a_row_in_its_first_callers_trace(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    stale = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 9},
+        inputs={"params": {"width": 9}},
+        created_at=now(),
+        traceparent=traceparent,
+    )
+    await asyncio.to_thread(projection.submit, stale, render_key(SLUG, {"width": 9}, None))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        started: list[str | None] = []
+        start = client.start_workflow
+
+        async def capturing(*args: Any, **kwargs: Any) -> Any:
+            started.append(current_traceparent())
+            return await start(*args, **kwargs)
+
+        client.start_workflow = capturing  # type: ignore[method-assign]
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    assert started and started[0] is not None
+    assert started[0].split("-")[1] == "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+async def test_with_no_valid_span_rows_carry_no_traceparent(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Review 2 of #1064: no stub of current_traceparent. Spec §4: the column is NULL
+    # when the sampler dropped the first request (a `traceparent: ...-00` parent) or the
+    # SDK is off (its no-op tracer gives no valid context). Outside any span the submit
+    # span is a sampled root of its own, so that row does carry one: the control that
+    # shows the two NULLs are not NULL by accident.
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=60.0)
+        with use_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"):
+            unsampled = await service.submit(SLUG, {"width": 11})
+        with monkeypatch.context() as off:
+            off.setattr(trace, "get_tracer", lambda *_args, **_kwargs: trace.NoOpTracer())
+            disabled = await service.submit(SLUG, {"width": 12})
+        root = await service.submit(SLUG, {"width": 13})
+        await service.aclose()
+    assert (await asyncio.to_thread(projection.read, unsampled.id)).traceparent is None
+    assert (await asyncio.to_thread(projection.read, disabled.id)).traceparent is None
+    stored = (await asyncio.to_thread(projection.read, root.id)).traceparent
+    (submit_span,) = [
+        s
+        for s in spans.get_finished_spans()
+        if s.name == "render.submit" and (s.attributes or {}).get("scadbuddy.job_id") == root.id
+    ]
+    assert submit_span.parent is None
+    assert stored is not None
+    assert stored.split("-")[1] == f"{submit_span.context.trace_id:032x}"
+
+
+@pytest.mark.parametrize(
+    "traceparent",
+    # Review 3 of #1064: an invalid value (a hand-edited row, a version the propagator
+    # does not accept) has no trace to rejoin either, exactly like NULL.
+    [None, "00-garbage-xx-01"],
+    ids=["null", "invalid"],
+)
+async def test_the_reconciler_roots_a_row_with_no_valid_traceparent_in_a_span_of_its_own(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
+    traceparent: str | None,
+) -> None:
+    old = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 10},
+        inputs={"params": {"width": 10}},
+        created_at=now(),
+        traceparent=traceparent,
+    )
+    await asyncio.to_thread(projection.submit, old, render_key(SLUG, {"width": 10}, None))
+    async with temporal_client() as plain:
+        # The production client's interceptor, which makes the StartWorkflow span.
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (root,) = [s for s in finished if s.name == "render.reconcile"]
+    assert root.parent is None
+    assert root.context.trace_flags.sampled
+    assert (root.attributes or {})["scadbuddy.job_id"] == old.id
+    (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
+    assert start.parent is not None
+    assert start.parent.span_id == root.context.span_id
+
+
+async def test_the_reconciler_records_its_own_span_when_it_rejoins_a_trace(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # Review 5 of #1064: a late start shows it came from the reconciler, in the
+    # original trace, between the request's span and StartWorkflow.
+    trace_id, span_id = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+    stale = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 14},
+        inputs={"params": {"width": 14}},
+        created_at=now(),
+        traceparent=f"00-{trace_id}-{span_id}-01",
+    )
+    await asyncio.to_thread(projection.submit, stale, render_key(SLUG, {"width": 14}, None))
+    async with temporal_client() as plain:
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (reconcile,) = [s for s in finished if s.name == "render.reconcile"]
+    assert reconcile.parent is not None
+    assert f"{reconcile.context.trace_id:032x}" == trace_id
+    assert f"{reconcile.parent.span_id:016x}" == span_id
+    assert (reconcile.attributes or {})["scadbuddy.job_id"] == stale.id
+    (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
+    assert start.parent is not None
+    assert start.parent.span_id == reconcile.context.span_id
+
+
+async def test_a_reconcile_that_finds_its_workflow_running_is_not_an_error_span(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # Review 7 of #1064: a pending row whose workflow is already running (a busy
+    # worker) is left alone, which is not a failure of the render.
+    async with temporal_client() as plain:
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        # No worker: the job stays pending with its workflow running.
+        await service.submit(SLUG, {"width": 16})
+        spans.clear()
+        assert await service.reconcile_once() == 0
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (reconcile,) = [s for s in finished if s.name == "render.reconcile"]
+    assert reconcile.status.status_code == trace.StatusCode.UNSET
+    assert (reconcile.attributes or {})["scadbuddy.reconcile.already_started"] is True
+    assert "scadbuddy.failure_class" not in (reconcile.attributes or {})

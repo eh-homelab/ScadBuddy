@@ -82,6 +82,13 @@ describe('client messages', () => {
     expect(parseClientMessage(message).ok).toBe(true)
   })
 
+  it('takes a user message with a W3C traceparent, and refuses a malformed one', () => {
+    const base = { v: 1, type: 'user.message', text: 'hi', context: { route: '/' } }
+    const traceparent = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+    expect(parseClientMessage({ ...base, traceparent })).toEqual({ ok: true, value: { ...base, traceparent } })
+    expect(parseClientMessage({ ...base, traceparent: 'not-a-traceparent' }).ok).toBe(false)
+  })
+
   it('rejects an empty user message', () => {
     expect(
       parseClientMessage({ v: 1, type: 'user.message', text: '', context: { route: '/' } }).ok,

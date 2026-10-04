@@ -16,11 +16,14 @@ dependencies = [
     "psycopg>=3.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "temporalio>=1.33.0,<1.34",
     "python-multipart>=0.0.20",
-    "temporalio>=1.33.0,<1.34",
     "trimesh>=4.5",
     "uvicorn[standard]>=0.32",
+    "opentelemetry-sdk>=1.45,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45,<2",
+    "opentelemetry-instrumentation-fastapi>=0.66b0,<0.67",
+    "opentelemetry-instrumentation-psycopg>=0.66b0,<0.67",
+    "temporalio[opentelemetry]>=1.33.0,<1.34",
 ]
 
 [build-system]
@@ -66,6 +69,6 @@ markers = [
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
-    "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose",
+    "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
 ]

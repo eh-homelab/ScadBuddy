@@ -10,9 +10,14 @@
  * (`EXTERNAL_SESSION_ID`) starts with what its script did, so the mocked build shows
  * the panel filled. Any other session the open mock agent knows touched nothing; one it
  * does not know is a 404, as the real route refuses a session it cannot find or show.
+ *
+ * #931 — the reverse, `GET /resources/:type/:id/sessions`, is read off the same lists: a
+ * session is listed when one of its rows matches, a `model` by the row's model and any
+ * other kind by its id, as agent `sessions/manager.ts` `listQuery` does. Its title is
+ * what `setSessionResources` was given.
  */
 import { HttpResponse, http } from 'msw'
-import type { AiSessionView, SessionLimits, SessionResource } from '../../api/types'
+import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
 import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
 
 const base = '/api/v1/ai'
@@ -51,18 +56,34 @@ const state = {
   /** Every limits write, for tests. */
   writes: [] as SessionLimits[],
   resources: new Map<string, SessionResource[]>(),
+  /** The session each resource list belongs to, as the reverse lookup shows it. */
+  views: new Map<string, AiSessionView>(),
 }
 
 export function reset(): void {
   state.limits = { ...DEFAULTS }
   state.writes = []
   state.resources = new Map([[EXTERNAL_SESSION_ID, [...EXTERNAL_RESOURCES]]])
+  state.views = new Map([
+    [EXTERNAL_SESSION_ID, view({ id: EXTERNAL_SESSION_ID, title: 'Tune the gridfinity bin', origin: 'mcp', turns: 1 })],
+  ])
 }
 reset()
 
 /** #931 — what `GET /sessions/:id/resources` answers for one session, oldest first. */
-export function setSessionResources(sessionId: string, resources: readonly SessionResource[]): void {
+export function setSessionResources(
+  sessionId: string,
+  resources: readonly SessionResource[],
+  session: Partial<AiSessionView> = {},
+): void {
   state.resources.set(sessionId, [...resources])
+  state.views.set(sessionId, view({ ...state.views.get(sessionId), ...session, id: sessionId }))
+}
+
+const VALID_TYPES: readonly string[] = ['model', 'revision', 'preset', 'asset', 'render_job', 'output', 'print_run', 'print']
+
+function touched(rows: readonly SessionResource[], ref: ResourceRef): boolean {
+  return rows.some((r) => (ref.type === 'model' ? r.model === ref.id : r.type === ref.type && r.id === ref.id))
 }
 
 export function mockSessionLimitWrites(): readonly SessionLimits[] {
@@ -72,7 +93,18 @@ export function mockSessionLimitWrites(): readonly SessionLimits[] {
 const detail = (text: string, status: number) => HttpResponse.json({ detail: text }, { status })
 
 function view(fields: Partial<AiSessionView> & Pick<AiSessionView, 'id'>): AiSessionView {
-  return { title: '', parent_id: null, turns: 0, cost_usd: 0, budget_usd: 1, running: false, ...fields }
+  return {
+    title: '',
+    origin: 'chat',
+    status: 'idle',
+    updated_at: '2026-10-03T09:00:05.000Z',
+    parent_id: null,
+    turns: 0,
+    cost_usd: 0,
+    budget_usd: 1,
+    running: false,
+    ...fields,
+  }
 }
 
 export const handlers = [
@@ -98,6 +130,18 @@ export const handlers = [
     const id = String(params.id)
     const resources = state.resources.get(id) ?? (mockAgentSessions()?.has(id) ? [] : undefined)
     return resources ? HttpResponse.json({ resources }) : detail('session not found', 404)
+  }),
+
+  http.get(`${base}/resources/:type/:id/sessions`, ({ params, request }) => {
+    const type = String(params.type)
+    if (!VALID_TYPES.includes(type)) return detail(`resource type must be one of ${VALID_TYPES.join(', ')}`, 400)
+    const ref = { type, id: String(params.id) } as ResourceRef
+    const sessions = [...state.resources]
+      .filter(([, rows]) => touched(rows, ref))
+      .map(([id]) => state.views.get(id) ?? view({ id }))
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      .slice(0, Number(new URL(request.url).searchParams.get('limit') ?? 100))
+    return HttpResponse.json({ sessions })
   }),
 
   http.post(`${base}/sessions/:id/fork`, ({ params }) => {
