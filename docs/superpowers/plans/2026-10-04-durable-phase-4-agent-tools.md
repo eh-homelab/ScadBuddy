@@ -97,7 +97,11 @@ exposes the same serialization context to a codec"), §8 (`agent-tools` activiti
    inside 30 s, where a drain cannot wait. `AgentOperation` changes go behind
    `patched()`, and a recorded history (`test/fixtures/agent_operation_histories/`) is replayed
    in CI, as `PrintRunWorkflow`'s are. Shutdown: `worker.shutdown()` with a 10 s
-   `shutdownGraceTime`, before the turns drain.
+   `shutdownGraceTime` and a 15 s `shutdownForceTime`, at the same time as the turns
+   drain (`main.ts` `stop()` awaits both, before the listener and the pool close). Past
+   the grace a running activity is cancelled (a fetch's git is killed through
+   `cancellationSignal`); one that ignores it is abandoned at 15 s, inside the turns'
+   17 s budget, so `stop()` always ends within the pod's 30 s.
 10. **The workflow is bundled at build.** `pnpm build` runs `bundleWorkflowCode` over
     `dist/temporal/workflows.js` into `dist/temporal/workflow-bundle.js` (the SDK's production
     path); tests pass `workflowsPath` to the source.
@@ -112,15 +116,19 @@ exposes the same serialization context to a codec"), §8 (`agent-tools` activiti
     and a re-pin is the same fetch. Approve, enable, discard and delete are one Postgres
     statement each (and an eviction from the cache) and stay requests (§4.1). Both kinds are
     `done`: 201 (install) / 200 (re-pin) with today's body inside the deadline, 202 with the
-    operation past it. Check (no fetch): the source or ref validates (400), the package exists
-    for a re-pin (404). Run: the fetch, vet and pin under the existing concurrency cap,
-    `run_attempts` 1, run timeout 5 min. Refusals keep today's statuses and bodies (422 with
+    operation past it. The route validates the source or ref first (400) and passes only
+    the validated source, so nothing with credentials, a query or a fragment reaches the
+    workflow's input in history. Check (no fetch): the source or ref validates (400), the
+    package exists for a re-pin (404), a fetch is free under the existing concurrency cap
+    (429, before the record, so the same key may start again). Run: the fetch, vet and
+    pin, waiting for a fetch rather than refusing, `run_attempts` 1, run timeout 5 min. Refusals keep today's statuses and bodies (422 with
     `problems`, 409, 400) as the operation's problem with `extensions`.
 13. **Without `Idempotency-Key`** each request is its own command (the backend's rule).
 
 **As built:** `startCommand` landed with Task 6 (its tests drive the workflow through
 it); the package kinds are `agent/src/plugins/packages/operations.ts`; the
-concurrency cap (429) moved into the kinds' run; the pg route tests run the kinds
+concurrency cap (429) is the kinds' check, and their run waits for a fetch (final
+review M2); the pg route tests run the kinds
 in-process (`test/support/commands.ts`) and `test/pluginPackages.temporal.test.ts` runs
 the routes on Temporal; no `operation.*` events (the UI follows by polling).
 
@@ -152,8 +160,9 @@ the routes on Temporal; no `operation.*` events (the UI follows by polling).
    `problems`) inside the deadline; a repeat with the same `Idempotency-Key` after it finished
    answers from `ai_operations` and fetches nothing; a refusal before the record lets the same
    key start again.
-5. Shutdown order: the worker stops polling and finishes (or cancels after 10 s) its running
-   activities before the pool closes, within the pod's 30 s.
+5. Shutdown order: alongside the turns' drain, the worker stops polling and finishes (or
+   cancels after 10 s, and abandons at 15 s) its running activities before the pool
+   closes, within the pod's 30 s.
 
 ---
 

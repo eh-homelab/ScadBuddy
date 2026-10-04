@@ -1152,7 +1152,8 @@ Each phase is its own implementation plan and ships alone.
      The agent service runs `AgentWorker` (`agent/src/temporal/worker.ts`) on
      `agent-tools` when `SCADBUDDY_TEMPORAL_ADDRESS` and the database are set,
      unversioned (it pins nothing a drain would wait for), stopped with the turns on
-     SIGTERM with a 10 s grace. Each tool's activity (`temporal/toolActivities.ts`) takes
+     SIGTERM with a 10 s grace, cancelled after it, and abandoned at 15 s
+     (`shutdownForceTime`). Each tool's activity (`temporal/toolActivities.ts`) takes
      the one dict `activity_as_tool` passes and returns the result's content blocks; a
      result that is not `ok` fails non-retryably (`ToolError`). It runs only for a
      workflow `session-<id>` whose `ai_sessions.mode` is `durable`: §6.1's column is
