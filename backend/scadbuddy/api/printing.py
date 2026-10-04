@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
+from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
     CatalogueDep,
     OutputIdPath,
@@ -147,10 +148,16 @@ def put_printer_rack_algorithm(
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
     Bambuddy, like the printer's remembered plate."""
-    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
-    return PrinterRackAlgorithm(
-        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
-    )
+    try:
+        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    except DATABASE_ERRORS as error:
+        # The store gives up on purpose rather than commit after the dialog has (#1129).
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"the rack algorithm was not saved ({type(error).__name__})",
+            type_=DATABASE_UNAVAILABLE_PROBLEM,
+        ) from None
+    return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
 
 
 @router.get(

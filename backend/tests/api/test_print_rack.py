@@ -9,12 +9,16 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from psycopg_pool import PoolTimeout
 
+from scadbuddy.api.analyzers import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
@@ -45,6 +49,25 @@ def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: Test
     forgot = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": None})
     assert forgot.json() == {"printer_id": 1, "algorithm": "least_used"}
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [psycopg.errors.QueryCanceled("canceling statement"), PoolTimeout("no connection")],
+    ids=["write", "pool"],
+)
+def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """#1129 review: the bounded save's timeouts are expected, not a crash."""
+
+    def timed_out(*_: object) -> None:
+        raise error
+
+    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", timed_out)
+    response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
 
 
 def test_an_unknown_algorithm_is_refused(client: TestClient) -> None:

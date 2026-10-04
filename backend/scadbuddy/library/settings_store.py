@@ -107,7 +107,9 @@ NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 #: How long a printer's rack-algorithm save may wait for a connection, and then how
 #: long its write may run (#1129). Together well under the print dialog's 25 s give-up
 #: (``rackAlgorithmSave`` in ``frontend/src/api/client.ts``): the dialog then sends its
-#: next choice, and a save it gave up on must not commit after that one.
+#: next choice, and a save it gave up on must not commit after that one. This bounds
+#: only the server's database work, not time a request spends before it reaches the
+#: store (a worker thread, a proxy); ordering saves explicitly is #1216.
 RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 
 #: The settings `StoreNotReadyError` is decided from.
@@ -596,12 +598,14 @@ class SettingsStore:
 
     def set_printer_rack_algorithm(
         self, printer_id: int, algorithm: RackAlgorithm | None
-    ) -> StoredSettings:
+    ) -> RackAlgorithm:
         """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
+        Returns the printer's algorithm now.
 
         Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
         write, so it commits well inside the print dialog's give-up or not at all
-        (#1129)."""
+        (#1129). Nothing is read back afterwards: an unbounded read of every setting
+        could outlast the give-up on a save that has already landed."""
         bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
         with (
             self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
@@ -609,7 +613,8 @@ class SettingsStore:
         ):
             conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
             _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
-        return self._written("printer_rack_algorithm")
+        emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
+        return algorithm or StoredSettings().rack_algorithm(None)
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing

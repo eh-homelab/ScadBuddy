@@ -10,12 +10,14 @@ one key inside the row's upsert.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg_pool import PoolTimeout
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
@@ -471,7 +473,7 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
         "least_used",
     )
 
-    store.set_printer_rack_algorithm(2, None)
+    assert store.set_printer_rack_algorithm(2, None) == "least_used"
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
     store.forget_remembered()
@@ -496,12 +498,62 @@ def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
 
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
         holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
-        writer = threading.Thread(target=save)
-        writer.start()
-        writer.join(timeout=5)
-        assert not writer.is_alive()
+        took = _timed_in_thread(save)
+    assert took < 2.0
     assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+
+def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the pool wait is bounded too, not only the write."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store._pool.connection():
+            took = _timed_in_thread(save)
+    finally:
+        store.close()
+    assert took < 2.0
+    assert [type(exc) for exc in failed] == [PoolTimeout]
+    assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129 review: a save that committed must not then stall on an unbounded read of
+    every setting, or the dialog gives up on a value that is stored."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    answered: list[str] = []
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+        took = _timed_in_thread(
+            lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
+        )
+    assert took < 2.0
+    assert answered == ["bambuddy"]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+
+def _timed_in_thread(call: Callable[[], object]) -> float:
+    """Run ``call`` in a thread, give it 5 s, and return how long it took."""
+    started = time.monotonic()
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    return time.monotonic() - started
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
