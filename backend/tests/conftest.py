@@ -562,10 +562,12 @@ def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 def rack_pick_swallows_only_expected_errors(
     request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
 ) -> Iterator[None]:
-    """A rack fallback (the pick, the /check preview, or the usage read) swallows every
-    exception by spec, so this is where a programming error (TypeError, KeyError...)
-    surfaces. A test that injects another type on purpose opts out with
-    ``@pytest.mark.rack_injects_errors``."""
+    """A rack fallback (the pick, the /check preview, the usage read, or the store's
+    seen, picks and settle writes and reads, #1112) swallows every exception by spec, so
+    this is where a programming error (TypeError, KeyError...) surfaces. A test that
+    needs another type on purpose opts out with ``@pytest.mark.rack_injects_errors``,
+    which turns the guard off for every fallback in that test: when an expected type
+    (``ApiError``, ``psycopg.OperationalError``) proves the same point, inject that."""
     yield
     if request.node.get_closest_marker("rack_injects_errors"):
         return
