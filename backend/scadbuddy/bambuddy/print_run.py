@@ -17,7 +17,7 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
@@ -214,7 +214,8 @@ class PrintRunResult(BaseModel):
     #: The project this print was filed under, and the folder its 3MF went into (#79).
     project_id: int | None = None
     folder_id: int | None = None
-    bambuddy_url: str
+    #: Bambuddy's queue; ``None`` when its settings were removed while the run queued.
+    bambuddy_url: str | None = None
     #: The rack positions actually sent, one per filament group that printed from the
     #: rack (#836). A pick can go stale before the print starts; that shows in progress,
     #: not here (spec §10).
@@ -977,19 +978,19 @@ async def plan_run(
 
 
 def finish_run(
-    client: BambuddyClient,
+    config: BambuddyConfig | None,
     planned: PlannedRun,
     outcomes: list[QueueOutcome],
     queued: list[QueuedPlate] | None = None,
 ) -> PrintRunResult:
     """Report what was queued, with each plate's rack picks and warnings (``queued``,
-    one per outcome)."""
+    one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
     warnings = list(planned.warnings)
     for plate in queued or []:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate.warnings if warning not in warnings]
     return _queued(
-        client,
+        config,
         outcomes,
         planned.library_file_id,
         planned.project_id,
@@ -1050,7 +1051,7 @@ async def _hardware_warnings(
 
 
 def _queued(
-    client: BambuddyClient,
+    config: BambuddyConfig | None,
     outcomes: list[QueueOutcome],
     library_file_id: int,
     project_id: int | None,
@@ -1075,7 +1076,7 @@ def _queued(
         warnings=warnings or [],
         project_id=project_id,
         folder_id=folder_id,
-        bambuddy_url=client.config.web_url(QUEUE_PATH),
+        bambuddy_url=config.web_url(QUEUE_PATH) if config is not None else None,
         rack_picks=rack_picks,
     )
 
