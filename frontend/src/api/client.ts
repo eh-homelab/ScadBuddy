@@ -382,8 +382,12 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+/**
+ * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * A still-accepting answer is re-sent for up to `acceptingMs`, unless `bounded`: then it
+ * counts toward `reattempts` like any other, for a body too large to send that often.
+ */
+async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal, bounded = false): Promise<T> {
   const began = Date.now()
   for (let tries = 0; ; ) {
     try {
@@ -391,7 +395,11 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
     } catch (caught) {
       if (signal?.aborted || !unanswered(caught)) throw caught
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (
+        accepting && !bounded
+          ? Date.now() - began >= printRunPoll.acceptingMs
+          : tries++ >= printRunPoll.reattempts
+      ) {
         throw caught
       }
       // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
@@ -738,7 +746,8 @@ export const api = {
           reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
         xhr.send(body)
       })
-    return reattach(send).then((first) => followOperation<ModelSummary>(first))
+    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+    return reattach(send, undefined, true).then((first) => followOperation<ModelSummary>(first))
   },
 
   patchMedia: (slug: string, id: string, caption: string) =>

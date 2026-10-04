@@ -9,6 +9,7 @@ import {
   api,
   mayHaveRun,
   newRequestId,
+  STILL_ACCEPTING,
   printRunPoll,
 } from './client'
 import type { MediaView } from './types'
@@ -40,6 +41,7 @@ describe('media URLs (#274)', () => {
 /** Just enough of an `XMLHttpRequest` to see what `uploadMedia` sends and to answer it. */
 class FakeXhr {
   static last: FakeXhr | undefined
+  static all: FakeXhr[] = []
   method = ''
   url = ''
   body: FormData | undefined
@@ -55,6 +57,7 @@ class FakeXhr {
 
   constructor() {
     FakeXhr.last = this
+    FakeXhr.all.push(this)
   }
   open(method: string, url: string) {
     this.method = method
@@ -1164,6 +1167,24 @@ describe('uploads, outputs, fonts and presets are commands (#1054)', () => {
     expect(again.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key'])
     again.answer(200, model)
     await expect(pending).resolves.toEqual(model)
+  })
+
+  it('uploadMedia re-sends a still-accepting upload at most printRunPoll.reattempts times', async () => {
+    // Review 3e final I2: each re-send streams the whole file again, so the 240 s a
+    // small command may keep re-sending for would be many gigabytes.
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    FakeXhr.all = []
+    const stillAccepting = { type: STILL_ACCEPTING, title: 'Service Unavailable', status: 503 }
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.mp4'))
+    const outcome = pending.catch((caught: unknown) => caught)
+    for (let sent = 1; sent <= printRunPoll.reattempts + 1; sent++) {
+      await vi.waitFor(() => expect(FakeXhr.all).toHaveLength(sent))
+      FakeXhr.all[sent - 1]!.answer(503, stillAccepting)
+    }
+    await expect(outcome).resolves.toMatchObject({ problem: { type: STILL_ACCEPTING } })
+    expect(FakeXhr.all).toHaveLength(printRunPoll.reattempts + 1)
+    expect(new Set(FakeXhr.all.map((xhr) => xhr.headers['Idempotency-Key'])).size).toBe(1)
   })
 })
 
