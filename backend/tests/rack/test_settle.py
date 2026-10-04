@@ -353,6 +353,33 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
 
 
+async def test_stuck_settings_reads_hold_one_thread_not_one_per_settle(
+    store: RackUsageStore, pool: PgPool
+) -> None:
+    """#1111: a settings read cut off at the settle timeout runs on in its thread. Each
+    settle used to start another on the loop's shared default executor, so a stalled
+    settings database could fill it; they now queue behind the one stuck read."""
+    release = threading.Event()
+    entered = 0
+    lock = threading.Lock()
+
+    def load() -> StoredSettings:
+        nonlocal entered
+        with lock:
+            entered += 1
+        release.wait(timeout=10)
+        return StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+
+    hook = settle_hook(store, PrintLinkStore(pool), load)
+    try:
+        for _ in range(3):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=0.2)
+        assert entered == 1
+    finally:
+        release.set()
+
+
 async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
     store: RackUsageStore, pool: PgPool, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
