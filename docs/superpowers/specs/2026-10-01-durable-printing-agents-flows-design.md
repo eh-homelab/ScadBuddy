@@ -1087,8 +1087,9 @@ Each phase is its own implementation plan and ships alone.
      remaining volume writes are `library` kinds. A model's media
      (`model_media_upload`, `_patch`, `_order`, `_cover`, `_delete`); outputs
      (`output_create`, `output_thumbnail`, `output_delete`); assets (`asset_upload`,
-     `asset_fetch`); `font_install` (subject: the family, lower-cased, so a second press
-     with the same key joins the first download); and the preset writes that run
+     `asset_fetch`); `font_install` (subject: the family, lower-cased: a re-send with the
+     same key joins the first download, while separate presses are separate
+     operations); and the preset writes that run
      openscad (`preset_create`, `preset_duplicate`, `preset_update`). The library check,
      the dependencies route and a preset delete stay requests: the first two record
      nothing, and a preset delete is one Postgres statement with no openscad. An output
