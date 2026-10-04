@@ -5,15 +5,17 @@ the check makes the ones that read the volume or the database, and the run is th
 route's former body.
 
 An upload's file and poster arrive as claims (``operations/claims.py``) named by the
-sha256 computed while they streamed; the run links each to a staging file of its own
-for ``Catalogue.add_media`` to move into ``media/``, so the claim stays for its
+sha256 computed while they streamed; the run links each into a staging directory of
+its own for ``Catalogue.add_media`` to move into ``media/``, so the claim stays for its
 release.
 """
 
 from __future__ import annotations
 
 import asyncio
+import shutil
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +36,7 @@ from scadbuddy.library.catalogue import (
 from scadbuddy.library.media import MAX_MEDIA_ITEMS, MEDIA_UPLOAD_PREFIX, StagedMedia
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.operations.claims import ClaimStore
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -70,9 +72,8 @@ def media_kinds(state: AppState) -> list[OperationKind]:
             raise _too_many()
         return {}
 
-    def _staged(name: str) -> Path:
-        """A staging file of this run's own, linked to the claim ``name``."""
-        staged = state.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
+    def _staged(name: str, staged: Path) -> Path:
+        """``staged``, linked to the claim ``name``."""
         try:
             ClaimStore(state.paths.claims).link(name, staged)
         except LookupError:
@@ -84,17 +85,23 @@ def media_kinds(state: AppState) -> list[OperationKind]:
 
     def _add(request: dict[str, Any]) -> ModelRecord:
         slug = request["slug"]
-        staged: list[Path] = []
+        # A directory, whose mtime is its own: a link shares the claim's, which the
+        # staging sweep would take for an upload killed an hour ago while this run
+        # waits on the model's lock (review 3e final M2).
+        staging = state.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
+        staging.mkdir(parents=True)
         try:
-            staged.append(_staged(request["file"]))
             upload = StagedMedia(
-                path=staged[0], kind=request["kind"], extension=request["extension"]
+                path=_staged(request["file"], staging / "file"),
+                kind=request["kind"],
+                extension=request["extension"],
             )
             poster = None
             if request["poster"] is not None:
-                staged.append(_staged(request["poster"]))
                 poster = StagedMedia(
-                    path=staged[1], kind="image", extension=request["poster_extension"]
+                    path=_staged(request["poster"], staging / "poster"),
+                    kind="image",
+                    extension=request["poster_extension"],
                 )
             return state.catalogue.add_media(slug, upload, request["caption"], poster)
         except ModelNotFoundError:
@@ -102,12 +109,12 @@ def media_kinds(state: AppState) -> list[OperationKind]:
         except TooManyMediaError:
             raise _too_many() from None
         finally:
-            for path in staged:
-                path.unlink(missing_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
 
     async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        # `to_thread`: a git commit, and a move of up to a gigabyte.
-        record = await asyncio.to_thread(_add, request)
+        # A git commit, and a move of up to a gigabyte: a cancel waits for both to land
+        # (review 3e final M3).
+        record = await to_thread_to_end(partial(_add, request))
         return _changed(request["slug"], record)
 
     def _patch(slug: str, item_id: str, caption: str) -> ModelRecord:

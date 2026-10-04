@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -139,3 +141,29 @@ def test_a_poster_that_cannot_be_held_releases_the_files_claim(
         )
     assert holds[0] == hashlib.sha256(WEBM).hexdigest()
     assert not (_state(app).paths.claims / holds[0]).exists()
+
+
+def test_an_old_claims_staging_is_not_swept_under_its_run(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3e final M2: a hard link shares the claim's mtime, so staging linked to a
+    claim put over an hour ago looked like a crashed upload's to the staging sweep."""
+    link = ClaimStore.link
+    catalogue = _state(app).catalogue
+    add_media = catalogue.add_media
+
+    def aged(store: ClaimStore, name: str, target: Path) -> None:
+        old = time.time() - 2 * 3600
+        os.utime(store.root / name, (old, old))
+        link(store, name, target)
+
+    def swept(*args: Any) -> Any:
+        catalogue.sweep_duplicate_staging()
+        return add_media(*args)
+
+    monkeypatch.setattr(ClaimStore, "link", aged)
+    monkeypatch.setattr(catalogue, "add_media", swept)
+    response = _upload(client, model, PNG)
+    assert response.status_code == 200, response.text
+    assert len(response.json()["media"]) == 1
+    assert _leftovers(app) == []
