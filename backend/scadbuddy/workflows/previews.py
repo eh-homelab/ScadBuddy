@@ -4,11 +4,14 @@ What the boot's pass over every model (`PreviewScheduler.request_all`) did is
 ``PreviewBackfill`` on the ``library`` queue, served in the API process, which holds
 the data volume the listing reads. The Schedule ``scadbuddy-previews-<queue>`` starts
 it every `BACKFILL_INTERVAL` and once at each boot; with previews off there is no
-Schedule. A run lists the models whose preview is missing or stale (``previews_due``)
-and refreshes them one at a time (``preview_refresh``: `PreviewScheduler.refresh`,
-whose render is a ``RenderPreview`` on the render queue), pausing after each render as
-the scheduler did. After the first pass a run renders nothing: a current preview is
-skipped. The per-change requests stay the scheduler's own, in-process.
+Schedule. A run lists the models whose preview is missing, stale or no longer wanted
+(``previews_due``, which only reads) and refreshes them one at a time
+(``preview_refresh``: `PreviewScheduler.refresh`, whose render is a ``RenderPreview``
+on the render queue), pausing after each render as the scheduler does. A render that
+could not be run (the render queue unreachable) ends the run, that model failed: the
+rest would only wait out the same timeout. After the first pass a run renders nothing:
+a current preview is skipped. The per-change requests stay the scheduler's own,
+in-process.
 
 The ``library`` worker is unversioned, so a run left open across a deploy replays on
 the new code: ``PreviewBackfill.run`` must stay replay-compatible. A change to its
@@ -23,7 +26,7 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.client import Client, ScheduleActionStartWorkflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 from scadbuddy.workflows.housekeeping import HEARTBEAT_TIMEOUT, ensure_workflow_schedule
 
@@ -31,15 +34,19 @@ PREVIEW_BACKFILL_WORKFLOW = "PreviewBackfill"
 PREVIEW_SCHEDULE = "scadbuddy-previews"
 DUE_ACTIVITY = "previews_due"
 REFRESH_ACTIVITY = "preview_refresh"
+#: The type of a refresh's failure when its render could not be run at all (the
+#: render queue unreachable, no worker polling), rather than failed.
+UNRUN_FAILURE = "PreviewUnrun"
 #: Every hour, and at each boot: after the first pass a tick is one listing, and it
 #: retries what a render that could not be run (not one that failed) left behind.
 BACKFILL_INTERVAL = 3600.0
-#: The scheduler's pause after each render, so a backlog never runs back to back.
+#: The pause after each render, so a backlog never runs back to back: the scheduler's
+#: too (`DEFAULT_INTERVAL`).
 PAUSE = timedelta(seconds=1)
 #: Refreshes per run before the rest go on in a new run, so a first boot over hundreds
 #: of models does not grow one history without bound.
 BATCH = 100
-#: A listing of the catalogue and a plan per model: reads only.
+#: A listing of the catalogue and a look at each model's preview: reads only.
 DUE_TIMEOUT = timedelta(minutes=5)
 #: A refresh's least bound, and its bound in a run given none (one the Schedule
 #: started before the bound was passed). It heartbeats while it waits.
@@ -98,9 +105,16 @@ class PreviewBackfill:
                     heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
-            except ActivityError:
-                workflow.logger.warning("could not refresh the preview of %s", slug)
+            except ActivityError as error:
                 failed.append(slug)
+                if isinstance(error.cause, ApplicationError) and error.cause.type == UNRUN_FAILURE:
+                    # Each later refresh would wait out the same timeout: the next
+                    # tick is the retry.
+                    workflow.logger.warning(
+                        "could not run the render for the preview of %s; the run ends", slug
+                    )
+                    return failed
+                workflow.logger.warning("could not refresh the preview of %s", slug)
                 continue
             if rendered:
                 await workflow.sleep(PAUSE)

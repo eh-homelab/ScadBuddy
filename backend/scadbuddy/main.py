@@ -14,6 +14,7 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -44,6 +45,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -71,6 +73,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
+    UNRUN_FAILURE,
     PreviewBackfill,
     ensure_preview_schedule,
 )
@@ -368,7 +371,9 @@ def _preview_activities(state: AppState) -> list[Callable[..., Any]]:
         if previews is None:
             return False
         try:
-            return await _heartbeating(previews.refresh(slug))
+            return await _heartbeating(previews.refresh(slug, raise_unrun=True))
+        except PreviewUnrunError as error:
+            raise ApplicationError(str(error), type=UNRUN_FAILURE) from error
         except Exception:
             logger.exception("could not refresh a model's preview", extra={"slug": slug})
             raise
