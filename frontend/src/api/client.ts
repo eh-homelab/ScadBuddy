@@ -393,7 +393,9 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
       if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      await wait(printRunPoll.intervalMs, signal)
+      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
 }

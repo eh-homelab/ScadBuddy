@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
@@ -230,7 +230,8 @@ async def post_run(
     nothing (``repeated`` is true), so a retry after a proxy timeout cannot queue the
     print twice. "The same request" includes ``request_id``: a client that makes a new
     one per deliberate Print gets a new print each time, and a retry of one press
-    (same id) its run.
+    (same id) its run, for as long as the run's row is kept
+    (``print_run_retention_seconds``).
     """
     meta = require_output(outputs, output_id)
     return await accept_run(
@@ -286,6 +287,7 @@ async def accept_run(
         # The store's window, so a repeat the record no longer matches starts anew.
         repeat_window_s=runs.store.repeat_window.total_seconds(),
         search_attributes=runs.search_attributes,
+        accepted_at=datetime.now(UTC),
     )
     workflow_id = f"print-{key}"
 
@@ -333,12 +335,14 @@ async def accept_run(
                 raise CommandStillAcceptingError(workflow_id)
             answer = await start(timedelta(seconds=left))
     except AlreadyClosedError:
-        # The press's execution closed after recording its run (§4.2): that run.
+        # The press's execution closed after recording its run (§4.2): that run. With
+        # no row, retention pruned it: the run may well have printed (review #1061 2a).
         closed = await runs.store.find(key, has_request_id=True)
         if closed is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "This print's run has ended and left no record. Print again to retry.",
+                "This print ran before, and its record has expired, so ScadBuddy cannot"
+                " tell whether it was queued. Check Bambuddy's queue before printing again.",
             ) from None
         response.status_code = status.HTTP_200_OK
         return closed.model_copy(update={"repeated": True})
