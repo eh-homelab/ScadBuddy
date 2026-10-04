@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
+import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
@@ -428,6 +429,26 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = (await m.events.read(session.id)).map((e) => e.event)
       expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: 'spawn failed' })
       expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+    })
+
+    it('says when a credential is usable again when none is now, and starts no query (#1093)', async () => {
+      const paths = await tempPaths()
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'never' }))
+      const why = 'no Claude credential is usable: credential 1 (API key …aaaa) is rate limited until 2026-10-03T12:05:00.000Z. The first is usable again at 2026-10-03T12:05:00.000Z'
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        credentials: {
+          candidates: () => Promise.reject(new NoUsableCredentialError(why, new Date('2026-10-03T12:05:00Z'))),
+          reporter: () => () => Promise.resolve(),
+        },
+      })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      expect(await (await m.send(session.id, agentA, 'x')).done).toEqual({ kind: 'failed', message: why })
+      expect(runs).toHaveLength(0)
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: why })
     })
 
     it('gives a turn memory hooks only when it loaded an enabled hindsight plugin, recalling the user’s words', async () => {

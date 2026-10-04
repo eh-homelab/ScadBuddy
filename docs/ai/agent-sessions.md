@@ -205,6 +205,17 @@ branch `docs/durable-printing-agents-flows` until it merges). Rows go with their
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 
+The assistant panel shows this list for the active session: **Touched** in the session
+strip opens it (`frontend/src/components/assistant/SessionTouched.tsx`), one entry per
+resource with every way it was touched, grouped by kind, and reads it again whenever
+the session's status moves or one of its tool calls finishes, so a running turn's
+changes show as they land. Each entry links to its page: a model to `/m/{slug}`, a
+revision to `/m/{slug}?version={commit}`, a preset, asset or render to its model's
+page, an output to `/edit/{id}`, a print run or print to `/prints`. A deleted
+resource, anything of a model the session deleted after last touching it (even if it
+made one of that slug again), and an `unclassified` row (shown by its tool) link
+nowhere.
+
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
@@ -215,5 +226,6 @@ session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 - **A2A** is deferred (spec §6).
 - **The rest of #931**: extractors for the remaining tools (libraries, fonts, Bambuddy
   projects, settings and remembered choices, `browser_*` param changes), a backfill
-  from `ai_audit`, the session view's "Touched" panel and resource-to-session links,
-  filtering sessions by resource, and "restore to before this session".
+  from `ai_audit`, links from a resource's page back to the sessions that touched it
+  (which needs a resource-to-sessions route), filtering sessions by resource, and
+  "restore to before this session".
