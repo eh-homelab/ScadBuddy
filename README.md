@@ -804,7 +804,10 @@ client), so with more than one API replica the overall ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
 whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
 `SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
-gets a bucket of its own. Empty, every browser behind the gateway shares one.
+gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
+`FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
+that flag lets any loopback caller name its own client.
 `scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
 `queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
 

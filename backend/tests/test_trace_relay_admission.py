@@ -133,6 +133,15 @@ def test_an_untrusted_peer_is_its_own_client() -> None:
     assert relay_client(forwarded, "10.42.0.5", settings()) == "10.42.0.5"
 
 
+def test_a_loopback_peer_is_not_believed_when_no_proxy_is_trusted() -> None:
+    """Review 5 of #1090: nothing below `relay_client` decides for it. The image starts
+    uvicorn with ``--no-proxy-headers``, so its peer is the socket's, and an in-pod
+    caller (``kubectl port-forward``, a sidecar) cannot pick its own bucket."""
+    forwarded = headers(("x-forwarded-for", "203.0.113.9"))
+    for peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        assert relay_client(forwarded, peer, settings()) == peer
+
+
 def test_a_trusted_proxy_names_the_client_by_its_last_value() -> None:
     trusted = settings("10.42.0.0/16")
     forwarded = headers(("x-forwarded-for", "198.51.100.1, 203.0.113.9"))

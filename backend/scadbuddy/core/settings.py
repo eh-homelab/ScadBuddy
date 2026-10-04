@@ -129,7 +129,8 @@ class Settings(BaseSettings):
     # `X-Forwarded-For` is believed, and then only its last value (`core/proxies.py`, the
     # agent's SCADBUDDY_AGENT_TRUSTED_PROXIES rules). The browser trace relay's per-client
     # rate limit keys on it (spec 2026-10-01 §5.2). Empty, no forwarding header is
-    # believed and every browser behind the gateway shares one client bucket. Not a
+    # believed and every browser behind the gateway shares one client bucket (uvicorn
+    # runs with --no-proxy-headers in the image, so it believes none either). Not a
     # stored setting: it decides who the server believes about who it is talking to.
     trusted_proxies: str = ""
 

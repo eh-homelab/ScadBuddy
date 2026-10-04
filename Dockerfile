@@ -548,7 +548,11 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # A new build must become current before the old pod drains, so roll it out with
 # RollingUpdate and maxSurge >= 1: under Recreate the old build stays current while it
 # drains, and runs submitted then are pinned to a build no pod serves afterwards.
-CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
+# --no-proxy-headers: uvicorn would otherwise believe X-Forwarded-For/-Proto from
+# 127.0.0.1 (its default FORWARDED_ALLOW_IPS) and rewrite the request's client before the
+# app sees it, so an in-pod caller (kubectl port-forward, a sidecar) could name any
+# client. SCADBUDDY_TRUSTED_PROXIES (`core/proxies.py`) is the only trust decision.
+CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608", "--no-proxy-headers"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.
