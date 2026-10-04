@@ -90,7 +90,7 @@ describe('scrubSpan', () => {
     )
   })
 
-  it('cuts http.target and drops query and user-agent attributes', () => {
+  it('cuts http.target and drops query, user-agent and status-text attributes (a rejected fetch writes its error message there)', () => {
     const [span] = record((tracer) => {
       tracer
         .startSpan('x', {
@@ -99,6 +99,7 @@ describe('scrubSpan', () => {
             'url.query': SENTINEL,
             'http.user_agent': SENTINEL,
             'user_agent.original': SENTINEL,
+            'http.status_text': SENTINEL,
             'http.request.header.cookie': SENTINEL,
             'http.response.header.set-cookie': [SENTINEL],
           },

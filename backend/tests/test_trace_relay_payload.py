@@ -172,6 +172,7 @@ def test_query_strings_and_user_agents_are_scrubbed_as_the_backend_does() -> Non
         string("url.query", f"q={SENTINEL}"),
         string("user_agent.original", SENTINEL),
         string("http.user_agent", SENTINEL),
+        string("http.status_text", SENTINEL),
     ]
     result = only_span(export(span(attributes=attributes)))
     assert result["attributes"] == [string("http.url", "https://scadbuddy.example/api/v1/models")]

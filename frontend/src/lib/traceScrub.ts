@@ -14,7 +14,8 @@ export const SPAN_NAME_MAX = 128
 export const ARRAY_ITEMS_MAX = 32
 
 const URL_ATTRIBUTES = ['url.full', 'http.url', 'http.target']
-const DROPPED_ATTRIBUTES = ['url.query', 'http.user_agent', 'user_agent.original']
+/** `http.status_text`: the fetch instrumentation writes a rejected fetch's error message there. */
+const DROPPED_ATTRIBUTES = ['url.query', 'http.user_agent', 'user_agent.original', 'http.status_text']
 /** §6: captured headers are dropped whatever the instrumentation's capture settings say. */
 const DROPPED_PREFIXES = ['http.request.header.', 'http.response.header.']
 /** Chromium's `    at f (url:1:2)`, and Firefox's and Safari's `f@url:1:2`. */

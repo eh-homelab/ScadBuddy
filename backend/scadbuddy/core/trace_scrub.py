@@ -47,6 +47,7 @@ DROPPED_ATTRIBUTES: Final = frozenset(
         "url.query",
         "http.user_agent",
         "user_agent.original",
+        "http.status_text",
         "http.host",
         "http.server_name",
         "server.address",
