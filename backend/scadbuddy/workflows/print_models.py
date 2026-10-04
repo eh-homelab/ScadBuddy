@@ -16,6 +16,7 @@ from scadbuddy.bambuddy.print_run import (
     PlatePlan,
     PreparedPlates,
     PrintRunRequest,
+    PrintRunResult,
     QueuedPlate,
 )
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
@@ -133,6 +134,14 @@ class FinishInput(BaseModel):
     planned: PlannedRun
     outcomes: list[QueueOutcome]
     queued: list[QueuedPlate] = Field(default_factory=list)
+
+
+class SucceedInput(BaseModel):
+    """``print_succeed``: the run's result, recorded with no limit on retries."""
+
+    input: PrintRunInput
+    run_id: str
+    result: PrintRunResult
 
 
 class FailInput(BaseModel):

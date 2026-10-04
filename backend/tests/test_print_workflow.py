@@ -57,6 +57,7 @@ from scadbuddy.workflows.print_models import (
     RecordInput,
     SliceStartInput,
     SourceSpec,
+    SucceedInput,
 )
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from tests.support.temporal import temporal_client
@@ -91,6 +92,8 @@ class Fake:
         self.record_error: Exception | None = None
         self.follows: list[FollowInput] = []
         self.output_id = uuid.uuid4().hex
+        #: How many of the next `print_succeed` attempts fail before one succeeds.
+        self.succeed_failures = 0
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -162,13 +165,20 @@ class Fake:
         return input.sent
 
     @activity.defn(name="print_finish")
-    async def finish(self, input: FinishInput) -> PrintRun:
+    async def finish(self, input: FinishInput) -> PrintRunResult:
         self.calls.append("finish")
         items = [item for outcome in input.outcomes for item in outcome.queue_item_ids]
-        result = PrintRunResult(
+        return PrintRunResult(
             library_file_id=41, copies=1, queue_item_ids=items, bambuddy_url="http://b/queue"
         )
-        return self._run("succeeded", result=result)
+
+    @activity.defn(name="print_succeed")
+    async def succeed(self, input: SucceedInput) -> PrintRun:
+        self.calls.append("succeed")
+        if self.succeed_failures:
+            self.succeed_failures -= 1
+            raise RuntimeError("the database blinked")
+        return self._run("succeeded", result=input.result)
 
     @activity.defn(name=FOLLOW_ACTIVITY)
     async def follow_print(self, input: FollowInput) -> str:
@@ -191,6 +201,7 @@ class Fake:
             self.enqueue,
             self.record,
             self.finish,
+            self.succeed,
             self.fail,
         ]
 
@@ -284,6 +295,7 @@ async def test_an_accepted_run_answers_the_row_then_succeeds(
         "enqueue:2",
         "record",
         "finish",
+        "succeed",
     ]
 
 
@@ -509,3 +521,22 @@ async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
         assert len(signals) == 1
     finally:
         await handle.terminate()
+
+
+async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 F3: once every plate is queued, a Postgres blip delays the record;
+    it never turns the run into a failure."""
+    fake.succeed_failures = 2
+    arg = run_input()
+    await start(client, worker, arg)
+    run = await asyncio.wait_for(ended(client, arg), timeout=60)
+    assert run.status == "succeeded"
+    assert not any(call.startswith("fail") for call in fake.calls)
+    attempts: dict[str, int] = {}
+    async for event in client.get_workflow_handle(f"print-{arg.key}").fetch_history_events():
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            scheduled = event.activity_task_scheduled_event_attributes
+            attempts[scheduled.activity_type.name] = scheduled.retry_policy.maximum_attempts
+    assert attempts["print_succeed"] == 0  # unlimited, as every record write

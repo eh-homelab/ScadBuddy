@@ -102,6 +102,20 @@ class PrintRun(BaseModel):
     repeated: bool = False
 
 
+LOST_DETAIL = (
+    "This print's run ended without recording an outcome, after it had started queueing "
+    "it, so ScadBuddy cannot tell whether the print was queued."
+)
+LOST_UNQUEUED_DETAIL = (
+    "This print's run ended without recording an outcome, before it queued anything. "
+    "Nothing was queued; print again to retry."
+)
+#: A run whose execution closed, or is gone, while its row still said ``running``: one
+#: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
+LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
+LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
+
+
 def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The output plus the request as parsed, so key order and spacing do not matter.
 
@@ -197,6 +211,16 @@ class PrintRunStore:
             self._finish, run_id, slug, "failed", "error", error.model_dump(mode="json")
         )
 
+    async def fail_lost(self, run_id: str) -> PrintRun:
+        """End a run its execution will never end: ``LOST`` once it had tried to queue,
+        ``LOST_UNQUEUED`` before. A run that has ended is left as it is."""
+        return await asyncio.to_thread(self._fail_lost, run_id)
+
+    async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        """``(run id, workflow id, workflow run id)`` of each run still ``running`` that
+        was accepted more than ``older_than`` ago."""
+        return await asyncio.to_thread(self._running_executions, older_than)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _announce(self, conn: Connection[DictRow], run: PrintRun, slug: str) -> None:
@@ -247,11 +271,11 @@ class PrintRunStore:
                 conn.execute("DELETE FROM print_runs WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
                 "INSERT INTO print_runs"
-                " (id, output_id, idempotency_key, status, workflow_id, workflow_run_id)"
-                " VALUES (%s, %s, %s, 'running', %s, %s)"
+                " (id, output_id, idempotency_key, status, workflow_id, workflow_run_id, slug)"
+                " VALUES (%s, %s, %s, 'running', %s, %s, %s)"
                 " ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING"
                 f" RETURNING {_COLUMNS}",
-                (run_id, subject, key, workflow_id, workflow_run_id),
+                (run_id, subject, key, workflow_id, workflow_run_id, slug),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
@@ -264,6 +288,39 @@ class PrintRunStore:
             ).fetchone()
         assert existing is not None  # the conflict was on this pair
         return PrintRun.model_validate(existing)
+
+    def _fail_lost(self, run_id: str) -> PrintRun:
+        with self._require().connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE print_runs SET status = 'failed', finished_at = now(),"
+                " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
+                f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}, slug",
+                (
+                    Jsonb(LOST.model_dump(mode="json")),
+                    Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
+                    run_id,
+                ),
+            ).fetchone()
+            if row is not None:
+                run = PrintRun.model_validate(row)
+                self._announce(conn, run, row["slug"] or "")
+                return run
+            current = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if current is None:
+            raise LookupError(f"there is no print run {run_id}")
+        return PrintRun.model_validate(current)
+
+    def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT id, workflow_id, workflow_run_id FROM print_runs"
+                " WHERE status = 'running' AND workflow_id IS NOT NULL"
+                " AND created_at <= now() - %s ORDER BY created_at",
+                (older_than,),
+            ).fetchall()
+        return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
 
     def _start_enqueue(self, run_id: str) -> None:
         with self._require().connection() as conn:

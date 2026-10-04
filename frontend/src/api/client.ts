@@ -310,7 +310,11 @@ const seg = encodeURIComponent
  * sending one the server is still accepting (#1052: past the accept's own worst case,
  * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000 }
+/**
+ * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
+ * execution is gone within minutes; this is the backstop, past any run's own length.
+ */
+export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -420,7 +424,18 @@ async function followPrintRun(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
   )
+  const began = Date.now()
   while (run.status === 'running') {
+    if (Date.now() - began >= printRunPoll.followMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:print-run-unfinished',
+        title: 'Still preparing',
+        status: 504,
+        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        // It may be queued by now: the dialog says to check before printing again.
+        may_have_queued: true,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = run.id
     run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
