@@ -136,9 +136,9 @@ async def merge_upstream(
     require_mine(slug)
 
     def refuse_a_conflict() -> None:
-        plan = catalogue.merge_plan(slug)
-        if plan is not None and plan.conflicts:
-            raise MergeConflictError(plan)
+        planned = catalogue.merge_plan(slug)
+        if planned is not None and planned[0].conflicts:
+            raise MergeConflictError(*planned)
 
     async def before_start() -> None:
         # Here, not in the operation: the conflict's 409 carries `merged`, the whole
@@ -160,15 +160,16 @@ async def merge_upstream(
 def merge_run(slug: str, state: AppState) -> UpstreamMerge:
     """The ``model_upstream_merge`` operation's run (#1054). A conflict here means the
     upstream or this template moved after the route found the merge clean: the
-    retryable 409 of a merge that kept changing, without `merged`."""
+    retryable 409 of a merge that kept changing, without `merged`, in the state the
+    run found."""
 
     def merge() -> tuple[ModelRecord, MergePlan]:
         try:
             return state.catalogue.merge_upstream(slug)
-        except MergeConflictError:
+        except MergeConflictError as error:
             raise UpstreamStateError(
                 f"{slug!r} or its upstream changed while the merge was checked; merge again",
-                state="update",
+                state=error.state,
             ) from None
 
     record, plan = _answer(slug, merge)

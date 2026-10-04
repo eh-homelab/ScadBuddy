@@ -5,6 +5,7 @@ by claim check."""
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -18,8 +19,11 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import models as models_api
 from scadbuddy.api import operations as operations_api
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.upstream import MergeConflictError, MergePlan, MergePreview
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
-from tests.api.test_model_operations import _commits, _history_bytes, _workflow_ids
+from tests.api.test_model_operations import _commits, _history_bytes, _state, _workflow_ids
 
 SOURCE = "cube(10);\n"
 
@@ -107,6 +111,89 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
         op = client.get(f"/api/v1/operations/{op['id']}").json()
     assert op["status"] == "succeeded", op
     assert op["result"]["slug"] == slug
+
+
+def _operation_ids(app: FastAPI, kind: str) -> list[str]:
+    pool = _state(app).components.get(OPERATIONS).store._require()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def _follow(client: TestClient, op: dict[str, Any]) -> dict[str, Any]:
+    deadline = time.monotonic() + 60
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    return op
+
+
+@pytest.mark.parametrize("route", ["put", "patch"])
+def test_a_stale_base_the_run_finds_after_a_202_carries_current(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Review 1130 3: the run's refusal under the lock reaches the operation's record
+    with `current` among its extensions."""
+    slug, version = _model(client, "Held Save")
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    release = threading.Event()
+    save = models_api._save_source
+
+    async def held(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.to_thread(release.wait, 60)
+        return await save(*args, **kwargs)
+
+    monkeypatch.setattr(models_api, "_save_source", held)
+    try:
+        if route == "put":
+            started = client.put(
+                f"/api/v1/models/{slug}/source", json={"source": "cube(6);\n", "base": version}
+            )
+        else:
+            started = client.post(
+                f"/api/v1/models/{slug}/source/patch",
+                json={"base": version, "edits": [{"search": "10", "replace": "6"}], "force": True},
+            )
+        assert started.status_code == 202, started.text
+        moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
+    finally:
+        release.set()
+    op = _follow(client, started.json())
+    assert op["status"] == "failed", op
+    assert op["error"]["status"] == 409
+    assert op["error"]["extensions"]["current"] == moved.version
+
+
+def test_a_merge_that_conflicts_only_in_the_run_is_a_retryable_409_without_merged(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 1130 4: the route found the merge clean, then the template moved; the
+    run's conflict is the 409 of a merge that kept changing, and `merged` stays out."""
+    slug, _ = _model(client, "Merged Late")
+    clean = MergePlan(revision="0" * 40, preview=MergePreview.model_construct(), conflicts=0)
+    monkeypatch.setattr(Catalogue, "merge_plan", lambda self, slug: (clean, "dismissed"))
+    conflict = MergePlan(
+        revision="1" * 40,
+        preview=MergePreview.model_construct(merged="<<<<<<< the run's merge", taken=[], kept=[]),
+        conflicts=1,
+    )
+
+    def conflicts(self: Catalogue, slug: str) -> Any:
+        raise MergeConflictError(conflict, "dismissed")
+
+    monkeypatch.setattr(Catalogue, "merge_upstream", conflicts)
+    refused = client.post(f"/api/v1/models/{slug}/upstream/merge")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["state"] == "dismissed"
+    assert "merged" not in refused.json()
+    (op_id,) = _operation_ids(app, "model_upstream_merge")
+    error = client.get(f"/api/v1/operations/{op_id}").json()["error"]
+    assert error["status"] == 409
+    assert error["extensions"] == {"state": "dismissed"}
 
 
 def test_sidecar_and_file_edits_are_operations(client: TestClient, app: FastAPI) -> None:

@@ -2001,15 +2001,17 @@ class Catalogue:
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
 
-    def merge_plan(self, slug: str) -> MergePlan | None:
-        """The merge a ``merge_upstream`` would make now, written nowhere; None when
-        there is no update to merge (#1054: the merge route answers a conflict from it)."""
+    def merge_plan(self, slug: str) -> tuple[MergePlan, UpstreamState] | None:
+        """The merge a ``merge_upstream`` would make now, written nowhere, and the state
+        it was worked out in; None when there is no update to merge (#1054: the merge
+        route answers a conflict from it)."""
         upstream, revision, state = self._upstream_now(slug)
         if state not in ("update", "dismissed") or revision is None:
             return None
-        return plan_merge(
+        plan = plan_merge(
             self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
         )
+        return plan, state
 
     def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
         """Take the upstream's current revision as one commit, or raise
@@ -2032,7 +2034,7 @@ class Catalogue:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
             plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
-                raise MergeConflictError(plan)
+                raise MergeConflictError(plan, state)
             merge = partial(self._write_merge, slug, plan, planned)
             try:
                 self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
