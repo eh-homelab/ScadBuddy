@@ -327,8 +327,16 @@ const seg = encodeURIComponent
 /**
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
+ * `operationFollowMs` is the same for an operation (review #1063): past its effect's
+ * five minutes and the server's reconcile of one whose execution is gone.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
+export const printRunPoll = {
+  intervalMs: 1000,
+  reattempts: 3,
+  acceptingMs: 240_000,
+  followMs: 3_600_000,
+  operationFollowMs: 600_000,
+}
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -385,7 +393,9 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
       if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      await wait(printRunPoll.intervalMs, signal)
+      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
 }
@@ -403,7 +413,16 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op = first.body as Operation
+  const began = Date.now()
   while (op.status === 'running') {
+    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:operation-unfinished',
+        title: 'Still running',
+        status: 504,
+        detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = op.id
     op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
@@ -793,21 +812,28 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` stops the
+   * re-sends (a superseded preview), never a request already sent: its answer names the
+   * job the next render supersedes.
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    // Sent again while the server is still accepting it (#1053): a render is keyed by
-    // its content, so the same request joins the job the first one is starting.
-    reattach(() =>
-      request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-        method: 'POST',
-        body: JSON.stringify({
-          inputs,
-          version: version ?? null,
-          ...(supersedes ? { supersedes } : {}),
+  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string, signal?: AbortSignal) => {
+    // Sent again while the server is still accepting it (#1053), with one
+    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
+    const headers = { 'Idempotency-Key': newRequestId() }
+    return reattach(
+      () =>
+        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs,
+            version: version ?? null,
+            ...(supersedes ? { supersedes } : {}),
+          }),
         }),
-      }),
-    ),
+      signal,
+    )
+  },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 

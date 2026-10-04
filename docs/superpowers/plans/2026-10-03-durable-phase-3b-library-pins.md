@@ -144,3 +144,15 @@ agent.
 - Spec §10 "As built so far (3b)".
 - `CLAUDE.md`: `library/operations.py` in the layout.
 - Commit `docs: library pins as commands (#1054)`.
+
+## As built (corrections, review #1119)
+
+- Task 1: `OperationCommands.queues` is `dict[Queue, str]` (`operations/kinds.py`
+  `Queue`), not `dict[str, str]`.
+- Task 2: the check also refuses an unknown model for the unpin (`model_check`), where
+  the old route checked inside the same synchronous call as the unpin; the unpin's own
+  `ModelNotFoundError` still answers a model deleted in between.
+- A cancelled run (past its `run_timeout`) is cancelled before its next step. A clone or
+  commit already in its thread (`to_thread_to_end`) finishes, and keeps the checkout gate
+  and install slot until it has: a commit in flight can still land after the operation is
+  recorded failed.

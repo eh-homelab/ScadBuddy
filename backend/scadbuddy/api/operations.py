@@ -24,10 +24,10 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from scadbuddy.api.deps import OperationCommands, OperationsDep
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
@@ -229,9 +229,12 @@ async def _run_operation(
     except AlreadyClosedError:
         recorded = await ops.store.find(key)
         if recorded is None:
+            # Its record was pruned while Temporal still keeps the closed execution
+            # (review #1063 8): it may have been done, so this never invites a repeat.
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "This request's operation has ended and left no record. Try again.",
+                "This request already ran, and its record has since been deleted, so it "
+                "may have been done. Check Bambuddy before sending it again.",
             ) from None
         return _answer(recorded, response, repeated=True)
     except CommandStillAcceptingError:

@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import re
 from collections.abc import AsyncIterator, Iterable, Sequence
+from functools import partial
 
 from fastapi import status
 
@@ -26,6 +27,7 @@ from scadbuddy.library.libraries import (
     LibraryStore,
     ModelLibrary,
 )
+from scadbuddy.operations.kinds import to_thread_to_end
 
 #: The most curated libraries one create may pin (#444). The create holds
 #: :meth:`CheckoutGate.pinning` across every clone, so removals wait on all of them;
@@ -46,8 +48,9 @@ async def resolve_pin(
     :meth:`CheckoutGate.pinning` until the pin is recorded."""
     try:
         # A clone is a network fetch; off the loop, and a bounded number at a time.
+        # A cancel waits for the clone, so the slot and the caller's gate stay held.
         async with installs:
-            return await asyncio.to_thread(libraries.resolve, name, url=url, ref=ref)
+            return await to_thread_to_end(partial(libraries.resolve, name, url=url, ref=ref))
     except LibraryNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,

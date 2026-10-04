@@ -38,8 +38,6 @@ from scadbuddy.api.deps import (
     HistoryDep,
     ImportPermits,
     ImportsDep,
-    OperationCommands,
-    OperationsDep,
     PathsDep,
     SlugPath,
 )
@@ -126,6 +124,7 @@ from scadbuddy.library.url_import import (
     fetch_model,
 )
 from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema

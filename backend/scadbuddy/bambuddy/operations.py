@@ -13,20 +13,25 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
 from scadbuddy.bambuddy.print_run import chosen_project
-from scadbuddy.bambuddy.project_file import file_into_project
-from scadbuddy.bambuddy.projects import ProjectRequest, attach_results, ensure_project
+from scadbuddy.bambuddy.project_file import file_into_project, output_stem
+from scadbuddy.bambuddy.projects import (
+    ProjectAttach,
+    ProjectRequest,
+    attach_results,
+    ensure_project,
+)
 from scadbuddy.bambuddy.send import register_sidebar, send_output
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.library.outputs import require_output
+from scadbuddy.operations.kinds import KindsBuild, OperationKind
 
 if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
+    from scadbuddy.core.components import Components, Core
 
 #: Bambuddy's queue page, as a reprint answers it.
 QUEUE_PAGE = "/queue"
@@ -37,12 +42,12 @@ def _json(model: Any) -> dict[str, Any]:
     return dumped
 
 
-def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
+def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The Bambuddy kinds, bound to this process's stores."""
-    settings_store = state.settings_store
-    outputs = state.outputs
-    uploads = state.uploads
-    links = state.print_links
+    settings_store = core.settings_store
+    outputs = core.outputs
+    uploads = core.uploads
+    links = core.print_links
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
         return {}
@@ -59,7 +64,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
 
     async def project_file_check(request: dict[str, Any]) -> dict[str, Any]:
         meta = require_output(outputs, request["output_id"])
-        return {"stem": await output_stem(meta, outputs, state.catalogue)}
+        return {"stem": await output_stem(meta, outputs, core.catalogue)}
 
     async def project_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = settings_store.load()
@@ -83,8 +88,6 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
             return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
-        from scadbuddy.api.printing import ProjectAttach
-
         require_output(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
         project_id = chosen_project(body, settings_store.load())
@@ -130,7 +133,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
     async def reprint_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         link = await _linked(archive_id)
-        cache = state.components.get(ARCHIVE_CACHE)
+        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             archive = await cache.archive(client, archive_id)
         if archive is None:
@@ -149,7 +152,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        cache = state.components.get(ARCHIVE_CACHE)
+        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             item = await client.enqueue(
                 QueueItemCreate(
@@ -169,7 +172,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
     async def timelapse_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         await _linked(archive_id)
-        cache = state.components.get(ARCHIVE_CACHE)
+        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             if await cache.archive(client, archive_id) is None:
                 raise ApiError(
@@ -181,7 +184,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
 
     async def timelapse_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        cache = state.components.get(ARCHIVE_CACHE)
+        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             await client.select_timelapse(archive_id, request["filename"])
             cache.forget(client, archive_id)
@@ -192,7 +195,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
         async with client_for(settings) as client:
             return _json(await register_sidebar(client, settings))
 
-    kinds = [
+    return [
         OperationKind("send", output_check, send_run, run_attempts=3),
         OperationKind("project_file", project_file_check, project_file_run),
         OperationKind("create_project", no_check, create_project_run),
@@ -201,4 +204,7 @@ def bambuddy_kinds(state: AppState) -> dict[str, OperationKind]:
         OperationKind("timelapse_pull", timelapse_check, timelapse_run),
         OperationKind("register_sidebar", no_check, sidebar_run, run_attempts=3),
     ]
-    return {kind.name: kind for kind in kinds}
+
+
+#: Registered with the operations component (`operations/component.py`).
+OPERATION_KINDS: KindsBuild = bambuddy_kinds

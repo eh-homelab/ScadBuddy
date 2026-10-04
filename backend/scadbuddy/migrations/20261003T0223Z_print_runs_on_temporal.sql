@@ -2,7 +2,9 @@
 -- only by the `PrintRun` workflow's activities, so nothing beats a heartbeat and nothing
 -- expires a lost run. `workflow_id`/`workflow_run_id` name the execution that owns the
 -- row; the unique pair makes the first activity's insert idempotent under retry (§4.2).
-ALTER TABLE print_runs DROP COLUMN heartbeat_at;
+-- `heartbeat_at` stays (NOT NULL DEFAULT now(), so new rows need not name it): a
+-- pre-#1052 pod still running during the rolling update reads and writes it. A later
+-- migration drops it once no such pod can be running (review #1061 3a).
 ALTER TABLE print_runs ADD COLUMN workflow_id text;
 ALTER TABLE print_runs ADD COLUMN workflow_run_id text;
 CREATE UNIQUE INDEX print_runs_execution ON print_runs (workflow_id, workflow_run_id);

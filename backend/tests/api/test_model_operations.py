@@ -24,6 +24,7 @@ from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.library.history import GIT, git_env
 from scadbuddy.library.presets import MAX_PRESETS
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
 
 SOURCE = "cube(10);\n"
@@ -46,7 +47,7 @@ def _commits(app: FastAPI) -> int:
 
 
 def _workflow_ids(app: FastAPI, kind: str) -> list[str]:
-    pool = _state(app).operations.store._require()
+    pool = _state(app).components.get(OPERATIONS).store._require()
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT workflow_id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)

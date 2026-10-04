@@ -10,10 +10,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from temporalio import activity
 from temporalio.client import Client
-from temporalio.worker import Worker
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, MAX_AGE, FollowInput
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows import follow as follow_module
 from scadbuddy.workflows.follow import FollowPrint, follow, follow_id, resume_followed
 from tests.support.temporal import temporal_client
 
@@ -84,6 +85,35 @@ async def test_a_poke_restarts_the_follow_fresh(client: Client) -> None:
     assert [a.fresh for a in fake.attempts] == [False, True]
 
 
+async def test_pokes_past_the_bound_continue_as_new(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A print poked over and over does not grow one history without bound."""
+    monkeypatch.setattr(follow_module, "MAX_POKES", 2)
+    queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
+    fake = FakeFollow()
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[FollowPrint],
+        activities=[fake.follow_print],
+        # Unsandboxed, so the patched bound is the one the workflow reads.
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    ):
+        await follow(client, queue, output)
+        handle = client.get_workflow_handle(follow_id(output))
+        first = (await handle.describe()).run_id
+        for n in (2, 3):
+            await _until(lambda: len(fake.attempts) == n - 1)  # noqa: B023
+            await handle.signal("poke")
+        await _until(lambda: len(fake.attempts) == 3)
+        fake.end.set()
+        assert await handle.result() == "settled"
+        last = (await handle.describe()).run_id
+    assert last != first
+    assert [a.fresh for a in fake.attempts] == [False, True, True]
+
+
 async def test_a_finished_follow_can_start_again(client: Client) -> None:
     queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
     fake = FakeFollow()
@@ -135,6 +165,45 @@ async def test_resume_followed_starts_recent_prints_and_clears_the_old_log(
     assert resumed == [recent]
     assert left is not None and left["n"] == 0
     assert [a.output_id for a in fake.attempts] == [recent]
+
+
+@pytest.mark.requires_postgres
+async def test_resume_followed_keeps_a_print_whose_follow_did_not_start(
+    pg_conninfo: str,
+) -> None:
+    """A start that fails leaves its row for the next boot's hand-over."""
+    projection = JobProjection(pg_conninfo, pool_size=2)
+    await asyncio.to_thread(projection.open)
+    output = uuid.uuid4().hex
+    now = datetime.now(UTC)
+    with projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_watches (output_id, printed_at) VALUES (%s, %s)",
+            (output, now - timedelta(hours=1)),
+        )
+    lazy = await Client.connect("127.0.0.1:1", lazy=True)
+    try:
+        resumed = await resume_followed(projection.pool, lazy, "nowhere", now)
+        with projection.pool.connection() as conn:
+            left = conn.execute("SELECT output_id FROM print_watches").fetchall()
+    finally:
+        await asyncio.to_thread(projection.close)
+    assert resumed == []
+    assert [row["output_id"] for row in left] == [output]
+
+
+@pytest.mark.requires_postgres
+async def test_resume_followed_once_the_old_log_is_dropped(pg_conninfo: str) -> None:
+    projection = JobProjection(pg_conninfo, pool_size=2)
+    await asyncio.to_thread(projection.open)
+    lazy = await Client.connect("127.0.0.1:1", lazy=True)
+    try:
+        with projection.pool.connection() as conn:
+            conn.execute("DROP TABLE print_watches")
+        resumed = await resume_followed(projection.pool, lazy, "nowhere", datetime.now(UTC))
+    finally:
+        await asyncio.to_thread(projection.close)
+    assert resumed == []
 
 
 async def test_follow_starts_one_execution_and_leaves_it_running(client: Client) -> None:

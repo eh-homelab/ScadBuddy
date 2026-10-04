@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import timedelta
 
 import pytest
 from temporalio import activity
 from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverlapPolicy
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
-from scadbuddy import main
 from scadbuddy.workflows.housekeeping import (
-    PRUNE_INTERVAL,
+    HEARTBEAT_TIMEOUT,
     PRUNE_SWEEPS,
+    PRUNE_TIMEOUT,
+    SWEEP_TIMEOUT,
     SWEEPS,
     Housekeeping,
     ensure_schedule,
@@ -24,7 +25,7 @@ from scadbuddy.workflows.housekeeping import (
     prune_schedule_id_for,
     schedule_id_for,
 )
-from tests.support.temporal import temporal_client
+from tests.support.temporal import temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -33,12 +34,15 @@ class FakeSweeps:
     def __init__(self, failing: str | None = None) -> None:
         self.ran: list[str] = []
         self.failing = failing
+        self.timeouts: dict[str, tuple[timedelta | None, timedelta | None]] = {}
 
     def all(self) -> list[object]:
         def make(name: str) -> object:
             @activity.defn(name=name)
             async def sweep() -> None:
                 self.ran.append(name)
+                info = activity.info()
+                self.timeouts[name] = (info.start_to_close_timeout, info.heartbeat_timeout)
                 if name == self.failing:
                     raise RuntimeError(f"{name} broke")
 
@@ -67,10 +71,28 @@ async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
     queue = f"library-{uuid.uuid4().hex[:8]}"
     fake = FakeSweeps(failing=SWEEPS[1])
     async with Worker(client, task_queue=queue, workflows=[Housekeeping], activities=fake.all()):  # type: ignore[arg-type]
-        await client.execute_workflow(
+        failed = await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
     assert fake.ran == list(SWEEPS)
+    assert failed == [SWEEPS[1]]
+
+
+async def test_the_prune_is_short_and_the_long_sweeps_heartbeat(client: Client) -> None:
+    """Review #1095 2: a worker lost mid-sweep is noticed within the heartbeat
+    timeout, and a lost prune within its own short one, not after `SWEEP_TIMEOUT`."""
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    fake = FakeSweeps()
+    async with Worker(client, task_queue=queue, workflows=[Housekeeping], activities=fake.all()):  # type: ignore[arg-type]
+        await client.execute_workflow(
+            Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
+        )
+    # The prune and the claims sweep (review 3c M1) are short, so they share a timeout.
+    for sweep in SWEEPS:
+        expected = (
+            (PRUNE_TIMEOUT, None) if sweep in PRUNE_SWEEPS else (SWEEP_TIMEOUT, HEARTBEAT_TIMEOUT)
+        )
+        assert fake.timeouts[sweep] == expected
 
 
 async def test_ensure_schedule_creates_then_updates_the_interval(client: Client) -> None:
@@ -83,6 +105,7 @@ async def test_ensure_schedule_creates_then_updates_the_interval(client: Client)
         second = await client.get_schedule_handle(schedule_id).describe()
     finally:
         await client.get_schedule_handle(schedule_id).delete()
+        await terminate_open_workflows(client, queue)
     assert first.schedule.spec.intervals[0].every == timedelta(seconds=600)
     assert second.schedule.spec.intervals[0].every == timedelta(seconds=120)
     assert second.schedule.policy.overlap == ScheduleOverlapPolicy.SKIP
@@ -98,18 +121,25 @@ async def test_an_interval_under_temporals_minimum_is_the_minimum(client: Client
         described = await client.get_schedule_handle(schedule_id).describe()
     finally:
         await client.get_schedule_handle(schedule_id).delete()
+        await terminate_open_workflows(client, queue)
     assert described.schedule.spec.intervals[0].every == timedelta(seconds=1)
 
 
 async def test_an_interval_of_zero_deletes_the_schedule(client: Client) -> None:
     schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
     queue = f"library-{uuid.uuid4().hex[:8]}"
-    await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
-    await ensure_schedule(client, queue, 0.0, schedule_id=schedule_id)
-    with pytest.raises(RPCError):
-        await client.get_schedule_handle(schedule_id).describe()
-    # And zero with no Schedule is not an error.
-    await ensure_schedule(client, queue, 0.0, schedule_id=schedule_id)
+    handle = client.get_schedule_handle(schedule_id)
+    try:
+        await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
+        await ensure_schedule(client, queue, 0.0, schedule_id=schedule_id)
+        with pytest.raises(RPCError):
+            await handle.describe()
+        # And zero with no Schedule is not an error.
+        await ensure_schedule(client, queue, 0.0, schedule_id=schedule_id)
+    finally:
+        with suppress(RPCError):  # gone, as it should be
+            await handle.delete()
+        await terminate_open_workflows(client, queue)
 
 
 async def test_housekeeping_runs_only_the_sweeps_it_is_given(client: Client) -> None:
@@ -137,29 +167,10 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
             await client.get_schedule_handle(schedule_id_for(queue)).describe()
     finally:
         await prune.delete()
-    assert described.schedule.spec.intervals[0].every == timedelta(seconds=PRUNE_INTERVAL)
-    assert PRUNE_INTERVAL == 300.0
+        await terminate_open_workflows(client, queue)
+    assert described.schedule.spec.intervals[0].every == timedelta(seconds=300)
     # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good.
     action = described.schedule.action
     assert isinstance(action, ScheduleActionStartWorkflow)
     (sweeps,) = await client.data_converter.decode(action.args)
     assert list(sweeps) == ["housekeeping_prune_jobs", "housekeeping_sweep_claims"]
-
-
-async def test_the_schedules_are_set_up_once_temporal_answers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review I2: a create that fails after the connect (a frontend up before its
-    history service) is retried, not left to the next restart."""
-    calls: list[float] = []
-
-    async def flaky(client: object, queue: str, interval: float) -> None:
-        calls.append(interval)
-        if len(calls) == 1:
-            raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
-
-    monkeypatch.setattr(main, "ensure_schedules", flaky)
-    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
-    stop = asyncio.Event()
-    await asyncio.wait_for(main._set_up_housekeeping(object(), "library", 600.0, stop), 5)  # type: ignore[arg-type]
-    assert calls == [600.0, 600.0]

@@ -228,6 +228,20 @@ def test_the_migration_says_every_run_it_ends_may_have_queued(
         assert "check Bambuddy's queue before printing again" in row["detail"]
 
 
+def test_the_migration_keeps_heartbeat_at_for_pods_that_still_write_it(
+    jobs: JobProjection,
+) -> None:
+    """Review #1061 3a: expand/contract. A pre-#1052 pod still running during the rolling
+    update reads and writes ``heartbeat_at``; a later migration drops it."""
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status)"
+            " VALUES ('old', %s, 'old', 'running')",
+            (OUTPUT,),
+        )
+        conn.execute("UPDATE print_runs SET heartbeat_at = now() WHERE id = 'old'")
+
+
 async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
     store: PrintRunStore,
 ) -> None:

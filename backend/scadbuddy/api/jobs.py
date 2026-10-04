@@ -25,7 +25,7 @@ from scadbuddy.api.deps import (
     StateDep,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.operations import still_accepting, temporal_unavailable
+from scadbuddy.api.operations import IdempotencyKey, still_accepting, temporal_unavailable
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
@@ -216,8 +216,9 @@ def require_job(render: RenderService, job_id: str) -> Job:
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
                 "limit is set); or Temporal, where renders run, is unreachable "
                 "(`temporal-unavailable`, nothing was queued); or the render is still "
-                "being accepted (`command-still-accepting`: send the same request again "
-                "to follow it). Retry after `Retry-After` seconds"
+                "being accepted (`command-still-accepting`: send the same request again, "
+                "with the same `Idempotency-Key`, to follow it as one request). Retry "
+                "after `Retry-After` seconds"
             )
         }
     },
@@ -234,6 +235,7 @@ async def render_model(
     assets: AssetsDep,
     fetcher: FetcherDep,
     fonts: FontsDep,
+    idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
@@ -271,6 +273,7 @@ async def render_model(
             inputs=inputs,
             model_version=source.version,
             supersedes=body.supersedes,
+            request_id=idempotency_key,
         )
     except QueueFullError as error:
         raise ApiError(

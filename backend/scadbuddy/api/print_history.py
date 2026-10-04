@@ -29,7 +29,6 @@ from scadbuddy.api.deps import (
     ConfigDep,
     FetcherDep,
     HistoryDep,
-    OperationsDep,
     OutputsDep,
     PathsDep,
     PrintLinksDep,
@@ -68,6 +67,7 @@ from scadbuddy.library.outputs import (
     download_filename,
 )
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue

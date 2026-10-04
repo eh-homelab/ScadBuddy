@@ -525,7 +525,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`print_runs` is our system of record**, written only by the workflow's activities,
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
-  - drops `heartbeat_at`;
+  - leaves `heartbeat_at`, which a pre-#1052 pod still writes during the rolling update;
+    a later migration drops it (expand/contract);
   - adds `workflow_id text` and `workflow_run_id text`, with a unique index on the pair
     (§4.2 step 3).
 
@@ -1019,8 +1020,10 @@ Each phase is its own implementation plan and ships alone.
      it closed in between). The progress route only starts it when none is running,
      never pokes. A poke cancels the attempt (`TRY_CANCEL`) and starts a fresh one that
      reads at once, then backs off as usual. A worker shutdown ends an attempt at once. `bambuddy/watcher.py` and its lock and
-     rescan are gone; a boot pass hands the prints in `print_watches` to `FollowPrint`
-     and empties it (the table is dropped later).
+     rescan are gone; each boot hands the prints in `print_watches` to `FollowPrint`,
+     deleting a row once its follow is running (the migration that drops the table
+     removes that pass). An old pod still writes the table, so this upgrade needs a
+     `Recreate` rollout: old replicas at 0 before the new one starts.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.

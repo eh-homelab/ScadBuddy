@@ -105,6 +105,8 @@ class Follower:
         self.now = now
         #: Each runs on the settled branch only; what one raises is logged by type and the
         #: follow ends as before. A feature registers itself here (``rack/component.py``).
+        #: A hook must be idempotent: it may run more than once for one print, and
+        #: concurrently (a poke's old attempt reads until its next heartbeat).
         self.on_settled: list[SettledHook] = list(on_settled)
 
     async def follow(

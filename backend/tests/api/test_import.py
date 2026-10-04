@@ -14,6 +14,7 @@ from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER, shown_u
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.operation_models import FINISH_ACTIVITY
 
 RAW_URL = "https://raw.githubusercontent.com/someone/models/main/Gridfinity%20Bin.scad"
@@ -251,7 +252,7 @@ def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -
     respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
     assert client.post("/api/v1/models/import", json={"url": url}).status_code == 201
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.operations.store._require().connection() as conn:
+    with state.components.get(OPERATIONS).store._require().connection() as conn:
         rows = conn.execute("SELECT subject FROM operations WHERE kind = 'model_import'").fetchall()
     assert [row["subject"] for row in rows] == ["raw.githubusercontent.com"]
 
@@ -268,7 +269,7 @@ def test_an_import_never_records_the_urls_query(client: TestClient, paths: DataP
     assert created.json()["origin_url"] == RAW_URL
     assert "secret" not in paths.model_meta("gridfinity-bin").read_text("utf-8")
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.operations.store._require().connection() as conn:
+    with state.components.get(OPERATIONS).store._require().connection() as conn:
         (row,) = conn.execute(
             "SELECT request::text AS request, result::text AS result, workflow_id"
             " FROM operations WHERE kind = 'model_import'"

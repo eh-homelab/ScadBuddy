@@ -28,8 +28,9 @@ if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
 
 
-def model_kinds(state: AppState) -> dict[str, OperationKind]:
-    """The model kinds, bound to this process's state."""
+def model_kinds(state: AppState) -> list[OperationKind]:
+    """The model kinds, bound to this process's state; ``library/operations.py`` exports
+    them with the pins."""
 
     def _record(record: ModelRecord) -> dict[str, Any]:
         dumped: dict[str, Any] = record.model_dump(mode="json")
@@ -130,7 +131,7 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
             name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
         )
 
-    kinds = [
+    return [
         # A create may clone the libraries it names, as a pin does.
         kind("model_create", create_check, create_run, run_timeout=PIN_TIMEOUT),
         kind("model_import", import_check, import_run),
@@ -138,4 +139,3 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         kind("model_duplicate", duplicate_check, duplicate_run),
         kind("model_delete", delete_check, delete_run),
     ]
-    return {each.name: each for each in kinds}

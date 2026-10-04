@@ -18,6 +18,8 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
@@ -37,6 +39,41 @@ logger = logging.getLogger(__name__)
 
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
 LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
+ORPHANED_ERROR = "failed: its workflow closed before it ran"
+#: How old a pending row an older build inserted must be before it can be orphaned: an
+#: older API inserts its row, then starts its workflow, within its own 5 s start
+#: timeout; this is six of those.
+LEGACY_GRACE = timedelta(seconds=30)
+
+
+class LegacyPendingError(Exception):
+    """A row an older build inserted waits on the same render key: its pending key
+    holds until that build runs it, or `render_accept` finds it orphaned."""
+
+    def __init__(self, job: Job) -> None:
+        super().__init__(f"render job {job.id} of an older build waits on the same key")
+        self.job = job
+
+
+async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
+    """Whether no workflow will run ``job``, a pending row an older build inserted past
+    `LEGACY_GRACE`: it names none, or Temporal has none running. Raises the RPC error
+    when Temporal cannot say."""
+    if now() - job.created_at < LEGACY_GRACE:
+        return False
+    if job.workflow_id is None:
+        return True
+    try:
+        described = await client.get_workflow_handle(job.workflow_id).describe(
+            rpc_timeout=rpc_timeout
+        )
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return True
+        raise
+    # A closed run (terminated, failed) that retention still keeps never settles it.
+    return described.status != WorkflowExecutionStatus.RUNNING
+
 
 PROJECTION_COLUMNS = (
     "id",
@@ -139,10 +176,19 @@ class JobProjection:
     # -- the API's writes -------------------------------------------------------
 
     def accept(
-        self, job: Job, key: str, *, workflow_id: str, run_id: str, max_pending: int = 0
+        self,
+        job: Job,
+        key: str,
+        *,
+        workflow_id: str,
+        run_id: str,
+        max_pending: int = 0,
+        orphaned: str | None = None,
     ) -> Job:
         """The first activity of `render-<render_key>` (#1053): the execution's row, or
-        `QueueFullError` with nothing written. A retried activity finds its row."""
+        `QueueFullError` with nothing written. A retried activity finds its row.
+        ``orphaned`` names the older build's row on the key that the caller found no
+        workflow will run (`LegacyPendingError`): it is failed, and this row goes in."""
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT * FROM render_jobs WHERE workflow_id = %s AND workflow_run_id = %s",
@@ -150,6 +196,23 @@ class JobProjection:
             ).fetchone()
             if row is not None:
                 return _job(row)
+            # `render_jobs_pending_key` still holds one pending row per key (see its
+            # migration). Only this run of `render-<key>` is open, so another run's
+            # pending row is an orphan; an older build's row is that build's to run.
+            held = conn.execute(
+                "SELECT * FROM render_jobs WHERE render_key = %s AND state = 'pending' FOR UPDATE",
+                (key,),
+            ).fetchone()
+            legacy = held is not None and held["workflow_run_id"] is None
+            if held is not None and legacy and held["id"] != orphaned:
+                raise LegacyPendingError(_job(held))
+            if held is not None:
+                conn.execute(
+                    "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                    " WHERE id = %s",
+                    (LEGACY_UNSTARTED_ERROR if legacy else ORPHANED_ERROR, held["id"]),
+                )
+                self._announce(conn, held["id"], held["slug"], "job.failed")
             if max_pending:
                 counted = conn.execute(
                     "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
@@ -191,13 +254,14 @@ class JobProjection:
                 (claims, job_id),
             )
 
-    def legacy_pending(self) -> list[Job]:
-        """Pending rows inserted before renders moved to update-with-start: no
-        execution of `render-<render_key>` owns them."""
+    def legacy_pending(self, older_than: timedelta) -> list[Job]:
+        """Pending rows an older release inserted over ``older_than`` ago: past its
+        insert-then-start, so one whose workflow is not running is orphaned."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM render_jobs WHERE state = 'pending' AND workflow_run_id IS NULL"
-                " ORDER BY created_at, id"
+                " AND created_at < now() - %s ORDER BY created_at, id",
+                (older_than,),
             ).fetchall()
         return [_job(row) for row in rows]
 

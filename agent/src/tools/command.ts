@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { ok } from '../tools/call.js'
-import { type ToolContext, ToolError } from '../tools/registry.js'
+import { ok } from './call.js'
+import { type ToolContext, ToolError } from './registry.js'
 
 // A ScadBuddy command from a tool (#1052, #1053, spec 2026-10-01 §4.2), as the browser
 // client's `command()` does it: one key per call, kept by every re-send, so a re-send
@@ -72,7 +72,9 @@ export async function answered<T>(
       if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
+      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
       continue
     }
     return result

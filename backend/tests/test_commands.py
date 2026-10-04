@@ -18,6 +18,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
+    CONNECT_MARGIN_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
@@ -150,12 +151,13 @@ async def test_an_update_slower_than_the_deadline_is_still_accepting(
 ) -> None:
     workflow_id = f"echo-{uuid.uuid4().hex}"
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        # Slower than the outer bound: `rpc_timeout` alone does not end the call, since
+        # the SDK polls again when the server answers a poll with no outcome (#1095 CI).
+        slow = EchoInput(delay_s=CONNECT_MARGIN_SECONDS + 2)
         with pytest.raises(CommandStillAcceptingError):
-            await echo(
-                client, queue, workflow_id, EchoInput(delay_s=2), deadline=timedelta(seconds=0.3)
-            )
+            await echo(client, queue, workflow_id, slow, deadline=timedelta(seconds=0.3))
         # The execution goes on, and the same request attaches to it.
-        again = await echo(client, queue, workflow_id, EchoInput(delay_s=2))
+        again = await echo(client, queue, workflow_id, slow)
         await client.get_workflow_handle(workflow_id).signal("finish")
     assert again.updates == 2
 

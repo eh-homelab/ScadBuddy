@@ -5,6 +5,12 @@ unchanged.
 They run on the ``library`` worker, which is in the API process and holds the data
 volume (phase 3a), so they share the API's checkout gate and install semaphore. Every
 kind runs once: a git commit is not deduped.
+
+The gate, the semaphore and the render leases are in-process ``asyncio`` primitives:
+they hold only while every process that pins, removes or renders from the volume is
+this one. Before the ``library`` worker leaves the API process, or the API runs more
+than one replica, the gate and the leases must move to Postgres advisory locks (#872
+tracks the leases a separate render worker takes).
 """
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from functools import partial, wraps
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import status
 
@@ -38,21 +44,23 @@ from scadbuddy.library.libraries import (
     ModelLibrary,
     declared_libraries,
 )
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
+    from scadbuddy.core.components import Components, Core
 
 
 #: A pin's run: the clone's own limit, plus waiting its turn (installs, a removal holding
-#: the gate) and the commit. Past it the run is cancelled, never left to commit late.
+#: the gate) and the commit. Past it the run is cancelled before its next step; a clone
+#: or commit already in its thread finishes (holding the gate) and a commit can land.
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
 def answered_as_routes[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-    """A model.json that cannot be read, or a pin whose checkout is gone, as the 409
-    every route answers it with (``api/models.py``, ``install_library_handlers``),
-    rather than the operation's unexpected 500."""
+    """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
+    checkout is gone, as the 409 every route answers it with (``api/models.py``,
+    ``install_library_handlers``), rather than the operation's unexpected 500."""
 
     @wraps(fn)
     async def answered(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -64,6 +72,10 @@ def answered_as_routes[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awa
             ) from None
         except LibraryNotInstalledError as error:
             raise ApiError(status.HTTP_409_CONFLICT, str(error.args[0])) from None
+        except LibraryDeclarationError as error:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
+            ) from None
 
     return answered
 
@@ -73,7 +85,7 @@ def library_changed(events: EventBus, slug: str, name: str) -> None:
     emit(events, ModelEvent(kind="model.updated", slug=slug))
 
 
-def library_kinds(state: AppState) -> dict[str, OperationKind]:
+def library_kinds(state: Core, components: Components) -> list[OperationKind]:
     """The pin kinds, bound to this process's state (read at each call, so a test's
     replaced store is the one used)."""
 
@@ -82,13 +94,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         return dumped
 
     async def _declared(slug: str, name: str) -> ModelLibrary:
-        try:
-            declared = await asyncio.to_thread(declared_libraries, state.paths.model_dir(slug))
-        except LibraryDeclarationError as error:
-            # The 409 every other reader of a malformed declaration gives.
-            raise ApiError(
-                status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
-            ) from None
+        declared = await asyncio.to_thread(declared_libraries, state.paths.model_dir(slug))
         current = next((entry for entry in declared if entry.name == name), None)
         if current is None:
             raise ApiError(
@@ -113,7 +119,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
                 pin = await resolve_pin(
                     name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
                 )
-                record = await asyncio.to_thread(
+                record = await to_thread_to_end(
                     partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
                 )
         except LibraryPinChangedError:
@@ -155,7 +161,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
     async def unpin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         slug, name, index = request["slug"], request["name"], request["index"]
         try:
-            record = await asyncio.to_thread(
+            record = await to_thread_to_end(
                 partial(state.catalogue.unpin_library, slug, name, index=index)
             )
         except LibraryPinChangedError:
@@ -205,7 +211,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
                     models=users,
                 )
             try:
-                removed = await asyncio.to_thread(libraries.remove, name, commit)
+                removed = await to_thread_to_end(partial(libraries.remove, name, commit))
             except LibraryCheckoutNotFoundError:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
@@ -217,7 +223,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
         emit(state.events, LibraryRemoved(name=name, commits=removed))
         return {}
 
-    kinds = [
+    return [
         OperationKind(
             "library_pin",
             answered_as_routes(model_check),
@@ -238,6 +244,17 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
             answered_as_routes(unpin_run),
             queue="library",
         ),
-        OperationKind("library_remove", no_check, remove_run, queue="library"),
+        OperationKind("library_remove", no_check, answered_as_routes(remove_run), queue="library"),
     ]
-    return {kind.name: kind for kind in kinds}
+
+
+def _kinds(core: Core, components: Components) -> list[OperationKind]:
+    """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
+    imports this module. Its runs are the routes' former bodies, which take the whole
+    ``AppState``; the core is one."""
+    from scadbuddy.library.model_operations import model_kinds
+
+    return [*library_kinds(core, components), *model_kinds(cast("AppState", core))]
+
+
+OPERATION_KINDS: KindsBuild = _kinds

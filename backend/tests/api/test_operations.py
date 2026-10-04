@@ -19,16 +19,17 @@ from fastapi.testclient import TestClient
 from temporalio import activity
 
 from scadbuddy.api import operations as operations_api
-from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.authorship import AUTHOR_HEADER, AUTHOR_SESSION_HEADER, current_author
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.component import OPERATIONS, OperationsDep
+from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5 = (uuid.uuid4().hex for _ in range(5))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -37,6 +38,7 @@ class Counts:
     def __init__(self) -> None:
         self.runs = 0
         self.cancelled = 0
+        self.events: list[str] = []
 
 
 @pytest.fixture
@@ -63,9 +65,6 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
     async def where(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         return {"queue": activity.info().task_queue}
 
-    state.operations.kinds["test"] = OperationKind("test", check, run)
-    state.operations.kinds["test_where"] = OperationKind("test_where", check, where)
-
     async def slow(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         try:
             await asyncio.sleep(30)
@@ -74,20 +73,52 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
             raise
         return {}
 
-    state.operations.kinds["test_slow"] = OperationKind(
-        "test_slow", check, slow, run_timeout=timedelta(seconds=2)
+    test_slow_kind = OperationKind("test_slow", check, slow, run_timeout=timedelta(seconds=2))
+    gate = asyncio.Lock()
+
+    async def threaded(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        def commit() -> None:
+            time.sleep(12)  # past the 2 s timeout and the heartbeat that delivers it
+            counts.events.append("committed")
+
+        try:
+            async with gate:
+                await to_thread_to_end(commit)
+        finally:
+            counts.events.append("released")
+        return {}
+
+    test_threaded_kind = OperationKind(
+        "test_threaded", check, threaded, run_timeout=timedelta(seconds=2)
     )
-    state.operations.kinds["test_library"] = OperationKind(
-        "test_library", check, where, queue="library"
-    )
+
+    async def slow_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {}
+
+    test_slow_check_kind = OperationKind("test_slow_check", slow_check, where, queue="library")
+    test_library_kind = OperationKind("test_library", check, where, queue="library")
 
     async def author(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         await asyncio.sleep(0)  # off the activity's own task, as a commit in a thread is
         found = current_author()
         return {"principal": found and found.principal, "session": found and found.session}
 
-    state.operations.kinds["test_author"] = OperationKind(
-        "test_author", check, author, queue="library"
+    test_author_kind = OperationKind("test_author", check, author, queue="library")
+    ops = state.components.get(OPERATIONS)
+    added = [
+        OperationKind("test", check, run),
+        OperationKind("test_where", check, where),
+        test_slow_kind,
+        test_threaded_kind,
+        test_slow_check_kind,
+        test_library_kind,
+        test_author_kind,
+    ]
+    # Before the app starts, so its workers serve the kinds too.
+    state.components.override(
+        OPERATIONS,
+        dataclasses.replace(ops, kinds={**ops.kinds, **{kind.name: kind for kind in added}}),
     )
     router = APIRouter()
 
@@ -102,7 +133,7 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return await run_operation(
             ops,
             response,
-            kind=state.operations.kinds[kind],
+            kind=ops.kinds[kind],
             subject="s",
             request=body,
             idempotency_key=key,
@@ -170,6 +201,21 @@ def test_a_retry_after_a_recorded_failure_answers_it_and_runs_nothing(
     assert counts.runs == 1
 
 
+def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
+    client: TestClient, counts: Counts, pg_conninfo: str
+) -> None:
+    """Review #1063 8: a retention shorter than Temporal's leaves a closed execution
+    with no row. The answer says it may have been done; it never runs it again."""
+    assert post(client, {"a": 1}, key=PRESS_6).status_code == 200
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = post(client, {"a": 1}, key=PRESS_6)
+    assert again.status_code == 409, again.text
+    assert "may have been done" in again.json()["detail"]
+    assert "Check Bambuddy" in again.json()["detail"]
+    assert counts.runs == 1
+
+
 def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> None:
     started = post(client, {"delay": 12}, key=PRESS_4)
     assert started.status_code == 202, started.text
@@ -185,12 +231,14 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     client: TestClient, app: FastAPI, pg_conninfo: str
 ) -> None:
     state: AppState = getattr(app.state, STATE_ATTR)
-    ops = state.operations
-    state.operations = dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
     try:
         response = post(client, {"a": 1}, key=PRESS_5)
     finally:
-        state.operations = ops
+        state.components.override(OPERATIONS, ops)
     assert response.status_code == 503
     assert response.json()["type"].endswith("/temporal-unavailable")
     with psycopg.connect(pg_conninfo) as conn:
@@ -217,6 +265,30 @@ def test_a_run_past_its_kinds_timeout_is_cancelled_and_recorded_failed(
     while counts.cancelled == 0 and time.monotonic() < deadline:
         time.sleep(0.2)
     assert counts.cancelled == 1
+
+
+def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
+    client: TestClient, counts: Counts
+) -> None:
+    """Review #1119 1: a pin's clone and commit are threads, which a cancel cannot stop.
+    The run keeps its gate until the thread has returned, so nothing that waits on the
+    gate runs beside it; the effect itself can still land after the record failed."""
+    response = client.post("/api/v1/test-op?kind=test_threaded", json={})
+    assert response.status_code == 500, response.text
+    deadline = time.monotonic() + 40
+    while len(counts.events) < 2 and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert counts.events == ["committed", "released"]
+
+
+def test_a_library_kinds_slow_check_does_not_blame_bambuddy(client: TestClient) -> None:
+    """Review #1119 2: a ``library`` check reads the data volume, not Bambuddy."""
+    response = client.post("/api/v1/test-op?kind=test_slow_check", json={})
+    assert response.status_code == 504, response.text
+    problem = response.json()
+    assert problem["type"] == "about:blank"
+    assert "Bambuddy" not in problem["detail"]
+    assert "the check did not finish" in problem["detail"]
 
 
 def test_an_execution_ended_before_it_answered_is_still_accepting(

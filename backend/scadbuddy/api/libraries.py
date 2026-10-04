@@ -35,7 +35,6 @@ from scadbuddy.api.deps import (
     FontsDep,
     InstallsDep,
     LibrariesDep,
-    OperationsDep,
     PathsDep,
     SlugPath,
 )
@@ -66,6 +65,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.scad import SourceCheck, check_source
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 
 router = APIRouter(tags=["libraries"])
@@ -131,7 +131,9 @@ def list_libraries(libraries: LibrariesDep) -> list[CatalogueLibrary]:
         "resolved to in this model's `model.json`, as one revision of the model. The "
         "model renders against that pin from then on; no other model moves. A 503 when "
         "the URL's host could not be looked up just now (try again), as distinct from "
-        "the 422 for a host that is not a public address."
+        "the 422 for a host that is not a public address. A 202 with the operation when "
+        "the clone is still running past the answer's deadline: follow "
+        "`GET /operations/{id}` for this answer."
     ),
 )
 async def pin_library(
@@ -164,7 +166,9 @@ async def pin_library(
         "branch pin moves to the branch's current commit), and records the commit as one "
         "revision of the model. The same checks and errors as pinning it in the first "
         "place; a 404 when the model does not declare the library, and a 409 when its "
-        "entry is changed or removed by another request while the clone runs."
+        "entry is changed or removed by another request while the clone runs. A 202 "
+        "with the operation when the clone is still running past the answer's deadline: "
+        "follow `GET /operations/{id}` for this answer."
     ),
     responses=OPERATION_RESPONSES,
 )
@@ -196,7 +200,8 @@ async def repin_library(
         "Removes every entry of that name, or with `index` only the invalid entry at that "
         "position (`invalid_libraries[].index`): a 409 when that entry is no longer an "
         "invalid one of that name. The checkout stays on the volume: an older revision "
-        "may still pin it."
+        "may still pin it. A 202 with the operation when it is still running past the "
+        "answer's deadline: follow `GET /operations/{id}` for this answer."
     ),
     responses=OPERATION_RESPONSES,
 )
@@ -375,7 +380,9 @@ async def list_library_users(name: LibraryName, catalogue: CatalogueDep) -> list
         "with a 409 naming the models while any model's live pin still reads one, and "
         "with a 409 naming the jobs while a running render reads one. "
         "Older revisions are not counted: rendering one that pinned a removed checkout "
-        "clones it again at that commit, and is a 409 only when that fails."
+        "clones it again at that commit, and is a 409 only when that fails. A 202 with "
+        "the operation, instead of the 204, when it is still running past the answer's "
+        "deadline: follow `GET /operations/{id}`."
     ),
 )
 async def remove_library(

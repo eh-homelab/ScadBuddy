@@ -164,24 +164,27 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
-  `operations`) and `kinds.py` (`OperationKind`: a kind's check, its effect, its
-  attempts, and its queue). `api/operations.py` `run_operation` is how a route runs a
-  kind (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
-  `GET /operations/{id}`. Each worker serves only its queue's kinds: the Bambuddy kinds
-  are `bambuddy/operations.py` (`bambuddy_kinds`, queue `bambuddy`), the library pins
-  `library/operations.py` (`library_kinds`, queue `library`, #1054) and a model's
-  lifecycle `library/model_operations.py` (`model_kinds`), all registered in
-  `create_app`. Request bytes too large for a workflow payload (a create's source,
-  thumbnail, README, a patch's presets, an import's URL) go by claim check:
-  `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by sha256 so a
-  re-send keeps its key. `run_operation(..., claimed=)` releases them once the answer
-  is final: only what its own `hold` created, unless a later put rewrote it or a running
-  operation names the digest; the rest go to the
+  `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
+  feature registers its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list.
+  Each worker serves only its queue's kinds: the Bambuddy kinds are
+  `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
+  `library`, #1054) exports the library pins with a model's lifecycle
+  (`library/model_operations.py` `model_kinds`). Request bytes too large for a workflow
+  payload (a create's source, thumbnail, README, a patch's presets, an import's URL) go
+  by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
+  sha256 so a re-send keeps its key. `run_operation(..., claimed=)` releases them once
+  the answer is final: only what its own `hold` created, unless a later put rewrote it
+  or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
-  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB) with
-  413. A kind reads the state when it runs, never a route dependency, so a test
-  replaces a store on the state (`state.libraries = store`). The browser's `command()`
-  (`frontend/src/api/client.ts`) and the agent's (`agent/src/api/command.ts`) send the
+  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  with 413. A kind reads the state when it runs, never a route dependency, so a test
+  replaces a store on the state (`state.libraries = store`). `api/operations.py`
+  `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
+  operation past the deadline) and serves `GET /operations/{id}`. The browser's
+  `command()` (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`)
+  send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
