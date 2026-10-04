@@ -59,7 +59,7 @@ from scadbuddy.workflows.print_models import (
     SourceSpec,
     SucceedInput,
 )
-from scadbuddy.workflows.printing import PrintRunWorkflow
+from scadbuddy.workflows.printing import CANCELLED, PrintRunWorkflow
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -94,6 +94,8 @@ class Fake:
         self.output_id = uuid.uuid4().hex
         #: How many of the next `print_succeed` attempts fail before one succeeds.
         self.succeed_failures = 0
+        #: Set, the check waits on it, so a test can act while it is in flight.
+        self.check_gate: asyncio.Event | None = None
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -107,6 +109,8 @@ class Fake:
     @activity.defn(name="print_check")
     async def check(self, input: PrintRunInput) -> Checked:
         self.calls.append("check")
+        if self.check_gate is not None:
+            await self.check_gate.wait()
         if self.refuse:
             raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)
         return Checked(
@@ -540,3 +544,24 @@ async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
             scheduled = event.activity_task_scheduled_event_attributes
             attempts[scheduled.activity_type.name] = scheduled.retry_policy.maximum_attempts
     assert attempts["print_succeed"] == 0  # unlimited, as every record write
+
+
+async def test_a_cancel_during_the_check_answers_the_update_before_the_execution_ends(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 1c: the Update answers a refusal, never outlived by its execution."""
+    fake.check_gate = asyncio.Event()
+    arg = run_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "check" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"print-{arg.key}").cancel()
+        answer = await accepting
+        assert answer.run is None
+        assert answer.refusal == CANCELLED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
+    finally:
+        fake.check_gate.set()

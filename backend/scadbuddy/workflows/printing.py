@@ -29,6 +29,7 @@ from temporalio.exceptions import (
     ApplicationError,
     FailureError,
     WorkflowAlreadyStartedError,
+    is_cancelled_exception,
 )
 
 with workflow.unsafe.imports_passed_through():
@@ -89,6 +90,17 @@ STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 MAY_HAVE_QUEUED = SearchAttributeKey.for_bool("ScadbuddyMayHaveQueued")
 
 
+#: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
+FOLLOW_PATCH = "follow-print"
+
+#: What a run cancelled before its record answers: nothing was written or queued.
+CANCELLED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This print was cancelled before it started. Nothing was queued; print again.",
+)
+
+
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
 class PrintRunWorkflow:
     def __init__(self) -> None:
@@ -118,11 +130,14 @@ class PrintRunWorkflow:
                 start_to_close_timeout=ACCEPT_TIMEOUT,
                 retry_policy=READ_RETRY,
             )
-        except ActivityError as error:
-            # Nothing was written: the execution fails, and a retry may start again.
-            self.refusal = problem_of(error)
+        except (ActivityError, asyncio.CancelledError) as error:
+            # Nothing was written: the execution fails, and a retry may start again. A
+            # cancel answers the Update too, so it is never outlived by its execution.
+            self.refusal = CANCELLED if is_cancelled_exception(error) else problem_of(error)
             self._upsert(status="refused")
             await workflow.wait_condition(workflow.all_handlers_finished)
+            if is_cancelled_exception(error):
+                raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
         run = await workflow.execute_activity(
             "print_insert",
@@ -251,7 +266,12 @@ class PrintRunWorkflow:
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
-        if input.source.kind == "output" and input.source.output_id is not None:
+        # Patched: a run started before #1053 replays without the follow (review #1061).
+        if (
+            workflow.patched(FOLLOW_PATCH)
+            and input.source.kind == "output"
+            and input.source.output_id is not None
+        ):
             await self._follow(input.source.output_id)
         return finished
 
