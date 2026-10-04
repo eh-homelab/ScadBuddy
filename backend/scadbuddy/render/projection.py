@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
 LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
+ORPHANED_ERROR = "failed: its workflow closed before it ran"
+
+
+class LegacyPendingError(Exception):
+    """A row an older build inserted waits on the same render key: its pending key
+    holds until that build runs it, so `render_accept` retries."""
 
 PROJECTION_COLUMNS = (
     "id",
@@ -150,6 +156,23 @@ class JobProjection:
             ).fetchone()
             if row is not None:
                 return _job(row)
+            # `render_jobs_pending_key` still holds one pending row per key (see its
+            # migration). Only this run of `render-<key>` is open, so another run's
+            # pending row is an orphan; an older build's row is that build's to run.
+            held = conn.execute(
+                "SELECT id, slug, workflow_run_id FROM render_jobs"
+                " WHERE render_key = %s AND state = 'pending' FOR UPDATE",
+                (key,),
+            ).fetchone()
+            if held is not None and held["workflow_run_id"] is None:
+                raise LegacyPendingError(held["id"])
+            if held is not None:
+                conn.execute(
+                    "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                    " WHERE id = %s",
+                    (ORPHANED_ERROR, held["id"]),
+                )
+                self._announce(conn, held["id"], held["slug"], "job.failed")
             if max_pending:
                 counted = conn.execute(
                     "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"

@@ -24,7 +24,9 @@ from scadbuddy.render.job_models import (
 from scadbuddy.render.projection import (
     LEGACY_RUNNING_ERROR,
     LEGACY_UNSTARTED_ERROR,
+    ORPHANED_ERROR,
     JobProjection,
+    LegacyPendingError,
 )
 from scadbuddy.render.schema import ParamValue
 from tests.support.renders import legacy_row as _row
@@ -96,8 +98,9 @@ def test_the_migrations_add_the_projection_and_drop_the_queues_lease(
     assert {"workflow_id", "kind", "inputs", "pipeline_version", "steps"} <= columns
     assert "heartbeat_at" not in columns
     assert "render_jobs_running" not in indexes
-    # Coalescing is the workflow's (#1053): rows are unique per execution instead.
-    assert "render_jobs_pending_key" not in indexes
+    # Coalescing is the workflow's (#1053): rows are unique per execution. The pending
+    # key stays while a pre-#1053 API may still insert against it (expand/contract).
+    assert "render_jobs_pending_key" in indexes
     assert "render_jobs_execution" in indexes
     assert "workflow_run_id" in columns
     assert MIGRATION_ID in applied
@@ -367,6 +370,22 @@ def test_two_executions_of_one_key_each_get_a_row(projection: JobProjection) -> 
     second = _accept(projection, "run-2", width=43)
     assert first.id != second.id
     assert projection.read(second.id).state == "pending"
+    # Only one run of `render-<key>` is open, so the other's pending row is an orphan
+    # (its run closed before it ran): failed, so the pending key holds the new one.
+    orphan = projection.read(first.id)
+    assert (orphan.state, orphan.error) == ("failed", ORPHANED_ERROR)
+
+
+def test_accept_waits_for_a_legacy_row_pending_on_the_same_key(
+    projection: JobProjection,
+) -> None:
+    legacy = _row(projection, _job(width=47))
+    with pytest.raises(LegacyPendingError):
+        _accept(projection, "run-1", width=47)
+    assert projection.read(legacy.id).state == "pending"
+    # Once the older build runs it, the key is free.
+    assert projection.mark_started(legacy.id) is not None
+    assert projection.read(_accept(projection, "run-1", width=47).id).state == "pending"
 
 
 def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> None:
