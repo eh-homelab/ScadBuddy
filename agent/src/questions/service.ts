@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import type { AttentionReason, OnTimeout } from '../harness/attention.js'
-import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -513,15 +513,24 @@ export class QuestionService {
           // The limit spans sessions and replicas, so its count and insert hold one
           // lock that does too (to commit), or two turns could each read 9 and insert.
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
-          const [recent] = await tx<{ n: number }[]>`
-            SELECT count(*)::int AS n FROM ai_questions
-            WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
-          if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
+          // Only the model's own requests count, and only they are limited: a
+          // browser_* call's wait for its tab (sessions/manager.ts waitForTab) is
+          // ScadBuddy's, at most one per turn, and must not use up the model's.
+          if (request.tool === ATTENTION_TOOL) {
+            const [recent] = await tx<{ n: number }[]>`
+              SELECT count(*)::int AS n FROM ai_questions
+              WHERE kind = 'attention' AND tool = ${ATTENTION_TOOL}
+                AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
+            if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
+          }
           const why = 'replaced by a newer request for the same reason'
           superseded = await tx<Resolved[]>`
             UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
               AND outcome IS NULL
+              -- The model's own request and a browser_* call's wait for its tab
+              -- never replace each other: both end when the tab is back.
+              AND (tool = ${ATTENTION_TOOL}) = (${request.tool} = ${ATTENTION_TOOL})
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
@@ -588,6 +597,7 @@ export class QuestionService {
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
+      await attention?.onParked?.()
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])

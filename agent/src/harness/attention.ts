@@ -86,6 +86,8 @@ export type AttentionSpec = {
   onTimeout: OnTimeout
   /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
   timeoutS: number
+  /** Called once the request is recorded and shown (questions/service.ts `gate`). */
+  onParked?: () => Promise<void>
 }
 
 /** The request's input, or why it is refused (and nothing parks). */

@@ -111,7 +111,12 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       // it as an attention request, and runs once more when the tab is back.
       // Once only: a tab that came back on another replica is still not here.
       if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
-        const waited = await ctx.waitForTab({ tool: `browser_${spec.tool}`, toolUseId: ctx.toolUseId, signal: ctx.signal })
+        const waited = await ctx.waitForTab({
+          tool: `browser_${spec.tool}`,
+          toolUseId: ctx.toolUseId,
+          signal: ctx.signal,
+          isBack: async () => (await tabs(ctx).status(target(ctx))).attached,
+        })
         if (waited.back) outcome = await call()
         else throw new ToolError(`${outcome.error.message} ${waited.message}`)
       }

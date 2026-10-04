@@ -34,11 +34,21 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 /** Long-running tools report here; a no-op when the caller sent no progress token. */
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
-/** Shared by every call: what `main.ts` (or a test) wires up once. */
 /** How a browser_* call's wait for its tab ended (ToolServices `waitForTab`). */
 export type TabWait = { back: true } | { back: false; message: string }
-export type WaitForTab = (request: { tool: string; toolUseId: string | undefined; signal: AbortSignal }) => Promise<TabWait>
+/**
+ * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
+ * `isBack`: whether the call's tab is connected now, checked once the wait is
+ * recorded, so a tab that came back in between is not waited for.
+ */
+export type WaitForTab = (request: {
+  tool: string
+  toolUseId: string | undefined
+  signal: AbortSignal
+  isBack: () => Promise<boolean>
+}) => Promise<TabWait>
 
+/** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
   /**

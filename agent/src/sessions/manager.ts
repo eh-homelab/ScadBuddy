@@ -178,9 +178,11 @@ export const SHUTTING_DOWN = 'shutting down'
 export const TAB_WAIT_S = 300
 const CARRY_ON = 'Carry on without the tab'
 
-export function waitForTab(gate: QuestionGate): WaitForTab {
+export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
   let open: Promise<TabWait> | undefined
-  return ({ tool, toolUseId, signal }) => {
+  return ({ tool, toolUseId, signal, isBack }) => {
+    // One wait for the turn's calls, on the turn's signal: a call that stops
+    // waiting (its own signal) leaves the others waiting.
     open ??= (async (): Promise<TabWait> => {
       const parsed = parseAttention({
         reason: 'tab_disconnected',
@@ -196,8 +198,15 @@ export function waitForTab(gate: QuestionGate): WaitForTab {
         tool: `mcp__scadbuddy__${tool}`,
         questions: [card],
         toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
-        signal,
-        attention: attentionSpec(parsed.input),
+        signal: turn,
+        attention: {
+          ...attentionSpec(parsed.input),
+          // The tab may have come back between the failed call and the row: the
+          // hub saw nothing to resolve then, so look once now that there is one.
+          onParked: async () => {
+            if (await isBack()) await reconnected()
+          },
+        },
       })
       if ('reconnected' in verdict && verdict.reconnected) return { back: true }
       // Any reply but "carry on" means try again (it costs one call, which says if it still finds no tab).
@@ -211,7 +220,13 @@ export function waitForTab(gate: QuestionGate): WaitForTab {
     })().finally(() => {
       open = undefined
     })
-    return open
+    const shared = open
+    return new Promise<TabWait>((resolve, reject) => {
+      const withdrawn = () => resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
+      if (signal.aborted) return withdrawn()
+      signal.addEventListener('abort', withdrawn, { once: true })
+      shared.then(resolve, reject).finally(() => signal.removeEventListener('abort', withdrawn))
+    })
   }
 }
 
@@ -1153,9 +1168,6 @@ export class SessionManager {
         signal: controller.signal,
         tierOf,
         approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-        // AskUserQuestion (#940): only the user in the panel answers, so only
-        // a session the browser user owns is given the tool. Any other
-        // owner's turn would wait on someone who is not asked.
         ...(questionGate ? { questionGate } : {}),
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
         // user's messages are instructions; tool results are data. Then which
@@ -1169,7 +1181,13 @@ export class SessionManager {
           ? {
               mcpServers: {
                 ...(this.deps.mcpServers
-                  ? this.deps.mcpServers(session, principal, questionGate ? { waitForTab: waitForTab(questionGate) } : {})
+                  ? this.deps.mcpServers(
+                      session,
+                      principal,
+                      questionGate
+                        ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
+                        : {},
+                    )
                   : {}),
                 ...(http ? { [HTTP_SERVER]: http } : {}),
                 // The one way past the backend's agent-actor gate: a human
