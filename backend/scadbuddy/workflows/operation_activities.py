@@ -20,7 +20,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import THREAD_STEPS, OperationKind, ThreadSteps
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.workflows.operation_models import (
     FINISH_ACTIVITY,
@@ -77,23 +77,51 @@ HEARTBEAT_EVERY = 5.0
 CANCEL_GRACE = 30.0
 
 
-async def _heartbeating[T](work: Awaitable[T]) -> T:
+#: How long before the run's start-to-close a run still in a thread answers for itself,
+#: so its answer reaches the record before Temporal's own timeout does.
+LANDING_MARGIN = 1.0
+
+
+async def _heartbeating[T](work: Awaitable[T], *, where: str) -> T:
     """Await ``work``, heartbeating: the Python SDK delivers a timeout or a cancel to an
     activity only through a heartbeat, so without one a run past its timeout would go
     on to its next step after the record already calls it failed. A step already in a
-    thread cannot be stopped: one under ``operations.kinds.to_thread_to_end`` keeps its locks until
-    it returns, and its effect (a commit in flight) can still land."""
-    task = asyncio.ensure_future(work)
+    thread cannot be stopped: one under ``operations.kinds.to_thread_to_end`` keeps its
+    locks until it returns, and its effect (a commit in flight) can still land. A run
+    still in such a step just before its timeout fails saying so (review #1119 2-4),
+    rather than as the timeout's unexpected failure, and is left to unwind."""
+    steps = ThreadSteps()
+    token = THREAD_STEPS.set(steps)
+    try:
+        task = asyncio.ensure_future(work)  # copies the context, and so ``steps``
+    finally:
+        THREAD_STEPS.reset(token)
+    loop = asyncio.get_running_loop()
+    limit = activity.info().start_to_close_timeout
+    landing = None if limit is None else loop.time() + limit.total_seconds() - LANDING_MARGIN
+    left = False
     try:
         while True:
-            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_EVERY)
+            wait = HEARTBEAT_EVERY
+            if landing is not None and loop.time() < landing:
+                wait = min(wait, landing - loop.time())
+            done, _ = await asyncio.wait({task}, timeout=wait)
             if done:
                 return task.result()
+            if landing is not None and loop.time() >= landing and steps.running:
+                left = True
+                raise ApiError(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "This ran out of time while a step that cannot be stopped was still "
+                    f"running, so it may have been done. Reload and check {where} before "
+                    "trying again.",
+                )
             activity.heartbeat()
     finally:
         if not task.done():
             task.cancel()
-            await asyncio.wait({task}, timeout=CANCEL_GRACE)
+            if not left:
+                await asyncio.wait({task}, timeout=CANCEL_GRACE)
 
 
 def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
@@ -131,7 +159,9 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
             with authored_as(
                 None if author is None else AgentAuthor(author.principal, author.session)
             ):
-                return await _heartbeating(kind.run(input.request, input.checked))
+                return await _heartbeating(
+                    kind.run(input.request, input.checked), where=str(kind.where)
+                )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
