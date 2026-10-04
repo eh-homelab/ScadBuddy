@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
 LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
 ORPHANED_ERROR = "failed: its workflow closed before it ran"
+CLOSED_ERROR = "failed: its workflow closed without settling it"
 #: How old a pending row an older build inserted must be before it can be orphaned: an
 #: older API inserts its row, then starts its workflow, within its own 5 s start
 #: timeout; this is six of those.
@@ -72,6 +73,23 @@ async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> b
             return True
         raise
     # A closed run (terminated, failed) that retention still keeps never settles it.
+    return described.status != WorkflowExecutionStatus.RUNNING
+
+
+async def run_closed(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
+    """Whether the execution that owns ``job``, an unsettled row of a
+    ``render-<render_key>`` run, has closed: its run settles the row before it closes,
+    so one that closed without (terminated, timed out) never will. Raises the RPC error
+    when Temporal cannot say."""
+    assert job.workflow_id is not None and job.workflow_run_id is not None
+    try:
+        described = await client.get_workflow_handle(
+            job.workflow_id, run_id=job.workflow_run_id
+        ).describe(rpc_timeout=rpc_timeout)
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return True  # past retention
+        raise
     return described.status != WorkflowExecutionStatus.RUNNING
 
 
@@ -273,6 +291,29 @@ class JobProjection:
                 " WHERE id = ANY(%s) AND state = 'pending' AND workflow_run_id IS NULL"
                 " RETURNING *",
                 (error, job_ids),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
+
+    def unsettled(self) -> list[Job]:
+        """The pending and running rows of ``render-<render_key>`` runs (#1053)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state IN ('pending', 'running')"
+                " AND workflow_run_id IS NOT NULL ORDER BY created_at, id"
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def fail_closed(self, job_ids: list[str]) -> list[Job]:
+        """Fail the rows of runs that closed without settling them (`run_closed`); a
+        row its run settled meanwhile is left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE id = ANY(%s) AND state IN ('pending', 'running')"
+                " AND workflow_run_id IS NOT NULL RETURNING *",
+                (CLOSED_ERROR, job_ids),
             ).fetchall()
             for row in rows:
                 self._announce(conn, row["id"], row["slug"], "job.failed")
