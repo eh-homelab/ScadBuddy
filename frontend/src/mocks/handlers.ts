@@ -1622,6 +1622,17 @@ export const handlers = [
       source: string
       force?: boolean
       message?: string | null
+      base?: string | null
+    }
+    // #1054 — `_require_base`: an edit made against a revision the model has moved past.
+    if (body.base && model.version && !model.version.startsWith(body.base)) {
+      return problem(
+        409,
+        'Conflict',
+        `'${slug}' has moved on: it is at ${model.version.slice(0, 7)}, and this edit was ` +
+          `made against ${body.base.slice(0, 7)}. Read the source again and rebuild the edit`,
+        { base: body.base, current: model.version },
+      )
     }
     // #157 — `merge_base` saves the resolution of a conflicted upstream merge.
     const mergeBase = new URL(request.url).searchParams.get('merge_base')

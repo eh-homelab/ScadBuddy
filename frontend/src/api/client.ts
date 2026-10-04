@@ -581,12 +581,14 @@ export const api = {
 
   /**
    * Replaces the source as one revision in the model's history, named by `message`
-   * when given. Parse-checked server-side unless `force`.
+   * when given. Parse-checked server-side unless `force`. With `base`, the version the
+   * edit was made against, a model that has moved past it is a 409 whose `current`
+   * names where it is now, and nothing is written (#1054).
    */
-  replaceSource: (slug: string, source: string, force = false, message?: string) =>
+  replaceSource: (slug: string, source: string, force = false, message?: string, base?: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/source`, {
       method: 'PUT',
-      body: JSON.stringify({ source, force, message: message ?? null }),
+      body: JSON.stringify({ source, force, message: message ?? null, base: base ?? null }),
     }),
 
   /**

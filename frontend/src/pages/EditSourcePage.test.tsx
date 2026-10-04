@@ -64,7 +64,25 @@ describe('EditSourcePage', () => {
     await user.click(save)
 
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
-    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube([10, 10, 10]);\n', false)
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube([10, 10, 10]);\n', false, undefined, undefined)
+    replace.mockRestore()
+  })
+
+  it('saves against the version it loaded (#1054)', async () => {
+    const { version } = await api.replaceSource('name-keychain', keychainSource)
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('cube(4);\n')
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(version).toBeTruthy()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube(4);\n', false, undefined, version)
     replace.mockRestore()
   })
 
@@ -244,7 +262,7 @@ describe('EditSourcePage', () => {
 
   it('opens the source as it is when there is no update left to resolve (#160)', async () => {
     const replace = vi.spyOn(api, 'replaceSource')
-    await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
+    const { version } = await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
     const { user } = renderEdit(COPY, '?merge')
 
     expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
@@ -253,7 +271,7 @@ describe('EditSourcePage', () => {
     await screen.findByText(/Parses cleanly/)
     await user.click(screen.getByRole('button', { name: 'Save source' }))
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
-    expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false)
+    expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false, undefined, version ?? undefined)
     replace.mockRestore()
   })
 })
@@ -285,6 +303,30 @@ describe('EditSourcePage, live (#269)', () => {
     await user.click(within(banner).getByRole('button', { name: 'Load their version' }))
     expect(editor).toHaveValue(THEIRS)
     expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
+  })
+
+  it('refuses a save over a change it has not seen, and offers theirs (#1054)', async () => {
+    await api.replaceSource('name-keychain', keychainSource)
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    // Saved elsewhere, and this page was never told.
+    await api.replaceSource('name-keychain', THEIRS)
+
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+    expect(await screen.findByText(/has moved on/)).toBeInTheDocument()
+    const banner = await screen.findByTestId('changed-elsewhere')
+    expect(editor).toHaveValue('sphere(2);\n')
+
+    // Keeping mine saves over theirs, now that it has been seen.
+    await user.click(within(banner).getByRole('button', { name: 'Keep editing' }))
+    await user.click(save)
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(await api.getSource('name-keychain')).toBe('sphere(2);\n')
   })
 
   it('takes a change that lands before the first read answers, with no banner', async () => {

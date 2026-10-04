@@ -1052,6 +1052,18 @@ describe("a model's edits are commands (#1054)", () => {
     expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
   })
 
+  it('replaceSource sends the base the edit was made against', async () => {
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/models/w/source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(model)
+      }),
+    )
+    await api.replaceSource('w', 'cube(2);', false, undefined, 'abc1234')
+    expect(sent).toMatchObject({ source: 'cube(2);', base: 'abc1234' })
+  })
+
   it("keeps a merge conflict's merged text, answered by the route", async () => {
     server.use(
       http.post('/api/v1/models/w/upstream/merge', () =>
