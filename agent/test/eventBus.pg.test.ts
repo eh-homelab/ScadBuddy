@@ -149,6 +149,21 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await until(() => heard.some((h) => h.id === later.id), 'an event after reconnecting')
     })
 
+    // #893: seq is selected as text; ordering by that text replayed "10" before "9".
+    it('replays a gap that crosses a digit boundary in numeric seq order', async () => {
+      // seq 1..7 before the listener starts, so the gap it replays is 8..12.
+      await db.sql`
+        INSERT INTO events (event_id, kind, at, payload)
+        SELECT ${randomUUID()} || g, 'print.progress', now(), '{}'::jsonb FROM generate_series(1, 7) g`
+      const { listener, heard } = await listen()
+      const missed = Array.from({ length: 5 }, (_, i) => event({ kind: 'print.progress', output_id: `o${i}`, slug: 'k' }))
+      for (const e of missed) await publish(db, e, { notify: false })
+      await listener.dropConnectionForTest()
+      await until(() => missed.every((m) => heard.some((h) => h.id === m.id)), 'the replayed events')
+      const mine = new Set(missed.map((m) => m.id))
+      expect(heard.filter((h) => mine.has(h.id)).map((h) => h.id)).toEqual(missed.map((m) => m.id))
+    })
+
     it('resyncs after replaying a row whose transaction was open longer than the check interval', async () => {
       const { listener, heard, resyncs, logs } = await listen()
       // logged_at is the transaction's start (DEFAULT now()): an hour before the

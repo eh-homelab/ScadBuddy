@@ -3,7 +3,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions } from '../src/approvals/mcp.js'
 import { ApprovalService } from '../src/approvals/service.js'
-import { AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
+import { type AuditFilter, AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
@@ -126,6 +126,37 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect((await audit.list({ outcome: 'refused' })).entries.map((e) => e.action)).toEqual(['a4'])
     expect((await audit.list({ principal: 'token:1', action: 'a1' })).entries.map((e) => e.action)).toEqual(['a1'])
     expect((await audit.list({ since: new Date(Date.now() + 60_000) })).entries).toEqual([])
+  })
+
+  // #893: ids are returned as text, and ordering by that text sorted "99" above
+  // "1010". Ids crossing 9→10, 99→100 and 999→1000 make the two orders differ.
+  it('pages newest first by numeric id across digit boundaries, every row once', async () => {
+    const total = 1010
+    await db.sql`
+      INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, outcome)
+      SELECT CASE WHEN g % 2 = 0 THEN 'tool_call' ELSE 'approval' END, 'a' || g, 'mcp', 'bearer', 't', 't', 'ok'
+      FROM generate_series(1, ${total}) g`
+    const numericDesc = (n: number, step = 1) =>
+      Array.from({ length: Math.floor((n - 1) / step) + 1 }, (_, i) => String(n - i * step))
+
+    const pageAll = async (filter: Pick<AuditFilter, 'kind'>) => {
+      const ids: string[] = []
+      let before: string | undefined
+      for (let page = 0; page < 20; page += 1) {
+        const { entries, next } = await audit.list({ ...filter, limit: 200, ...(before ? { before } : {}) })
+        ids.push(...entries.map((e) => e.id))
+        if (!next) return ids
+        before = next
+      }
+      throw new Error('did not reach the last page')
+    }
+
+    const first = await audit.list({ limit: 25 })
+    expect(first.entries.map((e) => e.id)).toEqual(numericDesc(total).slice(0, 25))
+    expect(first.next).toBe('986')
+
+    expect(await pageAll({})).toEqual(numericDesc(total))
+    expect(await pageAll({ kind: 'tool_call' })).toEqual(numericDesc(total, 2))
   })
 
   it('prunes past the retention setting, and records the setting change', async () => {
