@@ -35,6 +35,8 @@ export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
+# What the step before it found: deploy/grafana exists at REVISION.
+export DASHBOARD_AT_REVISION=true
 export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
@@ -222,6 +224,15 @@ if run "$api_and_agent"; then
   has_line "$pinned" "$MANIFEST" || fail "dashboard: api image not pinned"
 else
   fail "dashboard: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 9b. A revision without deploy/grafana: the pin does not move, the deploy fails.
+overlay=$(overlay_ns "${dashboard_line}${old_ref}")
+if DASHBOARD_AT_REVISION=false run "$api_and_agent"; then
+  fail "dashboard missing at revision: step passed, expected an error"
+else
+  grep -qF "has no deploy/grafana/kustomization.yaml" "$work/log" \
+    || fail "dashboard missing at revision: wrong error: $(grep '::error' "$work/log")"
 fi
 
 # 10. The same deploy again, once clusters merged the first: nothing to deploy.

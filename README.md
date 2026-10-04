@@ -776,8 +776,8 @@ deploy PR link into the release notes. There is no human step after
 There should be no reason for one; but the mechanism is only a PR. Editing the
 image line and annotations in the clusters manifests (both, once the render
 worker's exists), and the dashboard line's `?ref=` (the full 40-character
-revision), by hand and merging does exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
-what makes the running image knowable.
+revision), by hand and merging does exactly what the pipeline does. Do not
+`kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
 

@@ -189,6 +189,22 @@ jobs:
           fetch-depth: 1
           path: clusters
 
+      # The dashboard's ref= may only move to a revision that has the
+      # kustomization it points at: one without it fails the whole overlay's
+      # sync, the images included.
+      - name: Check deploy/grafana exists at the revision
+        id: grafana
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/deploy/grafana/kustomization.yaml?ref=${REVISION}" --silent 2>/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # sed against anchored lines rather than a YAML rewrite: yq would
       # reflow the whole document and bury the one-line change in noise. Each
       # target must match exactly once, before and after, or the edit aborts.
@@ -201,6 +217,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
+          DASHBOARD_AT_REVISION: ${{ steps.grafana.outputs.present }}
         run: |
           set -euo pipefail
           expect_one() { # manifest pattern description
@@ -343,6 +360,9 @@ jobs:
             fi
             if ! ns_transformer_ok "$target"; then
               echo "::error file=$target::pins the dashboard but has no NamespaceTransformer with unsetOnly: true (a YAML boolean; the string \"true\" does not count) in transformers, inline or as a file (clusters#1596 Phase 5)"; exit 1
+            fi
+            if [ "${DASHBOARD_AT_REVISION:-}" != true ]; then
+              echo "::error file=$target::${REVISION} has no deploy/grafana/kustomization.yaml; pinning the dashboard to it would fail the overlay's sync"; exit 1
             fi
             sed -i -E "s|${line}|\1- ${DASHBOARD_RESOURCE}?ref=${REVISION}|" "$target"
             expect_one "$target" "^\s*- ${DASHBOARD_RESOURCE//./\\.}\?ref=${REVISION}\$" "pinned dashboard"
