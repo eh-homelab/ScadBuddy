@@ -511,6 +511,7 @@ def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
     monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
     store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
     store.open()
+    store.set_printer_rack_algorithm(1, "oldest_first")
     failed: list[BaseException] = []
 
     def save() -> None:
@@ -526,7 +527,7 @@ def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
         store.close()
     assert took < 2.0
     assert [type(exc) for exc in failed] == [PoolTimeout]
-    assert _fresh_load(settings).printer_rack_algorithms == {}
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
 
 def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back(

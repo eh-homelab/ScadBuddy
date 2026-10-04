@@ -43,7 +43,13 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import NozzleChoice, RackAlgorithm, SlotChoice, Tier
+from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
+    NozzleChoice,
+    RackAlgorithm,
+    SlotChoice,
+    Tier,
+)
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
@@ -224,8 +230,8 @@ class StoredSettings(BambuddyIds):
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
         if printer_id is None:
-            return "least_used"
-        return self.printer_rack_algorithms.get(str(printer_id), "least_used")
+            return DEFAULT_ALGORITHM
+        return self.printer_rack_algorithms.get(str(printer_id), DEFAULT_ALGORITHM)
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -614,7 +620,7 @@ class SettingsStore:
             conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
             _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
         emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
-        return algorithm or StoredSettings().rack_algorithm(None)
+        return algorithm or DEFAULT_ALGORITHM
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing
