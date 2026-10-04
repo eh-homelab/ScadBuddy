@@ -24,7 +24,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
@@ -48,7 +48,7 @@ with workflow.unsafe.imports_passed_through():
         SliceStartInput,
         SucceedInput,
     )
-    from scadbuddy.workflows.problems import problem_of
+    from scadbuddy.workflows.problems import cancelled, problem_of
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -123,13 +123,10 @@ class PrintRunWorkflow:
         except (ActivityError, asyncio.CancelledError) as error:
             # Nothing was written: the execution fails, and a retry may start again. A
             # cancel answers the Update too, so it is never outlived by its execution.
-            cancelled = not isinstance(error, ActivityError) or isinstance(
-                error.cause, CancelledError
-            )
-            self.refusal = CANCELLED if cancelled else problem_of(error)
+            self.refusal = CANCELLED if cancelled(error) else problem_of(error)
             self._upsert(status="refused")
             await workflow.wait_condition(workflow.all_handlers_finished)
-            if cancelled:
+            if cancelled(error):
                 raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
         run = await workflow.execute_activity(

@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
+#: What an operation cancelled before its record answers: nothing was written or done.
+OPERATION_CANCELLED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This was cancelled before it started. Nothing was done; try again.",
+)
+
+
+def cancelled(error: BaseException) -> bool:
+    """Whether ``error`` is the execution's own cancel, as the awaited activity or the
+    workflow task itself raises it (review #1061 1c)."""
+    if isinstance(error, ActivityError):
+        return isinstance(error.cause, CancelledError)
+    return isinstance(error, asyncio.CancelledError)
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
