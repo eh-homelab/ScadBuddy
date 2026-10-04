@@ -113,6 +113,9 @@ LOST_UNQUEUED_DETAIL = (
 )
 #: A run whose execution closed, or is gone, while its row still said ``running``: one
 #: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
+#: A pre-#1052 pod beat its run's ``heartbeat_at`` and expired it past this: its
+#: ``LOST_AFTER``.
+PRE_1052_LOST_AFTER = timedelta(seconds=60)
 LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
 LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
 
@@ -223,6 +226,12 @@ class PrintRunStore:
         was accepted more than ``older_than`` ago."""
         return await asyncio.to_thread(self._running_executions, older_than)
 
+    async def stale_pre_1052_runs(self) -> list[str]:
+        """Ids of the ``running`` rows a pre-#1052 pod inserted during the rolling update
+        and stopped beating: it died mid-run, and no execution will end them (review
+        #1061 (3) 2). Goes with ``heartbeat_at`` (review #1061 3a)."""
+        return await asyncio.to_thread(self._stale_pre_1052_runs)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _announce(self, conn: Connection[DictRow], run: PrintRun, slug: str) -> None:
@@ -323,6 +332,15 @@ class PrintRunStore:
                 (older_than,),
             ).fetchall()
         return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
+
+    def _stale_pre_1052_runs(self) -> list[str]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM print_runs WHERE status = 'running' AND workflow_id IS NULL"
+                " AND heartbeat_at < now() - %s ORDER BY created_at",
+                (PRE_1052_LOST_AFTER,),
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     def _start_enqueue(self, run_id: str) -> None:
         with self._require().connection() as conn:

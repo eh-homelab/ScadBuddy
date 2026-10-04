@@ -319,3 +319,39 @@ async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
             await reset.terminate("test over")
     assert ended == 0
     assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
+
+
+def _insert_pre_1052(jobs: JobProjection, run_id: str, beaten: str) -> None:
+    """A row as a pre-#1052 pod inserts it during the rolling update: no execution, and
+    a heartbeat its own task keeps moving."""
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, heartbeat_at)"
+            f" VALUES (%s, %s, %s, 'running', {beaten})",
+            (run_id, OUTPUT, run_id),
+        )
+
+
+async def test_stale_pre_1052_runs_are_the_unowned_rows_nothing_beats(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1061 (3) 2: an old pod that died mid-run leaves its row ``running``."""
+    _insert_pre_1052(jobs, "dead", "now() - interval '1 day'")
+    _insert_pre_1052(jobs, "alive", "now() + interval '1 day'")
+    await accept(store, "owned", run_id="owned")
+
+    assert await store.stale_pre_1052_runs() == ["dead"]
+
+
+async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1061 (3) 2: otherwise the row is ``running`` for good, and every repeat
+    of its body-only key is answered with it."""
+    _insert_pre_1052(jobs, "dead", "now() - interval '1 day'")
+    _insert_pre_1052(jobs, "alive", "now() + interval '1 day'")
+    async with temporal_client() as client:
+        ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+    assert ended == 1
+    assert (await store.get("dead")).error == LOST_UNQUEUED  # type: ignore[union-attr]
+    assert (await store.get("alive")).status == "running"  # type: ignore[union-attr]
