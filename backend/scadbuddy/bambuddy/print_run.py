@@ -400,15 +400,16 @@ def rack_chooser(
                 return None
             stage = "status unreadable"
             status_read = await client.printer_status(printer_id)
-            # The order no longer decides a hotend's age: prepare_run and choices_for
-            # record the rack as seen earlier in the same request (#1081).
+            # The order no longer decides a hotend's age: prepare_run (the run's prepare
+            # activity) and choices_for record the rack as seen before this (#1081).
             usage = (
                 await _usage_or_empty(rack, status_read, printer_id)
                 if algorithm != "bambuddy"
                 else {}
             )
-            # Recorded again on purpose: this is a fresh read, per plate, and can show a
-            # hotend swapped in since prepare_run's. An unchanged rack makes no new row
+            # Recorded again on purpose: this is a fresh read, per plate (each plate's
+            # ``print_enqueue`` activity), and can show a hotend swapped in since
+            # prepare_run's. An unchanged rack makes no new row
             # version (#1082), though the upsert still locks its rows.
             await record_seen(rack, printer_id, status_read)
             stage = "rack pick failed"
