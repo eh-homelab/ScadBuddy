@@ -236,13 +236,61 @@ fi
 #     deploy): the deploy PR moves just the ref.
 overlay=$(overlay_ns)
 if run "$api_and_agent" \
-  && printf '%s\n' "${dashboard_line}${old_ref}" >> "$work/repo/$KUSTOMIZATION" \
+  && yq -i ".resources += [\"$DASHBOARD_RESOURCE?ref=$old_ref\"]" "$work/repo/$KUSTOMIZATION" \
   && rerun; then
   grep -qx 'unchanged=false' "$work/out" || fail "dashboard behind: expected unchanged=false"
   grep -qx "files=$KUSTOMIZATION" "$work/out" || fail "dashboard behind: expected only the overlay in files"
 else
   fail "dashboard behind: step failed: $(grep '::error' "$work/log")"
 fi
+
+# 11b. The same line under transformers: instead of resources: is a mention,
+#      not the pin.
+overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' \
+  'transformers:' "${dashboard_line}${old_ref}")
+if run "$api_and_agent"; then
+  fail "line under transformers: step passed, expected an error"
+else
+  grep -qF "$near_miss" "$work/log" || fail "line under transformers: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 11c. The NamespaceTransformer as a map, and as a file the overlay names.
+ns_map() {
+  printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+    'transformers:' '  - apiVersion: builtin' '    kind: NamespaceTransformer' '    metadata:' '      name: ns' \
+    '    namespace: bambuddy' "    unsetOnly: $1"
+}
+overlay=$(ns_map true)
+if run "$api_and_agent"; then
+  grep -qx 'dashboard=pinned' "$work/out" || fail "map transformer: not pinned"
+else
+  fail "map transformer: step failed: $(grep '::error' "$work/log")"
+fi
+overlay=$(ns_map '"true"')
+if run "$api_and_agent"; then
+  fail "string \"true\": step passed, expected an error"
+else
+  grep -qF "the string \"true\" does not count" "$work/log" || fail "string true: wrong error: $(grep '::error' "$work/log")"
+fi
+overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+  'transformers:' '  - ns.yaml')
+for ns_file_unset in true false; do
+  rm -rf "$work/repo"
+  mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
+  printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
+  printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  ns_map "$ns_file_unset" | yq '.transformers[0]' > "$work/repo/$(dirname "$KUSTOMIZATION")/ns.yaml"
+  (cd "$work/repo" && git init -q)
+  if rerun; then
+    if [ "$ns_file_unset" = true ]; then
+      grep -qx 'dashboard=pinned' "$work/out" || fail "file transformer: not pinned"
+    else
+      fail "file transformer unsetOnly: false: step passed, expected an error"
+    fi
+  elif [ "$ns_file_unset" = true ]; then
+    fail "file transformer: step failed: $(grep '::error' "$work/log")"
+  fi
+done
 
 # 12-17. Near misses are errors, never "not configured".
 dashboard_fails "short sha" "$near_miss" "${dashboard_line}1111111"
