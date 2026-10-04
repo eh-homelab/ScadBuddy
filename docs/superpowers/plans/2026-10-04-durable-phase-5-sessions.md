@@ -195,16 +195,40 @@ below, 5 pin `b1cf3848`.
      - The new run's first segment resumes the same Claude session at its checkpoint, with
        the owed error results delivered alongside the new prompt (README: "After a failed
        task, the agent can take the next one").
-   - **Still missing (a gap, not solved here).** An execution that closed *without* handing
-     over loses the Claude session's place, even though the transcript rows survive. That
-     covers a termination, a workflow-task failure, `forgetSubject`, and an operator delete of
-     the history. The agent service then starts the new execution with `state = null`, and
-     appends an `error` event, code `resumed_fresh`: "The previous run of this session ended
-     without handing over; this message starts a new conversation."
-   - Rebuilding an `AgentState` from Postgres (the last recorded segment's `session_id` and
-     checkpoint, plus synthetic `pending` results for its deferred calls) would close that
-     gap. It would mean constructing the plugin's internal state by hand, which the plugin
-     neither documents nor tests. Not planned; it needs the user's decision if wanted.
+   - **An execution that closed without handing over: snapshots (decided by the user).**
+     A termination, a workflow-task failure or a deleted history leaves no result to read.
+     For those cases the workflow saves the plugin's `AgentState` to Postgres as it goes
+     (Ruling 15), and a new execution resumes from the latest snapshot.
+     - `resumed_fresh` remains only for a session that has no snapshot at all.
+     - Verified 2026-10-04 against the locked environment. `AgentState` round-trips through
+       `DataConverter.default.payload_converter`, including `pending` with `ToolOutcome`
+       (`content`, `is_error`, `blocks`). It also round-trips as the plain JSON object the
+       agent service passes back: `from_payloads(..., [AgentState])` equals the original.
+       The keys are `checkpoint`, `conversation`, `external_storage`, `fork_next`,
+       `pending`, `recent_call_ids`, `runs`, `segment_index`, `segments`, `session_id`,
+       `stream`, `task_prompt`, `task_segments`, `tool_calls` and `total_cost_usd`.
+     - **What keeps a call from running twice when resuming from an older snapshot.**
+       1. `recent_call_ids` holds the last 256 call ids that ran, across runs, and the agent
+          refuses any id in it (`_workflow.py:878-892`). It stops the engine from handing
+          back a call that already ran. It cannot stop Claude from asking for the same
+          action again under a **new** id, which is what happens after forking at an older
+          checkpoint.
+       2. The snapshot records the calls in flight (`started` or `waiting for approval`).
+          Restoring applies `_end_task`'s rule by hand (`restore_state`, Ruling 15). Each
+          in-flight call gets the error result `_outcome_after_stop` would give it ("did
+          not run" / "interrupted; whether it took effect is unknown") and joins
+          `recent_call_ids`. Then `task_prompt = None`, `task_segments = 0` and
+          `fork_next = True`. Claude learns what happened to those calls and is never handed
+          them again.
+       3. The remaining window: a tool that **finished** after the snapshot was taken, if the
+          execution died before the next snapshot. Snapshots are a local activity started
+          when the agent's counters change, so the window is a few milliseconds of one
+          workflow task. The phase 4 `tool_call` audit rows (`session_id`, `toolUseId`,
+          outcome) catch it. On a snapshot restore, the agent service adds to the new
+          message's model-only context: "These tool calls ran after this session's last
+          saved point, and their results were lost: <name> (<id>), …". It lists the audit
+          rows newer than the snapshot whose ids are neither in `recent_call_ids` nor among
+          the in-flight calls. So nothing is silently re-run without Claude being told.
 5. **The pin is a newer head than the spec names.** The plan pins `b1cf3848`, not `766c647`,
    because the spec's own test and the solved limitations depend on the newer commits. A
    Temporal member's change request is still open on the PR (above). Confirm the pin.
@@ -245,7 +269,9 @@ below, 5 pin `b1cf3848`.
    passed (README, "Start with every argument"). The workflow completes only when Stop
    cancels it (deviation 4), returning its `AgentState`. An idle open workflow costs nothing.
    When the ID is closed, the agent service starts the next execution with
-   `[input, <last result>, null]` and `workflowIdReusePolicy: ALLOW_DUPLICATE` (deviation 4).
+   `[input, <state>, null]` and `workflowIdReusePolicy: ALLOW_DUPLICATE` (deviation 4).
+   `<state>` is the last result for a *Completed* execution, else the latest snapshot with
+   `input.restored = {in_flight}`, else `null` with `resumed_fresh`.
 7. **Approval ids.** A durable approval's id in `approval.required` is
    `durable:<sessionId>:<tool_use_id>`, at most 200 characters, which fits the socket's
    `id` limit. `ApprovalService.decide` and `decision` route such an id to
@@ -307,6 +333,28 @@ below, 5 pin `b1cf3848`.
     The NOTIFY payload and kinds are `SessionEventPublisher`'s, without its throttle (one
     NOTIFY per committed batch; batches are per event group, not per token).
 
+15. **Snapshots.**
+    - Table `ai_durable_snapshots(session_id uuid PK → ai_sessions ON DELETE CASCADE,
+      version bigint, state text, in_flight jsonb, saved_at timestamptz)`. `state` is the
+      payload converter's JSON of `AgentState`, plain text like `ai_session_entries`
+      (deleted with the session by `forgetSubject`).
+    - The workflow runs one background task, `_snapshots`. It waits until
+      `mark = (agent.segments, agent.total_tool_calls, tuple((c["id"], c["status"]) for c
+      in agent.tool_calls))` changes, then awaits the local activity `save_snapshot`
+      (`SnapshotInput(session_id, state=agent.state(), in_flight=[{id, name, status}
+      started/waiting], version=segments + total_tool_calls)`, 10 s timeout, retried).
+    - The activity upserts only when `excluded.version >= ai_durable_snapshots.version`, so
+      an out-of-order write never moves a snapshot backwards. A new run snapshots at once
+      (the initial mark is `None`).
+    - Restore: `SessionInput.restored: Restored | None` (`in_flight: list[InFlight]`).
+      `DurableSession.__init__` passes `restore_state(state, restored.in_flight)` to the
+      agent when it is set. `restore_state` is a pure function in `models.py`: copy the
+      state; for each in-flight call set `pending[id] = ToolOutcome(content=<_outcome_after_stop's
+      text for its status, reason "the previous run of this session stopped unexpectedly">,
+      is_error=True)` and append the id to `recent_call_ids` (cap 256). Then set
+      `task_prompt = None`, `task_segments = 0` and `fork_next = True`. If
+      `checkpoint is None`, set `session_id = None`, as `_end_task` does.
+
 ## Global Constraints
 
 - Follow the Temporal SDKs and the plugin as documented. Anything not covered by the
@@ -355,10 +403,14 @@ below, 5 pin `b1cf3848`.
 4. **A projector that dies mid-batch.** Events must neither repeat nor go missing in the
    panel. Pinned in Task 10: kill the follower after a batch commits but before the next
    one, and a new holder resumes at `next_offset` with no duplicate `seq` content.
-5. **Stop, then send again.** The model must see the earlier history, and a call
+5. **Terminate, then send again.** An operator terminate, or a workflow-task failure, must
+   not cost the conversation, and no call may run twice unannounced. Pinned in Task 9
+   test 12 (restore from a snapshot taken mid-tool), Task 12 (restore input and the
+   lost-results context) and Task 17 (terminate mid-session on the real engine).
+6. **Stop, then send again.** The model must see the earlier history, and a call
    interrupted mid-run must be reported as "unknown whether it took effect", never silently
    re-run. Pinned in Task 9 test 10 and Task 17.
-6. **A message with `mode` on an existing session, and a classic session's approvals.**
+7. **A message with `mode` on an existing session, and a classic session's approvals.**
    The first is refused. The second never routes to Temporal: ids without the `durable:`
    prefix still use `ai_approvals`. Pinned in Task 5 and Task 12.
 
@@ -1007,6 +1059,10 @@ class SubjectPayloadCodec(PayloadCodec, WithSerializationContext):
   `agent-durable/tests/test_store.py`, `agent-durable/tests/test_segments.py`
 
 **Interfaces:**
+- Produces: `Snapshots(pool)` with `async save(inp: SnapshotInput) -> None` and `async
+  latest(session_id) -> SnapshotRow | None`; the activity `save_snapshot(inp: SnapshotInput)`
+  (`SAVE_SNAPSHOT = "durable_save_snapshot"`), defined in `segments.py` and registered by the
+  worker.
 - Produces: `PostgresSessionStore(pool)` implementing `claude_agent_sdk.SessionStore`;
   `Segments(pool)` with `async record(session_id: str, segment_index: int, attempt: int,
   claude_session_id: str, cost_usd: float) -> None` and `async limits(session_id) ->
@@ -1034,6 +1090,15 @@ CREATE TABLE ai_durable_streams (
   holder      text,
   lease_until timestamptz
 );
+-- The plugin's AgentState as of the latest segment or tool call (plan ruling 15), so an
+-- execution that closed without handing over (terminated, failed) can be resumed.
+CREATE TABLE ai_durable_snapshots (
+  session_id uuid PRIMARY KEY REFERENCES ai_sessions (id) ON DELETE CASCADE,
+  version    bigint NOT NULL,
+  state      text NOT NULL,
+  in_flight  jsonb NOT NULL DEFAULT '[]',
+  saved_at   timestamptz NOT NULL DEFAULT now()
+);
 ```
 
 - [ ] **Step 1: Write the failing tests** (`requires_postgres`).
@@ -1058,6 +1123,11 @@ CREATE TABLE ai_durable_streams (
     - Recording the same `(session, segment, attempt)` twice keeps one row (the activity
       retried after its write).
     - `limits` reads the row.
+    - `Snapshots(pool).save(SnapshotInput)` at versions 3, then 5, then 4 leaves version 5.
+      `latest(session_id)` returns `(state_json, in_flight, saved_at)`.
+    - An `AgentState` with `pending` `ToolOutcome`s saved and read back through
+      `payload_converter.from_payloads(..., [AgentState])` equals the original (the
+      round-trip verified for the plan).
 - [ ] **Step 2: Run, expect FAIL.**
 - [ ] **Step 3: Implement** `store.py` from the SDK's `examples/session_stores/postgres_session_store.py`.
   - Adapt it to `ai_session_entries`: `entry` is JSON **text** (jsonb would reject `\u0000`,
@@ -1285,7 +1355,10 @@ class SessionRunner:
 **Interfaces:**
 - Consumes: `TOOLS` (Task 7).
 - Produces (`models.py`): `SessionInput(session_id: str, max_turns: int,
-  approval_expiry_seconds: int, model: str | None = None)`; `Message(text: str, context: str |
+  approval_expiry_seconds: int, model: str | None = None, restored: Restored | None = None)`;
+  `InFlight(id: str, name: str, status: str)`; `Restored(in_flight: list[InFlight])`;
+  `SnapshotInput(session_id: str, state: AgentState, in_flight: list[InFlight], version: int)`;
+  `restore_state(state: AgentState, in_flight: list[InFlight]) -> AgentState` (Ruling 15); `Message(text: str, context: str |
   None = None)`; `WORKFLOW_NAME = "DurableSession"`; `TASK_QUEUE = "agent"`;
   `SEND_UPDATE = "send_message"`; `REVIEW_UPDATE = "review"`; `PENDING_QUERY = "pending_approvals"`;
   `DECISIONS_QUERY = "decisions"`; `EXPIRED_BY = "system:expired"`; `render_prompt(m: Message) -> str`.
@@ -1334,7 +1407,24 @@ class SessionRunner:
         the new prompt. A call id from before the cancel can never run again.
       - (e) Starting with `state=None` after a cancel begins a new Claude session (a different
         `session_id`). This pins the gap: the store alone does not resume.
-  11. Replay: record the history of test 4 into
+  12. Snapshots and restore (Ruling 15).
+      - (a) After a message with one tool call, `save_snapshot` was called with
+        non-decreasing versions. The last saved state equals `agent.state()` at the end, and
+        a snapshot taken while the stub ran lists it in `in_flight` as `started`.
+      - (b) Terminate the execution while the stub runs (`handle.terminate()`). Take the
+        latest snapshot from the stub activity's recorder, and start a new execution with
+        `SessionInput(restored=Restored(in_flight))` and that state. Send a message. The
+        policy sees the earlier turns and the error result "…interrupted…" for the stubbed
+        call, and the old id is in `recent_call_ids`.
+      - (c) The same, with the call waiting for approval: "did not run", and the stub never
+        ran.
+      - (d) `restore_state` unit tests (no Temporal):
+        - in-flight `started` gives "interrupted…", and `waiting for approval` gives "did
+          not run…";
+        - `recent_call_ids` is capped at 256, with the newest kept;
+        - `checkpoint is None` clears `session_id`;
+        - the input state is not mutated.
+  13. Replay: record the history of test 4 into
       `agent-durable/tests/histories/approve.json`, and replay it with `Replayer` in the
       test, so a later change to the workflow fails replay (TMPRL1100).
 - [ ] **Step 2: Run, expect FAIL.**
@@ -1352,6 +1442,9 @@ class DurableSession:
     @workflow.init
     def __init__(self, inp: SessionInput, state: AgentState | None = None,
                  inbox: list[Message] | None = None) -> None:
+        if state is not None and inp.restored is not None:
+            state = restore_state(state, inp.restored.in_flight)  # Ruling 15
+            inp = dataclasses.replace(inp, restored=None)  # Continue-As-New must not restore again
         self._inp = inp
         self._inbox: list[Message] = list(inbox or [])
         self._timed: set[str] = set()
@@ -1372,6 +1465,7 @@ class DurableSession:
     async def run(self, inp: SessionInput, state: AgentState | None = None,
                   inbox: list[Message] | None = None) -> AgentState:
         asyncio.create_task(self._expire_approvals())
+        asyncio.create_task(self._snapshots())
         try:
             while True:
                 prompt: str | None = None
@@ -1427,6 +1521,24 @@ class DurableSession:
             for call_id in new():
                 self._timed.add(call_id)
                 asyncio.create_task(self._expire(call_id))
+
+    async def _snapshots(self) -> None:
+        """Ruling 15: save AgentState whenever a segment commits or a tool call moves."""
+        def mark() -> tuple[Any, ...]:
+            return (self.agent.segments, self.agent.total_tool_calls,
+                    tuple((c["id"], c["status"]) for c in self.agent.tool_calls))
+        last: tuple[Any, ...] | None = None
+        while True:
+            await workflow.wait_condition(lambda: mark() != last)
+            last = mark()
+            in_flight = [InFlight(c["id"], c["name"], c["status"]) for c in self.agent.tool_calls
+                         if c["status"] in ("started", "waiting for approval")]
+            await workflow.execute_local_activity(
+                SAVE_SNAPSHOT,
+                SnapshotInput(self._inp.session_id, self.agent.state(), in_flight,
+                              self.agent.segments + self.agent.total_tool_calls),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
 
     async def _expire(self, call_id: str) -> None:
         await workflow.sleep(self._inp.approval_expiry_seconds)
@@ -1536,8 +1648,8 @@ class DurableSession:
 
 - [ ] **Step 1: Write the failing tests.**
   - `test_worker.py`:
-    - `build_worker` registers exactly the workflow `DurableSession` and the activity
-      `run_claude_segment`, and no tool stub (those are served by TypeScript).
+    - `build_worker` registers exactly the workflow `DurableSession` and the activities
+      `run_claude_segment` and `durable_save_snapshot`, and no tool stub (those are served by TypeScript).
     - The worker's client has the `SubjectPayloadCodec`.
     - `/healthz` answers `starting` before Temporal connects and `ok` after.
     - SIGTERM calls `worker.shutdown()` and the projector stops within 10 s.
@@ -1609,6 +1721,7 @@ export function durableApprovalId(sessionId: string, toolUseId: string): string
 export function parseDurableApprovalId(id: string): { sessionId: string; toolUseId: string } | undefined
 export type DurableSessionInput = {
   session_id: string; max_turns: number; approval_expiry_seconds: number; model: string | null
+  restored: { in_flight: { id: string; name: string; status: string }[] } | null
 }
 export class DurableRefused extends Error {} // a validator refused the Update
 export interface DurableSessions {
@@ -1620,11 +1733,12 @@ export interface DurableSessions {
 }
 /**
  * send: `describe()` first. Running → update-with-start with state null (USE_EXISTING
- * attaches). Closed Completed → state = `handle.result()` (the AgentState, opaque JSON);
- * other closed → state null and `resumedFresh: true`. Not found → state null. The start
- * carries `workflowIdReusePolicy: 'ALLOW_DUPLICATE'`.
+ * attaches). Closed Completed → state = `handle.result()` (the AgentState, opaque JSON).
+ * Other closed, or not found → the latest `ai_durable_snapshots` row with
+ * `input.restored = {in_flight}`, or state null and `resumedFresh: true` when there is no
+ * snapshot. The start carries `workflowIdReusePolicy: 'ALLOW_DUPLICATE'`.
  */
-export type DurableSendResult = { started: 'attached' | 'resumed' | 'fresh'; resumedFresh: boolean }
+export type DurableSendResult = { started: 'attached' | 'handed_over' | 'restored' | 'fresh'; resumedFresh: boolean }
 export class TemporalDurableSessions implements DurableSessions { constructor(client: Client) }
 ```
 
@@ -1648,9 +1762,14 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
     - Send after a Stop: when `durable.send` finds the ID closed and *Completed*, it starts
       the new execution with the last result as `state`, and `ai_durable_streams.next_offset`
       is reset to 0 first.
-    - When the ID is closed any other way (terminated or failed), it starts with `state =
-      null` and the session's log gains `error {code: 'resumed_fresh'}` (the gap in
-      deviation 4).
+    - When the ID is closed any other way (terminated or failed), or not found but
+      `ai_durable_snapshots` has a row, it starts with the snapshot's state and
+      `input.restored = {in_flight}`. The message's `context` gains the lost-results line for
+      the audit `tool_call` rows newer than `saved_at` whose `toolUseId` is in neither
+      `recent_call_ids` nor `in_flight` (deviation 4, point 3). A test inserts such a row and
+      expects the line, and expects no line without one.
+    - With no snapshot at all, it starts with `state = null`, and the log gains
+      `error {code: 'resumed_fresh'}`.
     - A classic session's send never touches `DurableSessions`.
   - Review Focus 1: when `send` resolves but no worker polls, the status stays `running` and
     no `error` event is written.
@@ -1660,7 +1779,7 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
     - A non-owner bearer gets `not_found`, the same visibility rule as classic.
     - `DurableRefused` becomes `ApprovalError('conflict')`, which is 409 on the route
       (Review Focus 2).
-    - Review Focus 6: an id without the prefix still settles an `ai_approvals` row and never
+    - Review Focus 7: an id without the prefix still settles an `ai_approvals` row and never
       calls `review`.
     - `GET /approvals?session=<durable>&pending=true` maps `pending()` into `ApprovalView`s
       (`id` the durable id, `tier: 'outward'`, `input_summary` capped at 500, `decision:
@@ -1918,6 +2037,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     - The fake's next `/v1/messages` request must contain the first message's text and the
       `tool_result` "…interrupted…" for the hung call: the model sees the earlier history.
     - It expects `assistant.text.delta` for the second answer.
+  - Terminate and resume (Ruling 15), on the real engine:
+    - The first turn calls a tool whose stub hangs. The test terminates `session-<id>`
+      through a Temporal client (as an operator would).
+    - It sends a second `user.message`.
+    - The fake's next request must contain the first message, and an error `tool_result`
+      for the hung call ("…interrupted…").
+    - The answer arrives.
+    - No `resumed_fresh` error was written.
 - [ ] **Step 2: Run it** with the three variables set: `pnpm build && pnpm exec vitest run test/durable.e2e.test.ts`. Expected: PASS. Fix the plumbing it finds in the owning task's files.
 - [ ] **Step 3: Commit** `test(agent): a durable turn from the chat socket through agent-durable (#1056)`.
 
