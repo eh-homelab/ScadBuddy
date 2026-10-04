@@ -138,6 +138,7 @@ class BrokenUsage(RackUsageStore):
         return None
 
 
+@pytest.mark.rack_injects_errors
 @respx.mock
 def test_a_failed_picks_write_still_returns_the_queued_run(client: TestClient, model: str) -> None:
     """Spec §5: the item is queued, so the write is advisory."""
