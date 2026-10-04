@@ -21,6 +21,7 @@ from temporalio import activity
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
 from scadbuddy.api.operations import IdempotencyKey, run_operation
+from scadbuddy.core.authorship import AUTHOR_HEADER, AUTHOR_SESSION_HEADER, current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.client import connect_lazily
@@ -78,6 +79,15 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
     )
     state.operations.kinds["test_library"] = OperationKind(
         "test_library", check, where, queue="library"
+    )
+
+    async def author(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0)  # off the activity's own task, as a commit in a thread is
+        found = current_author()
+        return {"principal": found and found.principal, "session": found and found.session}
+
+    state.operations.kinds["test_author"] = OperationKind(
+        "test_author", check, author, queue="library"
     )
     router = APIRouter()
 
@@ -222,3 +232,17 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
     response = post(client, {})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> None:
+    """A run is the request's, so a commit it makes is authored as the agent that asked
+    (#252), not as ScadBuddy: the worker has no request of its own to read it from."""
+    response = client.post(
+        "/api/v1/test-op?kind=test_author",
+        json={},
+        headers={AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"principal": "token:abc123", "session": "s-1"}
+    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1})
+    assert plain.json() == {"principal": None, "session": None}

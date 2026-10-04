@@ -17,6 +17,7 @@ from fastapi import status
 from temporalio import activity
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -106,8 +107,14 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
 
     @activity.defn(name=run_activity(kind.name))
     async def run(input: RunOp) -> dict[str, Any]:
+        author = input.author
         try:
-            return await _heartbeating(kind.run(input.request, input.checked))
+            # Set before the run's task is made, which copies the context: its commits,
+            # in threads, are the agent's that asked (#252).
+            with authored_as(
+                None if author is None else AgentAuthor(author.principal, author.session)
+            ):
+                return await _heartbeating(kind.run(input.request, input.checked))
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
