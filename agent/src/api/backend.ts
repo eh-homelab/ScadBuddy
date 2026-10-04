@@ -30,7 +30,6 @@ export function tracingMiddleware(): Middleware {
         attributes: {
           'http.request.method': request.method,
           'url.template': schemaPath,
-          'server.address': new URL(request.url).hostname,
         },
       })
       open.set(id, span)
