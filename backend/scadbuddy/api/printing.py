@@ -10,7 +10,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Query, Response, status
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
@@ -145,7 +147,7 @@ def put_printer_bed_type(
     responses={
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
-                "Nothing was saved: the database did not answer within the save's bound "
+                "The database did not answer within the save's bound, so it was probably not saved "
                 "(#1129). Whether resending is safe is #1216."
             )
         }
@@ -160,9 +162,17 @@ def put_printer_rack_algorithm(
         algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
     except DATABASE_ERRORS as error:
         # The store gives up on purpose rather than commit after the dialog has (#1129).
+        # Only a pool wait or a cancelled statement is known to have saved nothing; any
+        # other lost connection may have dropped after the commit.
+        rolled_back = isinstance(error, PoolTimeout | psycopg.errors.QueryCanceled)
+        outcome = (
+            "nothing was saved"
+            if rolled_back
+            else "could not confirm the save; check the setting before resending"
+        )
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"nothing was saved: the database did not answer in time ({type(error).__name__})",
+            f"{outcome}: the database did not answer in time ({type(error).__name__})",
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)

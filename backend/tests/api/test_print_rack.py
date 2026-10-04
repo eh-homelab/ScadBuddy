@@ -72,6 +72,22 @@ def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
 
 
+def test_a_dropped_connection_does_not_claim_nothing_was_saved(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1189 review: a connection lost mid-save may have committed, so the 503 must not
+    say nothing was saved; a timeout that rolled back can."""
+
+    def dropped(*_: object) -> None:
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)
+    response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    assert "nothing was saved" not in response.json()["detail"]
+
+
 def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing(
     client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
