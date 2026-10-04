@@ -219,8 +219,10 @@ class RenderPiece:
 
     async def _tell_waiting(self, outcome: PieceOutcome) -> None:
         while self._waiting:
-            job = workflow.get_external_workflow_handle_for(
-                TemplatePipeline.run, self._waiting.pop(0)
+            job: workflow.ExternalWorkflowHandle[TemplatePipeline] = (
+                workflow.get_external_workflow_handle_for(
+                    TemplatePipeline.run, self._waiting.pop(0)
+                )
             )
             try:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
