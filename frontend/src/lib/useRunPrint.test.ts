@@ -142,6 +142,27 @@ describe('useRunPrint, traced', () => {
     }
   })
 
+  it("does not record a library file's id, which is Bambuddy's (spec §6)", async () => {
+    const tracing = installTestTracing()
+    try {
+      vi.spyOn(api, 'runLibraryPrint').mockResolvedValue(queuedResult)
+      vi.spyOn(api, 'putPrinterBedType').mockResolvedValue(undefined as never)
+      const props = { ...input(), source: { kind: 'library' as const, file: { id: 42, filename: 'cube.3mf' } } }
+      const { result } = renderHook(() => useRunPrint(props))
+      await act(() => result.current.run())
+
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.name).toBe('print')
+      expect(Object.keys(span?.attributes ?? {}).sort()).toEqual([
+        'scadbuddy.all_plates',
+        'scadbuddy.plate_id',
+        'scadbuddy.printer_id',
+      ])
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
   it('marks a refused run as an error with its problem type', async () => {
     const tracing = installTestTracing()
     try {

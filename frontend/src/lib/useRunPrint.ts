@@ -31,12 +31,13 @@ interface RunInput {
   onRan: (result: PrintRunResult) => void
 }
 
-/** Spec 2026-10-01 §6: what is printed, on which printer, and which plate. */
+/**
+ * Spec 2026-10-01 §6: what is printed, on which printer, and which plate. A library
+ * file's id is Bambuddy's, which §6 never records, so only an output names its source.
+ */
 function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes {
   return {
-    ...(source.kind === 'output'
-      ? { 'scadbuddy.output_id': source.output.id }
-      : { 'scadbuddy.library_file_id': source.file.id }),
+    ...(source.kind === 'output' ? { 'scadbuddy.output_id': source.output.id } : {}),
     ...(typeof body.printer_id === 'number' ? { 'scadbuddy.printer_id': body.printer_id } : {}),
     'scadbuddy.plate_id': body.plate_id,
     'scadbuddy.all_plates': body.all_plates,
