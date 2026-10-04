@@ -49,6 +49,32 @@ describe('SessionTouched', () => {
     expect(within(group('Print archives')).getByRole('link', { name: 'print 7' })).toHaveAttribute('href', '/prints/7')
   })
 
+  it("keeps one library's pins on different models, and its checkout's removal, apart", async () => {
+    setSessionResources('sess-lib', [
+      row({ type: 'library', id: 'BOSL2', model: 'bin-a', tool: 'pin_library' }),
+      row({ type: 'library', id: 'BOSL2', model: 'bin-b', tool: 'pin_library' }),
+      row({ type: 'library', id: 'BOSL2', model: 'bin-a', action: 'deleted', tool: 'unpin_library' }),
+      row({ type: 'library', id: 'BOSL2', model: null, before: 'c'.repeat(40), action: 'deleted', tool: 'remove_library_checkout' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-lib" />)
+    const libraries = await screen.findByRole('group', { name: 'Libraries' })
+    const items = within(libraries).getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    // Pinned on bin-b and still pinned: linked to that model.
+    expect(within(libraries).getByRole('link', { name: 'BOSL2 · bin-b' })).toHaveAttribute('href', '/m/bin-b')
+    // Pinned then unpinned on bin-a; the shared checkout removed: neither is linked.
+    expect(within(libraries).getByText('BOSL2 · bin-a')).toBeInTheDocument()
+    expect(within(libraries).queryByRole('link', { name: 'BOSL2 · bin-a' })).not.toBeInTheDocument()
+    expect(items[2]).toHaveTextContent(/^BOSL2deleted$/)
+  })
+
+  it("links a library's shared checkout, while it is installed, to Settings' Libraries", async () => {
+    setSessionResources('sess-lib2', [row({ type: 'library', id: 'MCAD', model: null, action: 'modified', tool: 'x' })])
+    renderPage(<SessionTouched sessionId="sess-lib2" />)
+    const libraries = await screen.findByRole('group', { name: 'Libraries' })
+    expect(within(libraries).getByRole('link', { name: 'MCAD' })).toHaveAttribute('href', '/settings#libraries')
+  })
+
   it('groups what the session touched by kind, each linking to its page', async () => {
     setSessionResources('sess-1', [
       row({ type: 'model', id: 'my-bin', model: 'my-bin', tool: 'create_model', after: 'aaaaaaa1' }),

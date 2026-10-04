@@ -48,7 +48,8 @@ function entries(rows: readonly SessionResource[]): Entry[] {
   const out: Entry[] = []
   const byKey = new Map<string, Entry>()
   rows.forEach((r, index) => {
-    const key = r.id === null ? null : `${r.type}\u0000${r.id}`
+    // A library is one per model it is pinned on, plus the shared checkout (no model).
+    const key = r.id === null ? null : `${r.type}\u0000${r.id}${r.type === 'library' ? `\u0000${r.model ?? ''}` : ''}`
     const seen = key === null ? undefined : byKey.get(key)
     if (seen) {
       if (seen.actions.at(-1) !== r.action) seen.actions.push(r.action)
@@ -107,8 +108,8 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
     case 'print_archive':
       return { name: `print ${id}`, to: page(`/prints/${encodeURIComponent(id)}`) }
     case 'library':
-      // A model's pin goes to the model; the shared checkout, to the Library page.
-      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/library') }
+      // A model's pin goes to the model; the shared checkout, to Settings' Libraries.
+      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/settings#libraries') }
     case 'font':
       return { name: id, to: null }
     case 'setting':

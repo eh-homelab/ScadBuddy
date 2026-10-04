@@ -229,7 +229,7 @@ the session's status moves or one of its tool calls finishes, so a running turn'
 changes show as they land. Each entry links to its page: a model to `/m/{slug}`, a
 revision to `/m/{slug}?version={commit}`, a preset, asset or render to its model's
 page, an output to `/edit/{id}`, a print run or print to `/prints`, a print archive to
-`/prints/{id}`, a library to its model's page (the shared checkout to `/library`) and a
+`/prints/{id}`, a library to its model's page (the shared checkout to Settings' Libraries, `/settings#libraries`; one entry per model it is pinned on) and a
 setting to `/settings`; fonts and Bambuddy's projects and files have no page here. A deleted
 resource, anything of a model the session deleted after last touching it (even if it
 made one of that slug again), and an `unclassified` row (shown by its tool) link
