@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 import psycopg
@@ -26,7 +27,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OPERATIONS, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 from scadbuddy.workflows.client import connect_lazily
-from scadbuddy.workflows.commands import CommandClosedError
+from scadbuddy.workflows.commands import (
+    COMMAND_ANSWER_DEADLINE,
+    CommandClosedError,
+    start_command,
+)
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
 PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
@@ -231,10 +236,21 @@ def test_a_pruned_library_operation_names_the_model_not_bambuddy(
     assert "Check the model and its libraries" in again.json()["detail"]
 
 
-def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> None:
-    started = post(client, {"delay": 12}, key=PRESS_4)
+def test_a_slow_done_command_answers_202_and_is_followed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    started = post(client, {"delay": 20}, key=PRESS_4)
+    # Re-sent with its key until it is recorded, as a client does: a loaded machine
+    # may not have written the record within the deadline.
+    resend_until = time.monotonic() + 60
+    while started.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM:
+        assert time.monotonic() < resend_until, started.text
+        started = post(client, {"delay": 20}, key=PRESS_4)
     assert started.status_code == 202, started.text
-    op = follow(client, started.json()["id"])
+    op = follow(client, started.json()["id"], timeout=60)
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
 
 
@@ -250,8 +266,12 @@ def test_get_operation_422s_a_malformed_id(client: TestClient) -> None:
 
 
 def test_temporal_unreachable_is_a_503_and_writes_nothing(
-    client: TestClient, app: FastAPI, pg_conninfo: str
+    client: TestClient, app: FastAPI, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Unreachable is known only once the deadline passed: production's, not the tests'.
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=COMMAND_ANSWER_DEADLINE)
+    )
     state: AppState = getattr(app.state, STATE_ATTR)
     ops = state.components.get(OPERATIONS)
     state.components.override(

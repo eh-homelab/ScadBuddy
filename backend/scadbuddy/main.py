@@ -66,8 +66,8 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     HEARTBEAT_TIMEOUT,
     SWEEPS,
-    Housekeeping,
     ensure_schedules,
+    library_worker,
 )
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
@@ -247,9 +247,13 @@ async def _sweep_assets_logged(state: AppState) -> None:
 
 
 async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = False) -> None:
+    """The boot skips a volume error; the Schedule's sweep (``reraise``) logs any error,
+    then fails its activity (review #1095b 4)."""
     try:
         await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
+    except Exception as error:
+        if not reraise and not isinstance(error, OSError):
+            raise
         logger.exception("could not sweep duplicate staging folders")
         if reraise:
             raise
@@ -621,11 +625,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     ]
     try:
         while not stop.is_set():
-            worker = Worker(
-                client,
-                task_queue=queue,
-                workflows=[Housekeeping, PreviewBackfill, OperationWorkflow],
-                activities=activities,
+            worker = library_worker(
+                client, queue, activities, workflows=[PreviewBackfill, OperationWorkflow]
             )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
