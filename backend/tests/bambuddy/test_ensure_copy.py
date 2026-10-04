@@ -69,6 +69,10 @@ class MemoryUploads:
         yield
 
 
+async def _stored_3mf(store: object, meta: object) -> bytes:
+    return b"3mf"
+
+
 def output(letter: str) -> OutputMeta:
     return OutputMeta(
         id=letter * 32,
@@ -83,7 +87,7 @@ def output(letter: str) -> OutputMeta:
 async def test_filing_and_a_print_at_once_upload_one_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     meta = output("c")
@@ -119,7 +123,7 @@ async def test_two_outputs_filed_into_one_folder_at_once_get_different_names(
     """Two customizations with the same changed params name the same stem. The folder's
     listing and the upload that takes a name from it are one step per folder, or both
     see ``Demo.3mf`` free and both upload under it (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     uploads = MemoryUploads()
@@ -152,7 +156,7 @@ async def test_a_folder_listing_that_fails_still_uploads_under_a_plain_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The listing only makes the name unique; it never fails the print (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = ListingFails()
 
@@ -175,7 +179,7 @@ async def test_filing_after_a_print_in_the_models_own_colours_reuses_its_copy(
 ) -> None:
     """A print whose spools were the model's colours records its copy under a coloured
     key; a filing with no spools must reuse it, not upload a duplicate (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     uploads = MemoryUploads()
@@ -208,7 +212,7 @@ async def test_two_replicas_filing_and_printing_at_once_upload_one_copy(
 ) -> None:
     """The in-process lock is per replica; two replicas on one database share only the
     database, so the advisory lock is what makes them upload one copy (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     # Each replica has its own process lock: none is shared between the two calls.
     monkeypatch.setattr(send, "_copy_lock", lambda key: asyncio.Lock())
