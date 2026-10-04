@@ -425,11 +425,16 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal, boun
  * body, or 202 with an operation still running, followed here through
  * `GET /operations/{id}` to that body, or to the problem the route would have answered.
  */
-async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function command<T>(
+  path: string,
+  init: RequestInit = {},
+  /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
+  operations = '/operations',
+): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
   const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
-  return followOperation<T>(first, signal)
+  return followOperation<T>(first, signal, operations)
 }
 
 /**
@@ -440,6 +445,7 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
 async function followOperation<T>(
   first: { status: number; body: T | Operation },
   signal?: AbortSignal,
+  operations = '/operations',
 ): Promise<T> {
   if (first.status !== 202) return first.body as T
   let op = first.body as Operation
@@ -455,7 +461,7 @@ async function followOperation<T>(
     }
     await wait(printRunPoll.intervalMs, signal)
     const id = op.id
-    op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
+    op = await reattach(() => request<Operation>(`${operations}/${seg(id)}`, { signal }), signal)
   }
   if (op.status === 'failed') {
     const error = op.error
