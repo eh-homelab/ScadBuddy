@@ -28,7 +28,6 @@ from scadbuddy.api.models import (
     RESOLVER_RETRY_AFTER,
     fetch_busy,
     require_model_exists,
-    shown_url,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -55,7 +54,12 @@ from scadbuddy.library.assets import (
     sample_files,
 )
 from scadbuddy.library.history import GitError, RevisionNotFoundError
-from scadbuddy.library.url_import import IMPORT_TIMEOUT, ImportRefusedError, ResolverBusyError
+from scadbuddy.library.url_import import (
+    IMPORT_TIMEOUT,
+    ImportRefusedError,
+    ResolverBusyError,
+    shown_url,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
