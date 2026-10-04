@@ -21,6 +21,8 @@ import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { setSessionResources } from '../mocks/features/assistantSessions'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
 
@@ -502,6 +504,30 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(schemaReads()).toBe(before.schema + 1))
     await waitFor(() => expect(renders.length).toBe(before.renders + 1), { timeout: 4000 })
     await firstRender()
+  })
+
+  it("links the assistant sessions that changed the model, and the reopened output's (#931)", async () => {
+    const id = 'e'.repeat(32)
+    const at = '2026-10-03T12:00:00.000Z'
+    const row = { action: 'created' as const, before: null, after: null, tool: 'save_output', at }
+    setSessionResources('sess-model', [{ ...row, type: 'preset', id: 'p1', model: 'name-keychain' }], { title: 'Bigger name' })
+    setSessionResources('sess-output', [{ ...row, type: 'output', id, model: 'name-keychain' }], { title: 'Saved it' })
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({ output_id: id, slug: 'name-keychain', name: null, params: {}, model_version: 'v1', source: 'record' }),
+      ),
+    )
+    const openSession = vi.fn()
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession }}>
+        <CustomizePage />
+      </AssistantOpenerContext.Provider>,
+      { route: `/m/name-keychain?from=${id}`, path: '/m/:slug' },
+    )
+    expect(await screen.findByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
+    await user.click(screen.getByRole('menuitem', { name: /Saved it/ }))
+    expect(openSession).toHaveBeenCalledWith('sess-output')
   })
 
   it('reopens from the 3MF alone when the output record is gone', async () => {
