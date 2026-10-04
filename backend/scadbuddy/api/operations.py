@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 #: Problem ``type``s for a command the route could not hand to Temporal (#1052, #1053).
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
+#: A request that already ran and whose record was pruned: it may have been done.
+RECORD_GONE_PROBLEM = "https://scadbuddy.dev/problems/operation-record-gone"
 
 #: The problems after which the operation may still run, so its claims are kept.
 _MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
@@ -278,6 +280,7 @@ async def _run_operation(
                 status.HTTP_409_CONFLICT,
                 "This request already ran, and its record has since been deleted, so it "
                 f"may have been done. Check {kind.where} before sending it again.",
+                type_=RECORD_GONE_PROBLEM,
             ) from None
         return _answer(recorded, response, repeated=True)
     except CommandStillAcceptingError:

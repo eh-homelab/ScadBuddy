@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
+import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { type ToolContext, ToolError } from './registry.js'
 
@@ -91,12 +92,7 @@ export async function reattach<T>(
   return ok(answered(ctx, send, what, gaveUp), what)
 }
 
-type Operation = {
-  id: string
-  status: 'running' | 'succeeded' | 'failed'
-  result?: unknown
-  error?: { status: number; title: string; detail: string; extensions?: Record<string, unknown> } | null
-}
+type Operation = components['schemas']['Operation']
 
 /** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
 export type CommandHeaders = { 'Idempotency-Key': string }
@@ -145,9 +141,13 @@ export async function commandAnswer<T>(
     )) as Operation
   }
   if (op.status === 'failed') {
-    const { extensions, ...problem } = op.error ?? { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
-    // The problem's own fields win over an extension of the same name, as in the browser's `command()`.
-    return { error: { ...extensions, ...problem }, response: new Response(null, { status: problem.status }) }
+    // The problem the route would have answered, type and extensions included (review #1063 4);
+    // its own fields win over an extension of the same name, as in the browser's `command()`.
+    const error = op.error
+    const problem = error
+      ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail }
+      : { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
+    return { error: problem, response: new Response(null, { status: problem.status }) }
   }
   return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }
