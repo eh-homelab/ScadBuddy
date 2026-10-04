@@ -18,17 +18,12 @@ from tests.conftest import wait_for_span
 KNOWN_SERVER_ATTRIBUTES = frozenset(
     {
         "http.flavor",
-        "http.host",
         "http.method",
         "http.route",
         "http.scheme",
-        "http.server_name",
         "http.status_code",
         "http.target",
-        "http.url",
         "net.host.port",
-        "net.peer.ip",
-        "net.peer.port",
     }
 )
 
@@ -72,7 +67,11 @@ def test_a_server_span_carries_only_known_attributes(
     client: TestClient, spans: InMemorySpanExporter
 ) -> None:
     missing = "0123456789abcdef0123456789abcdef"
-    headers = {"User-Agent": "agent-s3ntinel", "X-Forwarded-For": "192.0.2.1"}
+    headers = {
+        "User-Agent": "agent-s3ntinel",
+        "X-Forwarded-For": "192.0.2.1",
+        "Host": "host-s3ntinel.example",
+    }
     assert client.get("/api/v1/models?q=s3ntinel", headers=headers).status_code == 200
     assert client.get(f"/api/v1/jobs/{missing}?q=s3ntinel", headers=headers).status_code == 404
     wait_for_span(

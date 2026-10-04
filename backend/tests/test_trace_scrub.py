@@ -14,7 +14,7 @@ import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import Link, Status, StatusCode
+from opentelemetry.trace import Link, SpanKind, Status, StatusCode
 
 from scadbuddy.core import trace_scrub
 from scadbuddy.core.problems import ApiError
@@ -111,7 +111,7 @@ def test_a_clean_span_passes_through_unchanged() -> None:
     assert span.status.status_code is StatusCode.UNSET
 
 
-def _exported_attributes(attributes: dict[str, str]) -> dict[str, object]:
+def _exported_attributes(attributes: dict[str, str | int]) -> dict[str, object]:
     inner = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(inner)))
@@ -138,6 +138,47 @@ def test_no_query_string_or_user_agent_survives() -> None:
     assert kept["url.full"] == "http://h/api/v1/x"
     assert kept["http.target"] == "/api/v1/x"
     assert kept["http.route"] == "/api/v1/x"
+
+
+HOST_AND_PEER = (
+    "http.host",
+    "http.server_name",
+    "server.address",
+    "net.peer.ip",
+    "net.peer.port",
+    "client.address",
+    "client.port",
+    "net.sock.peer.addr",
+    "net.sock.peer.port",
+    "network.peer.address",
+    "network.peer.port",
+)
+
+
+def test_no_host_name_or_client_address_survives() -> None:
+    # Review 5 of #1064: the Host header is a request header (spec §6), and the
+    # client's address is never recorded either. The server's own port is kept.
+    kept = _exported_attributes(
+        {**dict.fromkeys(HOST_AND_PEER, SENTINEL), "server.port": 8000, "net.host.port": 8000}
+    )
+    assert kept == {"server.port": 8000, "net.host.port": 8000}
+
+
+def test_a_server_spans_url_is_not_exported_since_its_host_is_a_header() -> None:
+    inner = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(inner)))
+    attributes = {
+        "http.url": f"http://{SENTINEL}.example/api/v1/x",
+        "url.full": f"http://{SENTINEL}.example/api/v1/x",
+        "http.route": "/api/v1/x",
+    }
+    with provider.get_tracer("t").start_as_current_span(
+        "GET /api/v1/x", kind=SpanKind.SERVER, attributes=attributes
+    ):
+        pass
+    (span,) = inner.get_finished_spans()
+    assert dict(span.attributes or {}) == {"http.route": "/api/v1/x"}
 
 
 def test_a_frame_line_with_anything_but_a_function_name_does_not_survive() -> None:
@@ -265,6 +306,8 @@ def test_no_event_or_link_carries_what_a_span_may_not() -> None:
         "user_agent.original": SENTINEL,
         "http.request.header.cookie": SENTINEL,
         "http.response.header.set_cookie": SENTINEL,
+        "http.host": SENTINEL,
+        "client.address": SENTINEL,
         "scadbuddy.attempt": 2,
     }
     inner = InMemorySpanExporter()

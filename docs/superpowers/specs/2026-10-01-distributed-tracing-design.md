@@ -474,12 +474,17 @@ not copied from that module, which has no such list:
 - OpenSCAD source and its stderr (only the exit code and a failure class);
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
-  is configured; URLs are recorded without the query);
+  is configured; URLs are recorded without the query). That includes the
+  `Host` header: `http.host`, `http.server_name` and `server.address` are
+  dropped, and a server span exports no `http.url` or `url.full`, whose host is
+  that header's (the server's own port, `net.host.port`/`server.port`, stays);
+- the client's address: `net.peer.ip`/`net.peer.port`, `client.address`/
+  `client.port`, `net.sock.peer.*` and `network.peer.*`;
 - the request path: a segment is data (a file path a user chose, a photo
   filename Bambuddy returned, whatever the SPA fallback was asked for), so the
-  route's template stands in for it (`http.target`, `url.path`, and after the
-  `scheme://host` of `http.url`, `url.full`), and a request with no route
-  records no path at all;
+  route's template stands in for it (`http.target`, `url.path`, and, on any
+  span but a server span, after the `scheme://host` of `http.url` and
+  `url.full`), and a request with no route records no path at all;
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
