@@ -257,12 +257,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await migrate(db.sql)
         const bytes = Buffer.from([1])
         await expect(
-          db.sql`INSERT INTO ai_credentials (id, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
-                 VALUES ('x', 'gateway', NULL, ${bytes}, ${bytes}, 'k', '')`,
+          db.sql`INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
+                 VALUES ('x', 0, 'gateway', NULL, ${bytes}, ${bytes}, 'k', '')`,
         ).rejects.toThrow(/check constraint/)
         await expect(
-          db.sql`INSERT INTO ai_credentials (id, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
-                 VALUES ('x', 'bedrock', NULL, ${bytes}, ${bytes}, 'k', '')`,
+          db.sql`INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
+                 VALUES ('x', 0, 'bedrock', NULL, ${bytes}, ${bytes}, 'k', '')`,
         ).rejects.toThrow(/check constraint/)
       })
     })
@@ -285,6 +285,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(raw?.secret_sealed.includes(Buffer.from(SECRET))).toBe(false)
         const dump = await db.sql`SELECT * FROM ai_credentials`
         expect(JSON.stringify(dump)).not.toContain(SECRET)
+      })
+
+      it('stores and reveals a Claude Code OAuth token', async () => {
+        const store = new CredentialStore(db.sql)
+        await store.put({ kind: 'claude_oauth_token', secret: SECRET }, kek)
+        expect(await store.reveal(kek)).toEqual({ kind: 'claude_oauth_token', secret: SECRET })
       })
 
       it('keeps the stored secret on a PUT without one, and replaces it on a PUT with one', async () => {
