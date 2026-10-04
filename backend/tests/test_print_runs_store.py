@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
@@ -12,9 +13,12 @@ import pytest
 from psycopg import Connection
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.runs import LOST, LOST_UNQUEUED, PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.core.events import Event, PrintRunEvent
+from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.client import reconcile_lost_runs
+from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -163,3 +167,97 @@ async def test_get_reads_a_row_and_an_unknown_id_is_none(store: PrintRunStore) -
     got = await store.get(run.id)
     assert got is not None and got.output_id == OUTPUT
     assert await store.get("nope") is None
+
+
+async def test_fail_lost_says_whether_anything_could_have_been_queued(
+    store: PrintRunStore, events: Events
+) -> None:
+    """Review #1061 F1: a run whose execution ended without recording an outcome."""
+    unqueued = await accept(store, "k1", run_id="r1")
+    queueing = await accept(store, "k2", run_id="r2")
+    await store.start_enqueue(queueing.id)
+
+    first = await store.fail_lost(unqueued.id)
+    second = await store.fail_lost(queueing.id)
+
+    assert first.status == second.status == "failed"
+    assert first.error == LOST_UNQUEUED and not first.may_have_queued
+    assert second.error == LOST and second.may_have_queued
+    announced = [event for event in events.published if isinstance(event, PrintRunEvent)]
+    assert [event.slug for event in announced[-2:]] == ["demo", "demo"]
+
+
+async def test_fail_lost_leaves_an_ended_run_alone(store: PrintRunStore) -> None:
+    run = await accept(store)
+    await store.succeed(run.id, "demo", RESULT)
+    assert (await store.fail_lost(run.id)).status == "succeeded"
+
+
+async def test_running_executions_names_each_running_rows_execution(
+    store: PrintRunStore,
+) -> None:
+    running = await accept(store, "k1", run_id="r1", wf_run="w1")
+    done = await accept(store, "k2", run_id="r2", wf_run="w2")
+    await store.succeed(done.id, "demo", RESULT)
+
+    assert await store.running_executions(timedelta(0)) == [(running.id, "print-k1", "w1")]
+    assert await store.running_executions(timedelta(hours=1)) == []
+
+
+def test_the_migration_says_nothing_was_queued_for_a_run_that_never_tried(
+    jobs: JobProjection,
+) -> None:
+    """Review #1061 F4: the upgrade's message matches ``may_have_queued``."""
+    migration = (MIGRATIONS_DIR / "20261003T0223Z_print_runs_on_temporal.sql").read_text()
+    update = migration[migration.index("UPDATE print_runs") :]
+    with jobs.pool.connection() as conn:
+        for run_id, attempted in (("r1", False), ("r2", True)):
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status,"
+                " enqueue_attempted) VALUES (%s, %s, %s, 'running', %s)",
+                (run_id, OUTPUT, run_id, attempted),
+            )
+        conn.execute(update)
+        rows = {
+            row["id"]: row["detail"]
+            for row in conn.execute(
+                "SELECT id, error->>'detail' AS detail FROM print_runs ORDER BY id"
+            ).fetchall()
+        }
+    assert "Nothing was queued" in rows["r1"]
+    assert "cannot tell whether the print was queued" in rows["r2"]
+
+
+async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
+    store: PrintRunStore,
+) -> None:
+    """Review #1061 F1: a terminated execution, or one that is gone, never ends its
+    row itself; one still running is left to end it."""
+    async with temporal_client() as client:
+        queue = f"unserved-{uuid.uuid4().hex[:8]}"
+        live = await client.start_workflow(
+            "PrintRun", "x", id=f"print-live-{uuid.uuid4().hex[:8]}", task_queue=queue
+        )
+        killed = await client.start_workflow(
+            "PrintRun", "x", id=f"print-killed-{uuid.uuid4().hex[:8]}", task_queue=queue
+        )
+        await killed.terminate("an operator ended it")
+        for run_id, handle in (("live", live), ("killed", killed)):
+            await store.insert_accepted(
+                run_id,
+                subject=OUTPUT,
+                key=run_id,
+                slug="demo",
+                workflow_id=handle.id,
+                workflow_run_id=handle.result_run_id or "",
+                retention=None,
+            )
+        await accept(store, "gone", run_id="gone", wf_run=str(uuid.uuid4()))
+        try:
+            ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+        finally:
+            await live.terminate("test over")
+    assert ended == 2
+    assert (await store.get("live")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("killed")).error == LOST_UNQUEUED  # type: ignore[union-attr]
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
