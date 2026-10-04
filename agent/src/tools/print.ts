@@ -104,7 +104,9 @@ async function reattach<T>(
       if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
+      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
       continue
     }
     return ok(Promise.resolve(result), what)
