@@ -48,7 +48,7 @@ export interface OpenRequest {
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
 
-/** How many sessions the picker's model filter asks the agent for (its list route's maximum). */
+/** How many sessions the picker's model filter asks the agent for: its list route's maximum (agent routes/sessions.ts LIST_LIMIT_MAX). */
 const PICKER_FILTER_LIMIT = 500
 
 /** The panel's Advanced switch, per browser (the Library page's pattern). */
@@ -69,18 +69,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
   const pageModel = pageContext(pathname).modelSlug ?? null
-  const [onlyPageModel, setOnlyPageModel] = useState(false)
+  // The model the filter was turned on for: on another model's page it is off.
+  const [filteredModel, setFilteredModel] = useState<string | null>(null)
+  const filterBy = pageModel !== null && filteredModel === pageModel ? pageModel : null
   // Read again each time the picker opens or the filter is turned on, so it is current.
-  const touchingIds = useAsync(
+  const touching = useAsync(
     async () =>
-      onlyPageModel && pageModel && pickerOpen
+      filterBy && pickerOpen
         ? new Set(
-            (await api.listAiResourceSessions({ type: 'model', id: pageModel }, PICKER_FILTER_LIMIT)).sessions.map(
+            (await api.listAiResourceSessions({ type: 'model', id: filterBy }, PICKER_FILTER_LIMIT)).sessions.map(
               (s) => s.id,
             ),
           )
         : null,
-    [onlyPageModel, pageModel, pickerOpen],
+    [filterBy, pickerOpen],
   )
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
@@ -204,9 +206,10 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const prompts = suggestedPrompts(pathname)
   const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
   // #931 — on a model's page, the picker can show only the sessions that changed that model.
-  const filterBy = onlyPageModel && pageModel ? pageModel : null
-  const touching = filterBy ? touchingIds : undefined
-  const listed = touching?.data ? sessions.filter((s) => touching.data!.has(s.id)) : sessions
+  const touchingIds = filterBy ? touching.data : null
+  const listed = touchingIds ? sessions.filter((s) => touchingIds.has(s.id)) : sessions
+  const filterLoading = filterBy !== null && touching.loading
+  const filterError = filterBy !== null ? touching.error : undefined
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -246,20 +249,30 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
               <input
                 type="checkbox"
-                checked={onlyPageModel}
-                onChange={(event) => setOnlyPageModel(event.target.checked)}
+                checked={filterBy !== null}
+                onChange={(event) => setFilteredModel(event.target.checked ? pageModel : null)}
               />
               Only sessions that changed {pageModel}
             </label>
           )}
-          {touching?.error ? (
+          {filterError ? (
             <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
-              {touching.error instanceof ApiError ? touching.error.detail : 'The assistant service did not answer; try again.'}
+              {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
+              every session, unfiltered.
+            </p>
+          ) : null}
+          {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
+            <p className="px-3 pt-1 text-[11px] text-faint">
+              Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
             </p>
           ) : null}
           {sessions.length === 0 ? (
             <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
-          ) : filterBy && touching?.data && listed.length === 0 ? (
+          ) : filterLoading ? (
+            <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
+              Finding the sessions that changed {filterBy}…
+            </p>
+          ) : touchingIds && listed.length === 0 ? (
             <p className="px-3 py-2 text-[12.5px] text-muted">No session changed {filterBy}.</p>
           ) : (
             <ul className="max-h-56 overflow-y-auto py-1">

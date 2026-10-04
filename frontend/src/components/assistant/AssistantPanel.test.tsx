@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { useRef, type ReactNode } from 'react'
-import { Route, Routes } from 'react-router'
+import { Link, Route, Routes } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
@@ -411,9 +411,58 @@ describe('assistant panel', () => {
     )
     await view.user.click(within(picker).getByRole('checkbox'))
     await view.user.click(within(picker).getByRole('checkbox'))
-    expect(await within(picker).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    const alert = await within(picker).findByRole('alert')
+    expect(alert).toHaveTextContent('the AI database is unreachable')
+    // The list under it is not filtered, and says so.
+    expect(alert).toHaveTextContent('Showing every session')
     // The full list stays usable.
     expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+  })
+
+  it('shows a loading state, not the full list, while the model filter loads (#931)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', async () => {
+        await held
+        return HttpResponse.json({ sessions: [{ id: EXTERNAL_SESSION_ID }] })
+      }),
+    )
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText('Finding the sessions that changed gridfinity-bin…')).toBeInTheDocument()
+    expect(within(picker).queryByRole('listitem')).not.toBeInTheDocument()
+    act(() => release())
+    expect(await within(picker).findByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+  })
+
+  it('says when the model filter reached the most sessions it reads (#931)', async () => {
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        return HttpResponse.json({
+          sessions: [{ id: EXTERNAL_SESSION_ID }, ...Array.from({ length: limit - 1 }, (_, i) => ({ id: `old-${i}` }))],
+        })
+      }),
+    )
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText(/the 500 most recently updated/)).toBeInTheDocument()
+  })
+
+  it("does not carry the model filter to another model's page (#931)", async () => {
+    const view = renderShell('/m/gridfinity-bin', <Link to="/m/name-keychain">other model</Link>)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' }))
+    await view.user.click(screen.getByRole('link', { name: 'other model' }))
+    expect(await screen.findByRole('checkbox', { name: 'Only sessions that changed name-keychain' })).not.toBeChecked()
   })
 
   it('offers no model filter off a model page (#931)', async () => {
