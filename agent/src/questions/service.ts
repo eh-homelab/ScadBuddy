@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
+import type { AttentionReason, OnTimeout } from '../harness/attention.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -29,9 +30,18 @@ import {
 // (interrupt, shutdown, failure, the reaper), its pending questions are
 // cancelled (`cancelPending`, from sessions/manager.ts). A question is asked
 // again by the next turn if the model still needs it; there is no orphan to
-// resume, unlike an approval. There is no expiry of its own yet: the attention
-// work in #815 decides how long a question may wait, and a timeout there must
-// cancel, never answer.
+// resume, unlike an approval. A question has no expiry of its own yet (spec
+// §6.6 adds `question_expiry_seconds`, which must cancel, never answer).
+//
+// ATTENTION REQUESTS (#815, harness/attention.ts) are rows here too (`kind =
+// 'attention'`): the same gate, card, answer and cancellation. Two things are
+// theirs only. They have a timer, run by the parked waiter itself: a request
+// never outlives its turn either, so the replica holding the turn is the one
+// place it can fire. When it fires the row is `timed_out`, never answered, and
+// `on_timeout` decides the rest (`proceed` returns, `wait` and `stop` end the
+// turn). And they are throttled (#815 §5): one open request per session per
+// reason (a new one supersedes the last), and at most ATTENTION_RATE_LIMIT
+// created per ATTENTION_RATE_WINDOW_S across the user's sessions.
 //
 // WHO ANSWERS. Only the user in the ScadBuddy panel (the browser principal):
 // the question is the agent's own call, and an answer is a human's. No tool
@@ -39,6 +49,12 @@ import {
 // read can at most make it ASK, which is the model's call like any other.
 
 export const DEFAULT_QUESTION_POLL_MS = 1000
+
+/** #815 §5's per-user rate limit on attention requests: this many per window. */
+export const ATTENTION_RATE_LIMIT = 10
+export const ATTENTION_RATE_WINDOW_S = 600
+/** The advisory lock the rate limit's count and insert are taken under. */
+const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
 
@@ -69,14 +85,33 @@ export type QuestionGateContext = {
   secrets: () => readonly string[]
   /** The turn's own abort signal (interrupt, shutdown). */
   signal: AbortSignal
+  /** Ends the turn as an interrupt does: an attention request's `stop` and `wait` timers (#815). */
+  stopTurn?: (why: string) => void
 }
 
 type Row = {
   id: string
   session_id: string
-  outcome: 'answered' | 'cancelled' | null
+  outcome: 'answered' | 'cancelled' | 'timed_out' | null
   answers: string[] | null
   reason: string | null
+}
+
+/** A resolved row's columns the audit log needs. */
+type Resolved = { id: string; turn_id: string; tool: string; tool_use_id: string; created_at: Date }
+
+/** An `answer`-kind entry still waiting, as GET /api/v1/ai/pending-input lists it (spec §6.6). */
+export type PendingQuestion = {
+  id: string
+  sessionId: string
+  kind: 'question' | 'attention'
+  tool: string
+  toolUseId: string
+  questions: QuestionView[]
+  attentionReason: AttentionReason | null
+  onTimeout: OnTimeout | null
+  createdAt: string
+  expiresAt: string | null
 }
 
 /** The questions with every string redacted of `secrets`. */
@@ -130,6 +165,38 @@ export class QuestionService {
     const [row] = await this.deps.sql<Row[]>`
       SELECT id, session_id, outcome, answers, reason FROM ai_questions WHERE id = ${id}`
     return row
+  }
+
+  /** Every question and attention request still waiting for the user, oldest first (at most 500). */
+  async listPending(): Promise<PendingQuestion[]> {
+    const rows = await this.deps.sql<
+      {
+        id: string
+        session_id: string
+        kind: 'question' | 'attention'
+        tool: string
+        tool_use_id: string
+        questions: QuestionView[]
+        attention_reason: AttentionReason | null
+        on_timeout: OnTimeout | null
+        created_at: Date
+        expires_at: Date | null
+      }[]
+    >`
+      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, created_at, expires_at
+      FROM ai_questions WHERE outcome IS NULL ORDER BY created_at, id LIMIT 500`
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      kind: r.kind,
+      tool: r.tool,
+      toolUseId: r.tool_use_id,
+      questions: r.questions,
+      attentionReason: r.attention_reason,
+      onTimeout: r.on_timeout,
+      createdAt: r.created_at.toISOString(),
+      expiresAt: r.expires_at?.toISOString() ?? null,
+    }))
   }
 
   /**
@@ -289,7 +356,7 @@ export class QuestionService {
     for (const wake of this.waiters.get(id) ?? []) wake()
   }
 
-  private pause(id: string, signal: AbortSignal): Promise<void> {
+  private pause(id: string, signal: AbortSignal, ms: number): Promise<void> {
     return new Promise((resolve) => {
       const set = this.waiters.get(id) ?? new Set()
       this.waiters.set(id, set)
@@ -300,21 +367,70 @@ export class QuestionService {
         signal.removeEventListener('abort', done)
         resolve()
       }
-      const timer = setTimeout(done, this.pollMs)
+      const timer = setTimeout(done, ms)
       set.add(done)
       signal.addEventListener('abort', done, { once: true })
     })
   }
 
-  /** Waits until the question is resolved; undefined once `signal` aborts first. */
-  private async waitFor(id: string, signal: AbortSignal): Promise<Row | undefined> {
+  /**
+   * Waits until the question is resolved; undefined once `signal` aborts first,
+   * 'due' once `deadline` (epoch ms, an attention request's timer) passes first.
+   */
+  private async waitFor(id: string, signal: AbortSignal, deadline?: number): Promise<Row | 'due' | undefined> {
     for (;;) {
       if (signal.aborted) return undefined
       const row = await this.row(id)
       if (!row) throw new Error(`question ${id} no longer exists`)
       if (row.outcome !== null) return row
-      await this.pause(id, signal)
+      const left = deadline === undefined ? this.pollMs : deadline - Date.now()
+      if (left <= 0) return 'due'
+      await this.pause(id, signal, Math.min(this.pollMs, left))
     }
+  }
+
+  /**
+   * An attention request's timer (#815): resolves the row as `timed_out`, never
+   * answered, and returns it; or, when an answer or a cancellation won the race,
+   * the row as that left it.
+   */
+  private async timeOut(sessionId: string, id: string, onTimeout: OnTimeout): Promise<Row> {
+    const reason = `nobody replied in time (on_timeout: ${onTimeout})`
+    const resolved = await this.atomically(sessionId, async (tx) => {
+      const [row] = await tx<Resolved[]>`
+        UPDATE ai_questions SET outcome = 'timed_out', reason = ${reason}, resolved_at = now()
+        WHERE id = ${id} AND outcome IS NULL
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
+      return row
+        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: false, reason })] }
+        : { value: undefined, events: [] }
+    })
+    if (resolved) {
+      this.wake(id)
+      try {
+        await this.refreshStatus(sessionId)
+      } finally {
+        await this.audited([
+          {
+            kind: 'question',
+            action: 'timed_out',
+            surface: 'system',
+            actor: SYSTEM_ACTOR,
+            sessionId,
+            turnId: resolved.turn_id,
+            toolUseId: resolved.tool_use_id,
+            tier: 'read',
+            outcome: 'refused',
+            detail: safeDetail(`${resolved.tool} attention request ${id}: ${reason}`),
+            startedAt: resolved.created_at,
+            finishedAt: new Date(),
+          },
+        ])
+      }
+    }
+    const row = await this.row(id)
+    if (!row) throw new Error(`question ${id} no longer exists`)
+    return row
   }
 
   /** The canUseTool question gate for one turn (harness/questions.ts QuestionGate). */
@@ -333,16 +449,61 @@ export class QuestionService {
         }
       }
       const { sessionId, turnId } = context
+      const { attention } = request
       const asked = await this.atomically(sessionId, async (tx) => {
+        const none = { asked: false, superseded: [] as Resolved[] }
         // Still this turn's, and still the user's: after a handoff mid-turn
         // the new owner is not asked, so nothing parks for them.
         const [owner] = await tx<{ owner_kind: string }[]>`
           SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND turn_id = ${turnId} FOR UPDATE`
-        if (owner?.owner_kind !== 'browser') return { value: false, events: [] }
-        const tail: ServerEvent[] = [event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions })]
-        await tx`
-          INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
-          VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)})`
+        if (owner?.owner_kind !== 'browser') return { value: none, events: [] }
+        const tail: ServerEvent[] = []
+        let superseded: Resolved[] = []
+        let expiresAt: Date | null = null
+        if (attention) {
+          // #815 §5: a per-user rate limit (every session is the browser user's,
+          // or the request was refused above), then one open request per reason.
+          // The limit spans sessions and replicas, so its count and insert hold one
+          // lock that does too (to commit), or two turns could each read 9 and insert.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+          const [recent] = await tx<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM ai_questions
+            WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
+          if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
+          const why = 'replaced by a newer request for the same reason'
+          superseded = await tx<Resolved[]>`
+            UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
+            WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
+              AND outcome IS NULL
+            RETURNING id, turn_id, tool, tool_use_id, created_at`
+          for (const r of superseded) {
+            tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
+          }
+          const [inserted] = await tx<{ expires_at: Date }[]>`
+            INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
+                                      kind, attention_reason, on_timeout, expires_at)
+            VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
+                    'attention', ${attention.reason}, ${attention.onTimeout},
+                    now() + make_interval(secs => ${attention.timeoutS}))
+            RETURNING expires_at`
+          expiresAt = inserted?.expires_at ?? null
+        } else {
+          await tx`
+            INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
+            VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)})`
+        }
+        tail.push(
+          event({
+            type: 'question.asked',
+            sessionId,
+            id,
+            tool: request.toolUseId,
+            questions,
+            ...(attention && expiresAt
+              ? { attention: { reason: attention.reason, onTimeout: attention.onTimeout, expiresAt: expiresAt.toISOString() } }
+              : {}),
+          }),
+        )
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
         // shown; each refreshStatus hands back to whichever is still pending).
@@ -350,20 +511,56 @@ export class QuestionService {
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`
         if (moved.count > 0) tail.push(event({ type: 'session.status', sessionId, status: 'waiting_input' }))
-        return { value: true, events: tail }
+        return { value: { asked: true, superseded }, events: tail }
       })
-      if (!asked) {
+      for (const r of asked.superseded) this.wake(r.id)
+      await this.audited(
+        asked.superseded.map((r) => ({
+          kind: 'question',
+          action: 'cancelled',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'refused',
+          detail: safeDetail(`${r.tool} attention request ${r.id}: replaced by a newer request for the same reason`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+      if ('limited' in asked) {
+        return {
+          answered: false,
+          message:
+            `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
+            `${ATTENTION_RATE_WINDOW_S / 60} minutes. Say what you need in your reply instead.`,
+        }
+      }
+      if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
-      const resolved = await this.waitFor(id, AbortSignal.any([context.signal, request.signal]))
-      if (!resolved) {
+      const signal = AbortSignal.any([context.signal, request.signal])
+      const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
+      const waited = await this.waitFor(id, signal, deadline)
+      const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
+      if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay
         // answerable for an answer nobody would read, nor the session say it waits.
         // (A turn that stopped cancels its questions as it finishes.)
         if (!context.signal.aborted) await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
         return { answered: false, message: 'The user did not answer: the turn stopped first.' }
+      }
+      if (resolved.outcome === 'timed_out' && attention) {
+        if (attention.onTimeout === 'proceed') return { answered: false, timedOut: true, message: resolved.reason ?? 'timed out' }
+        // `wait` waited to its ceiling and then does what `stop` does: end the
+        // turn, as an interrupt would. Never an answer, never an approval.
+        const why = `nobody replied to the attention request in ${attention.timeoutS} s (on_timeout: ${attention.onTimeout})`
+        context.stopTurn?.(why)
+        return { answered: false, message: `The user did not reply: ${why}. Your turn ends here.` }
       }
       if (resolved.outcome !== 'answered' || !resolved.answers) {
         return { answered: false, message: `The user did not answer: ${resolved.reason ?? 'the question was cancelled'}.` }

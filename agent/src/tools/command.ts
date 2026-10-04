@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
+import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { type ToolContext, ToolError } from './registry.js'
 
@@ -91,12 +92,7 @@ export async function reattach<T>(
   return ok(answered(ctx, send, what, gaveUp), what)
 }
 
-type Operation = {
-  id: string
-  status: 'running' | 'succeeded' | 'failed'
-  result?: unknown
-  error?: { status: number; title: string; detail: string } | null
-}
+type Operation = components['schemas']['Operation']
 
 /** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
 export type CommandHeaders = { 'Idempotency-Key': string }
@@ -131,8 +127,11 @@ export async function command<T>(
     )) as Operation
   }
   if (op.status === 'failed') {
+    // The problem the route would have answered, type and extensions included, through
+    // the same `ok` as a direct answer (review #1063 4).
     const error = op.error
-    throw new ToolError(`${what} failed (HTTP ${error?.status ?? 500})`, error?.status ?? 500, error ? `${error.title}: ${error.detail}` : undefined)
+    const problem = error ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail } : undefined
+    return ok<T>(Promise.resolve({ error: problem, response: new Response(null, { status: error?.status ?? 500 }) }), what)
   }
   return op.result as T
 }
