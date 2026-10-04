@@ -251,8 +251,8 @@ def _reduced_url(
     query or fragment, when it is relative or on one of ScadBuddy's own origins. Any
     other absolute URL (``scheme://host`` or ``//host``), and one on no route, keeps
     its origin, without any userinfo; any other relative URL on no route is None.
-    A ``frame`` URL (a stack frame's) on an own origin also keeps a path under ``/assets/``, a bundle script, without query or
-    fragment."""
+    A ``frame`` URL (a stack frame's) on an own origin also keeps a path under
+    ``/assets/``, a bundle script, without query or fragment."""
     try:
         parts = urlsplit(url)
     except ValueError:
