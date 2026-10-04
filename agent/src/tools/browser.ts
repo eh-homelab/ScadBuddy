@@ -121,8 +121,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           isBack: async () => (await tabs(ctx).status(target(ctx))).attached,
         })
         if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
-        if (spec.risk !== 'read') throw new ToolError(tabBackNotRun(`browser_${spec.tool}`))
+        if (spec.risk !== 'read') throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
         outcome = await call()
+        if (!outcome.ok && outcome.error.code === 'no_browser') {
+          throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
+        }
       }
       if (outcome.ok) return json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
@@ -135,11 +138,19 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
 }
 
 /** #815 §2: a write or outward call that waited for the tab is not re-run when it is back. */
-export function tabBackNotRun(tool: string): string {
+export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): string {
+  const ended =
+    why === 'reconnected' ? 'the session has a connected tab again' : 'the user said they are back (a tab may not be attached yet)'
   return (
-    `the tab is back, but ${tool} was not run: the page may have reloaded or changed while the tab was away. ` +
-    `Re-check the page (browser_snapshot) and call ${tool} again if it is still what you want.`
+    `${ended}, but ${tool} was not run: the page may have reloaded or changed while the tab was away. ` +
+    `Re-check the page (browser_status, then browser_snapshot) and call ${tool} again if it is still what you want.`
   )
+}
+
+/** Why a read retried after a tab wait can still find no tab here. */
+const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
+  reconnected: 'The tab reconnected, but not to this agent replica, so it cannot be reached from here.',
+  user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */

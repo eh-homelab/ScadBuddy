@@ -184,6 +184,7 @@ export const TAB_WAIT_S = 300
  */
 export const TAB_WAITS_PER_TURN = 3
 const CARRY_ON = 'Carry on without the tab'
+const IM_BACK = "I'm back"
 
 export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
   let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
@@ -192,6 +193,8 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   let gaveUp: string | undefined
   let started = 0
   return ({ tool, toolUseId, signal, isBack }) => {
+    // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
+    if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
     if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
     if (!open && started >= TAB_WAITS_PER_TURN) {
       gaveUp =
@@ -228,8 +231,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         reason: 'tab_disconnected',
         message:
           `I need your ScadBuddy tab for ${tool}, but it is not connected. Open ScadBuddy (or reload it) and open ` +
-          'this chat in the assistant panel, and I will carry on there. Without it I carry on with what needs no tab.',
-        options: ["I'm back", CARRY_ON],
+          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
+          'on with what needs no tab.',
+        options: [IM_BACK, CARRY_ON],
         timeout_s: TAB_WAIT_S,
       })
       if (!parsed.ok) throw new Error(parsed.error)
@@ -249,11 +253,16 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           },
         },
       })
-      if ('reconnected' in verdict && verdict.reconnected) return { back: true }
-      // Any reply but "carry on" means try again (it costs one call, which says if it still finds no tab).
+      if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
+      // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
+      // other reply is the user's own words, which the model must read, so the
+      // call is not run and its error carries them.
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
-        if (reply !== CARRY_ON) return { back: true }
+        if (reply === IM_BACK) return { back: true, why: 'user_back' }
+        if (reply !== CARRY_ON) {
+          return { back: false, message: `The user replied ${JSON.stringify(reply)} instead; the call was not run. Act on their reply.` }
+        }
         gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`
         return { back: false, message: gaveUp }
       }

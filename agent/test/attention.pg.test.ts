@@ -384,7 +384,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await m.questions.listPending()).toHaveLength(1)
     await m.questions.reconnected(session.id)
     await turn!.done
-    expect(results).toEqual([{ back: true }, { back: true }])
+    expect(results).toEqual([{ back: true, why: 'reconnected' }, { back: true, why: 'reconnected' }])
   })
 
   // The tab came back after the call failed but before the request was recorded: nothing was waiting then.
@@ -409,7 +409,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
-    expect(results).toEqual([{ back: true }])
+    expect(results).toEqual([{ back: true, why: 'reconnected' }])
     expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ outcome: 'reconnected' }])
   })
 
@@ -449,7 +449,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`).length).toBe(2)
     expect(await m.questions.reconnected(session.id)).toBe(2)
     await turn!.done
-    expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true }])
+    expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true, why: 'reconnected' }])
   })
 
   /** A turn that runs `body` with its waitForTab, then ends; `m` is its manager. */
@@ -500,7 +500,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await pending(session.id)
     expect(await m.questions.reconnected(session.id)).toBe(1)
     await turn.done
-    expect(results).toEqual([{ back: true }])
+    expect(results).toEqual([{ back: true, why: 'reconnected' }])
   })
 
   it('a session another principal owns gets no wait: its browser_* calls fail at once', async () => {
@@ -537,7 +537,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
 
   it('parks a tab_disconnected request whose timer, at five minutes, proceeds', async () => {
     const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
-    expect(await call(gate)).toEqual({ back: true })
+    expect(await call(gate)).toEqual({ back: true, why: 'reconnected' })
     expect(asked[0]).toMatchObject({
       tool: 'mcp__scadbuddy__browser_snapshot',
       toolUseId: 'toolu_1',
@@ -554,8 +554,12 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
         signal: never,
         isBack: gone,
       })
-    expect(await answered("I'm back")).toEqual({ back: true })
-    expect(await answered('reopened it')).toEqual({ back: true })
+    expect(await answered("I'm back")).toEqual({ back: true, why: 'user_back' })
+    // The user's own words are not "I'm back": the call is not run, and the model reads them.
+    expect(await answered("never mind, don't print it")).toEqual({
+      back: false,
+      message: 'The user replied "never mind, don\'t print it" instead; the call was not run. Act on their reply.',
+    })
     expect(await answered('Carry on without the tab')).toEqual({ back: false, message: expect.stringMatching(/carry on without the tab/) })
     expect(await call(gateOf({ answered: false, timedOut: true, message: 'x' }).gate)).toEqual({ back: false, message: timedOutText(TAB_WAIT_S) })
     expect(await call(gateOf({ answered: false, message: 'The user did not answer: the turn stopped first.' }).gate)).toEqual({
@@ -602,7 +606,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     // At once, before the withdrawn wait has settled.
     const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: never, isBack: gone })
     expect(await a).toEqual({ back: false, message: expect.stringMatching(/stopped while it waited/) })
-    expect(await b).toEqual({ back: true })
+    expect(await b).toEqual({ back: true, why: 'reconnected' })
     expect(requests.map((r) => r.toolUseId)).toEqual(['toolu_a', 'toolu_b'])
     expect(requests[0]!.signal.aborted).toBe(true)
   })
@@ -618,11 +622,31 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       results.push(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: gone }))
     }
     expect(asked).toBe(TAB_WAITS_PER_TURN)
-    expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true }))
+    expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true, why: 'reconnected' }))
     expect(results.slice(TAB_WAITS_PER_TURN)).toEqual([
       { back: false, message: expect.stringMatching(/waited for 3 times this turn.*another agent replica/s) },
       { back: false, message: expect.stringMatching(/waited for 3 times this turn/) },
     ])
+  })
+
+  it('a call already stopped opens no wait: no card, and none of the turn\'s waits used', async () => {
+    let asked = 0
+    const wait = waitForTab(() => {
+      asked += 1
+      return Promise.resolve({ answered: false, reconnected: true, message: 'x' })
+    }, never, noop)
+    const stopped = new AbortController()
+    stopped.abort()
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `s${i}`, signal: stopped.signal, isBack: gone })).toEqual({
+        back: false,
+        message: 'The call stopped before it waited for the tab.',
+      })
+    }
+    expect(asked).toBe(0)
+    // The turn's waits are all still there.
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'live', signal: never, isBack: gone })).toEqual({ back: true, why: 'reconnected' })
+    expect(asked).toBe(1)
   })
 
   it('a call that stops waiting leaves the others sharing the wait still waiting', async () => {
@@ -635,6 +659,6 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     first.abort()
     expect(await a).toEqual({ back: false, message: expect.stringMatching(/stopped while it waited/) })
     release!({ answered: false, reconnected: true, message: 'x' })
-    expect(await b).toEqual({ back: true })
+    expect(await b).toEqual({ back: true, why: 'reconnected' })
   })
 })

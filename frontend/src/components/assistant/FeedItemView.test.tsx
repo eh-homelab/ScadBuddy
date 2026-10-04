@@ -370,7 +370,7 @@ describe('the tab-disconnected card (#815)', () => {
       reconnected: true,
     }
     render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
-    expect(screen.getByRole('status')).toHaveTextContent('The tab is back; the assistant carries on there.')
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back; the assistant re-checks the page before going on.')
     expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
   })
 })

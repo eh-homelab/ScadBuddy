@@ -471,7 +471,7 @@ describe('waiting for the tab (#815)', () => {
         waits.push({ tool, toolUseId })
         await tab(hub, TAB, () => ({ ok: true, result: { snapped: true } }))
         hub.pairSession('s1', TAB)
-        return { back: true }
+        return { back: true, why: 'reconnected' as const }
       },
     }
     const result = await runTool(tool('browser_snapshot'), {}, c)
@@ -494,12 +494,29 @@ describe('waiting for the tab (#815)', () => {
       waitForTab: async () => {
         back = await tab(hub)
         hub.pairSession('s1', TAB)
-        return { back: true }
+        return { back: true, why: 'reconnected' as const }
       },
     })
     expect(result.isError).toBe(true)
-    expect(text(result)).toBe(tabBackNotRun(name))
+    expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
     expect(back!.calls()).toEqual([])
+  })
+
+  it("words the not-run error by why the wait ended: the user's word is not a connected tab", async () => {
+    const hub = new TabHub()
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(result)).toBe(tabBackNotRun('browser_set_param', 'user_back'))
+    expect(text(result)).toMatch(/^the user said they are back \(a tab may not be attached yet\), but browser_set_param was not run/)
+    expect(tabBackNotRun('browser_click', 'reconnected')).toMatch(/^the session has a connected tab again, but browser_click was not run/)
+    const read = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(read)).toMatch(/The user said they were back, but no tab is attached here yet\.$/)
   })
 
   it('fails with the wait\'s outcome when the tab did not come back, and retries only once', async () => {
@@ -518,10 +535,10 @@ describe('waiting for the tab (#815)', () => {
       ...ctx(hub.forSession('s1'), browser),
       waitForTab: () => {
         waited += 1
-        return Promise.resolve({ back: true })
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
       },
     })
-    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session/)
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The tab reconnected, but not to this agent replica/s)
     expect(waited).toBe(2)
   })
 
@@ -534,7 +551,7 @@ describe('waiting for the tab (#815)', () => {
       ...ctx(hub.forSession('s1'), browser),
       waitForTab: () => {
         waited = true
-        return Promise.resolve({ back: true })
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
       },
     })
     expect(text(result)).toMatch(/did not answer/)

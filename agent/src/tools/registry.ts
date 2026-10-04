@@ -35,7 +35,10 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
 /** How a browser_* call's wait for its tab ended (ToolServices `waitForTab`). */
-export type TabWait = { back: true } | { back: false; message: string }
+export type TabWait =
+  /** `why`: the hub saw the session's tab again, or the user said they are back (the tab may still not be here). */
+  | { back: true; why: 'reconnected' | 'user_back' }
+  | { back: false; message: string }
 /**
  * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
  * `isBack`: whether the call's tab is connected now, checked once the wait is
