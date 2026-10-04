@@ -15,12 +15,16 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
+from scadbuddy.workflows import print_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
+from scadbuddy.workflows.operation_activities import _kind_activities
 from scadbuddy.workflows.operation_models import (
     FinishOp,
     InsertOp,
@@ -33,6 +37,7 @@ from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED,
     OPERATION_CANCELLED_RUNNING,
     OPERATION_UNEXPECTED_DETAIL,
+    OPERATION_UNEXPECTED_RUNNING_DETAIL,
 )
 from tests.support.temporal import temporal_client
 
@@ -185,15 +190,18 @@ async def test_an_effect_failure_completes_with_the_problem(
     assert fake.calls[-1] == "finish:502"
 
 
-async def test_an_unexpected_effect_error_is_recorded_as_unexpected(
+async def test_an_unexpected_effect_error_says_the_effect_may_have_happened(
     client: Client, worker: str, fake: Fake
 ) -> None:
+    """Review #1063 (second) 1: a crash or timeout in the run may come after Bambuddy
+    took the write, so the record warns as a cancel mid-run does."""
     fake.run_error = RuntimeError("boom")
     arg = op_input()
     answer = await start(client, worker, arg)
     assert answer.operation is not None and answer.operation.error is not None
     assert answer.operation.error.status == 500
-    assert answer.operation.error.detail == OPERATION_UNEXPECTED_DETAIL
+    assert answer.operation.error.detail == OPERATION_UNEXPECTED_RUNNING_DETAIL
+    assert OPERATION_UNEXPECTED_RUNNING_DETAIL != OPERATION_UNEXPECTED_DETAIL
 
 
 async def test_the_run_activity_takes_the_kinds_attempts(
@@ -210,10 +218,12 @@ async def test_the_run_activity_takes_the_kinds_attempts(
                 scheduled = event.activity_task_scheduled_event_attributes
                 if scheduled.activity_type.name == "op.test.run":
                     attempts[f"run{n}"] = scheduled.retry_policy.maximum_attempts
+                    heartbeat = scheduled.heartbeat_timeout.ToTimedelta().total_seconds()
+                    attempts["run_heartbeat"] = int(heartbeat)
                 if scheduled.activity_type.name == "op.test.check":
                     timeout = scheduled.start_to_close_timeout.ToTimedelta().total_seconds()
                     attempts["check_timeout"] = int(timeout)
-    assert attempts == {"run1": 1, "run3": 3, "check_timeout": 8}
+    assert attempts == {"run1": 1, "run3": 3, "check_timeout": 8, "run_heartbeat": 30}
 
 
 async def test_a_second_update_while_running_is_a_repeat_that_runs_nothing(
@@ -290,3 +300,25 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     assert answer.operation is not None
     assert answer.operation.error == OPERATION_CANCELLED_RUNNING
     assert (await ended(client, arg)).status == "failed"
+
+
+async def test_the_run_activity_heartbeats_while_the_effect_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1063 (second) 2: a run on a worker that died is retired after the
+    heartbeat timeout, not after the whole ``RUN_TIMEOUT``."""
+    monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.01)
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def slow(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {"done": True}
+
+    _, run = _kind_activities(OperationKind(name="slow", check=check, run=slow))
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    env.on_heartbeat = lambda *details: beats.append(details)
+    assert await env.run(run, RunOp(request={}, checked={})) == {"done": True}
+    assert beats

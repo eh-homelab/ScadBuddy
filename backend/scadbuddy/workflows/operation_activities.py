@@ -30,7 +30,7 @@ from scadbuddy.workflows.operation_models import (
     check_activity,
     run_activity,
 )
-from scadbuddy.workflows.print_activities import raised_as
+from scadbuddy.workflows.print_activities import _heartbeating, raised_as
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: Below the check activity's 8 s start-to-close (`workflows/operation.py` CHECK_TIMEOUT).
@@ -98,7 +98,8 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=run_activity(kind.name))
     async def run(input: RunOp) -> dict[str, Any]:
         try:
-            return await kind.run(input.request, input.checked)
+            # Heartbeats, so a run on a worker that died ends at the heartbeat timeout.
+            return await _heartbeating(kind.run(input.request, input.checked))
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 

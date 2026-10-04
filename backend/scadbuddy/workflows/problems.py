@@ -11,6 +11,12 @@ from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
+#: An unexpected failure of an operation's effect (review #1063 second review 1): a crash
+#: or timeout may come after Bambuddy took the write, so it may have been done.
+OPERATION_UNEXPECTED_RUNNING_DETAIL = (
+    "ScadBuddy failed unexpectedly while doing this, so it may have been done. "
+    "Check Bambuddy before trying again; ScadBuddy's logs say what failed."
+)
 #: What an operation cancelled before its record answers: nothing was written or done.
 OPERATION_CANCELLED = PrintRunError(
     status=409,

@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
         OPERATION_CANCELLED,
         OPERATION_CANCELLED_RUNNING,
         OPERATION_UNEXPECTED_DETAIL,
+        OPERATION_UNEXPECTED_RUNNING_DETAIL,
         problem_of,
     )
 
@@ -47,6 +48,9 @@ with workflow.unsafe.imports_passed_through():
 CHECK_TIMEOUT = timedelta(seconds=8)
 #: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin.
 RUN_TIMEOUT = timedelta(minutes=5)
+#: The run heartbeats (`operation_activities.py`), so a run on a worker that died is
+#: retired after this, not after ``RUN_TIMEOUT`` (review #1063 second review 2).
+RUN_HEARTBEAT = timedelta(seconds=30)
 SHORT = timedelta(seconds=60)
 READ_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
@@ -150,6 +154,7 @@ class OperationWorkflow:
                 RunOp(request=input.request, checked=checked),
                 result_type=dict,
                 start_to_close_timeout=RUN_TIMEOUT,
+                heartbeat_timeout=RUN_HEARTBEAT,
                 retry_policy=RetryPolicy(
                     maximum_attempts=input.run_attempts,
                     initial_interval=timedelta(seconds=1),
@@ -160,9 +165,11 @@ class OperationWorkflow:
             if is_cancelled_exception(error):
                 # The effect may have reached Bambuddy before the cancel (review #1063 2).
                 return FinishOp(operation_id=operation_id, error=OPERATION_CANCELLED_RUNNING)
+            # A crash or timeout may come after Bambuddy took the write (review #1063
+            # second review 1), so the unexpected failure says it may have been done.
             return FinishOp(
                 operation_id=operation_id,
-                error=problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL),
+                error=problem_of(error, unexpected=OPERATION_UNEXPECTED_RUNNING_DETAIL),
             )
         return FinishOp(operation_id=operation_id, result=result)
 
