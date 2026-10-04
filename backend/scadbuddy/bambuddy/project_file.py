@@ -29,7 +29,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
 from scadbuddy.library.libraries import LibraryError, model_search_path
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 
@@ -152,7 +152,7 @@ async def generate_target(
 
 async def file_into_project(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,

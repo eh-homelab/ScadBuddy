@@ -17,7 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy import operations as bambuddy_operations
+from scadbuddy.bambuddy import output_reader
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
 from tests.api.test_print_history import link, mock_archive
@@ -72,7 +72,9 @@ def test_a_reprint_refusal_writes_no_operation(
     assert response.status_code == 409
     assert not queue.called
     with psycopg.connect(pg_conninfo) as conn:
-        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind <> 'output_create'"
+        ).fetchone() == (0,)
 
 
 @respx.mock
@@ -87,7 +89,9 @@ def test_a_reprint_is_recorded_as_an_operation(
     client.post("/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex})
 
     with psycopg.connect(pg_conninfo) as conn:
-        row = conn.execute("SELECT kind, subject, status, result FROM operations").fetchone()
+        row = conn.execute(
+            "SELECT kind, subject, status, result FROM operations WHERE kind <> 'output_create'"
+        ).fetchone()
     assert row is not None and row[:3] == ("reprint", "archive:35", "succeeded")
     assert row[3]["queue_item_id"] == 51
 
@@ -134,7 +138,7 @@ def test_a_slow_check_that_is_not_bambuddy_is_not_blamed_on_bambuddy(
         await asyncio.sleep(9)
         return "never"
 
-    monkeypatch.setattr(bambuddy_operations, "output_stem", slow_stem)
+    monkeypatch.setattr(output_reader, "output_stem", slow_stem)
 
     response = client.post(
         f"/api/v1/outputs/{output_id}/project-file",
@@ -282,7 +286,9 @@ def test_a_bambuddy_error_in_the_effect_is_a_failed_operation_with_its_problem(
     response = _post(client, case, uuid.uuid4().hex)
 
     with psycopg.connect(pg_conninfo) as conn:
-        row = conn.execute("SELECT kind, status, error FROM operations").fetchone()
+        row = conn.execute(
+            "SELECT kind, status, error FROM operations WHERE kind <> 'output_create'"
+        ).fetchone()
     assert row is not None and row[:2] == (kind, "failed"), row
     assert row[2]["detail"] != OPERATION_UNEXPECTED_DETAIL
     assert response.status_code == row[2]["status"] != 500, response.text

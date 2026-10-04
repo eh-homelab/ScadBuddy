@@ -11,7 +11,8 @@ name: Deploy (reusable)
 #      CI, so the required checks that gate auto-merge would never report.
 #   2. Rewrite applications/scadbuddy/scadbuddy.yaml (the API) and, once it
 #      exists in clusters, applications/scadbuddy/scadbuddy-render.yaml (the
-#      render worker, same image; #547): in each, the image line to
+#      render worker, same image; #547) and scadbuddy-print.yaml (the print
+#      worker, same image; #1060): in each, the image line to
 #      `ghcr.io/eh-homelab/scadbuddy:<version>@sha256:<digest>` and the three
 #      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
 #      The agent sidecar's line in the API manifest (#738) is pinned to
@@ -77,6 +78,8 @@ env:
   # The render worker's Deployment (#547, clusters#1454): same image, same pin.
   # Optional until that file lands in clusters; pinned whenever it exists.
   MANIFEST_WORKER: applications/scadbuddy/scadbuddy-render.yaml
+  # The print worker's Deployment (#1060): same image, same pin.
+  MANIFEST_PRINT: applications/scadbuddy/scadbuddy-print.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -280,6 +283,13 @@ jobs:
             manifests+=("$MANIFEST_WORKER")
           else
             echo "::notice::${MANIFEST_WORKER} is not in clusters yet; pinning ${MANIFEST} only"
+          fi
+          # Conditional until clusters adds the print worker's file (#1060).
+          if [ -f "$MANIFEST_PRINT" ]; then
+            pin "$MANIFEST_PRINT" scadbuddy-print
+            manifests+=("$MANIFEST_PRINT")
+          else
+            echo "::notice::${MANIFEST_PRINT} is not in clusters yet; not pinning it"
           fi
 
           if git diff --quiet -- "${manifests[@]}"; then

@@ -5,7 +5,8 @@
 2. ``op_insert`` writes the record, retried on its own so a refusal never follows it.
    A cancel waits it out and ends the record, which is never left ``running``.
 3. ``op.<kind>.run`` is the effect, with the kind's attempts; then ``op_finish``. From
-   the record on, every outcome completes the execution and is recorded.
+   the record on, every outcome completes the execution and is recorded. A kind with a
+   prelude (#1060) runs ``op.<prelude>.run`` on the prelude's own queue first.
 
 Every kind here is ``done`` (§4.2 step 4): the Update answers once the effect ended.
 """
@@ -27,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         FINISH_ACTIVITY,
         INSERT_ACTIVITY,
         OPERATION_WORKFLOW,
+        PRELUDE_PATCH,
         FinishOp,
         InsertOp,
         OperationAnswer,
@@ -145,8 +147,25 @@ class OperationWorkflow:
     async def _effect(
         self, input: OperationInput, operation_id: str, checked: dict[str, Any]
     ) -> FinishOp:
-        """The kind's run; whatever happened is recorded, and the execution completes."""
+        """The kind's prelude, if any, then its run; whatever happened is recorded, and
+        the execution completes. A prelude that fails is the operation's failure, and
+        the run never starts."""
         try:
+            prelude = input.prelude
+            if prelude is not None and workflow.patched(PRELUDE_PATCH):
+                await workflow.execute_activity(
+                    run_activity(prelude.kind),
+                    RunOp(request=input.request, checked={}, author=input.author),
+                    result_type=dict,
+                    task_queue=prelude.task_queue,
+                    start_to_close_timeout=RUN_TIMEOUT,
+                    heartbeat_timeout=RUN_HEARTBEAT,
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=prelude.run_attempts,
+                        initial_interval=timedelta(seconds=1),
+                        backoff_coefficient=2.0,
+                    ),
+                )
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
                 RunOp(request=input.request, checked=checked, author=input.author),

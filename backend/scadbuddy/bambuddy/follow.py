@@ -42,10 +42,11 @@ from pydantic import BaseModel
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.bambuddy.output_reader import OutputReader
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError, OutputStore
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class Follower:
     def __init__(
         self,
         *,
-        outputs: OutputStore,
+        outputs: OutputReader,
         observer: ProgressObserver,
         read: Reader,
         events: EventBus | None,
@@ -142,7 +143,7 @@ class Follower:
             if self.now() - active > self.max_age:
                 return "quiet"
             try:
-                meta = await asyncio.to_thread(self.outputs.get, output_id)
+                meta = await self.outputs.get(output_id)
             except OutputNotFoundError:
                 return "deleted"
             except Exception:

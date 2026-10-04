@@ -23,7 +23,7 @@ from typing import Any
 from psycopg_pool import ConnectionPool
 from temporalio import workflow
 from temporalio.client import Client
-from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+from temporalio.common import RetryPolicy, VersioningBehavior, WorkflowIDReusePolicy
 from temporalio.exceptions import ActivityError, WorkflowAlreadyStartedError
 
 with workflow.unsafe.imports_passed_through():
@@ -102,6 +102,19 @@ class FollowPrint:
             pokes += 1
             if pokes >= MAX_POKES or workflow.info().is_continue_as_new_suggested():
                 workflow.continue_as_new(args=[output_id, fresh])
+
+
+@workflow.defn(name=FOLLOW_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedFollowPrint(FollowPrint):
+    """``FollowPrint`` on the versioned ``scadbuddy-print`` worker (#1060): AUTO_UPGRADE,
+    because a follow lasts as long as its print, so it moves to each new build instead
+    of holding the old one's drain. Its own class because a versioning behavior is
+    refused by an unversioned worker (the API's in-process one). Changes still go behind
+    ``workflow.patched``, in ``FollowPrint``."""
+
+    @workflow.run
+    async def run(self, output_id: str, fresh: bool = False) -> str:
+        return await super().run(output_id, fresh)
 
 
 async def follow(client: Client, task_queue: str, output_id: str) -> bool:

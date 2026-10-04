@@ -21,13 +21,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
@@ -41,12 +41,11 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
-from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
-from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
@@ -75,9 +74,11 @@ HEARTBEAT_EVERY = 10.0
 @dataclass
 class PrintDeps:
     settings_store: SettingsStore
-    outputs: OutputStore
+    #: The outputs, on the volume or through the API (#1060).
+    outputs: OutputReader
+    #: Where a print records the output's last print (#1060).
+    prints: OutputPrintStore | None
     uploads: BambuddyUploadStore
-    catalogue: Catalogue
     store: PrintRunStore
     observer: ProgressObserver
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
@@ -129,10 +130,11 @@ class PrintActivities:
         return OutputSource(
             self.d.outputs,
             self.d.uploads,
-            require_output(self.d.outputs, spec.output_id),
+            await require(self.d.outputs, spec.output_id),
             settings,
             stem=spec.stem,
             print_settings=spec.print_settings,
+            prints=self.d.prints,
         )
 
     @activity.defn(name="print_check")
@@ -151,19 +153,21 @@ class PrintActivities:
         try:
             if spec.kind == "output":
                 assert spec.output_id is not None
-                meta = require_output(self.d.outputs, spec.output_id)
+                meta = await require(self.d.outputs, spec.output_id)
                 # A copy uploaded into a project's folder is named like the one Generate
                 # files (#317); a model.json that refuses its print settings refuses the
                 # run here, before the record (#770).
-                stem = (
-                    await output_stem(meta, self.d.outputs, self.d.catalogue)
-                    if chosen_project(input.request, settings) is not None
-                    else None
-                )
+                naming = await self.d.outputs.naming(meta)
+                if naming.invalid_meta is not None:
+                    raise invalid_meta(naming.invalid_meta)
                 spec = spec.model_copy(
                     update={
-                        "stem": stem,
-                        "print_settings": self.d.catalogue.print_settings(meta.slug),
+                        "stem": (
+                            naming.stem
+                            if chosen_project(input.request, settings) is not None
+                            else None
+                        ),
+                        "print_settings": naming.print_settings,
                     }
                 )
             async with client_for(settings) as client:
@@ -173,10 +177,6 @@ class PrintActivities:
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
-        except InvalidModelMetaError as error:
-            # As every route that reads a broken model.json answers it (`api/models.py`).
-            invalid = ApiError(status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata")
-            raise raised_as(invalid, REFUSED) from None
         return Checked(source=spec, prepared=PreparedPlates.of(prepared))
 
     @activity.defn(name="print_insert")
@@ -302,7 +302,7 @@ class PrintActivities:
             # output deleted while it printed has nothing left to follow.
             # The workflow then starts its `FollowPrint` (#1053).
             try:
-                meta = require_output(self.d.outputs, spec.output_id)
+                meta = await require(self.d.outputs, spec.output_id)
                 self.d.observer.started(meta)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)

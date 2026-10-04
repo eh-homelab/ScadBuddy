@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -11,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -29,6 +30,9 @@ from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
+
+if TYPE_CHECKING:
+    from scadbuddy.library.output_prints import OutputPrintStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +139,19 @@ class _ResolvedCover:
     archive: Path | None
 
 
+class OutputFiles(Protocol):
+    async def model_3mf(self, output_id: str) -> bytes | None:
+        """The output's stored ``model.3mf``; ``None`` when it has none (or is gone)."""
+        ...
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
-    def __init__(self, paths: DataPaths) -> None:
+    def __init__(self, paths: DataPaths, *, prints: OutputPrintStore | None = None) -> None:
         self.paths = paths
+        #: The last print of each output (#1060), laid over what ``meta.json`` says.
+        self.prints = prints
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
@@ -173,7 +185,29 @@ class OutputStore:
 
     def get(self, output_id: str) -> OutputMeta:
         directory = self._find_dir(output_id)
-        return OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        [meta] = self._with_last_prints([meta])
+        return meta
+
+    def _with_last_prints(self, metas: list[OutputMeta]) -> list[OutputMeta]:
+        """Each output's recorded last print (#1060) over its file's; one with no row
+        keeps what an older release wrote into its ``meta.json``."""
+        if self.prints is None:
+            return metas
+        rows = self.prints.for_outputs([meta.id for meta in metas])
+        return [
+            meta.model_copy(update=rows[meta.id].fields()) if meta.id in rows else meta
+            for meta in metas
+        ]
+
+    async def model_3mf(self, output_id: str) -> bytes | None:
+        return await asyncio.to_thread(self._model_3mf, output_id)
+
+    def _model_3mf(self, output_id: str) -> bytes | None:
+        try:
+            return (self._find_dir(output_id) / MODEL_NAME).read_bytes()
+        except (OutputNotFoundError, FileNotFoundError):
+            return None
 
     def provenance(self, output_id: str) -> Provenance | None:
         """What the 3MF itself says produced it — the fallback when the record is gone."""
@@ -217,7 +251,7 @@ class OutputStore:
             OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
             for path in directory.glob(f"*/{META_NAME}")
         ]
-        return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
+        return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
 
     def ids_for(self, slug: str) -> list[str]:
         """The id of every output directory of ``slug``, readable record or not."""
@@ -299,41 +333,6 @@ class OutputStore:
         self.forget_plate_cover(job.slug)
         self._changed(job.slug)
         return meta
-
-    def record_send(
-        self,
-        output_id: str,
-        *,
-        queue_item_id: int | None = None,
-        print_route: PrintRoute | None = None,
-        slice_job_id: int | None = None,
-        project_id: int | None = None,
-        plates: list[PlateSend] | None = None,
-    ) -> OutputMeta:
-        """Persist the Bambuddy ids a send produced, leaving omitted ones alone.
-
-        A new print (``print_route`` given) without ``plates`` clears the previous
-        print's plates, so they never describe a print they were not part of.
-        """
-        directory = self._find_dir(output_id)
-        meta = self.get(output_id)
-        if plates is None and print_route is not None:
-            plates = []
-        updated = meta.model_copy(
-            update={
-                key: value
-                for key, value in (
-                    ("queue_item_id", queue_item_id),
-                    ("print_route", print_route),
-                    ("slice_job_id", slice_job_id),
-                    ("project_id", project_id),
-                    ("plates", plates),
-                )
-                if value is not None
-            }
-        )
-        self._write_meta(directory, updated)
-        return updated
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)

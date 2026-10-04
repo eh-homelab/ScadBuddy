@@ -11,6 +11,8 @@ shared unchanged.
 
 from __future__ import annotations
 
+import asyncio
+import io
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -21,10 +23,11 @@ from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, target_for
+from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, read_3mf, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
 
@@ -111,7 +114,7 @@ async def _spool_colours(
 
 @dataclass
 class OutputSource:
-    store: OutputStore
+    store: OutputFiles
     uploads: BambuddyUploadStore
     meta: OutputMeta
     settings: StoredSettings
@@ -119,6 +122,9 @@ class OutputSource:
     stem: str | None = None
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: Where :meth:`record` writes the output's last print (#1060); a source that only
+    #: reads (the print dialog's options and checks) has none.
+    prints: OutputPrintStore | None = None
 
     @property
     def colours(self) -> list[str]:
@@ -129,7 +135,8 @@ class OutputSource:
         return self.meta.slug
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
-        return [plate.index for plate in plates_of(self.store.directory(self.meta.id) / MODEL_NAME)]
+        payload = await read_3mf(self.store, self.meta)
+        return [plate.index for plate in plates_of(io.BytesIO(payload))]
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         copy = await copy_to_read(client, self.store, self.uploads, self.meta, self.settings)
@@ -197,11 +204,12 @@ class OutputSource:
             PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
             for item in outcome.queue_item_ids
         ]
+        assert self.prints is not None, "a source that records needs the print store"
         for queue_item_id in outcome.queue_item_ids:
-            self.store.record_send(
+            await asyncio.to_thread(
+                self.prints.record,
                 self.meta.id,
                 queue_item_id=queue_item_id,
-                print_route="slice_queue",
                 slice_job_id=outcome.slice_job_id,
                 project_id=project_id,
                 plates=sent,

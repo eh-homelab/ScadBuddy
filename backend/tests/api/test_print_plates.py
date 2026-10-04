@@ -225,7 +225,8 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
 
     assert answer.status_code == 502
     assert queue.call_count == 1
-    meta = json.loads(_output_3mf(paths, output_id).with_name("meta.json").read_text())
+    # In Postgres since #1060, read through the output's record.
+    meta = client.get(f"/api/v1/outputs/{output_id}").json()
     assert meta["queue_item_id"] == 9
     assert meta["print_route"] == "slice_queue"
     assert meta["slice_job_id"] == 9

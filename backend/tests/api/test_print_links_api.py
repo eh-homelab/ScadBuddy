@@ -29,7 +29,9 @@ def test_a_progress_poll_links_the_archive_and_the_proxy_serves_it(
 ) -> None:
     configure(client)
     output_id = make_output(client, model)
-    state(client).outputs.record_send(output_id, queue_item_id=34, print_route="slice_queue")
+    prints = state(client).outputs.prints
+    assert prints is not None
+    prints.record(output_id, queue_item_id=34, slice_job_id=None, project_id=None, plates=[])
     respx.get(f"{API}/queue/34").mock(
         return_value=httpx.Response(
             200, json={**recording("queue-item.json"), "id": 34, "archive_id": 18}
@@ -66,7 +68,9 @@ def test_attaching_a_queue_item_that_is_not_the_outputs_does_not_link_it(
     foreign one cannot open its archive's media (#522 review)."""
     configure(client)
     output_id = make_output(client, model)
-    state(client).outputs.record_send(output_id, queue_item_id=34, print_route="slice_queue")
+    prints = state(client).outputs.prints
+    assert prints is not None
+    prints.record(output_id, queue_item_id=34, slice_job_id=None, project_id=None, plates=[])
     for item, archive in ((34, 18), (500, 99)):
         respx.get(f"{API}/queue/{item}").mock(
             return_value=httpx.Response(

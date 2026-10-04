@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -21,6 +21,7 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.bambuddy import follow as follow_module
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.paths import DataPaths
@@ -106,7 +107,7 @@ def follower_for(
     seen: list[Event] = []
     bus.add_listener(seen.append)
     follower = Follower(
-        outputs=options.pop("outputs", OutputStore(paths)),
+        outputs=LocalOutputs(options.pop("outputs", OutputStore(paths)), cast(Any, None)),
         observer=ProgressObserver(bus),
         read=read,
         events=bus,

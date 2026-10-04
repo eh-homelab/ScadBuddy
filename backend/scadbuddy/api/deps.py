@@ -17,6 +17,7 @@ from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
@@ -41,6 +42,7 @@ from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
 from scadbuddy.library.media_store import PostgresMediaStore
+from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -296,7 +298,7 @@ def _build_core(settings: Settings) -> AppState:
     # Job events commit with the job change that they describe.
     projection.events = events
     preview_store = PreviewStore(pool.connection)
-    outputs = OutputStore(paths)
+    outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     uploads = BambuddyUploadStore(pool)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
@@ -384,7 +386,7 @@ def _build_core(settings: Settings) -> AppState:
         events=events,
         print_progress=print_progress,
         print_follower=Follower(
-            outputs=outputs,
+            outputs=LocalOutputs(outputs, catalogue),
             observer=print_progress,
             read=read_progress,
             events=events,

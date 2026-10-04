@@ -691,7 +691,7 @@ async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeed
             settings_store=cast(Any, _Settings()),
             outputs=unused,
             uploads=unused,
-            catalogue=unused,
+            prints=unused,
             store=unused,
             observer=unused,
         )
@@ -722,7 +722,7 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
             settings_store=unused,
             outputs=unused,
             uploads=unused,
-            catalogue=unused,
+            prints=unused,
             store=unused,
             observer=unused,
         )

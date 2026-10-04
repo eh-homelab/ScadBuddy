@@ -13,21 +13,25 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
+from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
+from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import chosen_project
-from scadbuddy.bambuddy.project_file import file_into_project, output_stem
+from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
     ProjectAttach,
     ProjectRequest,
     attach_results,
     ensure_project,
 )
-from scadbuddy.bambuddy.send import register_sidebar, send_output
+from scadbuddy.bambuddy.send import delete_inbox_copies, register_sidebar, send_output
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import require_output
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 
 if TYPE_CHECKING:
@@ -43,32 +47,48 @@ def _json(model: Any) -> dict[str, Any]:
 
 
 def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
-    """The Bambuddy kinds, bound to this process's stores."""
-    settings_store = core.settings_store
-    outputs = core.outputs
-    uploads = core.uploads
-    links = core.print_links
+    """The Bambuddy kinds, bound to this process's stores and its volume."""
+    return bambuddy_kinds_over(
+        settings_store=core.settings_store,
+        outputs=LocalOutputs(core.outputs, core.catalogue),
+        uploads=core.uploads,
+        links=core.print_links,
+        archive_cache=components.get(ARCHIVE_CACHE),
+    )
+
+
+def bambuddy_kinds_over(
+    *,
+    settings_store: SettingsStore,
+    outputs: OutputReader,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    archive_cache: ArchiveCache,
+) -> list[OperationKind]:
+    """The Bambuddy kinds over these stores: the API's, or the print worker's, which
+    reads its outputs through the API (#1060)."""
+    cache = archive_cache
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     async def output_check(request: dict[str, Any]) -> dict[str, Any]:
-        require_output(outputs, request["output_id"])
+        await require(outputs, request["output_id"])
         return {}
 
     async def send_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = settings_store.load()
-        meta = require_output(outputs, request["output_id"])
+        meta = await require(outputs, request["output_id"])
         async with client_for(settings) as client:
             return _json(await send_output(client, outputs, uploads, meta, settings))
 
     async def project_file_check(request: dict[str, Any]) -> dict[str, Any]:
-        meta = require_output(outputs, request["output_id"])
-        return {"stem": await output_stem(meta, outputs, core.catalogue)}
+        meta = await require(outputs, request["output_id"])
+        return {"stem": (await outputs.naming(meta)).stem}
 
     async def project_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = settings_store.load()
-        meta = require_output(outputs, request["output_id"])
+        meta = await require(outputs, request["output_id"])
         async with client_for(settings) as client:
             filed = await file_into_project(
                 client,
@@ -88,7 +108,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
             return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
-        require_output(outputs, request["output_id"])
+        await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
         project_id = chosen_project(body, settings_store.load())
         if project_id is None:
@@ -99,7 +119,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         return {"project_id": project_id}
 
     async def attach_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        meta = require_output(outputs, request["output_id"])
+        meta = await require(outputs, request["output_id"])
         wanted: list[int] = request["body"].get("queue_item_ids") or []
         ids = wanted or (
             [plate.queue_item_id for plate in meta.plates]
@@ -133,7 +153,6 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
     async def reprint_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         link = await _linked(archive_id)
-        cache = components.get(ARCHIVE_CACHE)
         async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
             archive = await cache.archive(client, archive_id)
         if archive is None:
@@ -152,7 +171,6 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             item = await client.enqueue(
                 QueueItemCreate(
@@ -172,7 +190,6 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
     async def timelapse_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         await _linked(archive_id)
-        cache = components.get(ARCHIVE_CACHE)
         async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
             if await cache.archive(client, archive_id) is None:
                 raise ApiError(
@@ -184,10 +201,19 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def timelapse_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        cache = components.get(ARCHIVE_CACHE)
         async with client_for(settings_store.load()) as client:
             await client.select_timelapse(archive_id, request["filename"])
             cache.forget(client, archive_id)
+        return {}
+
+    async def inbox_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """Output delete's Bambuddy part (#1060), its prelude: the output's copies in the
+        inbox go before its files do. A failure here keeps the output for a retry."""
+        meta = await require(outputs, request["output_id"])
+        if await uploads.for_output(meta.id):
+            settings = settings_store.load()
+            async with client_for(settings) as client:
+                await delete_inbox_copies(client, uploads, meta, settings)
         return {}
 
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -203,6 +229,15 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         OperationKind("reprint", reprint_check, reprint_run),
         OperationKind("timelapse_pull", timelapse_check, timelapse_run),
         OperationKind("register_sidebar", no_check, sidebar_run, run_attempts=3),
+        # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
+        # so a retry deletes nothing twice.
+        OperationKind(
+            "output_inbox_delete",
+            no_check,
+            inbox_delete_run,
+            run_attempts=3,
+            where="Bambuddy's inbox folder",
+        ),
     ]
 
 
