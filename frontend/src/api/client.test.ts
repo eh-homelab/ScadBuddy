@@ -852,8 +852,9 @@ describe('command() sends a key and follows an operation (#1053)', () => {
 })
 
 describe('library pins are commands (#1054)', () => {
+  const defaults = { ...printRunPoll }
   afterEach(() => {
-    printRunPoll.intervalMs = 1000
+    Object.assign(printRunPoll, defaults)
   })
 
   it.each([
@@ -882,6 +883,32 @@ describe('library pins are commands (#1054)', () => {
     )
     await expect(call()).resolves.toEqual(model)
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("rejects with a failed operation's problem, so the pin dialog's 409 still applies", async () => {
+    printRunPoll.intervalMs = 1
+    const operation = {
+      id: 'op-9',
+      kind: 'library_pin',
+      subject: 'w',
+      status: 'running',
+      created_at: '2026-10-03T00:00:00Z',
+    }
+    const detail = "'w''s 'BOSL2' was changed or removed while this re-pin ran; nothing was recorded"
+    server.use(
+      http.put('/api/v1/models/w/libraries/BOSL2', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-9', () =>
+        HttpResponse.json({
+          ...operation,
+          status: 'failed',
+          error: { status: 409, title: 'Conflict', detail, extensions: {} },
+        }),
+      ),
+    )
+    const error = await api.pinModelLibrary('w', 'BOSL2', {}).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).message).toBe(detail)
   })
 })
 
