@@ -19,10 +19,10 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.workflows import operation_activities, print_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow

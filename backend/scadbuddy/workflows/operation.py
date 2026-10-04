@@ -143,14 +143,15 @@ class OperationWorkflow:
             retry_policy=RECORD_RETRY,
         )
         try:
-            self.done = await asyncio.shield(finishing)
+            done: Operation = await asyncio.shield(finishing)
         except asyncio.CancelledError:
             # The effect's outcome is recorded whatever comes (review #1063 third review
             # 1): a row left running would be called lost, and its result dropped.
-            self.done = await finishing
-        self._upsert(STATUS.value_set(self.done.status))
+            done = await finishing
+        self.done = done
+        self._upsert(STATUS.value_set(done.status))
         await workflow.wait_condition(workflow.all_handlers_finished)
-        return self.done
+        return done
 
     async def _effect(
         self, input: OperationInput, operation_id: str, checked: dict[str, Any]
