@@ -522,6 +522,34 @@ def test_a_message_smuggled_into_the_stack_is_removed_before_frames_are_kept() -
     ]
 
 
+def _stacktrace_after(message: str, stack: str) -> list[Json]:
+    event = {
+        "name": "exception",
+        "attributes": [
+            string("exception.message", message),
+            string("exception.stacktrace", stack),
+        ],
+    }
+    (scrubbed,) = only_span(export(span(events=[event])))["events"]
+    attributes: list[Json] = scrubbed["attributes"]
+    return attributes
+
+
+def test_a_stack_cut_inside_its_message_keeps_nothing() -> None:
+    """The page's 1024-character limit cut the stack before the message ended."""
+    message = "a" * 1100 + "\n    at SECRET (https://scadbuddy.example/assets/a.js:1:2)"
+    stack = f"Error: {message}"[:1024]
+    assert _stacktrace_after(message[:1024], stack) == [string("exception.stacktrace", "")]
+
+
+def test_a_message_cut_at_the_limit_keeps_nothing_of_the_stack() -> None:
+    """The message attribute was cut; the rest of it, frame-shaped lines and all, would
+    follow in the stack."""
+    full = "a" * 1020 + "\n    at SECRET (https://scadbuddy.example/assets/a.js:1:2)"
+    stack = f"Error: {full}\n    at real (https://scadbuddy.example/assets/a.js:3:4)"
+    assert _stacktrace_after(full[:1024], stack) == [string("exception.stacktrace", "")]
+
+
 _FRAMES = (
     "    at f (https://scadbuddy.example/assets/index-a1b2.js:112:15)\n"
     "    at https://scadbuddy.example/assets/index-a1b2.js:20:7\n"

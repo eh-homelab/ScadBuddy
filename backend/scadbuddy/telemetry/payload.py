@@ -386,7 +386,8 @@ def _string_attribute(attributes: list[Any], name: str) -> str | None:
 def _without_message(stack: str, error_type: str | None, message: str | None) -> str:
     """The stack without the message at its head, where V8 writes ``<type>: <message>``
     (which can span lines). Firefox and Safari write no head, so nothing is removed; nor
-    is the message anywhere else, where it can be text inside a frame."""
+    is the message anywhere else, where it can be text inside a frame. Where the page
+    may have cut either one at its length limit, nothing of the stack is kept."""
     if not message:
         return stack
     heads = [f"{error_type}: {message}"] if error_type else []
@@ -396,7 +397,12 @@ def _without_message(stack: str, error_type: str | None, message: str | None) ->
     heads.append(message)
     for head in heads:
         if stack.startswith(head):
-            return stack[len(head) :]
+            # A message at the page's length limit may have been cut: the rest of it
+            # would follow in the stack, where no line can be told from a frame.
+            return "" if len(message) >= MAX_STRING_CHARS else stack[len(head) :]
+        if head.startswith(stack):
+            # The page cut the stack inside its head: all of it is message.
+            return ""
     return stack
 
 
