@@ -620,3 +620,17 @@ def test_upstream_actions_are_operations(
     merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
     assert merged["model"]["slug"] == MINE
     assert _workflow_ids(app, "model_upstream_merge")
+
+
+def test_a_repeated_merge_answers_from_its_record_after_the_upstream_moved(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    """Review 3d I1: the route's conflict pre-check comes after the record, so a re-send
+    of a merge that landed is its answer, not the conflict a later upstream makes."""
+    _duplicate(client)
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    key = {"Idempotency-Key": "a" * 32}
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key))
+    _json(_put(client, MINE, _source(client).replace('layout = "column";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "stack";'))
+    assert _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key)) == merged

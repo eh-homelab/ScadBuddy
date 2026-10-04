@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
@@ -115,9 +116,12 @@ async def run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | Operation:
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
-    A refusal or a recorded failure is raised as the problem the route answers with."""
+    A refusal or a recorded failure is raised as the problem the route answers with.
+    ``before_start`` is a route's own refusal, made only when no record answers: a
+    repeat is its first answer whatever has changed since (§4.2)."""
     body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
     size = len(json.dumps(body, separators=(",", ":")).encode())
     if size > MAX_REQUEST_BYTES:
@@ -132,6 +136,8 @@ async def run_operation(
     recorded = await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
+    if before_start is not None:
+        await before_start()
     arg = OperationInput(
         kind=kind.name,
         subject=subject,

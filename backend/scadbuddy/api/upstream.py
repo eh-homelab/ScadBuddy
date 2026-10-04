@@ -139,9 +139,11 @@ async def merge_upstream(
         if plan is not None and plan.conflicts:
             raise MergeConflictError(plan)
 
-    # Here, not in the operation: the conflict's 409 carries `merged`, the whole
-    # three-way result, which has no place in a workflow's history (#1054).
-    await asyncio.to_thread(_answer, slug, refuse_a_conflict)
+    async def before_start() -> None:
+        # Here, not in the operation: the conflict's 409 carries `merged`, the whole
+        # three-way result, which has no place in a workflow's history (#1054).
+        await asyncio.to_thread(_answer, slug, refuse_a_conflict)
+
     result = await run_operation(
         ops,
         response,
@@ -149,6 +151,7 @@ async def merge_upstream(
         subject=slug,
         request={"slug": slug},
         idempotency_key=idempotency_key,
+        before_start=before_start,
     )
     return operation_answer(result, UpstreamMerge)
 
