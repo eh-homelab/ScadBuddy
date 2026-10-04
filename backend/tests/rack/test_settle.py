@@ -22,8 +22,10 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import SETTLE_TIMEOUT
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.rack import usage
 from scadbuddy.rack.usage import (
     SETTINGS_READ_TIMEOUT,
     PickedHotend,
@@ -41,7 +43,7 @@ from tests.bambuddy.test_watcher import (
     watcher_for,
     write_output,
 )
-from tests.conftest import PgPool, open_pg_pool
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool, open_pg_pool
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
@@ -382,6 +384,32 @@ async def test_the_settings_read_is_bounded_and_the_next_settle_reads_again(
         await hook(OutputMeta.model_construct(id=OUTPUT))
     assert asked == [SETTINGS_READ_TIMEOUT, SETTINGS_READ_TIMEOUT]
     assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
+
+
+async def test_a_real_stuck_settings_read_gives_its_thread_back(
+    store: RackUsageStore,
+    pool: PgPool,
+    tmp_path: Path,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111, end to end: the hook's read through the real settings store, held on a
+    locked table, ends within the bound, so its thread returns to the executor."""
+    monkeypatch.setattr(usage, "SETTINGS_READ_TIMEOUT", 0.2)
+    settings_store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
+    settings_store.open()
+    try:
+        hook = settle_hook(store, PrintLinkStore(pool), settings_store.load)
+        with psycopg.connect(pg_conninfo) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=30)
+    finally:
+        settings_store.close()
 
 
 async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(

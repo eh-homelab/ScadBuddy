@@ -25,9 +25,10 @@ statement on its own row, so neither can drop the other's change.
 from __future__ import annotations
 
 import logging
+import time
 import types
 from dataclasses import dataclass
-from typing import Any, Literal, Self, Union, get_args, get_origin
+from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -430,18 +431,28 @@ class SettingsStore:
         return self._pool
 
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
-        """``timeout``, in seconds, bounds the wait for a connection and then the read,
-        for this read only (#1111): a pool-wide statement timeout would also cut short
-        the saves' deliberate lock waits and the migration."""
+        """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a
+        connection and every statement after it share one deadline, so the read ends
+        about ``timeout`` after it starts. It bounds this read only: a pool-wide
+        statement timeout would also cut short the saves' deliberate lock waits and the
+        migration."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
         with self._pool.connection(timeout=timeout) as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            if timeout is not None:
-                conn.execute(f"SET LOCAL statement_timeout = {max(1, int(timeout * 1000))}")
-            rows = conn.execute("SELECT name, value FROM settings").fetchall()
-            choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
-            beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
+
+            def read(query: LiteralString) -> list[DictRow]:
+                if deadline is not None:
+                    # statement_timeout bounds each statement on its own, so each one
+                    # gets what is left of the read's budget.
+                    left = max(1, int((deadline - time.monotonic()) * 1000))
+                    conn.execute("SELECT set_config('statement_timeout', %s, true)", [str(left)])
+                return conn.execute(query).fetchall()
+
+            rows = read("SELECT name, value FROM settings")
+            choices = read("SELECT model_id, choices FROM model_print_choices")
+            beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
         stored_rows = {row["name"]: row["value"] for row in rows}
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}

@@ -10,6 +10,7 @@ one key inside the row's upsert.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
@@ -477,18 +478,54 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     assert _fresh_load(settings).printer_rack_algorithms == {}
 
 
-def test_a_bounded_settings_read_gives_up_on_a_held_table(
+def test_a_bounded_settings_read_gives_up_on_a_held_table(settings: Settings) -> None:
+    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
+    the bound is this read's own, so the next read on the same connection is not
+    bounded by it."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    try:
+        before = _connection_and_bound(store)
+        with psycopg.connect(settings.database_url) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=0.2)
+        after = _connection_and_bound(store)
+    finally:
+        store.close()
+    assert after == before
+
+
+def _connection_and_bound(store: SettingsStore) -> tuple[int, str]:
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT pg_backend_pid() AS pid, current_setting('statement_timeout') AS bound"
+        ).fetchone()
+    assert row is not None
+    return row["pid"], row["bound"]
+
+
+def test_a_settings_read_timeout_bounds_the_whole_read(
     store: SettingsStore, settings: Settings
 ) -> None:
-    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
-    the bound is this read's own, so the next read is not bounded by it."""
-    with psycopg.connect(settings.database_url) as holder, holder.transaction():
-        holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
-        with pytest.raises(psycopg.errors.QueryCanceled):
-            store.load(timeout=0.2)
-    with store.pool.connection() as conn:
-        row = conn.execute("SHOW statement_timeout").fetchone()
-    assert row is not None and row["statement_timeout"] == "0"
+    """#1111: the timeout is the read's whole budget, not each statement's: a read that
+    waits most of it on one table gets only the rest for the next."""
+    budget = 1.0
+    settings_holder = psycopg.connect(settings.database_url)
+    try:
+        settings_holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+        with psycopg.connect(settings.database_url) as beds, beds.transaction():
+            beds.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+            release = threading.Timer(0.6 * budget, settings_holder.commit)
+            release.start()
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=budget)
+            elapsed = time.monotonic() - started
+            release.join()
+    finally:
+        settings_holder.close()
+    assert elapsed < 1.3 * budget
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:

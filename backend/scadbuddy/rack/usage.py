@@ -44,7 +44,7 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: covers one or two slow archives; it can cut the hook off mid-write, and that
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
-#: How long a settle's settings read may wait for a connection, and then run (#1111):
+#: The whole budget of a settle's settings read, its wait for a connection included (#1111):
 #: well inside the watcher's ``SETTLE_TIMEOUT``.
 SETTINGS_READ_TIMEOUT = 10.0
 
