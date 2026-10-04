@@ -47,6 +47,7 @@ async def test_a_pick_with_no_serial_is_sent_but_not_recorded() -> None:
     assert [p.group_id for p in store.rows[0][2]] == [0]
 
 
+@pytest.mark.rack_injects_errors
 async def test_a_failed_write_is_logged_by_type_and_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

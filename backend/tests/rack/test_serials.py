@@ -13,17 +13,24 @@ from scadbuddy.bambuddy.filaments import FilamentWarning, SpoolOption
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.bambuddy.print_run import (
-    RACK_FALLBACKS,
     RACK_PICK_FALLBACK,
     RACK_USAGE_FALLBACK,
     rack_chooser,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
-from scadbuddy.rack.usage import PickedHotend, record_seen, record_settled, save_picks
+from scadbuddy.rack.usage import (
+    RACK_SEEN_FALLBACK,
+    RACK_SETTLE_FALLBACK,
+    RACK_STORE_FALLBACKS,
+    PickedHotend,
+    record_seen,
+    record_settled,
+    save_picks,
+)
 from tests.bambuddy.test_rack_chooser import Reads, grouped
 from tests.rack.helpers import INVENTED_SERIALS, requirement, slot, status
-from tests.support.rack_guard import foreign_rack_errors
+from tests.support.rack_guard import MESSAGES, foreign_rack_errors
 
 
 def leak(serial: str) -> str:
@@ -147,9 +154,10 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
     assert not [s for s in INVENTED_SERIALS if s in repr(warnings)]
 
 
-@pytest.mark.parametrize("message", sorted(RACK_FALLBACKS))
+@pytest.mark.parametrize("message", sorted(MESSAGES))
 def test_the_guard_covers_every_rack_fallback(message: str) -> None:
-    """#1081: the preview and the usage read swallow exceptions too."""
+    """#1081, #1112: the preview, the usage read and the store's writes swallow
+    exceptions too."""
     made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
     made.error = "KeyError"
     assert foreign_rack_errors([made]) == ["KeyError"]
@@ -195,3 +203,23 @@ def test_the_guard_flags_a_programming_error_but_not_an_api_one() -> None:
     )
     # claude-review on #1043, finding 5: StopIteration is a real bug's error, never expected.
     assert flagged == ["StopIteration", "TypeError", "KeyError"]
+
+
+def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() -> None:
+    """#1112: the store's writes and reads swallow exceptions too. A Postgres outage or
+    timeout there is expected; a programming error, such as a typo in the seen upsert, is
+    not."""
+    assert RACK_STORE_FALLBACKS <= MESSAGES
+
+    def record(message: str, error: str) -> logging.LogRecord:
+        made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+        made.error = error
+        return made
+
+    for message in sorted(RACK_STORE_FALLBACKS):
+        expected = [record(message, name) for name in ("QueryCanceled", "PoolTimeout", "ApiError")]
+        assert foreign_rack_errors(expected) == [], message
+        bugs = [record(message, name) for name in ("UndefinedColumn", "KeyError", "TypeError")]
+        assert foreign_rack_errors(bugs) == ["UndefinedColumn", "KeyError", "TypeError"], message
+    assert foreign_rack_errors([record(RACK_SETTLE_FALLBACK, "TimeoutError")]) == []
+    assert foreign_rack_errors([record(RACK_SEEN_FALLBACK, "TimeoutError")]) == ["TimeoutError"]

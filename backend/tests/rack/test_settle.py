@@ -271,6 +271,7 @@ class FailingLinks:
         raise RuntimeError(f"connection lost near {A}")
 
 
+@pytest.mark.rack_injects_errors
 async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:

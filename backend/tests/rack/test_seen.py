@@ -36,6 +36,7 @@ async def test_no_status_or_no_store_records_nothing() -> None:
     assert store.calls == []
 
 
+@pytest.mark.rack_injects_errors
 async def test_a_failed_write_is_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> None:
     store = Seen(RuntimeError(f"duplicate key (serial)=({serial(17)})"))
     with caplog.at_level(logging.DEBUG):
