@@ -223,3 +223,5 @@ __marimo__/
 backend/openapi.json
 frontend/src/api/schema.d.ts
 agent/src/api/schema.d.ts
+
+agent-durable/.venv/

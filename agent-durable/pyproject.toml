@@ -1,0 +1,46 @@
+[project]
+name = "scadbuddy-durable"
+version = "0.1.0"
+description = "ScadBuddy's durable agent sessions on Temporal (spec 2026-10-01 §6)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "temporalio>=1.33.0,<1.34",
+  # Bundles Claude Code 2.1.283, the version agent/package.json's SDK bundles.
+  # Bump with @anthropic-ai/claude-agent-sdk and the Dockerfile's CLAUDE_CODE_VERSION.
+  "claude-agent-sdk==0.2.160",
+  # ai-integrations#33 (spec §6.2): git-pinned to one commit of Temporal's own
+  # repository, never vendored; every bump is its own reviewed PR with the diff
+  # of python/claude_agent_sdk between the two SHAs.
+  "temporalio-claude-agent-sdk @ git+https://github.com/temporalio/ai-integrations@b1cf3848b15ad5cd1f009bd19524e3f751140439#subdirectory=python/claude_agent_sdk",
+  "psycopg>=3.2",
+  "psycopg-pool>=3.2",
+  "cryptography>=43",
+]
+
+[dependency-groups]
+dev = ["psycopg[binary]>=3.2", "mypy>=1.13", "pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.7"]
+
+[tool.uv]
+package = false
+# claude-agent-sdk 0.2.160 has no Windows wheel and the plugin excludes it there;
+# the image and CI are Linux.
+environments = ["sys_platform == 'linux'"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+files = ["scadbuddy_durable", "tests"]
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+  "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL",
+  "requires_temporal: needs a Temporal CLI or SCADBUDDY_TEST_TEMPORAL_DEV_SERVER",
+  "requires_engine: runs the bundled Claude Code against the fake endpoint (needs node)",
+]
