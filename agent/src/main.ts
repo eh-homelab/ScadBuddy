@@ -39,6 +39,9 @@ import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { AgentWorker } from './temporal/worker.js'
+import { Runtime } from '@temporalio/worker'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 
@@ -295,6 +298,25 @@ const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
   onError: (err) => console.error('audit retention sweep failed:', (err as Error).message),
 })
 
+// The agent-tools worker (spec 2026-10-01 §6.3, #1055): every tool as an activity for
+// durable sessions' workflows. It needs the database (a call runs as its session's
+// owner) and SCADBUDDY_TEMPORAL_ADDRESS. Its SIGTERM is ours: stop() below stops it
+// alongside the turns, so the SDK's own signal handling is turned off.
+if (config.temporalAddress) Runtime.install({ shutdownSignals: [] })
+const temporalWorker =
+  config.temporalAddress && database
+    ? AgentWorker.start({
+        address: config.temporalAddress,
+        namespace: config.temporalNamespace,
+        activities: toolActivities(ALL_TOOLS, {
+          services: toolServices,
+          sessions: new PgSessionOwners(database.sql),
+          audit,
+        }),
+      })
+    : undefined
+if (config.temporalAddress && !database) console.error('agent-tools worker: not started, it needs SCADBUDDY_DATABASE_URL')
+
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
@@ -316,6 +338,7 @@ const app = createApp({
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
+  ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -366,7 +389,12 @@ async function stop(): Promise<void> {
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted
   // turns' pending approvals stay pending (approvals/service.ts).
-  await sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
+  // The agent-tools worker at the same time: it stops polling, and its running
+  // activities get its 10 s grace, inside the turns' budget.
+  await Promise.all([
+    temporalWorker?.stop(),
+    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
+  ])
   stopSessionWake?.()
   stopHeartbeat()
   tabs.close()

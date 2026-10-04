@@ -62,7 +62,16 @@ describe('GET /healthz', () => {
       backend: 'ok',
       secret_key: 'not configured',
       credential: 'unknown',
+      temporal: 'not configured',
     })
+  })
+
+  it("reports the agent-tools worker's state, and stays 200 while it cannot reach Temporal (#1055)", async () => {
+    for (const state of ['connecting', 'ok', 'unavailable'] as const) {
+      const { status, body } = await health(createApp(deps({ temporal: () => state })))
+      expect(status).toBe(200)
+      expect(body.temporal).toBe(state)
+    }
   })
 
   it('stays 200 and says why when the database or backend is down', async () => {
