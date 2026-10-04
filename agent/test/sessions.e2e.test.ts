@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -64,7 +65,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     return manager({
       sql: pool.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...extra,
     })
@@ -118,6 +119,54 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.status',
     ])
   })
+
+  it('falls back to the next credential when the first is refused, resuming through the Postgres store (#1093)', async () => {
+    const TOKEN_A = 'gw-sessions-revoked-aaaa'
+    const TOKEN_B = 'gw-sessions-working-bbbb'
+    let revoked = true
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}` && revoked
+        ? { error: { status: 401, type: 'authentication_error', message: 'invalid token' } }
+        : { text: conversation(r).includes('second') ? 'second answer' : 'first answer' }
+    const outcomes: string[] = []
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => (attempt, outcome) => {
+          outcomes.push(`${attempt.id}:${outcome.class}`)
+          return Promise.resolve()
+        },
+      },
+    })
+
+    // The session's first turn: credential A fails before Claude Code has
+    // answered anything, and B picks the new session up from the store.
+    const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(outcomes).toEqual(['a:permanent', 'b:ok'])
+    const firstSent = conversation(fake.messageCalls().at(-1))
+    expect(firstSent.split('make a box').length - 1).toBe(1)
+
+    // A later turn on A, now working again, sees the whole conversation.
+    revoked = false
+    expect(await (await m.send(session.id, agentA, 'second question')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(fake.messageCalls().at(-1)?.headers.authorization).toBe(`Bearer ${TOKEN_A}`)
+    expect(sent).toContain('make a box')
+    expect(sent).toContain('first answer')
+    expect(sent).toContain('second question')
+
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type === 'error')).toEqual([])
+    expect(JSON.stringify(events)).not.toMatch(/API Error|Not logged in|gw-sessions/)
+  }, 60_000)
 
   it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
     script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })
