@@ -1037,7 +1037,9 @@ Each phase is its own implementation plan and ships alone.
      until Temporal takes it. Its worker runs in the API process, which holds the data volume, until the
      `scadbuddy-library` container. The API's sweep loop and `RenderService`'s prune
      loop are gone. The boot passes stay in the boot, since they must finish before the
-     first request; the boot then triggers the Schedule once.
+     first request; the boot then triggers the Schedule once. That run is the start's only
+     sweep of the uploads (review #1095 1). While an operator keeps the Schedule paused,
+     the start backfills the uploads to the store itself (review #1095 2).
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
