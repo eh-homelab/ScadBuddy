@@ -22,12 +22,17 @@ def _clear_otel(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def test_otel_traces_exporter_none_is_no_target(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_otel_traces_exporter_other_than_otlp_is_no_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _clear_otel(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-    for value in ("none", "NONE"):
+    for value in ("none", "NONE", "console", "zipkin,jaeger"):
         monkeypatch.setenv("OTEL_TRACES_EXPORTER", value)
         assert otlp_traces_target() is None
+    for value in ("otlp", " OTLP ", "console, otlp"):
+        monkeypatch.setenv("OTEL_TRACES_EXPORTER", value)
+        assert otlp_traces_target() == ("http://collector:4318/v1/traces", {})
 
 
 def test_target_is_none_without_an_endpoint_or_when_disabled(

@@ -174,6 +174,24 @@ def test_query_strings_and_user_agents_are_scrubbed_as_the_backend_does() -> Non
     assert result["droppedAttributesCount"] == 0
 
 
+def test_host_names_and_peer_addresses_are_scrubbed_as_the_backend_does() -> None:
+    attributes = [
+        string(key, SENTINEL)
+        for key in (
+            "http.host",
+            "http.server_name",
+            "server.address",
+            "net.peer.ip",
+            "client.address",
+            "network.peer.address",
+        )
+    ]
+    attributes.append(string("http.method", "GET"))
+    result = only_span(export(span(attributes=attributes)))
+    assert result["attributes"] == [string("http.method", "GET")]
+    assert result["droppedAttributesCount"] == 0
+
+
 def test_a_query_string_is_cut_from_each_item_of_an_array_valued_url() -> None:
     urls = {
         "arrayValue": {

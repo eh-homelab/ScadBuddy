@@ -8,15 +8,16 @@ from __future__ import annotations
 import os
 from urllib.parse import unquote
 
-from scadbuddy.core.tracing import tracing_disabled
+from scadbuddy.core.tracing import traces_export_enabled
 
 
 def otlp_traces_target() -> tuple[str, dict[str, str]] | None:
     """Where traces go and the headers sent, by the SDK's precedence, or ``None`` when
-    export is off (no endpoint, ``OTEL_TRACES_EXPORTER=none`` or ``OTEL_SDK_DISABLED``).
+    the backend would not export either (`traces_export_enabled`: no endpoint,
+    ``OTEL_SDK_DISABLED``, or ``OTEL_TRACES_EXPORTER`` naming anything but ``otlp``).
     ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` is used as is; ``OTEL_EXPORTER_OTLP_ENDPOINT``
     gets ``/v1/traces``."""
-    if tracing_disabled() or os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none":
+    if not traces_export_enabled():
         return None
     traces = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
     general = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
