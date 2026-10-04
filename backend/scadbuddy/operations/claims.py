@@ -5,9 +5,11 @@ the operation its name instead; the run reads it back. Temporal limits a payload
 2 MB and warns from 512 KB, and a source may be 1M characters, a thumbnail 10 MB.
 
 A claim is named by the sha256 of its bytes, so a repeated request carries the same
-name and reaches the same operation key. The route drops a request's claims once its
-answer is final, unless a running operation names them (``api/operations.py``); the
-housekeeping sweep removes the rest once nothing has put them for ``CLAIM_MAX_AGE``.
+name and reaches the same operation key. The route releases a request's claims once
+its answer is final (``api/operations.py``): only one its own put created, and only
+while it is still the file that put wrote, so bytes another request put before or
+since stay for that request's run. The housekeeping sweep removes the rest once
+nothing has put them for ``CLAIM_MAX_AGE``.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import re
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +29,18 @@ from pathlib import Path
 CLAIM_MAX_AGE = timedelta(days=1)
 
 _NAME = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class Held:
+    """What one put left: the claim's name, the file it wrote (its inode and mtime: an
+    inode number freed by a later put may be reused), and whether that file created the
+    claim (none held those bytes before)."""
+
+    name: str
+    inode: int
+    mtime_ns: int
+    created: bool
 
 
 class ClaimStore:
@@ -38,21 +53,34 @@ class ClaimStore:
         return self.root / name
 
     def put(self, data: bytes) -> str:
-        """Write ``data`` and return its name. Always a fresh file, even when the claim
-        is held already: the bytes are the same, the new mtime renews it against the
-        sweep, and a sweep that removed it meanwhile cannot fail the put."""
+        """Write ``data`` and return its name."""
+        return self.hold(data).name
+
+    def hold(self, data: bytes) -> Held:
+        """Write ``data`` as a fresh file, even when the claim is held already: the bytes
+        are the same, the new file renews it against the sweep and tells a release that
+        another put came since, and a sweep that removed it meanwhile cannot fail the
+        put."""
         name = hashlib.sha256(data).hexdigest()
+        path = self.root / name
         self.root.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".claim-")
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(data)
-            os.replace(tmp, self.root / name)
+                handle.flush()
+                written = os.fstat(handle.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                os.replace(tmp, path)
+                return Held(name, written.st_ino, written.st_mtime_ns, created=False)
+            os.unlink(tmp)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(tmp)
             raise
-        return name
+        return Held(name, written.st_ino, written.st_mtime_ns, created=True)
 
     def get(self, name: str) -> bytes:
         try:
@@ -60,9 +88,23 @@ class ClaimStore:
         except FileNotFoundError:
             raise LookupError(f"claim {name} is gone") from None
 
-    def drop(self, name: str) -> None:
-        """Remove a claim; one already gone is no error."""
-        self._path(name).unlink(missing_ok=True)
+    def release(self, held: Held) -> None:
+        """Remove the claim ``held`` created, unless a put has written it since; a claim
+        already gone is no error. It is moved aside first, and put back when what was
+        moved is not the file ``held`` wrote."""
+        if not held.created:
+            return
+        path = self._path(held.name)
+        aside = self.root / f".released-{uuid.uuid4().hex}"
+        try:
+            os.rename(path, aside)
+        except FileNotFoundError:
+            return
+        moved = aside.stat()
+        if (moved.st_ino, moved.st_mtime_ns) != (held.inode, held.mtime_ns):
+            with contextlib.suppress(FileExistsError):
+                os.link(aside, path)
+        aside.unlink()
 
     def sweep(self, max_age: timedelta = CLAIM_MAX_AGE) -> int:
         """Remove the claims (and a crashed put's temporary files) older than ``max_age``.

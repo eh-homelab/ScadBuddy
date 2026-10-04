@@ -116,10 +116,41 @@ def test_a_claim_renewed_while_the_sweep_looks_at_it_survives(
     assert claims.get(name) == b"a"
 
 
-def test_drop_removes_a_claim_and_tolerates_one_already_gone(tmp_path: Path) -> None:
+def test_a_hold_says_whether_it_created_the_claim(tmp_path: Path) -> None:
     claims = ClaimStore(tmp_path)
-    name = claims.put(b"a")
-    claims.drop(name)
-    claims.drop(name)
+    first, second = claims.hold(b"a"), claims.hold(b"a")
+    assert first.name == second.name == claims.put(b"a")
+    assert (first.created, second.created) == (True, False)
+
+
+def test_release_removes_the_claim_its_hold_created(tmp_path: Path) -> None:
+    claims = ClaimStore(tmp_path)
+    held = claims.hold(b"a")
+    claims.release(held)
+    claims.release(held)
     with pytest.raises(LookupError):
-        claims.get(name)
+        claims.get(held.name)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_release_keeps_a_claim_another_request_put_first(tmp_path: Path) -> None:
+    """Review 3c 1.2 race: B puts the bytes before A; A did not create the claim, so
+    A's release leaves it for B's run."""
+    claims = ClaimStore(tmp_path)
+    b = claims.hold(b"a")
+    a = claims.hold(b"a")
+    claims.release(a)
+    assert claims.get(b.name) == b"a"
+
+
+def test_release_keeps_a_claim_another_request_put_since(tmp_path: Path) -> None:
+    """Review 3c 1.2 race: B puts the bytes after A; the claim is no longer the file A
+    wrote, so A's release leaves it for B's run, and B's release, not the creator's,
+    leaves it to the sweep."""
+    claims = ClaimStore(tmp_path)
+    a = claims.hold(b"a")
+    b = claims.hold(b"a")
+    claims.release(a)
+    claims.release(b)
+    assert claims.get(a.name) == b"a"
+    assert [path.name for path in tmp_path.iterdir()] == [a.name]

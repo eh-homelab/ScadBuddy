@@ -27,7 +27,7 @@ from temporalio.service import RPCError
 from scadbuddy.api.deps import OperationCommands, OperationsDep
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
@@ -112,21 +112,23 @@ def _author() -> OperationAuthor | None:
 
 @dataclass(frozen=True)
 class Claimed:
-    """The claims a request wrote (``operations/claims.py``), dropped once its answer is
-    final (review 3c 1.2)."""
+    """The claims a request wrote (``operations/claims.py``), released once its answer
+    is final (review 3c 1.2)."""
 
     store: ClaimStore
-    names: list[str]
+    held: list[Held]
 
 
 async def _release(ops: OperationCommands, claimed: Claimed) -> None:
-    """Drop ``claimed``, except what an operation still running names: another request
-    holding the same bytes."""
-    if not claimed.names:
+    """Release ``claimed``: what this request's puts created and nothing has put since,
+    and no operation still running names (another request holding the same bytes)."""
+    created = [held for held in claimed.held if held.created]
+    if not created:
         return
-    held = await ops.store.named_by_running(claimed.names)
-    for name in set(claimed.names) - held:
-        await asyncio.to_thread(claimed.store.drop, name)
+    running = await ops.store.named_by_running([held.name for held in created])
+    for held in created:
+        if held.name not in running:
+            await asyncio.to_thread(claimed.store.release, held)
 
 
 async def recorded(
