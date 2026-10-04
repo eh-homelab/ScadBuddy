@@ -64,6 +64,7 @@ STATE_ATTR = "scadbuddy"
 VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
+OPERATION_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 #: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
@@ -222,9 +223,10 @@ class PrintCommands:
     search_attributes: bool = False
 
 
-class _AfterCommit:
+class _Immediate:
     """``publish_in`` for a bus that has no transaction of its own (the in-process bus
-    of a test): publishes at once."""
+    of a test): publishes at once, before the caller's transaction commits, so a
+    subscriber that re-reads the row may see it as it was (review #1061 5)."""
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
@@ -234,7 +236,7 @@ class _AfterCommit:
 
 
 def transactional_events(events: EventBus) -> TransactionalEvents:
-    return events if isinstance(events, PgNotifyEventBus) else _AfterCommit(events)
+    return events if isinstance(events, PgNotifyEventBus) else _Immediate(events)
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
@@ -604,6 +606,7 @@ SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
 RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
+OperationIdPath = Annotated[str, Path(pattern=OPERATION_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]
