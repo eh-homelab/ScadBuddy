@@ -38,6 +38,11 @@ import { redact } from '../secrets.js'
 //               harness/httpRequest.ts), each redirect hop its own row:
 //               action the method, `input_summary` the scheme, host, status
 //               and size as JSON (never a path, a header or a body)
+//   question    every answer the user gives a question the agent asked
+//               (#940, #1075, questions/service.ts): action `answered`,
+//               tied to the call by `tool_use_id`, `input_hash` the keyed
+//               hash of the answers (never their text: an answer may be
+//               anything the user typed)
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -53,7 +58,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]

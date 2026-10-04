@@ -137,6 +137,15 @@ describe('/api/v1/ai/credentials', () => {
     expect(JSON.parse(readText)).toMatchObject({ configured: true, kind: 'anthropic_api_key', base_url: null })
   })
 
+  it('saves a Claude Code OAuth token, which takes no base URL', async () => {
+    const app = createApp(deps())
+    const saved = await put(app, { kind: 'claude_oauth_token', secret: SECRET })
+    expect(saved.status).toBe(200)
+    expect(await saved.text()).not.toContain(SECRET)
+    const refused = await put(app, { kind: 'claude_oauth_token', base_url: 'https://llm.example', secret: SECRET })
+    expect(refused.status).toBe(400)
+  })
+
   it('saves a gateway and normalises its base URL', async () => {
     const app = createApp(deps())
     const res = await put(app, { kind: 'gateway', base_url: 'https://llm.example/anthropic/', secret: GATEWAY_TOKEN })

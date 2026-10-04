@@ -157,6 +157,45 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(creates).toEqual([{ kind: 'gateway', base_url: 'https://other.example/anthropic/', secret: 'gw-token-ZZ12' }])
   })
 
+  it('adds a Claude Code OAuth token with no base URL', async () => {
+    const creates = bodiesOf('POST', entries)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument()
+    expect(screen.getByText(/claude setup-token/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-oat01-ZZ34abcd')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added last')
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    expect(rows()[2]).toHaveTextContent('3.Claude Code OAuth token')
+    expect(within(rows()[2]!).getByLabelText('ending in abcd')).toBeInTheDocument()
+    expect(creates).toEqual([{ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-ZZ34abcd' }])
+  })
+
+  it('warns, without blocking, when a secret looks like the other Anthropic kind', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-ant-oat01-ZZ34')
+    expect(screen.getByTestId('ai-credential-kind-warning')).toHaveTextContent('looks like a Claude Code OAuth token')
+    expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled()
+
+    await user.click(screen.getByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.queryByTestId('ai-credential-kind-warning')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-api03-ZZ34')
+    expect(screen.getByTestId('ai-credential-kind-warning')).toHaveTextContent('looks like an Anthropic API key')
+  })
+
+  it('replaces an OAuth token as an OAuth token', async () => {
+    setCredentials([credentialEntry({ id: 'default', kind: 'claude_oauth_token', last4: 'ZZ34' })])
+    const saves = bodiesOf('PUT', `${entries}/default`)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: 'Replace the key of Claude Code OAuth token ••••ZZ34' }))
+    await user.type(screen.getByLabelText('New OAuth token'), 'sk-ant-oat01-NEW0wxyz')
+    await user.click(screen.getByRole('button', { name: 'Save key' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved a new key for credential 1')
+    expect(saves).toEqual([{ kind: 'claude_oauth_token', base_url: null, secret: 'sk-ant-oat01-NEW0wxyz' }])
+  })
+
   it('saves the first credential when there is none, and shows a short key without a last four', async () => {
     setCredentials([])
     const { user } = renderPage(<AiCredentialSection />)

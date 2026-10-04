@@ -151,6 +151,20 @@ describe('probeCredential', () => {
     expect(JSON.parse(seen[0]!.body)).toMatchObject({ model: PROBE_FALLBACK_MODEL })
   })
 
+  it('never asks about an OAuth token: unknown, so a 429 or refusal cools down and never disables it', async () => {
+    // How Claude Code presents the token to the Messages API is not measured here; sent as
+    // x-api-key it is a 401, which would read as the token's own refusal.
+    let calls = 0
+    const counting: typeof fetch = () => {
+      calls += 1
+      return Promise.resolve(new Response('{}', { status: 401 }))
+    }
+    expect(
+      await probeCredential({ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-probe' }, { model: undefined, fetch: counting, now }),
+    ).toEqual({ verdict: 'unknown', until: new Date(now() + DEFAULT_COOLDOWN_MS) })
+    expect(calls).toBe(0)
+  })
+
   it('falls back to the default cooldown when the endpoint cannot be asked or names no time', async () => {
     const failing: typeof fetch = () => Promise.reject(new Error('connection refused'))
     expect(await probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: failing, now })).toEqual({

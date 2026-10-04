@@ -537,8 +537,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   shows as `"unavailable (database timed out)"` instead of a hung probe. An
   edited, already-applied migration stops the service at start with a message
   naming it (each file's sha256 is recorded).
-- The Claude credentials (Anthropic API keys, or gateway base URLs plus
-  tokens) are set in Settings → Assistant → **Claude credentials**, a list in
+- The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
+  `claude setup-token`, or gateway base URLs plus tokens) are set in Settings → Assistant → **Claude credentials**, a list in
   the order the assistant tries them (#1000, #1093). Each shows whether it is
   active, rate limited until a time, or disabled and why, and can be moved,
   tested, reset, given a new key or deleted. Underneath, and from a loopback
