@@ -105,7 +105,7 @@ exposes the same serialization context to a codec"), §8 (`agent-tools` activiti
     agent owns its `ai_*` tables (CLAUDE.md). Same columns, same unique
     `(workflow_id, workflow_run_id)`, same `operation_key` (sha256 of kind, subject, canonical
     body, `Idempotency-Key`). Finished rows older than 7 days (the namespace's 168 h) are
-    pruned hourly. `GET /api/v1/ai/operations/{id}` answers one, with the UI read guard; a
+    pruned at each insert, as the backend's are (as built). `GET /api/v1/ai/operations/{id}` answers one, with the UI read guard; a
     `running` row whose execution is closed or gone is finished there as lost
     (the backend's `OPERATION_LOST` wording).
 12. **Install and re-pin are both commands.** §10 names the install; §4.1 classifies by effect,
@@ -117,6 +117,12 @@ exposes the same serialization context to a codec"), §8 (`agent-tools` activiti
     `run_attempts` 1, run timeout 5 min. Refusals keep today's statuses and bodies (422 with
     `problems`, 409, 400) as the operation's problem with `extensions`.
 13. **Without `Idempotency-Key`** each request is its own command (the backend's rule).
+
+**As built:** `startCommand` landed with Task 6 (its tests drive the workflow through
+it); the package kinds are `agent/src/plugins/packages/operations.ts`; the
+concurrency cap (429) moved into the kinds' run; the pg route tests run the kinds
+in-process (`test/support/commands.ts`) and `test/pluginPackages.temporal.test.ts` runs
+the routes on Temporal; no `operation.*` events (the UI follows by polling).
 
 ## Global Constraints
 

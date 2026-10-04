@@ -581,9 +581,18 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and
-  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`, each described below. With no database
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES`,
+  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` and the backend's
+  `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE` and
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
+- **`SCADBUDDY_TEMPORAL_ADDRESS`** (#1055): set it as the API container has it. The
+  agent then runs a Temporal worker on the `agent-tools` task queue: every tool as an
+  activity for durable sessions, and the agent's own commands (installing and
+  re-pinning a plugin package). It needs the database too. `/healthz` reports
+  `"temporal"`: `not configured`, `connecting`, `ok` or `unavailable`; without it,
+  plugin package installs answer `503`. The pod's network policy must let the agent
+  reach the Temporal frontend, as it does the API.
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
   spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,

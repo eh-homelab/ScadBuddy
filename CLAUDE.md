@@ -263,8 +263,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
   `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
-  variable the backend reads; the one origin allowed to write) and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  variable the backend reads; the one origin allowed to write),
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
+  backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
@@ -301,6 +302,19 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
+    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
+    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
+    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
+    replays. `pnpm build` also writes `dist/tools.json` (the tool manifest the durable
+    worker declares from; never committed). Temporal tests (`test/*temporal*.test.ts`)
+    skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
+    `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
+    The `@temporalio/*` packages are pinned exactly, all one version.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.

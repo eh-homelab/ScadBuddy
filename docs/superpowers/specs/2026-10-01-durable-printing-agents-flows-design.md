@@ -1139,6 +1139,29 @@ Each phase is its own implementation plan and ships alone.
      retries a render that could not be run, which used to wait for the next edit or boot.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
+   - As built (#1055, plan `2026-10-04-durable-phase-4-agent-tools.md`): `pnpm build`
+     writes `agent/dist/tools.json`, `[{name, description, input_schema, tier}]` read
+     through the `/mcp` projection itself (`agent/src/tools/manifest.ts`), so it is
+     exactly what `/mcp` lists; generated, never committed (`pnpm gen:tools <file>`).
+     The agent service runs `AgentWorker` (`agent/src/temporal/worker.ts`) on
+     `agent-tools` when `SCADBUDDY_TEMPORAL_ADDRESS` and the database are set,
+     unversioned (it pins nothing a drain would wait for), stopped with the turns on
+     SIGTERM with a 10 s grace. Each tool's activity (`temporal/toolActivities.ts`) takes
+     the one dict `activity_as_tool` passes and returns the result's content blocks; a
+     result that is not `ok` fails non-retryably (`ToolError`). It runs only for a
+     workflow `session-<id>` whose `ai_sessions.mode` is `durable`: §6.1's column is
+     added here (`20261004T1330Z_session_mode.sql`), so phase 5 does not add it, because
+     the activity runs with `gate: 'workflow'` (the workflow's `needs_approval` was the
+     approval) and a classic session's id must not be borrowed past `ai_approvals`. The
+     `sessions_*` decisions a session model may not make refuse it as they refuse the
+     harness. Each call writes the harness's audit row. §6.5's gate holds: in
+     `@temporalio/common` 1.24 a codec receives `ActivitySerializationContext` with the
+     workflow ID (pinned by `test/temporal.worker.test.ts`); the codec itself is phase 5.
+     Install and re-pin are `AgentOperation` kinds (`temporal/workflows.ts`, the backend
+     `Operation`'s steps, a bundle built at `pnpm build`, a replayed recorded history),
+     recorded in `ai_operations` (the agent owns its tables), keyed by `Idempotency-Key`,
+     `done` within 10 s, else 202 followed at `GET /api/v1/ai/operations/{id}`. Approve,
+     enable, discard and delete stay requests (one Postgres statement each).
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
    `SessionStore`, the credential port, the event subscriber, HITL, the mode UI and
    setting.
