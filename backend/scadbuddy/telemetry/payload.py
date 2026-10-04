@@ -14,7 +14,9 @@ its own either, as a server span keeps none: a path on one of the app's routes b
 that route's template, when the URL is relative or on one of ScadBuddy's own origins
 (`OriginCheck`; after its ``scheme://host``). Any other URL leaves only its
 ``scheme://host``, or nothing when it is relative: another host has none of the app's
-routes. The SPA's routes are the browser's own, so a page's URL keeps only its origin.
+routes. The SPA's routes are the browser's own, so a page's URL keeps only its origin. The
+same goes for the URLs inside a stack's frames, which keep their ``:line:col`` (and a
+path under ``/assets/``, a bundle script).
 
 What is dropped for a cap is counted in OTLP's own field for its kind, as the SDK's
 limits count it: ``droppedAttributesCount`` on the span, an event or a link,
@@ -29,7 +31,7 @@ import math
 import re
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from urllib.parse import unquote, urlsplit
 
 from scadbuddy.core.trace_scrub import DROPPED_ATTRIBUTES, HEADER_PREFIXES, URL_ATTRIBUTES
@@ -77,8 +79,15 @@ type RouteMatcher = Callable[[str], str | None]
 #: Whether a URL's ``scheme://host[:port]`` is one of ScadBuddy's own (the relay passes
 #: `origin_allowed` over the public URL and allowed origins, which also takes loopback).
 type OriginCheck = Callable[[str], bool]
+
+
 #: A URL attribute's value to what is forwarded of it (`_reduced_url`), or None.
-type _UrlReducer = Callable[[str], str | None]
+class _UrlReducer(Protocol):
+    def __call__(self, url: str, /, *, frame: bool = False) -> str | None: ...
+
+
+#: A script URL inside a stack frame, up to its ``:line:col``.
+_FRAME_URL: Final = re.compile(r"(?P<url>[a-z][a-z0-9+.-]*://\S+):(?P<position>\d+:\d+)", re.I)
 
 
 def _id(value: object, pattern: re.Pattern[str]) -> str | None:
@@ -172,9 +181,21 @@ def parse(body: bytes) -> Json:
     return payload
 
 
-def browser_frames_only(stack: str) -> str:
-    """The frame lines of a browser stack, and nothing else: the message is the rest."""
-    return "\n".join(line.strip() for line in stack.splitlines() if _BROWSER_FRAME.fullmatch(line))
+def browser_frames_only(stack: str, reduce_url: _UrlReducer) -> str:
+    """The frame lines of a browser stack, and nothing else: the message is the rest.
+    A frame's URL is the page's own for an inline script or an ``eval``, so it is
+    reduced as a URL attribute is, keeping its ``:line:col`` (a bundle script under
+    ``/assets/`` keeps its path)."""
+
+    def reduce_frame(match: re.Match[str]) -> str:
+        reduced = reduce_url(match["url"], frame=True) or "<anonymous>"
+        return f"{reduced}:{match['position']}"
+
+    return "\n".join(
+        _FRAME_URL.sub(reduce_frame, line.strip())
+        for line in stack.splitlines()
+        if _BROWSER_FRAME.fullmatch(line)
+    )
 
 
 def _count(value: object) -> int:
@@ -223,11 +244,15 @@ def _value(value: object) -> Json | None:
     return {"arrayValue": {"values": kept}}
 
 
-def _reduced_url(url: str, match_route: RouteMatcher, own_origin: OriginCheck) -> str | None:
+def _reduced_url(
+    url: str, match_route: RouteMatcher, own_origin: OriginCheck, *, frame: bool = False
+) -> str | None:
     """``url`` with its path replaced by the template of the route it names, without
     query or fragment, when it is relative or on one of ScadBuddy's own origins. Any
     other absolute URL (``scheme://host`` or ``//host``), and one on no route, keeps
-    its origin, without any userinfo; any other relative URL on no route is None."""
+    its origin, without any userinfo; any other relative URL on no route is None.
+    A ``frame`` URL (a stack frame's) on an own origin also keeps a path under ``/assets/``, a bundle script, without query or
+    fragment."""
     try:
         parts = urlsplit(url)
     except ValueError:
@@ -238,6 +263,8 @@ def _reduced_url(url: str, match_route: RouteMatcher, own_origin: OriginCheck) -
         origin = f"{parts.scheme}://{host}" if parts.scheme else f"//{host}"
         if not own_origin(origin):
             return origin
+        if frame and parts.path.startswith("/assets/"):
+            return origin + parts.path
     elif parts.scheme:
         return None
     template = match_route(unquote(parts.path)) if parts.path.startswith("/") else None
@@ -264,7 +291,7 @@ def _attributes(raw: object, limit: int, reduce_url: _UrlReducer) -> tuple[list[
     URL that reduces to nothing (`_reduced_url`)."""
     kept: list[Json] = []
     dropped = 0
-    for item in _scrub_exception(raw):
+    for item in _scrub_exception(raw, reduce_url):
         key = item.get("key") if isinstance(item, dict) else None
         if not isinstance(key, str):
             dropped += 1
@@ -310,7 +337,7 @@ def _without_message(stack: str, error_type: str | None, message: str | None) ->
     return stack
 
 
-def _scrub_exception(raw: object) -> list[Any]:
+def _scrub_exception(raw: object, reduce_url: _UrlReducer) -> list[Any]:
     """An attribute list without ``exception.message``, and with only the frame lines of
     an ``exception.stacktrace`` (spec §6), wherever the page put them: the message and
     type come from the same list."""
@@ -328,7 +355,7 @@ def _scrub_exception(raw: object) -> list[Any]:
                 continue
             # A multi-line message can carry a line that looks like a frame.
             stack = _without_message(stack, error_type, message)
-            item = {"key": key, "value": {"stringValue": browser_frames_only(stack)}}
+            item = {"key": key, "value": {"stringValue": browser_frames_only(stack, reduce_url)}}
         scrubbed.append(item)
     return scrubbed
 

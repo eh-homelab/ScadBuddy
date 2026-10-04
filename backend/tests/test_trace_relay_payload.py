@@ -505,7 +505,7 @@ def test_the_output_of_a_largest_legal_body_stays_proportional() -> None:
 
 def test_a_message_smuggled_into_the_stack_is_removed_before_frames_are_kept() -> None:
     message = "a\n    at SECRET:1:2"
-    stack = "Error: a\n    at SECRET:1:2\n    at real (http://h/a.js:1:2)"
+    stack = "Error: a\n    at SECRET:1:2\n    at real (https://scadbuddy.example/assets/a.js:1:2)"
     event = {
         "name": "exception",
         "attributes": [
@@ -514,13 +514,15 @@ def test_a_message_smuggled_into_the_stack_is_removed_before_frames_are_kept() -
         ],
     }
     (scrubbed,) = only_span(export(span(events=[event])))["events"]
-    assert scrubbed["attributes"] == [string("exception.stacktrace", "at real (http://h/a.js:1:2)")]
+    assert scrubbed["attributes"] == [
+        string("exception.stacktrace", "at real (https://scadbuddy.example/assets/a.js:1:2)")
+    ]
 
 
 _FRAMES = (
-    "    at f (https://host/assets/index-a1b2.js:112:15)\n"
-    "    at https://host/assets/index-a1b2.js:20:7\n"
-    "g@https://host/assets/index-a1b2.js:30:9"
+    "    at f (https://scadbuddy.example/assets/index-a1b2.js:112:15)\n"
+    "    at https://scadbuddy.example/assets/index-a1b2.js:20:7\n"
+    "g@https://scadbuddy.example/assets/index-a1b2.js:30:9"
 )
 
 
@@ -543,7 +545,7 @@ def test_a_message_found_inside_a_frame_leaves_the_frames_byte_identical(message
 
 def test_a_stack_without_a_message_header_keeps_every_frame() -> None:
     """Firefox and Safari write no ``<type>: <message>`` line: nothing is removed."""
-    stack = "f@https://host/assets/index-a1b2.js:1:2\ng@https://host/assets/index-a1b2.js:3:4"
+    stack = "f@https://scadbuddy.example/assets/index-a1b2.js:1:2\ng@https://scadbuddy.example/assets/index-a1b2.js:3:4"
     event = {
         "name": "exception",
         "attributes": [
@@ -758,3 +760,63 @@ def test_the_matcher_is_given_the_decoded_path_without_query_or_fragment() -> No
     url = "https://scadbuddy.example/api/v1/models/a%20b/files/x?y=1#z"
     payload.prepare(export(span(attributes=[string("url.full", url)])), spy, own_origin)
     assert seen == ["/api/v1/models/a b/files/x"]
+
+
+def _stack_after_prepare(stack: str) -> str:
+    event = {
+        "name": "exception",
+        "attributes": [string("exception.type", "Error"), string("exception.stacktrace", stack)],
+    }
+    (scrubbed,) = only_span(export(span(events=[event])))["events"]
+    attribute = scrubbed["attributes"][-1]
+    assert attribute["key"] == "exception.stacktrace"
+    return str(attribute["value"]["stringValue"])
+
+
+def test_a_frame_url_on_an_spa_path_keeps_its_origin_without_path_or_query() -> None:
+    """An inline script or an eval frame reports the document's URL (spec §6)."""
+    stack = (
+        f"Error: x\n    at f (https://scadbuddy.example/models/{SENTINEL}/customize?q={SENTINEL}:12:3)\n"
+        f"    at https://scadbuddy.example/m/{SENTINEL}#{SENTINEL}:4:5\n"
+        f"g@https://scadbuddy.example/models/{SENTINEL}?q={SENTINEL}:6:7"
+    )
+    out = _stack_after_prepare(stack)
+    assert SENTINEL not in out
+    assert out == (
+        "at f (https://scadbuddy.example:12:3)\n"
+        "at https://scadbuddy.example:4:5\n"
+        "g@https://scadbuddy.example:6:7"
+    )
+
+
+def test_an_eval_frame_url_is_reduced() -> None:
+    stack = (
+        "Error: x\n    at eval (eval at g (https://scadbuddy.example/models/"
+        f"{SENTINEL}/customize?q={SENTINEL}:12:3), <anonymous>:1:1)"
+    )
+    out = _stack_after_prepare(stack)
+    assert SENTINEL not in out
+    assert out == "at eval (eval at g (https://scadbuddy.example:12:3), <anonymous>:1:1)"
+
+
+def test_a_frame_url_on_a_backend_route_becomes_its_template() -> None:
+    out = _stack_after_prepare(
+        f"    at f (https://scadbuddy.example/api/v1/models/box/files/{SENTINEL}.scad?x=1:1:2)"
+    )
+    assert out == f"at f (https://scadbuddy.example{FILES_ROUTE}:1:2)"
+
+
+def test_a_bundle_frame_keeps_its_asset_path_without_the_query() -> None:
+    stack = (
+        "    at f (https://scadbuddy.example/assets/index-a1b2.js?v=9:112:15)\n"
+        "g@https://scadbuddy.example/assets/index-a1b2.js:30:9"
+    )
+    assert _stack_after_prepare(stack) == (
+        "at f (https://scadbuddy.example/assets/index-a1b2.js:112:15)\n"
+        "g@https://scadbuddy.example/assets/index-a1b2.js:30:9"
+    )
+
+
+def test_a_frame_url_on_another_host_keeps_only_its_origin() -> None:
+    out = _stack_after_prepare(f"    at f (https://cdn.example/assets/{SENTINEL}.js?q=1:1:2)")
+    assert out == "at f (https://cdn.example:1:2)"
