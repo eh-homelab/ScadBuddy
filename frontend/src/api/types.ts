@@ -286,7 +286,22 @@ export interface AiSessionView {
  * queue item id; `print_run` is ScadBuddy's own run.
  */
 export interface SessionResource {
-  type: 'model' | 'revision' | 'preset' | 'asset' | 'render_job' | 'output' | 'print_run' | 'print' | 'unclassified'
+  type:
+    | 'model'
+    | 'revision'
+    | 'preset'
+    | 'asset'
+    | 'render_job'
+    | 'output'
+    | 'print_run'
+    | 'print'
+    | 'library'
+    | 'font'
+    | 'setting'
+    | 'project'
+    | 'bambuddy_file'
+    | 'print_archive'
+    | 'unclassified'
   /** Null only for `unclassified`. */
   id: string | null
   action: 'created' | 'modified' | 'deleted'

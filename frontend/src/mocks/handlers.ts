@@ -2714,9 +2714,11 @@ export const handlers = [
     }
     await delay(250)
     // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
+    const known = new Set((output.library_files ?? []).map((copy) => copy.id))
     const libraryFileId = copyIn(output, null)
     const result: SendResult = {
       library_file_id: libraryFileId,
+      created: !known.has(libraryFileId),
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
       bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
