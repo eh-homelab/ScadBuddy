@@ -9,6 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
+import type { Origin, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -265,9 +266,42 @@ export interface SessionLimits {
 export interface AiSessionView {
   id: string
   title: string
+  origin: Origin
+  status: SessionStatus
+  updated_at: string
   parent_id: string | null
   turns: number
   cost_usd: number
   budget_usd: number
   running: boolean
+}
+
+/**
+ * #931 — one resource a session's tool call created, changed or deleted (agent
+ * `sessions/touched.ts` TouchedRecord, `GET /api/v1/ai/sessions/:id/resources`).
+ * `model` is the model it belongs to; `before`/`after` are what it was and became
+ * where that has an id (a revision's parent and new commit). `print` is a Bambuddy
+ * queue item id; `print_run` is ScadBuddy's own run.
+ */
+export interface SessionResource {
+  type: 'model' | 'revision' | 'preset' | 'asset' | 'render_job' | 'output' | 'print_run' | 'print' | 'unclassified'
+  /** Null only for `unclassified`. */
+  id: string | null
+  action: 'created' | 'modified' | 'deleted'
+  model: string | null
+  before: string | null
+  after: string | null
+  /** The tool whose call touched it. */
+  tool: string
+  at: string
+}
+
+/**
+ * #931 — a resource to find the sessions of (agent `sessions/touched.ts` ResourceRef,
+ * `GET /api/v1/ai/resources/:type/:id/sessions`). A `model` matches anything of that
+ * model; any other kind matches its own id.
+ */
+export interface ResourceRef {
+  type: Exclude<SessionResource['type'], 'unclassified'>
+  id: string
 }

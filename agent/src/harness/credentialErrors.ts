@@ -69,6 +69,35 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
   return 'other'
 }
 
+/**
+ * What the user is told about a turn that ended on a failed model request
+ * (#1101), from the same evidence `classifyFailure` reads and, for a refusal,
+ * what the probe said of the credential (fallback.ts). Claude Code's own
+ * "API Error: …" text, when there is one, follows as the detail.
+ */
+export function describeApiFailure(
+  evidence: FailureEvidence,
+  judged: { probe?: ProbeVerdict['verdict'] | undefined } = {},
+): string {
+  const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
+  const text = evidence.message?.trim()
+  const detail = text ? `: ${text}` : ''
+  switch (classifyFailure(evidence)) {
+    case 'permanent':
+      // A refusal is the key's only once a probe confirms it (fallback.ts).
+      if (judged.probe === 'answered') return `the model endpoint refused this request (${http}); the credential itself works${detail}`
+      if (judged.probe === 'rate_limited') return `the Claude credential is rate limited (${http}); try again later${detail}`
+      if (judged.probe === 'refused') return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+      return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
+    case 'rate_limited':
+      return `the Claude credential is rate limited (${http}); try again later${detail}`
+    case 'transient':
+      return `the model endpoint failed (${http}); try again${detail}`
+    default:
+      return `the model API refused the request (${http})${detail}`
+  }
+}
+
 /** A rate limit that names no time is tried again after this long. */
 export const DEFAULT_COOLDOWN_MS = 60_000
 /** No credential waits longer than this without being tried again. */
@@ -192,6 +221,10 @@ export const CLEARED_COOLDOWN_MS = 1000
  */
 export async function probeCredential(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
   const now = options.now ?? Date.now
+  // How Claude Code presents an OAuth token to the Messages API is not measured, and
+  // in x-api-key Anthropic answers one with a 401 that would read as its own refusal:
+  // unknown, so a rate limit or refusal cools it down and never disables it.
+  if (credential.kind === 'claude_oauth_token') return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 10_000)

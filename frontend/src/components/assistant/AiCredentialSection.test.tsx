@@ -55,6 +55,62 @@ describe('AiCredentialSection (#1000)', () => {
     ])
   })
 
+  it('saves a Claude Code OAuth token with no base URL', async () => {
+    const puts: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PUT' && new URL(request.url).pathname === base) {
+        void request.clone().json().then((body) => puts.push(body))
+      }
+    })
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-oat01-ZZ34')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    expect(puts).toEqual([{ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-ZZ34' }])
+  })
+
+  it('warns, without blocking, when a secret looks like the other Anthropic kind', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.type(await screen.findByLabelText('Anthropic API key'), 'sk-ant-oat01-ZZ34')
+    expect(screen.getByTestId('ai-credential-kind-warning')).toHaveTextContent('looks like a Claude Code OAuth token')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+
+    await user.click(screen.getByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.queryByTestId('ai-credential-kind-warning')).not.toBeInTheDocument()
+    await user.clear(screen.getByLabelText('OAuth token'))
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-api03-ZZ34')
+    expect(screen.getByTestId('ai-credential-kind-warning')).toHaveTextContent('looks like an Anthropic API key')
+  })
+
+  it('says where an OAuth token comes from', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Claude Code OAuth token' }))
+    expect(screen.getByText(/claude setup-token/)).toBeInTheDocument()
+  })
+
+  it('shows a stored OAuth token by its kind', async () => {
+    server.use(
+      http.get(base, () =>
+        HttpResponse.json({
+          configured: true,
+          usable: true,
+          can_save: true,
+          kind: 'claude_oauth_token',
+          base_url: null,
+          last4: 'ZZ34',
+          updated_at: '2026-10-03T00:00:00Z',
+        }),
+      ),
+    )
+    renderPage(<AiCredentialSection />)
+    const current = await screen.findByTestId('ai-credential-current')
+    expect(current).toHaveTextContent('Claude Code OAuth token')
+    expect(within(current).getByLabelText('ending in ZZ34')).toBeInTheDocument()
+  })
+
   it('tests the credential, and shows the wait when rate-limited', async () => {
     const { user } = renderPage(<AiCredentialSection />)
     const test = await screen.findByRole('button', { name: 'Test' })

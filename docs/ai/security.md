@@ -516,7 +516,11 @@ PreToolUse hook is where their tier applies. A subagent's own calls go through
 tasks are off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, #946), so a subagent asked to run in
 the background runs inside the turn too. Backgrounded, it outlived the turn, and Claude Code
 then refused its calls itself, as if the user had declined them, without asking `canUseTool`
-or anyone. A query
+or anyone. A subagent cannot ask the user with `AskUserQuestion`: Claude Code refuses it
+there ("not available inside subagents") and never asks `canUseTool`. A session the
+browser user owns therefore also gets `mcp__scadbuddy_questions__ask_user` (#940,
+[`agent/src/harness/questions.ts`](../../agent/src/harness/questions.ts)), an in-process
+tool at `read` that parks on the same question gate, so only the user answers it. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 

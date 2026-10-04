@@ -9,6 +9,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -30,6 +31,7 @@ from tests.api.test_print_run_choices import (
 from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
+from tests.support.rack_guard import foreign_rack_errors
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -131,7 +133,7 @@ class BrokenUsage(RackUsageStore):
     async def record_picks(
         self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
     ) -> int:
-        raise RuntimeError("the database went away")
+        raise psycopg.OperationalError("the database went away")
 
     def close(self) -> None:
         return None
@@ -413,6 +415,7 @@ class LeakyUsage(BrokenUsage):
         raise RuntimeError(f"duplicate key value: (serial)=({INVENTED_SERIALS[2]})")
 
 
+@pytest.mark.rack_injects_errors
 @respx.mock
 def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
     client: TestClient, model: str, caplog: pytest.LogCaptureFixture
@@ -436,6 +439,8 @@ def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
         assert not [s for s in INVENTED_SERIALS if s in text], record.getMessage()
         assert record.exc_info is None and record.exc_text is None
     assert not [s for s in INVENTED_SERIALS if s in response.text]
+    # The real fallback reaches the guard (#1086 review, finding 4).
+    assert foreign_rack_errors(caplog.records) == ["RuntimeError"]
 
 
 @respx.mock

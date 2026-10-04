@@ -10,7 +10,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
-import type { ProbeVerdict } from '../harness/credentialErrors.js'
+import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
@@ -54,7 +54,7 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { ASK_USER_QUESTION } from '../harness/questions.js'
+import { isQuestionTool } from '../harness/questions.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -73,7 +73,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
-import { SessionResources, type TouchedRecord } from './touched.js'
+import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -267,6 +267,9 @@ export type TurnOutcome =
 
 export type Turn = { turnId: string; done: Promise<TurnOutcome> }
 
+/** A turn that ended on a failed model request (fallback.ts `onRefused`). */
+type Refused = { evidence: FailureEvidence; probe?: ProbeVerdict['verdict'] }
+
 export type StartOptions = {
   origin: Origin
   title?: string
@@ -300,7 +303,13 @@ export type SendOptions = {
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
 export type TurnPrincipal = { tiers?: readonly Tier[] }
 
-export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
+export type ListFilter = {
+  status?: SessionStatus
+  origin?: Origin
+  limit?: number
+  /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
+  resource?: ResourceRef
+}
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
@@ -524,6 +533,18 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
   }
+  if (filter.resource) {
+    // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
+    let match: string
+    if (filter.resource.type === 'model') {
+      params.push(filter.resource.id)
+      match = `r.model_slug = $${params.length}`
+    } else {
+      params.push(filter.resource.type, filter.resource.id)
+      match = `r.resource_type = $${params.length - 1} AND r.resource_id = $${params.length}`
+    }
+    where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
+  }
   params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
   const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY updated_at DESC LIMIT $${params.length}`
@@ -586,6 +607,7 @@ export class SessionManager {
       sql: deps.sql,
       events: this.events,
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.audit ? { audit: deps.audit } : {}),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -912,10 +934,10 @@ export class SessionManager {
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
     let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
-    // AskUserQuestion (#940) only asks the user: shown and audited as `read`, as the harness tiers it.
+    // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
-      asksUser && name === ASK_USER_QUESTION ? 'read' : eventTierOf(name, input)
+      asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf)
     let lost = false
     /** Redacted from everything this turn writes to the durable event log. */
@@ -953,6 +975,23 @@ export class SessionManager {
 
     let result: SDKResultMessage | undefined
     let failure: string | undefined
+    /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
+    let refused: Refused | undefined
+    /**
+     * Claude Code's synthetic "API Error: …" messages, held until it is known
+     * whether the turn ended on them (#1101): then the result's error event
+     * says it, and they are dropped; otherwise they are shown as they came.
+     */
+    const heldErrors: SDKMessage[] = []
+    const show = async (message: SDKMessage) => {
+      await pluginCheck?.(message)
+      const events = mapper.map(message)
+      if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+      if (auditor) for (const e of events) await auditor.observe(e)
+    }
+    const flushErrors = async () => {
+      for (const m of heldErrors.splice(0)) await show(m)
+    }
     let forwarded: PluginsForRun | undefined
     let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
@@ -1131,18 +1170,27 @@ export class SessionManager {
         ...(this.deps.probe ? { probe: this.deps.probe } : {}),
         // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
         ...(resume ? { priorCostUsd: session.costUsd } : {}),
+        onRefused: (evidence, judged) => {
+          refused = { evidence, ...judged }
+        },
       })
       for await (const message of turn) {
+        if (message.type === 'assistant' && message.error) {
+          heldErrors.push(message)
+          continue
+        }
         if (message.type === 'result') {
           result = message
           local.settling = true
+          // onRefused runs before fallback.ts yields what it held.
+          if (refused) heldErrors.length = 0
         }
-        await pluginCheck?.(message)
-        const events = mapper.map(message)
-        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
-        if (auditor) for (const e of events) await auditor.observe(e)
+        await flushErrors()
+        await show(message)
       }
+      await flushErrors()
     } catch (err) {
+      if (!refused) await flushErrors().catch(() => {})
       // For an error result the SDK yields the result and then throws
       // ("Claude Code returned an error result", test/run.test.ts); the
       // result is what counts then.
@@ -1170,7 +1218,8 @@ export class SessionManager {
     // replica, resumes from a complete transcript.
     if (lost) return { kind: 'lost_claim' }
     const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-    return this.finish(session, turnId, stopped, result, failure, secrets)
+    // A turn stopped after its refusal was reported is still the caller's.
+    return this.finish(session, turnId, stopped, result, result && stopped === undefined ? refused : undefined, failure, secrets)
   }
 
   /**
@@ -1272,6 +1321,8 @@ export class SessionManager {
     turnId: string,
     stopped: string | undefined,
     result: SDKResultMessage | undefined,
+    /** The failed model request `result` reports, when it reports one (fallback.ts `onRefused`). */
+    refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
   ): Promise<TurnOutcome> {
@@ -1310,20 +1361,34 @@ export class SessionManager {
       // and it is added instead.
       const total = result.total_cost_usd
       costUsd = total >= session.costUsd ? total : session.costUsd + total
-      turns = session.turns + result.num_turns
-      status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
-      // Its budget is filled in from the row once the claim is released below.
-      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      if (result.subtype === 'error_max_budget_usd') {
-        // The SDK's own text names this turn's share of the budget as an
-        // unrounded float; the session's budget, in cents, is what the user
-        // set. Worded below, once the row says what the budget is now.
-        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: 'the chat used its budget' }))
-      } else if (result.subtype !== 'success') {
-        const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
-        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
+      if (refused) {
+        // Claude Code reports a refused request as a `success` result with
+        // `is_error` set, and its "API Error: …" text as a synthetic reply
+        // (#1101). Redacted here too: the outcome reaches MCP callers without
+        // scrubForLog. The refused request is not a turn; any before it are.
+        const refusal = redact(describeApiFailure(refused.evidence, refused), secrets)
+        // `num_turns` counts the refused request (fallback.ts `onRefused`).
+        turns = session.turns + Math.max(result.num_turns - 1, 0)
+        status = 'failed'
+        tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+        tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal }))
+        outcome = { kind: 'failed', message: refusal }
+      } else {
+        turns = session.turns + result.num_turns
+        status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
+        // Its budget is filled in from the row once the claim is released below.
+        tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+        if (result.subtype === 'error_max_budget_usd') {
+          // The SDK's own text names this turn's share of the budget as an
+          // unrounded float; the session's budget, in cents, is what the user
+          // set. Worded below, once the row says what the budget is now.
+          tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: 'the chat used its budget' }))
+        } else if (result.subtype !== 'success') {
+          const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
+          tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
+        }
+        outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
       }
-      outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
     } else if (stopped !== undefined) {
       status = 'idle'
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))

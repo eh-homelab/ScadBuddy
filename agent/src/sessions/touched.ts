@@ -34,6 +34,26 @@ export const RESOURCE_TYPES = [
 ] as const
 export type ResourceType = (typeof RESOURCE_TYPES)[number]
 
+/** The kinds a session list can be filtered by (#931's reverse lookup): every kind with an id. */
+export const LOOKUP_TYPES = [
+  'model',
+  'revision',
+  'preset',
+  'asset',
+  'render_job',
+  'output',
+  'print_run',
+  'print',
+] as const satisfies readonly Exclude<ResourceType, 'unclassified'>[]
+export type LookupType = (typeof LOOKUP_TYPES)[number]
+
+/**
+ * A resource to find the sessions of. A `model` matches every row of that
+ * model (`model_slug`: the model itself, its revisions, presets, assets,
+ * renders and outputs); any other kind matches its own id.
+ */
+export type ResourceRef = { type: LookupType; id: string }
+
 export const RESOURCE_ACTIONS = ['created', 'modified', 'deleted'] as const
 export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
 
@@ -286,7 +306,7 @@ type Row = {
 export const MAX_TOUCHES_PER_CALL = 100
 
 /** The longest id stored; longer ones are cut (they come from a tool result). */
-const ID_MAX = 300
+export const ID_MAX = 300
 
 /** At most ID_MAX UTF-16 units, cut between code points: never half a surrogate pair. */
 function bounded(value: string | null | undefined): string | null {
