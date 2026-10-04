@@ -17,6 +17,10 @@ kind: Kustomization
 # field, or this ConfigMap is rewritten into the overlay's namespace, where the
 # sidecar never looks (clusters#1596 Phase 5).
 #
+# No folder annotation: clusters/prod/rk2-rancher-monitoring-values.yaml sets
+# the sidecar's `folderAnnotation: null`, so a per-ConfigMap folder is ignored
+# and the dashboard lands in General.
+#
 # No hash suffix: the sidecar keys on the dashboard's uid, not the ConfigMap's
 # name, and a stable name lets ArgoCD update it in place.
 configMapGenerator:
@@ -26,7 +30,5 @@ configMapGenerator:
       disableNameSuffixHash: true
       labels:
         grafana_dashboard: "1"
-      annotations:
-        k8s-sidecar-target-directory: /tmp/dashboards/ScadBuddy
     files:
       - scadbuddy.json

@@ -375,8 +375,6 @@ configMapGenerator:
       disableNameSuffixHash: true
       labels:
         grafana_dashboard: "1"
-      annotations:
-        k8s-sidecar-target-directory: /tmp/dashboards/ScadBuddy
     files:
       - scadbuddy.json
 ```
