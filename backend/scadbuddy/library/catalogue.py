@@ -492,6 +492,14 @@ class ModelRecord(ModelMeta):
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``. A built-in's is
     #: what it ships (``readonly``) followed by what was added to it (#722).
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+
+    @field_validator("media", mode="before")
+    @classmethod
+    def _readable_media(cls, value: Any) -> Any:
+        """Views, read as given: a record is read back from its JSON as an operation's
+        answer (#1054), and model.json's leniency would turn each into a plain item."""
+        return value
+
     #: A built-in's chosen cover (#722), listed first in ``media``; None while the
     #: shipped order decides it, and always for a template of mine, whose cover is
     #: simply its first item.

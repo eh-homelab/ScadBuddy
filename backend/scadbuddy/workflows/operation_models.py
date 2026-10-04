@@ -32,6 +32,8 @@ class OperationInput(BaseModel):
     request: dict[str, Any]
     #: The kind's: 1 for an effect Bambuddy does not dedupe (§4.2).
     run_attempts: int = 1
+    #: The kind's run timeout in seconds; the workflow's ``RUN_TIMEOUT`` when None.
+    run_timeout_s: float | None = None
     #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
     search_attributes: bool = False
 

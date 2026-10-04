@@ -290,6 +290,7 @@ def test_pinning_and_unpinning_a_library_publish_library_changed(
         protocols=("file",),
     )
     app.dependency_overrides[get_libraries] = lambda: store
+    getattr(app.state, STATE_ATTR).libraries = store
 
     _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
     _ok(client.delete(f"/api/v1/models/{mine}/libraries/BOSL2"))
@@ -321,6 +322,7 @@ def test_repinning_and_removing_checkouts_publish_their_events(
         protocols=("file",),
     )
     app.dependency_overrides[get_libraries] = lambda: store
+    getattr(app.state, STATE_ATTR).libraries = store
     _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
     events.clear()
 
@@ -343,7 +345,8 @@ def test_repinning_and_removing_checkouts_publish_their_events(
         {"kind": "library.changed", "slug": mine, "name": "BOSL2"},
         {"kind": "model.updated", "slug": mine},
     ]
-    assert published(events) == [
+    # The removal is an operation (#1054), announced as `operation.changed` beside it.
+    assert [event for event in published(events) if event["kind"] == "library.removed"] == [
         {"kind": "library.removed", "name": "BOSL2", "commits": [commits["v1"]]}
     ]
 

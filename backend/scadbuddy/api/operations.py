@@ -107,6 +107,7 @@ async def run_operation(
         key=key,
         request=body,
         run_attempts=kind.run_attempts,
+        run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
     )
     try:
@@ -115,7 +116,7 @@ async def run_operation(
             OPERATION_WORKFLOW,
             arg,
             id=f"op-{kind.name}-{key}",
-            task_queue=ops.task_queue,
+            task_queue=ops.queues[kind.queue],
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,
             reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,

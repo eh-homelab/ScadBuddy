@@ -43,8 +43,10 @@ with workflow.unsafe.imports_passed_through():
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
-#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin.
+#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin; a kind may set its own.
 RUN_TIMEOUT = timedelta(minutes=5)
+#: The run heartbeats (``operation_activities``), so a timeout or cancel reaches it.
+RUN_HEARTBEAT = timedelta(seconds=30)
 SHORT = timedelta(seconds=60)
 READ_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
@@ -118,7 +120,10 @@ class OperationWorkflow:
                 run_activity(input.kind),
                 RunOp(request=input.request, checked=checked),
                 result_type=dict,
-                start_to_close_timeout=RUN_TIMEOUT,
+                start_to_close_timeout=(
+                    timedelta(seconds=input.run_timeout_s) if input.run_timeout_s else RUN_TIMEOUT
+                ),
+                heartbeat_timeout=RUN_HEARTBEAT,
                 retry_policy=RetryPolicy(
                     maximum_attempts=input.run_attempts,
                     initial_interval=timedelta(seconds=1),

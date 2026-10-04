@@ -35,6 +35,8 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
+        operations=SimpleNamespace(store=None, kinds={}),
+        settings_store=None,
     )
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
