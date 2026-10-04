@@ -120,11 +120,12 @@ phase 5, as amended by #1030 (`agent-durable` is a sidecar trusted like `agent`)
   `WorkflowSerializationContext.workflow_id` and `ActivitySerializationContext.workflow_id`.
   Phase 4 confirmed that a `@temporalio/common` 1.24.0 codec receives `workflowId`.
 
-## Deviations to confirm with the user
+## Deviations (decided by the user, 2026-10-04)
 
-The work does not start until the user answers these. Each is a place where the spec, written
-against `766c647`, no longer matches the plugin, or where the plugin offers nothing for what
-the spec needs.
+Each is a place where the spec, written against `766c647`, no longer matches the plugin, or
+where the plugin offers nothing for what the spec needs. The user decided all five: 1
+accepted (it follows upstream), 2 keep the Postgres store, 3 the wrapper, 4 as revised
+below, 5 pin `b1cf3848`.
 
 1. **The two "known limitations" of §3.2 are solved upstream.** Both commits are after
    766c647: parallel durable calls (2c1fcb6), and Bash/MCP calls run as their own activities
@@ -150,14 +151,60 @@ the spec needs.
    API, but no upstream example builds a runner per segment. The cost is that the engine
    version (`claude -v`) is checked once per segment instead of once per worker. Recommended:
    accept it, and ask upstream for a per-segment options hook as a follow-up.
-4. **Interrupt.** The plugin's only stop is Workflow cancellation, which ends the task and
-   then the Workflow (`run()` re-raises the cancellation). Reopening it would start a new
-   workflow and lose the Claude session. The plan **refuses `session.interrupt` on a durable
-   session** with code `unsupported` ("A durable session can't be stopped mid-turn yet."), and
-   the panel hides Stop for it. The alternative is to catch `asyncio.CancelledError` around
-   `agent.run`, then continue as new with `agent.state()`. That is legal Temporal Python, but
-   the plugin does not document it, and it would need its own replay tests. Recommended:
-   refuse now, and file an upstream request for an interrupt API.
+4. **Interrupt (decided): Stop cancels the current execution, and the next message starts
+   a new one that resumes the conversation.**
+   - Stop is Temporal workflow cancellation of `session-<id>`. That is the documented API,
+     and the README's only stop.
+   - **The store alone is not enough to resume.** Verified at `b1cf3848`:
+     - The plugin resumes a Claude session from `AgentState`, not from the store.
+       `SegmentInput` carries `session_id` and `checkpoint` (the transcript entry where the
+       last committed segment ended). `_runner.py:1620` starts a **new** Claude session when
+       `checkpoint is None`. A new execution built with `state=None` therefore gets
+       `AgentState()`, and `run()` gives it a fresh `session_id = workflow.uuid4()`
+       (`_workflow.py:773`): no history.
+     - The rest of what a resume needs is also only in `AgentState`, not in the store:
+       - `pending`: the error results owed for calls Claude is still waiting on;
+       - `fork_next`: continue in a copy of the session that ends at the checkpoint;
+       - `recent_call_ids`: a call never runs twice.
+     - The store cannot supply the checkpoint: it may hold entries a cancelled segment wrote
+       after it, which is why the plugin forks at the checkpoint (`fork_session_via_store`,
+       `_runner.py:1646`).
+   - **What the cancel leaves.** When the cancellation reaches `agent.run()`, `run()` calls
+     `_end_task("the Workflow was cancelled")` (`_workflow.py:776-783`, `1030-1064`), then
+     publishes `cancelled` and re-raises.
+     - Every call Claude was still waiting for gets an error result in `state.pending`.
+       - An approval that was waiting (its `wait_condition` is cancelled): "This tool call
+         did not run: the Workflow was cancelled."
+       - A tool activity that had started: "This tool call was interrupted (…); whether it
+         took effect is unknown. Check before running it again."
+       - A call that had finished: its real result.
+     - It sets `task_prompt = None` and `fork_next = True`, and keeps `session_id` and
+       `checkpoint` (it clears them only when nothing was ever committed).
+     - The store stays consistent: the next segment forks at the checkpoint, so whatever the
+       cancelled segment wrote after it never reaches Claude.
+   - **The design.**
+     - `DurableSession.run` catches `asyncio.CancelledError` around its loop and **returns
+       `self.agent.state()` as the workflow's result**. A Python workflow may catch its
+       cancellation and complete. The execution then closes as *Completed*, not *Cancelled*:
+       a deliberate difference from the README's "ends as cancelled", so that the hand-over
+       is in Temporal and is encrypted by the codec.
+     - The next message's update-with-start finds the ID closed. The agent service reads the
+       last execution's result (the `AgentState`, passed back as opaque JSON) and starts the
+       new execution with `[input, state, null]`, reusing the ID
+       (`workflowIdReusePolicy: ALLOW_DUPLICATE`).
+     - The new run's first segment resumes the same Claude session at its checkpoint, with
+       the owed error results delivered alongside the new prompt (README: "After a failed
+       task, the agent can take the next one").
+   - **Still missing (a gap, not solved here).** An execution that closed *without* handing
+     over loses the Claude session's place, even though the transcript rows survive. That
+     covers a termination, a workflow-task failure, `forgetSubject`, and an operator delete of
+     the history. The agent service then starts the new execution with `state = null`, and
+     appends an `error` event, code `resumed_fresh`: "The previous run of this session ended
+     without handing over; this message starts a new conversation."
+   - Rebuilding an `AgentState` from Postgres (the last recorded segment's `session_id` and
+     checkpoint, plus synthetic `pending` results for its deferred calls) would close that
+     gap. It would mean constructing the plugin's internal state by hand, which the plugin
+     neither documents nor tests. Not planned; it needs the user's decision if wanted.
 5. **The pin is a newer head than the spec names.** The plan pins `b1cf3848`, not `766c647`,
    because the spec's own test and the solved limitations depend on the newer commits. A
    Temporal member's change request is still open on the PR (above). Confirm the pin.
@@ -195,8 +242,10 @@ the spec needs.
    `DurableSession` on queue `agent`, ID `session-<id>`,
    `workflowIdConflictPolicy: USE_EXISTING`. The start arguments are
    `[input, null, null]`, because Temporal applies types only when every `run` argument is
-   passed (README, "Start with every argument"). The workflow never completes on its own. An
-   idle open workflow costs nothing, and closing it would lose the `AgentState`.
+   passed (README, "Start with every argument"). The workflow completes only when Stop
+   cancels it (deviation 4), returning its `AgentState`. An idle open workflow costs nothing.
+   When the ID is closed, the agent service starts the next execution with
+   `[input, <last result>, null]` and `workflowIdReusePolicy: ALLOW_DUPLICATE` (deviation 4).
 7. **Approval ids.** A durable approval's id in `approval.required` is
    `durable:<sessionId>:<tool_use_id>`, at most 200 characters, which fits the socket's
    `id` limit. `ApprovalService.decide` and `decision` route such an id to
@@ -213,7 +262,15 @@ the spec needs.
    `approval.resolved {approved: false}` without `by`, as classic does for an expired
    approval.
 9. **Fork and interrupt.** `fork` of a durable session answers 409 `unsupported`, because
-   the SDK cannot copy a Workflow's state into a new session. Interrupt: deviation 4.
+   the SDK cannot copy a Workflow's state into a new session.
+   - Interrupt is `WorkflowHandle.cancel()` on the running execution (deviation 4). It answers
+     `true` when an execution was running, and `false` when none was.
+   - The projector turns the `cancelled` event into an `approval.resolved {approved: false,
+     reason: "the turn was stopped"}` for each approval left open, then `session.status
+     idle`.
+   - The projector's offset restarts at 0 for each new execution. The agent service resets
+     `ai_durable_streams.next_offset` when it starts a new execution: Workflow Streams
+     offsets are per execution chain, and follow Continue-As-New but not a new start.
 10. **Text.** `text` events are buffered per `(segment, attempt)`. A `retry` drops the
     older attempt's text, and the buffer is flushed (as one
     `assistant.text.delta` + `assistant.text.done` per message) at the segment's next
@@ -298,7 +355,10 @@ the spec needs.
 4. **A projector that dies mid-batch.** Events must neither repeat nor go missing in the
    panel. Pinned in Task 10: kill the follower after a batch commits but before the next
    one, and a new holder resumes at `next_offset` with no duplicate `seq` content.
-5. **A message with `mode` on an existing session, and a classic session's approvals.**
+5. **Stop, then send again.** The model must see the earlier history, and a call
+   interrupted mid-run must be reported as "unknown whether it took effect", never silently
+   re-run. Pinned in Task 9 test 10 and Task 17.
+6. **A message with `mode` on an existing session, and a classic session's approvals.**
    The first is refused. The second never routes to Temporal: ids without the `durable:`
    prefix still use `ai_approvals`. Pinned in Task 5 and Task 12.
 
@@ -1260,7 +1320,21 @@ class SessionRunner:
      conversation and a message waiting in the inbox is still answered.
   9. Parallel calls: a policy that returns two durable calls in one message (deviation 1) runs
      both stubs and delivers both results.
-  10. Replay: record the history of test 4 into
+  10. Stop and resume (deviation 4). ScriptedClaude runs with a `state_dir`, which is its
+      session-store mode.
+      - (a) Cancel while a stub tool activity runs. The execution completes, and its result is
+        an `AgentState` with the same `session_id`, a `checkpoint`, `fork_next` true, and
+        `pending[call_id]` "…interrupted…".
+      - (b) Cancel while an outward call waits for approval. `pending[call_id]` is "This tool
+        call did not run: the Workflow was cancelled.", and the stub never ran.
+      - (c) Cancel while idle. The result keeps the session's `session_id` and `checkpoint`.
+      - (d) For each case, start a new execution on the same ID with `[input, <result>,
+        None]` and send a message. The policy's view of the conversation holds the earlier
+        turns, so the model sees the earlier history, and the owed error result arrives with
+        the new prompt. A call id from before the cancel can never run again.
+      - (e) Starting with `state=None` after a cancel begins a new Claude session (a different
+        `session_id`). This pins the gap: the store alone does not resume.
+  11. Replay: record the history of test 4 into
       `agent-durable/tests/histories/approve.json`, and replay it with `Replayer` in the
       test, so a later change to the workflow fails replay (TMPRL1100).
 - [ ] **Step 2: Run, expect FAIL.**
@@ -1296,19 +1370,26 @@ class DurableSession:
 
     @workflow.run
     async def run(self, inp: SessionInput, state: AgentState | None = None,
-                  inbox: list[Message] | None = None) -> None:
+                  inbox: list[Message] | None = None) -> AgentState:
         asyncio.create_task(self._expire_approvals())
-        while True:
-            prompt: str | None = None
-            if not self.agent.busy:
-                await workflow.wait_condition(lambda: bool(self._inbox) or self.agent.should_continue_as_new())
-                if not self._inbox:
-                    await self.agent.continue_as_new()
-                prompt = render_prompt(self._inbox.pop(0))
-            try:
-                await self.agent.run(prompt)
-            except FailureError:
-                pass  # the agent published `error`; the session takes the next message
+        try:
+            while True:
+                prompt: str | None = None
+                if not self.agent.busy:
+                    await workflow.wait_condition(lambda: bool(self._inbox) or self.agent.should_continue_as_new())
+                    if not self._inbox:
+                        await self.agent.continue_as_new()
+                    prompt = render_prompt(self._inbox.pop(0))
+                try:
+                    await self.agent.run(prompt)
+                except FailureError:
+                    pass  # the agent published `error`; the session takes the next message
+        except asyncio.CancelledError:
+            # Stop (deviation 4). agent.run() already ended the task (_end_task: owed error
+            # results in pending, fork_next) and published `cancelled`. Hand the state over as
+            # this execution's result, so the next message's execution resumes the same
+            # Claude session from the SessionStore at the checkpoint.
+            return self.agent.state()
 
     @workflow.update(name=SEND_UPDATE)
     def send_message(self, message: Message) -> None:
@@ -1394,7 +1475,9 @@ class DurableSession:
     - `rejected` decided by a person gives no `approval.resolved`, because the route wrote it
       (ruling 7).
     - `error` gives a flush, `error{sessionId, message}` and status `idle`, final.
-    - `cancelled` gives status `idle`, final.
+    - `cancelled` after an `approval_needed` with no `tool_result` gives
+      `approval.resolved{id, approved: false, reason: "the turn was stopped"}` for each open
+      approval, then status `idle`, final.
     - `prompt` and `continued_as_new` give nothing.
     - `bus_kind_of` matches TypeScript's `busKindOf` for the same five shapes.
   - `test_projector.py` (`requires_postgres`, `requires_temporal`, `ScriptedClaude`):
@@ -1529,10 +1612,19 @@ export type DurableSessionInput = {
 }
 export class DurableRefused extends Error {} // a validator refused the Update
 export interface DurableSessions {
-  send(input: DurableSessionInput, message: { text: string; context: string | null }): Promise<void>
+  send(input: DurableSessionInput, message: { text: string; context: string | null }): Promise<DurableSendResult>
   review(sessionId: string, toolUseId: string, approved: boolean, approver: string): Promise<void>
   pending(sessionId: string): Promise<{ id: string; name: string; input: Record<string, unknown> }[]>
+  /** Stop: cancels the running execution; false when none is running. */
+  cancel(sessionId: string): Promise<boolean>
 }
+/**
+ * send: `describe()` first. Running → update-with-start with state null (USE_EXISTING
+ * attaches). Closed Completed → state = `handle.result()` (the AgentState, opaque JSON);
+ * other closed → state null and `resumedFresh: true`. Not found → state null. The start
+ * carries `workflowIdReusePolicy: 'ALLOW_DUPLICATE'`.
+ */
+export type DurableSendResult = { started: 'attached' | 'resumed' | 'fresh'; resumedFresh: boolean }
 export class TemporalDurableSessions implements DurableSessions { constructor(client: Client) }
 ```
 
@@ -1540,7 +1632,9 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
   - `durable.client.test.ts` (with a fake `Client`):
     - `send` calls `executeUpdateWithStart(SEND_UPDATE, {args: [message], startWorkflowOperation:
       WithStartWorkflowOperation.create(DURABLE_WORKFLOW, {workflowId: 'session-<id>',
-      taskQueue: 'agent', args: [input, null, null], workflowIdConflictPolicy: 'USE_EXISTING'})})`.
+      taskQueue: 'agent', args: [input, state, null], workflowIdConflictPolicy: 'USE_EXISTING',
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE'})})`, where `state` is `null` while the ID is
+      running or unknown, and the closed execution's result when it completed.
     - A `WorkflowUpdateFailedError` becomes `DurableRefused` with the validator's message.
     - `parseDurableApprovalId` round-trips, and rejects ids without the prefix or with a
       non-uuid session.
@@ -1549,8 +1643,14 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
       `send` with the session's `max_turns`, the current `approval_expiry_seconds` and
       `model`, and the page context.
     - A `DurableRefused("the session is busy")` becomes `SessionError('busy')`.
-    - `session.interrupt` on a durable session answers `error` with code `unsupported`
-      (deviation 4).
+    - `session.interrupt` on a durable session calls `durable.cancel(sessionId)` and
+      returns true. With no running execution, it returns false (deviation 4).
+    - Send after a Stop: when `durable.send` finds the ID closed and *Completed*, it starts
+      the new execution with the last result as `state`, and `ai_durable_streams.next_offset`
+      is reset to 0 first.
+    - When the ID is closed any other way (terminated or failed), it starts with `state =
+      null` and the session's log gains `error {code: 'resumed_fresh'}` (the gap in
+      deviation 4).
     - A classic session's send never touches `DurableSessions`.
   - Review Focus 1: when `send` resolves but no worker polls, the status stays `running` and
     no `error` event is written.
@@ -1560,7 +1660,7 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
     - A non-owner bearer gets `not_found`, the same visibility rule as classic.
     - `DurableRefused` becomes `ApprovalError('conflict')`, which is 409 on the route
       (Review Focus 2).
-    - Review Focus 5: an id without the prefix still settles an `ai_approvals` row and never
+    - Review Focus 6: an id without the prefix still settles an `ai_approvals` row and never
       calls `review`.
     - `GET /approvals?session=<durable>&pending=true` maps `pending()` into `ApprovalView`s
       (`id` the durable id, `tier: 'outward'`, `input_summary` capped at 500, `decision:
@@ -1654,8 +1754,8 @@ export class TemporalDurableSessions implements DurableSessions { constructor(cl
       default and sends.
     - After the first message the picker is gone, and messages with a `sessionId` never carry
       `mode`.
-  - `AssistantChat`: a durable session shows a "Durable" badge in the header and no Stop
-    button (deviation 4); a classic session has Stop.
+  - `AssistantChat`: a durable session shows a "Durable" badge in the header. Stop works for
+    it as for a classic session: it sends `session.interrupt` (deviation 4).
   - `SessionModeSetting.test.tsx`: it loads the value, saves the change through PUT, and
     shows the error detail of a 400/503. Model it on `SessionLimitsSetting.test.tsx`.
 - [ ] **Step 2: Run, expect FAIL.** `cd frontend && pnpm exec vitest run src/components/assistant/ModePicker.test.tsx src/components/SessionModeSetting.test.tsx`
@@ -1811,6 +1911,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     `approval.resolved {approved: false, by}`, then `tool.result ok: false`.
   - Review Focus 1: start the Python worker only after `user.message` was sent. The reply
     still arrives.
+  - Stop and resume (deviation 4), on the real engine:
+    - The script's first turn calls a tool whose stub activity hangs. The test sends
+      `session.interrupt` and expects `session.status idle`.
+    - It then sends a second `user.message` on the same session.
+    - The fake's next `/v1/messages` request must contain the first message's text and the
+      `tool_result` "…interrupted…" for the hung call: the model sees the earlier history.
+    - It expects `assistant.text.delta` for the second answer.
 - [ ] **Step 2: Run it** with the three variables set: `pnpm build && pnpm exec vitest run test/durable.e2e.test.ts`. Expected: PASS. Fix the plumbing it finds in the owning task's files.
 - [ ] **Step 3: Commit** `test(agent): a durable turn from the chat socket through agent-durable (#1056)`.
 
