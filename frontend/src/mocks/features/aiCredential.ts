@@ -99,8 +99,9 @@ function expire(): void {
 function listView(): AiCredentialList {
   expire()
   const usable = state.credentials.filter((c) => c.usable && c.status === 'active')
+  // Agent `soonestRecovery`: only a credential the mounted key opens recovers.
   const cooling = state.credentials
-    .filter((c) => c.status === 'cooling_down' && c.cooldown_until)
+    .filter((c) => c.usable && c.status === 'cooling_down' && c.cooldown_until)
     .map((c) => c.cooldown_until!)
     .sort()
   return {
@@ -143,6 +144,10 @@ export const handlers = [
     const ok = checked(body)
     if (ok instanceof Response) return ok
     if (ok.secret === undefined) return detail('secret: Required', 400)
+    // Agent MAX_CREDENTIALS and TOO_MANY_MESSAGE.
+    if (state.credentials.length >= 100) {
+      return detail('at most 100 Claude credentials can be stored; delete one first', 409)
+    }
     const created = entry({
       id: `c${state.nextId++}`,
       priority: state.credentials.length,
@@ -230,18 +235,21 @@ export const handlers = [
     }
     const current = find(params.id)
     if (!current) return detail('no such credential', 404)
+    if (!current.usable) {
+      return detail('the stored credential cannot be decrypted: no key opens it; save it again', 409)
+    }
     state.testing = true
     try {
       // The agent starts a Claude Code process; a moment here lets a second click meet the running test.
       await delay(20)
-      return HttpResponse.json(
-        state.failing.has(current.id)
-          ? { ok: false, detail: 'authentication_error: invalid x-api-key', duration_ms: 812, model: null }
-          : { ok: true, detail: 'ok', duration_ms: 1430, model: 'claude-sonnet-5-5' },
-      )
+      const result = state.failing.has(current.id)
+        ? { ok: false, detail: 'authentication_error: invalid x-api-key', duration_ms: 812, model: null }
+        : { ok: true, detail: 'ok', duration_ms: 1430, model: 'claude-sonnet-5-5' }
+      // As the agent's `lastTestEnded`: only a test that ran starts the cooldown.
+      state.lastTest = Date.now()
+      return HttpResponse.json(result)
     } finally {
       state.testing = false
-      state.lastTest = Date.now()
     }
   }),
 ]

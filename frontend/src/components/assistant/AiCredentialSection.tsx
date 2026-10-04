@@ -69,6 +69,24 @@ function replaceMismatch(kind: AiCredentialKind, secret: string): string | null 
   return `This looks like ${other}, and a replacement keeps the credential's kind. Add it as a new credential instead, then delete this one.`
 }
 
+/**
+ * Why no credential is usable when none recovers by itself: a refused one needs a reset or a
+ * new key, one the agent cannot decrypt (agent `opensWith`) needs its key saved again, and
+ * with no key-encryption key mounted nothing can be decrypted or saved.
+ */
+function noneUsable(credentials: readonly AiCredentialEntry[], canSave: boolean): string {
+  const locked = credentials.some((c) => !c.usable)
+  const refused = credentials.some((c) => c.usable && c.status === 'disabled')
+  if (locked && !canSave) {
+    return 'No credential is usable now: the agent cannot decrypt the stored keys, or save new ones, until its key-encryption key is mounted.'
+  }
+  if (locked && refused) {
+    return 'No credential is usable now: a refused one needs a reset or a new key, and one the agent cannot decrypt needs its key saved again.'
+  }
+  if (locked) return 'No credential is usable now: the agent cannot decrypt them, so each key needs saving again.'
+  return 'No credential is usable now: each one needs a reset or a new key.'
+}
+
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -366,7 +384,7 @@ export function AiCredentialSection() {
             <p role="status" data-testid="ai-credentials-none-usable" className="text-warn">
               {current.recovers_at
                 ? `No credential is usable now. The first rate-limited one is usable again at ${clock(current.recovers_at)}.`
-                : 'No credential is usable now: each one needs a reset or a new key.'}
+                : noneUsable(credentials, current.can_save)}
             </p>
           )}
           <ol className="flex flex-col divide-y divide-line rounded-[6px] border border-line" aria-label="Claude credentials, tried in this order">

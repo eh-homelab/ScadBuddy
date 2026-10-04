@@ -345,6 +345,9 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no such credential')
     await waitFor(() => expect(rows()).toHaveLength(1))
+    // A test that never ran starts no cooldown (agent `lastTestEnded`).
+    await user.click(screen.getByRole('button', { name: `Test ${KEY}` }))
+    expect(await within(rows()[0]!).findByTestId('ai-credential-test')).toHaveTextContent('Works')
   })
 
   it('reads the list again when a cooldown ends, so the status is not left stale', async () => {
@@ -495,7 +498,48 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     renderPage(<AiCredentialSection />)
     expect(await screen.findByText(/cannot decrypt this key/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
+    expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent(
+      'the agent cannot decrypt them, so each key needs saving again',
+    )
   })
+
+  it('names both fixes when one credential is refused and one cannot be decrypted', async () => {
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA', status: 'disabled', last_error: 'authentication_error' }),
+      credentialEntry({ id: 'c2', kind: 'gateway', base_url: 'https://gateway.example/anthropic', last4: 'GW99', usable: false }),
+    ])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credentials-none-usable')).toHaveTextContent(
+      'a refused one needs a reset or a new key, and one the agent cannot decrypt needs its key saved again',
+    )
+  })
+
+  it('promises no recovery from a cooldown on a key the agent cannot decrypt', async () => {
+    setCredentials([
+      credentialEntry({
+        id: 'default',
+        last4: 'Q7xA',
+        usable: false,
+        status: 'cooling_down',
+        cooldown_until: '2099-01-01T00:00:00Z',
+      }),
+    ])
+    renderPage(<AiCredentialSection />)
+    const banner = await screen.findByTestId('ai-credentials-none-usable')
+    expect(banner).not.toHaveTextContent('usable again')
+    expect(banner).toHaveTextContent('cannot decrypt')
+  })
+
+  it('refuses a credential past the 100 the agent stores, keeping what was typed', async () => {
+    setCredentials(Array.from({ length: 100 }, (_, i) => credentialEntry({ id: `k${i}`, last4: `K${String(i).padStart(3, '0')}` })))
+    const { user } = renderPage(<AiCredentialSection />)
+    await waitFor(() => expect(rows()).toHaveLength(100))
+    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-api03-one-too-many')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('at most 100 Claude credentials can be stored')
+    expect(rows()).toHaveLength(100)
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('sk-ant-api03-one-too-many')
+  }, 15_000)
 
   it('tries again when the read after a cooldown fails', async () => {
     const until = new Date(Date.now() + 500).toISOString()
@@ -521,6 +565,14 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-abcd')
     expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
     expect(screen.getByRole('button', { name: `Replace the key of ${KEY}` })).toBeDisabled()
+  })
+
+  it('says the key-encryption key is the fix when none is mounted', async () => {
+    setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', usable: false })], false)
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credentials-none-usable')).toHaveTextContent(
+      'until its key-encryption key is mounted',
+    )
   })
 
   it('warns about a key the agent cannot decrypt', async () => {
