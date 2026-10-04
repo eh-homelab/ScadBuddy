@@ -120,8 +120,8 @@ in this order:
 
 **Interfaces:**
 - Produces: `Operation` (pydantic: `id, kind, subject, status: Literal["running","succeeded","failed"], result: dict | None, error: PrintRunError | None, created_at, finished_at`), `OperationStore(pool, *, events)` with
-  `async find(key) -> Operation | None`, `async get(id) -> Operation | None`,
-  `async insert(op_id, *, kind, subject, key, request, workflow_id, workflow_run_id, retention) -> Operation`,
+  `async find(operation_key) -> Operation | None`, `async get(id) -> Operation | None`,
+  `async insert(op_id, *, kind, subject, operation_key, request, workflow_id, workflow_run_id, retention) -> Operation`,
   `async finish(op_id, *, result=None, error=None) -> Operation`;
   `OperationEvent(kind="operation.changed", operation_id, op_kind, subject)`.
 
@@ -132,7 +132,7 @@ CREATE TABLE operations (
     id text PRIMARY KEY,
     kind text NOT NULL,
     subject text NOT NULL,
-    idempotency_key text NOT NULL,
+    operation_key text NOT NULL,
     status text NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
     request jsonb NOT NULL,
     result jsonb,
@@ -143,7 +143,7 @@ CREATE TABLE operations (
     finished_at timestamptz
 );
 CREATE UNIQUE INDEX operations_execution ON operations (workflow_id, workflow_run_id);
-CREATE INDEX operations_key ON operations (idempotency_key, created_at DESC);
+CREATE INDEX operations_operation_key ON operations (operation_key, created_at DESC);
 CREATE INDEX operations_finished ON operations (finished_at) WHERE finished_at IS NOT NULL;
 ```
 
@@ -151,9 +151,9 @@ CREATE INDEX operations_finished ON operations (finished_at) WHERE finished_at I
 
 ```python
 async def test_insert_twice_for_one_execution_returns_the_first_row_and_publishes_once(store, events):
-    first = await store.insert("a", kind="reprint", subject="archive:5", key="k", request={},
+    first = await store.insert("a", kind="reprint", subject="archive:5", operation_key="k", request={},
                                workflow_id="op-reprint-k", workflow_run_id="r1", retention=None)
-    again = await store.insert("b", kind="reprint", subject="archive:5", key="k", request={},
+    again = await store.insert("b", kind="reprint", subject="archive:5", operation_key="k", request={},
                                workflow_id="op-reprint-k", workflow_run_id="r1", retention=None)
     assert again.id == first.id == "a"
     assert [e.operation_id for e in events.published] == ["a"]

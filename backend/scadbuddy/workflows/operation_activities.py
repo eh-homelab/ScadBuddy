@@ -50,7 +50,7 @@ def operation_activities(
             uuid.uuid4().hex,
             kind=op.kind,
             subject=op.subject,
-            key=op.key,
+            operation_key=op.key,
             request=op.request,
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
