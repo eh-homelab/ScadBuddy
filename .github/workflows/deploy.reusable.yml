@@ -296,7 +296,7 @@ jobs:
             n=$(grep -cE "$line" "$target" || true)
             mentions=$(grep -ciE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' "$target" || true)
             if [ "$n" -eq 0 ]; then
-              if grep -qiE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' "$target"; then
+              if [ "$mentions" -gt 0 ]; then
                 echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>'"; exit 1
               fi
               echo "::notice::${target} has no dashboard pin yet (clusters#1596 Phase 5); pinning the images only"
