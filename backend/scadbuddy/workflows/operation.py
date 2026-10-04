@@ -17,7 +17,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
@@ -38,7 +38,6 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.problems import (
         OPERATION_CANCELLED,
         OPERATION_UNEXPECTED_DETAIL,
-        cancelled,
         problem_of,
     )
 
@@ -98,12 +97,12 @@ class OperationWorkflow:
             # cancel answers the Update too, so it is never outlived by its execution.
             self.refusal = (
                 OPERATION_CANCELLED
-                if cancelled(error)
+                if is_cancelled_exception(error)
                 else problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
             )
             self._upsert(STATUS.value_set("refused"))
             await workflow.wait_condition(workflow.all_handlers_finished)
-            if cancelled(error):
+            if is_cancelled_exception(error):
                 raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
         op: Operation = await workflow.execute_activity(

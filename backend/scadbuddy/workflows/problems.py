@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
-from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
 from scadbuddy.workflows.print_models import FAILED, REFUSED
@@ -18,14 +17,6 @@ OPERATION_CANCELLED = PrintRunError(
     title="Conflict",
     detail="This was cancelled before it started. Nothing was done; try again.",
 )
-
-
-def cancelled(error: BaseException) -> bool:
-    """Whether ``error`` is the execution's own cancel, as the awaited activity or the
-    workflow task itself raises it (review #1061 1c)."""
-    if isinstance(error, ActivityError):
-        return isinstance(error.cause, CancelledError)
-    return isinstance(error, asyncio.CancelledError)
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
