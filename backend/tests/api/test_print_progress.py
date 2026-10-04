@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
@@ -122,4 +123,9 @@ def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     assert ran.status_code == 200, ran.text
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    # `print_succeed` records the run, then starts the watcher: the run can read
+    # `succeeded` a moment before it is watched.
+    deadline = time.monotonic() + 10
+    while output_id not in state.print_watcher.watching and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert output_id in state.print_watcher.watching
