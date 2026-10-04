@@ -83,8 +83,12 @@ export type ToolContext = ToolServices & {
    * prepared a second time. Only the harness projection sets it
    * (projections.ts `createHarnessServer`); the in-process server is reachable
    * only from a harness query.
+   *
+   * `workflow`: the call is an activity on `agent-tools` (temporal/toolActivities.ts,
+   * #1055), which a durable session's workflow schedules only once its own approval
+   * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
-  gate?: 'harness'
+  gate?: 'harness' | 'workflow'
   /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
@@ -355,7 +359,7 @@ async function runJudgedByResult(
     )
   }
   try {
-    if (tool.gated && ctx.gate !== 'harness') {
+    if (tool.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
       const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })

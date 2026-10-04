@@ -108,12 +108,20 @@ async function refusals<T>(run: () => Promise<T>): Promise<T> {
  */
 const IN_A_TURN: Pick<Owner, 'kind' | 'id'> = { kind: 'anonymous', id: '' }
 
+/**
+ * Whether a session's own model made the call: a classic turn (`harness`) or a durable
+ * session's tool activity (`workflow`, #1055). Only /mcp sets no gate.
+ */
+function inSession(ctx: ToolContext): boolean {
+  return ctx.gate !== undefined
+}
+
 function viewerOf(ctx: ToolContext): Pick<Owner, 'kind' | 'id'> {
-  return ctx.gate === 'harness' ? IN_A_TURN : ownerOf(ctx.principal)
+  return inSession(ctx) ? IN_A_TURN : ownerOf(ctx.principal)
 }
 
 function notInHarness(ctx: ToolContext, what: string): void {
-  if (ctx.gate === 'harness') {
+  if (inSession(ctx)) {
     throw new ToolError(
       `${what} is the session owner's own decision, made in the ScadBuddy UI or by an agent over /mcp; ` +
         'a session model cannot make it (spec §6, §8.2)',
