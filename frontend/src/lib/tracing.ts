@@ -45,7 +45,6 @@ export function startTracing(): () => Promise<void> {
     resource: resourceFromAttributes({
       'service.name': TRACER_NAME,
       'service.version': import.meta.env.VITE_SCADBUDDY_VERSION || 'dev',
-      'user_agent.original': navigator.userAgent,
     }),
     spanLimits: SPAN_LIMITS,
     spanProcessors: [
