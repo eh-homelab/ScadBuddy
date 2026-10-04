@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { recheckAiAvailability } from '../../agent/chat/availability'
 import { credentialEntry, setCredentials } from '../../mocks/features/aiCredential'
 import { server } from '../../mocks/server'
@@ -34,7 +34,23 @@ function bodiesOf(method: string, path: string): unknown[] {
 
 const rows = () => screen.getAllByTestId('ai-credential')
 
-afterEach(() => server.events.removeAllListeners())
+/**
+ * A clock the cooldown tests move by hand: timers and `Date` are fake, so the component's
+ * timer and the mock's read-time expiry see the same time. It still runs on with real time,
+ * so Testing Library's waits and msw keep working.
+ */
+function fakeClock() {
+  vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  return { userEventOptions: { advanceTimers: vi.advanceTimersByTime } }
+}
+
+/** Moves the fake clock on, running the timers that fall due and what they start. */
+const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
+
+afterEach(() => {
+  server.events.removeAllListeners()
+  vi.useRealTimers()
+})
 
 describe('AiCredentialSection (#1000, #1093)', () => {
   it('lists the credentials in the order they are tried, with their status, never a secret', async () => {
@@ -371,6 +387,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
   })
 
   it('reads the list again when a cooldown ends, so the status is not left stale', async () => {
+    fakeClock()
     setCredentials([
       credentialEntry({
         id: 'default',
@@ -382,12 +399,15 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     renderPage(<AiCredentialSection />)
     expect(await screen.findByTestId('ai-credentials-none-usable')).toBeInTheDocument()
     expect(rows()[0]).toHaveTextContent(/Rate limited until/)
-    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 5000 })
+    // The cooldown ends at +1 s; the list is read again half a second later.
+    await tick(1500)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'))
     expect(screen.queryByTestId('ai-credentials-none-usable')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: `Reset ${KEY}` })).not.toBeInTheDocument()
   })
 
   it('backs off when the agent still reports a cooldown this clock says has ended', async () => {
+    fakeClock()
     let reads = 0
     const past = new Date(Date.now() - 60_000).toISOString()
     server.use(
@@ -406,11 +426,17 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     )
     renderPage(<AiCredentialSection />)
     await screen.findAllByTestId('ai-credential')
-    // 1 s, then 2 s: three reads in the first 3.5 s, not one every half second.
-    await new Promise((resolve) => setTimeout(resolve, 3500))
-    expect(reads).toBeGreaterThanOrEqual(2)
-    expect(reads).toBeLessThanOrEqual(3)
-  }, 10_000)
+    expect(reads).toBe(1)
+    // Read again after 1 s, then 2 s, then 4 s: the wait doubles.
+    await tick(1000)
+    await waitFor(() => expect(reads).toBe(2))
+    await tick(2000)
+    await waitFor(() => expect(reads).toBe(3))
+    await tick(3800)
+    expect(reads).toBe(3)
+    await tick(200)
+    await waitFor(() => expect(reads).toBe(4))
+  })
 
   it('shows the date of a cooldown that ends on another day', async () => {
     setCredentials([
@@ -581,6 +607,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
   })
 
   it('keeps reading after a cooldown when an action overtakes the timed read and fails', async () => {
+    const clock = fakeClock()
     const until = new Date(Date.now() + 400).toISOString()
     setCredentials([
       credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: until }),
@@ -600,17 +627,21 @@ describe('AiCredentialSection (#1000, #1093)', () => {
         return undefined
       }),
     )
-    const { user } = renderPage(<AiCredentialSection />)
+    const { user } = renderPage(<AiCredentialSection />, clock)
     await screen.findAllByTestId('ai-credential')
-    await waitFor(() => expect(reads).toBe(2), { timeout: 3000 })
+    await tick(1000)
+    await waitFor(() => expect(reads).toBe(2))
     await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
     expect(await screen.findByTestId('ai-credentials-stale')).toBeInTheDocument()
     release()
-    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 6000 })
+    // The failed read is tried again after the 1 s back-off.
+    await tick(1000)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'))
     expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument()
-  }, 10_000)
+  })
 
   it('tries again when the read after a cooldown fails', async () => {
+    fakeClock()
     const until = new Date(Date.now() + 500).toISOString()
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: until })])
     let reads = 0
@@ -623,11 +654,17 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     )
     renderPage(<AiCredentialSection />)
     expect((await screen.findAllByTestId('ai-credential'))[0]).toHaveTextContent(/Rate limited until/)
-    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 6000 })
-    expect(reads).toBeGreaterThanOrEqual(3)
-  }, 10_000)
+    // The timed read at +1 s fails; the next comes 1 s later.
+    await tick(1000)
+    await waitFor(() => expect(reads).toBe(2))
+    expect(rows()[0]).toHaveTextContent(/Rate limited until/)
+    await tick(1000)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'))
+    expect(reads).toBe(3)
+  })
 
   it('waits for the cooldown again after an action answers with the list, even after a failed read', async () => {
+    const clock = fakeClock()
     setCredentials([
       credentialEntry({ id: 'default', last4: 'Q7xA' }),
       credentialEntry({
@@ -648,7 +685,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
         return failing ? HttpResponse.json({ detail: 'Bad Gateway' }, { status: 502 }) : undefined
       }),
     )
-    const { user } = renderPage(<AiCredentialSection />)
+    const { user } = renderPage(<AiCredentialSection />, clock)
     await screen.findAllByTestId('ai-credential')
     failing = true
     await user.click(screen.getByRole('button', { name: 'Reset credential 3 (Anthropic API key ••••K333)' }))
@@ -658,9 +695,11 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await waitFor(() => expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument())
     const after = reads
     // Backing off would read again after 1 s; the cooldown has a minute left.
-    await new Promise((resolve) => setTimeout(resolve, 1600))
+    await tick(30_000)
     expect(reads).toBe(after)
-  }, 10_000)
+    await tick(31_000)
+    await waitFor(() => expect(reads).toBe(after + 1))
+  })
 
   it('badges a key the agent cannot decrypt as such, not Active', async () => {
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', usable: false })])
