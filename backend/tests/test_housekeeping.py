@@ -250,7 +250,7 @@ async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Clien
     queue = f"library-{uuid.uuid4().hex[:8]}"
     handle = client.get_schedule_handle(schedule_id)
     try:
-        await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
+        assert not await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
         assert await _actions(client, schedule_id, 1) == 1
         # The boot's run, ended: no open run that a trigger could queue behind.
         started = (await handle.describe()).info.recent_actions[-1].action
@@ -259,7 +259,8 @@ async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Clien
             started.workflow_id, run_id=started.first_execution_run_id
         ).terminate("ended by the test")
         await handle.pause(note="incident")
-        await ensure_schedule(client, queue, 120.0, schedule_id=schedule_id)
+        # Said, so the boot converges the uploads itself (review #1095 2).
+        assert await ensure_schedule(client, queue, 120.0, schedule_id=schedule_id)
         actions = await _actions(client, schedule_id, 2)
         described = await handle.describe()
     finally:

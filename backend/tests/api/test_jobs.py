@@ -7,8 +7,12 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.client import WorkflowUpdateFailedError
+from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
@@ -170,6 +174,35 @@ def test_a_render_when_temporal_is_unreachable_is_a_503_naming_it(
     assert response.status_code == 503
     assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
     assert response.headers["retry-after"] == "5"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        RPCError("Namespace nope is not found.", RPCStatusCode.NOT_FOUND, b""),
+        RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
+    ],
+)
+def test_a_render_temporal_refuses_is_a_503_naming_it(
+    client: TestClient, model: str, refusal: RPCError
+) -> None:
+    """Any RPC refusal of the start, as the print and operation routes answer it
+    (review #1066 3.1): never an unhandled 500."""
+    refused = mock.AsyncMock(side_effect=refusal)
+    with mock.patch.object(RenderService, "submit", refused):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+
+
+def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, model: str) -> None:
+    """An Update failure other than an execution that closed first (review #1066 3.1)."""
+    failed = mock.AsyncMock(side_effect=WorkflowUpdateFailedError(ApplicationError("boom")))
+    with mock.patch.object(RenderService, "submit", failed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
 
 
 def test_a_render_still_being_accepted_is_a_503_to_send_again(

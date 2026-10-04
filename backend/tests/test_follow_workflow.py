@@ -106,6 +106,20 @@ async def test_a_poke_restarts_the_follow_fresh(client: Client) -> None:
     assert [a.fresh for a in fake.attempts] == [False, True]
 
 
+async def test_a_poke_before_the_first_task_reads_at_once(client: Client) -> None:
+    """Review #1091 4: a `PrintRun` pokes a follow the progress route has just started,
+    before its first workflow task: the first attempt is the fresh one."""
+    queue, output = f"follow-{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
+    fake = FakeFollow()
+    fake.end.set()
+    await client.start_workflow(
+        "FollowPrint", output, id=follow_id(output), task_queue=queue, start_signal="poke"
+    )
+    async with serving(client, queue, fake):
+        await client.get_workflow_handle(follow_id(output)).result()
+    assert [a.fresh for a in fake.attempts] == [True]
+
+
 async def test_pokes_past_the_bound_continue_as_new(
     client: Client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +161,36 @@ async def test_following_with_temporal_unreachable_is_only_a_warning(
     lazy = await Client.connect("127.0.0.1:1", lazy=True)
     await follow(lazy, "nowhere", uuid.uuid4().hex)
     assert any("could not follow a print" in r.message for r in caplog.records)
+
+
+async def test_follows_try_once_per_output_while_temporal_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 1: reads while a start is in flight, or soon after one failed, do
+    not start another: an outage costs one attempt and one warning per output per
+    `retry_after`."""
+    calls: list[str] = []
+
+    async def counting(client: Client, task_queue: str, output_id: str) -> bool:
+        calls.append(output_id)
+        return await follow(client, task_queue, output_id)
+
+    monkeypatch.setattr(follow_module, "follow", counting)
+    clock = [0.0]
+    lazy = await Client.connect("127.0.0.1:1", lazy=True)
+    follows = follow_module.Follows(lazy, "nowhere", retry_after=10, clock=lambda: clock[0])
+    output = uuid.uuid4().hex
+    for _ in range(5):
+        follows.ensure(output)
+    await asyncio.gather(*follows.starting)
+    for _ in range(5):
+        follows.ensure(output)
+    assert not follows.starting
+    clock[0] = 11
+    follows.ensure(output)
+    await asyncio.gather(*follows.starting)
+    assert calls == [output, output]
+    assert sum("could not follow a print" in r.message for r in caplog.records) == 2
 
 
 @pytest.mark.requires_postgres

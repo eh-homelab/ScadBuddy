@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -25,7 +25,7 @@ WHERE: dict[Queue, str] = {"bambuddy": "Bambuddy", "library": "the model and its
 #: ``run`` needs (JSON).
 CheckFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 #: The effect: the request and what the check returned; returns the route's answer body.
-RunFn = Callable[[dict[str, Any], dict[str, Any]], Awaitable[dict[str, Any]]]
+RunFn = Callable[[dict[str, Any], dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 
 @dataclass(frozen=True)

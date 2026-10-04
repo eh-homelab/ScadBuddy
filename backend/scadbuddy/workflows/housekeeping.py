@@ -134,9 +134,10 @@ async def ensure_schedule(
     *,
     schedule_id: str | None = None,
     sweeps: tuple[str, ...] = SWEEPS,
-) -> None:
+) -> bool:
     """The Schedule at ``interval`` seconds (0: none), then one run now: the boot's
-    converging sweep. A Schedule an operator paused stays paused, and is not run."""
+    converging sweep. A Schedule an operator paused stays paused, and is not run:
+    True says so (review #1095 2), since then nothing converges until it resumes."""
     schedule_id = schedule_id or schedule_id_for(task_queue)
     handle = client.get_schedule_handle(schedule_id)
     if interval <= 0:
@@ -145,7 +146,7 @@ async def ensure_schedule(
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
-        return
+        return False
     schedule = _schedule(schedule_id, task_queue, interval, sweeps)
     try:
         await client.create_schedule(schedule_id, schedule)
@@ -161,10 +162,12 @@ async def ensure_schedule(
         # A run still open (a rollout stopped the old pod mid-sweep) would SKIP this
         # one; it queues behind that run instead.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
+    return schedule.state.paused
 
 
-async def ensure_schedules(client: Client, task_queue: str, interval: float) -> None:
-    """Both Schedules: the prune's fixed one, and every sweep at ``interval``."""
+async def ensure_schedules(client: Client, task_queue: str, interval: float) -> bool:
+    """Both Schedules: the prune's fixed one, and every sweep at ``interval``. True
+    when an operator has paused the sweeps' one."""
     await ensure_schedule(
         client,
         task_queue,
@@ -172,4 +175,4 @@ async def ensure_schedules(client: Client, task_queue: str, interval: float) -> 
         schedule_id=prune_schedule_id_for(task_queue),
         sweeps=PRUNE_SWEEPS,
     )
-    await ensure_schedule(client, task_queue, interval)
+    return await ensure_schedule(client, task_queue, interval)

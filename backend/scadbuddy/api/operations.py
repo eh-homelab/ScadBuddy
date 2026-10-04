@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
+from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationCommands, OperationsDep
@@ -148,7 +149,8 @@ async def run_operation(
             raise still_accepting() from None
         return _answer(recorded, response, repeated=False)
     except CommandClosedError:
-        # Ended before it answered: nothing was recorded, and the same request starts again.
+        # Ended before it answered. A re-send reads whatever it recorded (the reconciler
+        # ends a row it left running); with no record, the same request starts again.
         raise still_accepting() from None
     except (RPCError, TemporalUnavailableError):
         raise temporal_unavailable("operations") from None
@@ -181,7 +183,7 @@ OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 
 @router.get("/{operation_id}", responses={404: {"description": "No such operation"}})
-async def get_operation(operation_id: str, ops: OperationsDep) -> Operation:
+async def get_operation(operation_id: OperationIdPath, ops: OperationsDep) -> Operation:
     """One operation (§4.2 "Our record"): follow a 202 here until it is not ``running``."""
     op = await ops.store.get(operation_id)
     if op is None:

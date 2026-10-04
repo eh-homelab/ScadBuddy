@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import timedelta
 from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
-def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
     """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
     checkout is gone, as the 409 every route answers it with (``api/models.py``,
     ``install_library_handlers``), rather than the operation's unexpected 500."""
