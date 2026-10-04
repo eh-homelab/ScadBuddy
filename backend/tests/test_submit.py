@@ -1173,7 +1173,6 @@ async def test_settled_jobs_past_their_ttl_are_pruned(
     assert (await asyncio.to_thread(projection.read, fresh.id)).state == "done"
 
 
-
 async def test_a_prune_that_fails_still_settles_the_rows_nothing_will_settle(
     projection: JobProjection, deps: WorkerDeps, monkeypatch: pytest.MonkeyPatch
 ) -> None:
