@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installStaleChunkReload, loadOptionalChunk } from './staleChunks'
 
-function preloadError(): Event {
+const TRACING = /\/tracing-[\w-]+\.js/
+
+function preloadError(message?: string): Event {
   const event = new Event('vite:preloadError', { cancelable: true })
+  if (message !== undefined) Object.assign(event, { payload: new TypeError(message) })
   window.dispatchEvent(event)
   return event
 }
@@ -74,8 +77,9 @@ describe('installStaleChunkReload', () => {
     let rejectImport: (error: Error) => void = () => undefined
     const pending = loadOptionalChunk(
       () => new Promise<never>((_, reject) => (rejectImport = reject)),
+      TRACING,
     ).catch(() => 'failed')
-    const optional = preloadError()
+    const optional = preloadError('Failed to fetch dynamically imported module: https://x.test/assets/tracing-AbC123.js')
     rejectImport(new Error('blocked'))
     await expect(pending).resolves.toBe('failed')
     expect(reload).not.toHaveBeenCalled()
@@ -83,6 +87,20 @@ describe('installStaleChunkReload', () => {
     // The failed optional chunk used up nothing: a stale chunk afterwards still reloads.
     preloadError()
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it("still reloads for another chunk's error while an optional load is pending", async () => {
+    const reload = load('old')
+    let rejectImport: (error: Error) => void = () => undefined
+    const pending = loadOptionalChunk(
+      () => new Promise<never>((_, reject) => (rejectImport = reject)),
+      TRACING,
+    ).catch(() => 'failed')
+    const other = preloadError('Failed to fetch dynamically imported module: https://x.test/assets/ModelPage-AbC123.js')
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(other.defaultPrevented).toBe(true)
+    rejectImport(new Error('blocked'))
+    await pending
   })
 })
 
