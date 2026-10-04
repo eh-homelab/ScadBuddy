@@ -8,7 +8,7 @@ from collections.abc import Iterable
 import psycopg
 import pytest
 
-from scadbuddy.rack.usage import record_seen
+from scadbuddy.rack.usage import RACK_SEEN_FALLBACK, record_seen
 from tests.rack.helpers import mounted, serial, slot, status
 
 
@@ -42,6 +42,6 @@ async def test_a_failed_write_is_logged_by_type_only(caplog: pytest.LogCaptureFi
     with caplog.at_level(logging.DEBUG):
         await record_seen(store, 1, status(slot(2)))  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert record.getMessage() == "could not record the rack's hotends"
+    assert record.getMessage() == RACK_SEEN_FALLBACK
     assert record.__dict__["error"] == "OperationalError"
     assert serial(17) not in repr(record.__dict__) and record.exc_info is None

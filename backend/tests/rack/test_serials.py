@@ -20,7 +20,10 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import (
+    RACK_PICKS_FALLBACK,
+    RACK_SEEN_FALLBACK,
     RACK_SETTLE_FALLBACK,
+    RACK_SETTLE_READ_FALLBACK,
     RACK_STORE_FALLBACKS,
     PickedHotend,
     record_seen,
@@ -91,14 +94,14 @@ class Links:
 
 
 EXPECTED_MESSAGES = [
-    "rack usage unreadable; ranked without it",
-    "could not record the rack's hotends",
-    "rack pick left to Bambuddy",
-    "could not record the rack's hotends",
-    "could not record the rack picks",
-    "could not record a rack nozzle's print",
-    "could not record a rack nozzle's print",
-    "could not read a settled print's rack picks",
+    RACK_USAGE_FALLBACK,
+    RACK_SEEN_FALLBACK,
+    RACK_PICK_FALLBACK,
+    RACK_SEEN_FALLBACK,
+    RACK_PICKS_FALLBACK,
+    RACK_SETTLE_FALLBACK,
+    RACK_SETTLE_FALLBACK,
+    RACK_SETTLE_READ_FALLBACK,
 ]
 
 

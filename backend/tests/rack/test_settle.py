@@ -23,7 +23,13 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
+from scadbuddy.rack.usage import (
+    RACK_SETTLE_FALLBACK,
+    PickedHotend,
+    RackUsageStore,
+    record_settled,
+    settle_hook,
+)
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.bambuddy.test_watcher import OUTPUT as WATCHED
 from tests.bambuddy.test_watcher import (
@@ -198,7 +204,7 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
     with caplog.at_level(logging.DEBUG):
         assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 1
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert record.getMessage() == "could not record a rack nozzle's print"
+    assert record.getMessage() == RACK_SETTLE_FALLBACK
     assert (
         getattr(record, "output_id", None),
         getattr(record, "archive_id", None),

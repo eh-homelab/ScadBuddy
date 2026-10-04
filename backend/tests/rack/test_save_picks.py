@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import psycopg
 import pytest
 
-from scadbuddy.rack.usage import PickedHotend, save_picks
+from scadbuddy.rack.usage import RACK_PICKS_FALLBACK, PickedHotend, save_picks
 from tests.rack.helpers import serial
 
 
@@ -55,7 +55,7 @@ async def test_a_failed_write_is_logged_by_type_and_dropped(
     with caplog.at_level(logging.DEBUG):
         await save_picks(store, 1, [51], [PICK])  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert record.getMessage() == "could not record the rack picks"
+    assert record.getMessage() == RACK_PICKS_FALLBACK
     assert getattr(record, "error", None) == "OperationalError"
     assert serial(19) not in repr(record.__dict__) and record.exc_info is None
 
