@@ -73,7 +73,7 @@ def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
 
 
 def test_a_dropped_connection_does_not_claim_nothing_was_saved(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#1189 review: a connection lost mid-save may have committed, so the 503 must not
     say nothing was saved; a timeout that rolled back can."""
@@ -82,10 +82,17 @@ def test_a_dropped_connection_does_not_claim_nothing_was_saved(
         raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)
-    response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.api.printing"):
+        response = client.put(
+            "/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"}
+        )
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
     assert "nothing was saved" not in response.json()["detail"]
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.api.printing"]
+    assert getattr(record, "printer_id", None) == 1
+    assert getattr(record, "error", None) == "OperationalError"
+    assert record.exc_info is None
 
 
 def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing(

@@ -7,6 +7,7 @@ than about an output, and only some of them are output-scoped at all. ``POST
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
@@ -61,6 +62,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.usage import RackUsage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -164,6 +167,10 @@ def put_printer_rack_algorithm(
         # The store gives up on purpose rather than commit after the dialog has (#1129).
         # Only a pool wait or a cancelled statement is known to have saved nothing; any
         # other lost connection may have dropped after the commit.
+        logger.warning(
+            "rack-algorithm save gave up on the database",
+            extra={"printer_id": printer_id, "error": type(error).__name__},
+        )
         rolled_back = isinstance(error, PoolTimeout | psycopg.errors.QueryCanceled)
         outcome = (
             "nothing was saved"
