@@ -1056,6 +1056,19 @@ Each phase is its own implementation plan and ships alone.
      every 300 s whatever the sweep interval, a day after the last request put it), not
      by its run, because two requests may share the same bytes. An operation's inline
      request is capped at 128 KB (413 past it), and an import's subject is the URL's host. The UI's and the agent's calls to these routes go through `command()`.
+   - As built so far (3d, #1054, plan `2026-10-03-durable-phase-3d-model-edits.md`): a
+     model's edits are `library` kinds too (`library/model_operations.py`): source save
+     and patch, thumbnail and README set and remove, a sibling `.scad` file's write and
+     removal, restore, and the upstream merge, dismiss and detach. Source, patch body,
+     README, file content and thumbnail go by claim check. A stale `base` is still a
+     409 naming `current`, now from the operation's problem extensions. An upstream
+     merge that would conflict is answered by the route (`Catalogue.merge_plan`, read
+     only) as a 409 with the merged text, and starts no operation, so the merged text
+     never enters a workflow history. An operation's run commits as the request's
+     agent author (`OperationInput.author`, `core/authorship.py` `authored_as`). The
+     agent's `commandAnswer` (`agent/src/api/command.ts`) returns a followed
+     operation's failure as the route's problem, so `apply_patch` still reads
+     `current`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the

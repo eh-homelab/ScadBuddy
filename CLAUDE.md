@@ -170,7 +170,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `GET /operations/{id}`. Each worker serves only its queue's kinds: the Bambuddy kinds
   are `bambuddy/operations.py` (`bambuddy_kinds`, queue `bambuddy`), the library pins
   `library/operations.py` (`library_kinds`, queue `library`, #1054) and a model's
-  lifecycle `library/model_operations.py` (`model_kinds`), all registered in
+  lifecycle and edits `library/model_operations.py` (`model_kinds`: create, import,
+  patch, duplicate, delete, source, README, thumbnail, sibling files, restore and
+  upstream; an upstream merge that would conflict is refused by the route, so its
+  merged text never enters a history), all registered in
   `create_app`. Request bytes too large for a workflow payload (a create's source,
   thumbnail, README) go by claim check: `operations/claims.py` `ClaimStore`, under
   `cache/claims/`, named by sha256 so a re-send keeps its key, and removed only by the
