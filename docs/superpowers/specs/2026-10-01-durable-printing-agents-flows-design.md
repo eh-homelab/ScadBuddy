@@ -525,7 +525,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`print_runs` is our system of record**, written only by the workflow's activities,
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
-  - drops `heartbeat_at`;
+  - leaves `heartbeat_at`, which a pre-#1052 pod still writes during the rolling update;
+    a later migration drops it (expand/contract);
   - adds `workflow_id text` and `workflow_run_id text`, with a unique index on the pair
     (§4.2 step 3).
 
