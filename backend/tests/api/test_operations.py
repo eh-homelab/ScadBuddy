@@ -26,7 +26,7 @@ from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5 = (uuid.uuid4().hex for _ in range(5))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -136,6 +136,21 @@ def test_a_retry_after_a_recorded_failure_answers_it_and_runs_nothing(
     again = post(client, {"fail": True}, key=PRESS_3)
     assert first.status_code == again.status_code == 502
     assert again.json()["detail"] == "Bambuddy said no"
+    assert counts.runs == 1
+
+
+def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
+    client: TestClient, counts: Counts, pg_conninfo: str
+) -> None:
+    """Review #1063 8: a retention shorter than Temporal's leaves a closed execution
+    with no row. The answer says it may have been done; it never runs it again."""
+    assert post(client, {"a": 1}, key=PRESS_6).status_code == 200
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = post(client, {"a": 1}, key=PRESS_6)
+    assert again.status_code == 409, again.text
+    assert "may have been done" in again.json()["detail"]
+    assert "Check Bambuddy" in again.json()["detail"]
     assert counts.runs == 1
 
 
