@@ -23,6 +23,10 @@
 #     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
 #     `<name>_info` (prometheus_client's exposition names), so a `_total` on a
 #     gauge or a bare counter is an error, not an empty panel
+#   - every label a PromQL target's `by (...)`/`without (...)` or `{{label}}` legend
+#     names is one a series in that query declares in its constructor's label list
+#     (`le` comes with a `_bucket`), or one the scrape adds (namespace, pod,
+#     instance, job)
 #   - every TraceQL query names exactly one ScadBuddy `resource.service.name`
 #     (spec §3; a query spanning services is rejected, so each span name is
 #     checked against the service that says it), and every span `name="…"` in
@@ -135,28 +139,62 @@ done < <(jq -r "$panels"'
   | .[] | @tsv' "$dash")
 
 # Prometheus series against the registry in core/metrics.py: the names each
-# declaration exposes, by its constructor.
+# declaration exposes, by its constructor, one `<series> <label>...` line each
+# (the labels its labelnames list declares).
 exposed=$(
-  tr '\n' ' ' < "$metrics_py" \
-    | grep -oE '(Counter|Gauge|Histogram|Summary|Info)\(\s*"scadbuddy_[a-z0-9_]+"' \
-    | sed -E 's/\(\s*/ /' \
-    | while read -r kind name; do
-      name=${name//\"/}
+  tr '\n' ' ' < "$metrics_py" | sed 's/registry=r/\n/g' \
+    | grep -E '(Counter|Gauge|Histogram|Summary|Info)\(\s*"scadbuddy_' \
+    | while read -r decl; do
+      [[ "$decl" =~ (Counter|Gauge|Histogram|Summary|Info)\(\ *\"(scadbuddy_[a-z0-9_]+)\" ]] || continue
+      kind=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]} labels=""
+      if [[ "$decl" =~ \[((\"[a-z_]+\",?\ *)+)\] ]]; then
+        labels=${BASH_REMATCH[1]//[\",]/}
+      fi
       case "$kind" in
-        Gauge) echo "$name" ;;
-        Counter) echo "${name%_total}_total" ;;
-        Histogram) printf '%s\n' "${name}_bucket" "${name}_sum" "${name}_count" ;;
-        Summary) printf '%s\n' "${name}_sum" "${name}_count" ;;
-        Info) echo "${name%_info}_info" ;;
+        Gauge) echo "$name $labels" ;;
+        Counter) echo "${name%_total}_total $labels" ;;
+        Histogram) printf '%s\n' "${name}_bucket $labels le" "${name}_sum $labels" "${name}_count $labels" ;;
+        Summary) printf '%s\n' "${name}_sum $labels" "${name}_count $labels" ;;
+        Info) echo "${name%_info}_info $labels" ;;
       esac
     done
 )
+series_labels() { # series -> its declared labels on one line; fails when undeclared
+  awk -v s="$1" '$1 == s { $1 = ""; print; found = 1 } END { exit !found }' <<< "$exposed"
+}
 while read -r series; do
   [ -n "$series" ] || continue
-  grep -qxF "$series" <<< "$exposed" \
+  series_labels "$series" > /dev/null \
     || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares"
 done < <(jq -r "$panels"' [panels | .targets[]? | .expr // empty] + [.templating.list[]? | .query | objects | .query // empty] | .[]' "$dash" \
   | grep -oE 'scadbuddy_[a-z0-9_]+' | sort -u)
+
+# The labels a target's by()/without() grouping and {{label}} legend name must
+# be ones a series in its query declares (`le` comes with a _bucket), or ones
+# Prometheus adds when it scrapes (namespace, pod, instance, job): a misspelt
+# label would collapse the panel into one unlabelled series without an error.
+while IFS=$'\t' read -r where expr legend; do
+  allowed=" namespace pod instance job "
+  while read -r series; do
+    [ -n "$series" ] || continue
+    allowed+="$(series_labels "$series" || true) "
+  done < <(grep -oE 'scadbuddy_[a-z0-9_]+' <<< "$expr" | sort -u)
+  while read -r group; do
+    [ -n "$group" ] || continue
+    read -ra group_labels <<< "$(sed -E 's/^[a-z]+\s*\(//; s/\)$//; s/,/ /g' <<< "$group")"
+    for label in "${group_labels[@]}"; do
+      [[ "$allowed" == *" $label "* ]] \
+        || problem "$rel" "$where: $group: \"$label\" is not a label of the series the query reads"
+    done
+  done < <(grep -oE '\b(by|without)\s*\([^)]*\)' <<< "$expr")
+  while read -r ref; do
+    [ -n "$ref" ] || continue
+    label=$(tr -d '{} ' <<< "$ref")
+    [[ "$allowed" == *" $label "* ]] \
+      || problem "$rel" "$where: legend $ref: \"$label\" is not a label of the series the query reads"
+  done < <(grep -oE '\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}' <<< "$legend")
+done < <(jq -r "$panels"' panels | . as $p | .targets[]? | select(has("expr"))
+  | ["panel \($p.id) target \(.refId)", .expr, (.legendFormat // "")] | @tsv' "$dash")
 
 # The span names the backend emits: one per render stage (render/jobs.py's
 # `render.{name}`), and every literal its code passes to span()/detached_span().
@@ -193,6 +231,8 @@ ts_names() { # source dir
     | grep -oE "((startSpan|startActiveSpan|withSpan|traceAction)\(\s*|\b[A-Z][A-Z0-9_]*_SPAN\s*(:\s*[A-Za-z]+\s*)?=\s*)['\"\`][^'\"\`]+['\"\`]" \
     | grep -oE "['\"\`][^'\"\`]+['\"\`]\$" | tr -d "'\"\`" | sort -u
 }
+# Each TS service's names, found once on first use.
+declare -A ts_cache=()
 unchecked=""
 emitted() { # service name -> 0 when that service emits a span of that name
   local service=$1 name=$2 src probe
@@ -206,7 +246,8 @@ emitted() { # service name -> 0 when that service emits a span of that name
     [[ " $unchecked " == *" $service "* ]] || unchecked+=" $service"
     return 0
   fi
-  grep -qxF "$name" <<< "$(ts_names "$src")"
+  [[ -v "ts_cache[$service]" ]] || ts_cache[$service]=$(ts_names "$src" || true)
+  grep -qxF "$name" <<< "${ts_cache[$service]}"
 }
 
 while IFS=$'\t' read -r where query; do

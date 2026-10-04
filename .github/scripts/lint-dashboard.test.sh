@@ -146,6 +146,28 @@ check 'a counter read without _total fails' \
   "$(run)"
 
 good
+edit '(.panels[] | select(.id == 6) | .targets[0].expr) |= sub("by \\(le, stage\\)"; "by (le, stages)")'
+check 'a by() label the metric does not declare fails' \
+  "1:$f: panel 6 target A: by (le, stages): \"stages\" is not a label of the series the query reads" \
+  "$(run)"
+
+good
+edit '(.panels[] | select(.id == 6) | .targets[0].legendFormat) = "{{phase}}"'
+check 'a legend label the metric does not declare fails' \
+  "1:$f: panel 6 target A: legend {{phase}}: \"phase\" is not a label of the series the query reads" \
+  "$(run)"
+
+good
+edit '(.panels[] | select(.id == 6) | .targets[0].expr) |= sub("by \\(le, stage\\)"; "without (stage, namespace)")'
+check 'without() labels the metric declares, and a scrape label, pass' '0:' "$(run)"
+
+good
+edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum by (le) (scadbuddy_render_queue_depth)"'
+check 'le on a series that is not a _bucket fails' \
+  "1:$f: panel 2 target A: by (le): \"le\" is not a label of the series the query reads" \
+  "$(run)"
+
+good
 p=$(tempo_panel 'render.render')
 edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=\\\"render.openscad\\\"}\""
 check 'a span name the backend never emits fails' \
@@ -228,7 +250,7 @@ mkdir -p "$r/agent/src"
 turn=$(tempo_panel 'agent.turn')
 approval=$(tempo_panel 'agent.approval')
 check 'agent span names absent from agent/src fail once it traces' \
-  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
+  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $turn target B: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
   "$(run)"
 
 good
@@ -249,7 +271,7 @@ mkdir -p "$r/agent/src"
 : > "$r/agent/src/telemetry.ts"
 printf 'export const SPAN_ATTR_TURN = "agent.turn"\nexport const SPAN_NAME_APPROVAL = "agent.approval"\n' > "$r/agent/src/spans.ts"
 check 'SPAN_ATTR_* and SPAN_NAME_* constants are not span names' \
-  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
+  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $turn target B: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
   "$(run)"
 
 # A name that is only quoted somewhere else is not a span the agent emits.
@@ -261,7 +283,7 @@ printf 'startSpan("agent.turn")\n' > "$r/agent/src/spans.test.ts"
 printf 'startSpan("agent.turn")\n' > "$r/agent/src/mocks/m.ts"
 printf 'startSpan("agent.approval")\n' > "$r/agent/test/t.ts"
 check 'agent span names only in tests, mocks or non-tracer literals fail' \
-  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
+  "1:$f: panel $turn target A: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $turn target B: scadbuddy-agent emits no span named \"agent.turn\"|$f: panel $approval target A: scadbuddy-agent emits no span named \"agent.approval\"" \
   "$(run)"
 
 good
