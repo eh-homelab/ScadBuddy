@@ -140,12 +140,14 @@ export type FallbackOptions = {
   priorCostUsd?: number
   /**
    * Called when the turn ends on a failed model request, before its held
-   * synthetic message and result are yielded (#1101): the failure as this
-   * file judged it, and whether a probe found the credential itself works
-   * (so the request, not the key, was refused). The result's `num_turns`
-   * counts that refused request; an earlier attempt's never is.
+   * synthetic message and result are yielded (#1101), so the caller knows
+   * the result is not a reply by the time it sees it: the failure as this
+   * file judged it, and what the probe said of a refused credential, when
+   * one was asked (`probe` is undefined otherwise). The result's `num_turns`
+   * counts that refused request; an earlier attempt's never is. Not called
+   * for a turn the caller stopped.
    */
-  onRefused?: (failure: FailureEvidence, judged: { credentialWorks: boolean }) => void
+  onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -357,9 +359,12 @@ export async function* runWithFallback(
       controller.abort()
     }
 
-    const release = function* (credentialWorks = false): Generator<SDKMessage> {
-      const ended = resultHeld ? apiFailure(result, synthetic, lastRetry) : undefined
-      if (ended) options.onRefused?.(ended, { credentialWorks })
+    /** What the probe said of this attempt's refused credential, when it was asked. */
+    let probed: ProbeVerdict['verdict'] | undefined
+    const release = function* (): Generator<SDKMessage> {
+      // A stopped turn is the caller's, whatever its last request met.
+      const ended = resultHeld && !base.signal?.aborted ? apiFailure(result, synthetic, lastRetry) : undefined
+      if (ended) options.onRefused?.(ended, probed === undefined ? {} : { probe: probed })
       for (const m of held) yield withSpent(m, spend, resumed)
     }
     if (base.signal?.aborted) {
@@ -386,13 +391,14 @@ export async function* runWithFallback(
       // probe's own model, so a refusal of this turn's model or features
       // does not confirm itself.
       const check = await probe(current.credential, undefined, base.signal)
+      probed = check.verdict
       if (base.signal?.aborted) {
         yield* release()
         if (thrown !== undefined) throw thrown
         return
       }
       if (check.verdict === 'answered') {
-        yield* release(true)
+        yield* release()
         if (thrown !== undefined) throw thrown
         throw new Error(`the model endpoint refused this request (${reason}); the credential itself works`)
       }
@@ -410,7 +416,8 @@ export async function* runWithFallback(
     }
 
     const own = result ? ownCost(result, spend, resumed) : 0
-    const turns = result?.num_turns ?? 0
+    // The refused request that ended the attempt is not a turn (#1101).
+    const turns = resultHeld ? Math.max((result?.num_turns ?? 0) - 1, 0) : (result?.num_turns ?? 0)
     const exhausted =
       spend.turns + turns >= (base.maxTurns ?? DEFAULT_MAX_TURNS) ||
       spend.usd + own >= (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD)
@@ -450,8 +457,7 @@ export async function* runWithFallback(
       return
     }
     spend.usd += own
-    // The refused request that ended the attempt is not a turn (#1101).
-    spend.turns += resultHeld ? Math.max(turns - 1, 0) : turns
+    spend.turns += turns
     if (sessionSeen !== undefined) {
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT

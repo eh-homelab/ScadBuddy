@@ -268,7 +268,7 @@ export type TurnOutcome =
 export type Turn = { turnId: string; done: Promise<TurnOutcome> }
 
 /** A turn that ended on a failed model request (fallback.ts `onRefused`). */
-type Refused = { evidence: FailureEvidence; credentialWorks: boolean }
+type Refused = { evidence: FailureEvidence; probe?: ProbeVerdict['verdict'] }
 
 export type StartOptions = {
   origin: Origin

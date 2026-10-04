@@ -71,18 +71,25 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
 
 /**
  * What the user is told about a turn that ended on a failed model request
- * (#1101), from the same evidence `classifyFailure` reads, unless a probe
- * found the credential works. Claude Code's own
+ * (#1101), from the same evidence `classifyFailure` reads and, for a refusal,
+ * what the probe said of the credential (fallback.ts). Claude Code's own
  * "API Error: …" text, when there is one, follows as the detail.
  */
-export function describeApiFailure(evidence: FailureEvidence, judged: { credentialWorks?: boolean } = {}): string {
+export function describeApiFailure(
+  evidence: FailureEvidence,
+  judged: { probe?: ProbeVerdict['verdict'] | undefined } = {},
+): string {
   const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
   const text = evidence.message?.trim()
   const detail = text ? `: ${text}` : ''
-  // A probe answered: the refusal was this request's (fallback.ts), not the key's.
-  if (judged.credentialWorks) return `the model endpoint refused this request (${http}); the credential itself works${detail}`
   switch (classifyFailure(evidence)) {
     case 'permanent':
+      // A refusal is the key's only once a probe confirms it (fallback.ts).
+      if (judged.probe === 'answered') return `the model endpoint refused this request (${http}); the credential itself works${detail}`
+      if (judged.probe === 'rate_limited') return `the Claude credential is rate limited (${http}); try again later${detail}`
+      if (judged.probe === 'unknown') {
+        return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
+      }
       return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
     case 'rate_limited':
       return `the Claude credential is rate limited (${http}); try again later${detail}`

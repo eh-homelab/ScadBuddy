@@ -193,6 +193,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       status: 400,
       type: 'invalid_request_error',
       message: 'Your credit balance is too low to access the Anthropic API',
+      // The probe confirms it: refused again.
+      confirmed: true,
       code: 'api_error',
       says: /the Claude credential was rejected \(HTTP 400\); check it under Settings → AI: .*credit balance is too low/i,
     },
@@ -212,8 +214,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     const m = await replica({
       probe: () =>
         Promise.resolve(
-          c.status === 401
-            ? { verdict: 'refused', reason: 'the probe was refused (HTTP 401)' }
+          c.status === 401 || ('confirmed' in c && c.confirmed)
+            ? { verdict: 'refused', reason: `the probe was refused (HTTP ${c.status})` }
             : { verdict: 'unknown', until: new Date(Date.now() + 60_000) },
         ),
     })
@@ -279,8 +281,15 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused this request \(HTTP 403\); the credential itself works/) })
     expect(JSON.stringify(done)).not.toContain('Settings')
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    // fallback.ts throws after yielding the held result on this path: the
+    // manager's catch must neither replace the refusal nor show its message.
     const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
     expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([
+      expect.objectContaining({ code: 'api_error', message: expect.stringMatching(/the credential itself works/) }),
+    ])
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 0 })])
   }, 60_000)
 
   it('a refused request on one credential is not a turn when the next one answers (#1101)', async () => {

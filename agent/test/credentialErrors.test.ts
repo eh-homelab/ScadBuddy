@@ -9,6 +9,7 @@ import {
   type FailureEvidence,
   MAX_COOLDOWN_MS,
   PROBE_FALLBACK_MODEL,
+  type ProbeVerdict,
   probeCredential,
   rateLimitResetFromHeaders,
   refusesTheKey,
@@ -70,10 +71,17 @@ describe('describeApiFailure (#1101)', () => {
     expect(describeApiFailure(evidence)).toBe(said)
   })
 
-  it('says the credential works when a probe found it does, whatever the status says', () => {
-    expect(describeApiFailure({ status: 403, message: 'blocked by policy' }, { credentialWorks: true })).toBe(
-      'the model endpoint refused this request (HTTP 403); the credential itself works: blocked by policy',
-    )
+  it.each<[ProbeVerdict['verdict'] | undefined, string]>([
+    ['answered', 'the model endpoint refused this request (HTTP 403); the credential itself works: blocked'],
+    ['rate_limited', 'the Claude credential is rate limited (HTTP 403); try again later: blocked'],
+    [
+      'unknown',
+      'the model endpoint refused this request (HTTP 403), and the credential could not be checked; try again, then check it under Settings → AI: blocked',
+    ],
+    ['refused', 'the Claude credential was rejected (HTTP 403); check it under Settings → AI: blocked'],
+    [undefined, 'the Claude credential was rejected (HTTP 403); check it under Settings → AI: blocked'],
+  ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
+    expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
   })
 })
 
