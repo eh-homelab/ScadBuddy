@@ -233,8 +233,9 @@ async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
                 archive_timeout=10,
             )
         )
-        while archives.reads != [101]:
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(5):
+            while 101 not in archives.reads:
+                await asyncio.sleep(0.01)
         hook.cancel()
         with pytest.raises(asyncio.CancelledError):
             await hook
@@ -244,6 +245,38 @@ async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
     assert getattr(record, "archive_ids", None) == [101, 102]
     assert A not in repr(record.__dict__) and record.exc_info is None
     assert await store.recorded_archives([101, 102]) == set()
+
+
+class HangingLinks(Links):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        self.started.set()
+        await asyncio.Event().wait()
+        return self.links
+
+
+async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113 review: a cut-off before any archive is known still leaves a record, so a
+    missing RACK_SETTLE_CUT_OFF line means nothing was skipped."""
+    links = HangingLinks()
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(OUTPUT, client=Archives(), links=links, store=store, now=lambda: AT)
+        )
+        await asyncio.wait_for(links.started.wait(), 5)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "archive_ids", None) == []
+    assert A not in repr(record.__dict__) and record.exc_info is None
 
 
 async def test_an_archive_that_stalls_costs_only_itself(

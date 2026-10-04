@@ -376,7 +376,9 @@ async def record_settled(
     and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
     Nothing is retried now: an archive skipped here is recorded by the output's next
     settle, which reads every linked archive not yet recorded. A settle cut off by the
-    watcher logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``)."""
+    watcher logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``); one cut
+    off before the links are read has no ids to name, and logs an empty list."""
+    linked: list[tuple[int, int]] = []
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -385,6 +387,14 @@ async def record_settled(
         ]
         picked = await store.picked_items(item for _, item in linked)
         recorded = await store.recorded_archives(archive for archive, _ in linked)
+    except asyncio.CancelledError:
+        # Cut off before the loop: the ids are those linked so far, none if the link
+        # read itself was in flight.
+        logger.warning(
+            RACK_SETTLE_CUT_OFF,
+            extra={"output_id": output_id, "archive_ids": [archive for archive, _ in linked]},
+        )
+        raise
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_READ_FALLBACK,
