@@ -222,9 +222,10 @@ class PrintCommands:
     search_attributes: bool = False
 
 
-class _AfterCommit:
+class _Immediate:
     """``publish_in`` for a bus that has no transaction of its own (the in-process bus
-    of a test): publishes at once."""
+    of a test): publishes at once, before the caller's transaction commits, so a
+    subscriber that re-reads the row may see it as it was (review #1061 5)."""
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
@@ -234,7 +235,7 @@ class _AfterCommit:
 
 
 def _transactional(events: EventBus) -> TransactionalEvents:
-    return events if isinstance(events, PgNotifyEventBus) else _AfterCommit(events)
+    return events if isinstance(events, PgNotifyEventBus) else _Immediate(events)
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
