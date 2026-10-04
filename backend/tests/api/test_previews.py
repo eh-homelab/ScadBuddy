@@ -15,6 +15,7 @@ import asyncio
 import itertools
 import subprocess
 import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import ScheduleActionExecutionStartWorkflow, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
@@ -34,7 +36,11 @@ from scadbuddy.main import create_app
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for
-from scadbuddy.workflows.previews import preview_schedule_id_for
+from scadbuddy.workflows.previews import (
+    PREVIEW_BACKFILL_WORKFLOW,
+    REFRESH_ACTIVITY,
+    preview_schedule_id_for,
+)
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
@@ -594,6 +600,87 @@ def test_an_edit_and_the_backfill_render_a_model_once(
     assert _model(client)["thumbnail_source"] == "preview"
 
 
+async def _run_backfill(state: AppState, refreshing: threading.Event | None = None) -> Any:
+    """Start a backfill run on the app's library queue, as the Schedule does, and
+    return its result; ``refreshing`` is set once its refresh activity has started."""
+    assert state.temporal is not None
+    handle = await state.temporal.start_workflow(
+        PREVIEW_BACKFILL_WORKFLOW,
+        id=f"previews-test-{uuid.uuid4().hex}",
+        task_queue=state.settings.temporal_task_queue_library,
+    )
+    if refreshing is not None:
+        for _ in range(600):
+            history = await handle.fetch_history()
+            if any(
+                event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+                and event.activity_task_scheduled_event_attributes.activity_type.name
+                == REFRESH_ACTIVITY
+                for event in history.events
+            ):
+                refreshing.set()
+                break
+            await asyncio.sleep(0.05)
+    return await handle.result()
+
+
+def test_the_backfill_waits_for_the_edit_paths_render_through_its_activity(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """Review #1195 4: the backfill's refresh activity, on the library worker, takes
+    the scheduler's lock: while the edit path renders a model, the run's refresh of it
+    waits, then finds the preview current. One render, one write."""
+    stub.released.clear()
+    _create(client)
+    for _ in range(600):
+        if stub.started:
+            break
+        threading.Event().wait(0.05)
+    assert stub.started == [SLUG]
+    refreshing = threading.Event()
+    backfill = client.portal.start_task_soon(_run_backfill, state, refreshing)  # type: ignore[union-attr]
+    assert refreshing.wait(30)
+    threading.Event().wait(0.2)
+    assert not backfill.done()
+    stub.released.set()
+    assert backfill.result(timeout=30) == []
+    settle(client, state)
+
+    assert stub.started == [SLUG]
+    assert len(stub.calls) == 1
+    assert _model(client)["thumbnail_source"] == "preview"
+
+
+def test_a_render_that_could_not_run_is_a_failure_of_the_backfill_run(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """Review #1195 2: a dead render queue is in the run's failures, not a clean run."""
+    stub.fail = RPCError("no worker is polling", RPCStatusCode.UNAVAILABLE, b"")
+    _create(client)
+    settle(client, state)
+
+    assert client.portal.call(_run_backfill, state) == [SLUG]  # type: ignore[union-attr]
+    assert scheduler(state).store.record(SLUG) is None
+
+
+def test_the_listing_drops_nothing(
+    client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
+) -> None:
+    """Review #1195 1: the listing only reads. A preview no longer wanted is listed,
+    and the refresh, under the scheduler's lock, drops it."""
+    _create(client)
+    settle(client, state)
+    previews = scheduler(state)
+    assert previews.store.record(SLUG) is not None
+    previews.catalogue.thumbnail_path(SLUG).write_bytes(PNG_BYTES)
+
+    assert previews.due() == [SLUG]
+    assert previews.store.record(SLUG) is not None
+    assert client.portal.call(previews.refresh, SLUG) is False  # type: ignore[union-attr]
+    assert previews.store.record(SLUG) is None
+    assert previews.due() == []
+
+
 def test_due_skips_a_model_it_cannot_plan(
     client: TestClient, state: AppState, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -602,12 +689,12 @@ def test_due_skips_a_model_it_cannot_plan(
         paths.model_dir(slug).mkdir(parents=True)
         paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
 
-    def plan(slug: str) -> str | None:
+    def needs_refresh(slug: str) -> bool:
         if slug == SLUG:
             raise OSError("unreadable")
-        return "key"
+        return True
 
-    monkeypatch.setattr(previews, "plan", plan)
+    monkeypatch.setattr(previews, "needs_refresh", needs_refresh)
     due = previews.due()
     assert "gadget" in due
     assert SLUG not in due

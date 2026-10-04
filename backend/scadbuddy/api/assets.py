@@ -239,15 +239,16 @@ async def fetch_asset(
     paths: PathsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> FetchedAsset | JSONResponse:
+    pasted = body.url.strip()
     try:
         # Refusals that quote the URL whole: here, so no operation records them.
-        parse_fetch_url(body.url)
+        parse_fetch_url(pasted)
     except ImportRefusedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history (as an import's, review 3c 1.5).
     claims = ClaimStore(paths.claims)
-    url = await asyncio.to_thread(claims.hold, body.url.encode())
+    url = await asyncio.to_thread(claims.hold, pasted.encode())
 
     async def permit() -> None:
         # Before the operation starts, so a full budget answers with its Retry-After
@@ -259,8 +260,8 @@ async def fetch_asset(
         response,
         kind=ops.kinds["asset_fetch"],
         # The host, never the URL: the subject is a search attribute.
-        subject=urlsplit(body.url).hostname or "url",
-        request={"slug": slug, "url": url.name, "shown": shown_url(body.url)},
+        subject=urlsplit(pasted).hostname or "url",
+        request={"slug": slug, "url": url.name, "shown": shown_url(pasted)},
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
         before_start=permit,

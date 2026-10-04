@@ -175,6 +175,12 @@ class Metrics:
             "SCADBUDDY_RENDER_CONCURRENCY: render workers in this process.",
             registry=r,
         )
+        self.print_follows_running = Gauge(
+            "scadbuddy_print_follows_running",
+            "Prints this process is following (FollowPrint attempts); at FOLLOW_SLOTS "
+            "the next prints wait on the follow queue, unfollowed.",
+            registry=r,
+        )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
             "Time from submit until a worker took the job (or expired it).",

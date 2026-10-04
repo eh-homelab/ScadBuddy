@@ -49,8 +49,10 @@ export type ToolServices = {
   renderWaitMs: number
   /**
    * How long a command follows an operation's 202 (tools/command.ts, review #1063), as the
-   * browser's `printRunPoll.operationFollowMs` does. It must exceed the longest kind's
-   * `run_timeout` plus the run's cancel grace (library pins: 600 s + 30 s).
+   * browser's `printRunPoll.operationFollowMs` does. It must exceed the longest run,
+   * `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend `workflows/operation.py`) with
+   * 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s, `main.py`) for the reconciler
+   * to end a lost one: 1203 s.
    */
   operationFollowMs: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */

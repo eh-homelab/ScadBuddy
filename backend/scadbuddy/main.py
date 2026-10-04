@@ -14,6 +14,7 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -45,6 +46,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -72,6 +74,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
+    UNRUN_FAILURE,
     PreviewBackfill,
     ensure_preview_schedule,
 )
@@ -224,30 +227,23 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(
-    state: AppState, *, converge: bool = True, reraise: bool = False
-) -> None:
-    # Best effort, like the boot's other sweeps: a store or volume error skips this
-    # sweep (removing nothing it could not prove unused) and the next one retries.
-    # ``reraise``: the Schedule's sweep also fails its activity, which reports it.
-    # The boot's sweep does not converge: reconcile and backfill talk to Bambuddy at
-    # length, so they run from the periodic sweep and never hold up the start.
+async def _sweep_assets_logged(state: AppState) -> None:
+    # Best effort: a store or volume error skips this sweep (removing nothing it could
+    # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
+    # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
         if remote is not None and cutoff is not None:
             await drop_swept_assets(state, removed, cutoff=cutoff)
-            if not converge:
-                return
             # What an earlier drop failed to remove, and what the store lost (a copy an
             # `ensure` dropped, a race with a delete): both converge here, per sweep.
             await remote.reconcile(state.assets, cutoff=cutoff)
             await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
-        if reraise:
-            raise
+        raise
 
 
 async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = False) -> None:
@@ -280,16 +276,17 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
 
 
-async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
+async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool = True) -> None:
     """The boot's mirror of what predates the store, in the background and best effort:
-    an unreachable Bambuddy never holds up or fails the start. Uploads only when no
-    periodic asset sweep runs (`SCADBUDDY_ASSET_SWEEP_INTERVAL` 0); otherwise that
-    sweep backfills them. Fonts always: nothing else mirrors a family installed before."""
+    an unreachable Bambuddy never holds up or fails the start. Uploads only when the
+    housekeeping Schedule's sweep does not backfill them: `SCADBUDDY_ASSET_SWEEP_INTERVAL`
+    0, or the Schedule paused (`_run_library_worker`, review #1095 2). Fonts on every
+    boot: nothing else mirrors a family installed before."""
     try:
         if uploads and state.store.remote_assets is not None:
             mirrored = await state.store.remote_assets.backfill(state.assets)
             logger.info("mirrored uploads", extra={"count": mirrored})
-        if state.store.fonts is not None:
+        if fonts and state.store.fonts is not None:
             logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
     except Exception:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
@@ -326,7 +323,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
-        await _heartbeating(_sweep_assets_logged(state, reraise=True))
+        await _heartbeating(_sweep_assets_logged(state))
 
     @activity.defn(name=SWEEPS[2])
     async def sweep_blobs() -> None:
@@ -369,7 +366,9 @@ def _preview_activities(state: AppState) -> list[Callable[..., Any]]:
         if previews is None:
             return False
         try:
-            return await _heartbeating(previews.refresh(slug))
+            return await _heartbeating(previews.refresh(slug, raise_unrun=True))
+        except PreviewUnrunError as error:
+            raise ApplicationError(str(error), type=UNRUN_FAILURE) from error
         except Exception:
             logger.exception("could not refresh a model's preview", extra={"slug": slug})
             raise
@@ -550,7 +549,13 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         queue = settings.temporal_task_queue_bambuddy
         workers = [
             bambuddy_worker(client, queue, activities),
-            follow_worker(client, queue, FollowActivities(state.print_follower).follow_print),
+            follow_worker(
+                client,
+                queue,
+                FollowActivities(
+                    state.print_follower, running=state.metrics.print_follows_running
+                ).follow_print,
+            ),
         ]
         if not await _serve_until(workers, stop):
             with suppress(TimeoutError):
@@ -594,15 +599,20 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         return
     settings = state.settings
     queue = settings.temporal_task_queue_library
-    schedules = asyncio.create_task(
-        _set_up_housekeeping(
+
+    async def set_up() -> None:
+        paused = await _set_up_housekeeping(
             client,
             queue,
             state.config.asset_sweep_interval,
             state.previews.timeout if state.previews is not None else None,
             stop,
         )
-    )
+        if paused and state.store.content is not None:
+            # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
+            await _backfill_store_logged(state, uploads=True, fonts=False)
+
+    schedules = asyncio.create_task(set_up())
     ops = state.components.get(OPERATIONS)
     activities = [
         *_housekeeping_activities(state),
@@ -631,21 +641,23 @@ def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
 
 async def _set_up_housekeeping(
     client: Client, queue: str, interval: float, previews: float | None, stop: asyncio.Event
-) -> None:
+) -> bool:
     """The housekeeping Schedules and the preview backfill's (``previews``: the
     scheduler's render bound; None, previews off: none), retried until Temporal takes
     them: a frontend can answer the connect before it can create one. Each set-up
     triggers its Schedule, so the preview one comes last: a retry after the
-    housekeeping ones failed does not run the backfill twice."""
+    housekeeping ones failed does not run the backfill twice. True when the sweeps'
+    one is paused."""
     while not stop.is_set():
         try:
-            await ensure_schedules(client, queue, interval)
+            paused = await ensure_schedules(client, queue, interval)
             await ensure_preview_schedule(client, queue, previews)
-            return
+            return paused
         except Exception:
             logger.warning("could not set up the library Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    return False
 
 
 async def _serve_until(
@@ -812,12 +824,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if serves_print_queue(state.settings):
             printing = asyncio.create_task(_run_print_worker(state, stop_printing))
         upkeep = asyncio.create_task(_print_upkeep(state, stop_printing))
-        # After the projection has opened: the jobs in it are references too. Before the
-        # first request, as the boot passes are; the converging sweep is the Schedule's.
-        if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state, converge=False)
         # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
-        # run once at once (the boot's converging sweep), then every interval.
+        # run once at once (the boot's sweep of the uploads, converging with the store;
+        # review #1095 1: the boot no longer walks them itself first), then every interval.
         library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(

@@ -13,8 +13,8 @@
 dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
 without limit; ``print_record`` also touches the data volume and Bambuddy, so it gives
 up and the run is recorded as failed. ``print_finish`` remembers the project's printer
-best effort and ``print_succeed`` is the record alone, so once every plate is queued the
-run never ends ``failed``.
+best effort and, like ``print_succeed``, retries without limit, so once every plate is
+queued the run never ends ``failed`` (unless Bambuddy's settings are removed meanwhile).
 
 ``print_plan`` uploads the 3MF and retries (``READ_RETRY``): ``ensure_uploaded`` reuses
 the copy ScadBuddy recorded, so a retry uploads again only when the attempt died after
@@ -107,7 +107,8 @@ MAY_HAVE_QUEUED = SearchAttributeKey.for_bool("ScadbuddyMayHaveQueued")
 #: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
 FOLLOW_PATCH = "follow-print"
 
-#: What a run cancelled before its record answers: nothing was written or queued.
+#: What a run cancelled before it printed answers, before or during its record: nothing
+#: was queued.
 CANCELLED = PrintRunError(
     status=409,
     title="Conflict",
@@ -143,10 +144,15 @@ class PrintRunWorkflow:
     async def run(self, input: PrintRunInput) -> PrintRun:
         self.search_attributes = input.search_attributes
         self._upsert(kind="print", subject=input.subject, status="accepting")
+        accepted_at = input.accepted_at
+        if workflow.patched("unwaited-server-clock"):
+            # The execution's start on the server's clock, not a time the route stamped
+            # on its own host: pods' clocks differ (review #1061 3).
+            accepted_at = workflow.info().workflow_start_time
         try:
             checked = await workflow.execute_activity(
                 "print_check",
-                input,
+                input.model_copy(update={"accepted_at": accepted_at}),
                 result_type=Checked,
                 start_to_close_timeout=ACCEPT_TIMEOUT,
                 retry_policy=READ_RETRY,
@@ -162,34 +168,44 @@ class PrintRunWorkflow:
             raise ApplicationError(refusal.detail, type=REFUSED, non_retryable=True) from None
         if (
             workflow.patched("unwaited-before-insert")
-            and input.accepted_at is not None
-            and workflow.now() - input.accepted_at > CLIENT_ACCEPTING
+            and accepted_at is not None
+            and workflow.now() - accepted_at > CLIENT_ACCEPTING
         ):
             # The point of no return: a check that ended after every client stopped
             # re-sending this run would print it with nobody watching (review #1061 (2) 2).
             await self._refuse(UNWAITED)
             raise ApplicationError(UNWAITED.detail, type=REFUSED, non_retryable=True)
-        run = await workflow.execute_activity(
+        insert = workflow.start_activity(
             "print_insert",
             InsertInput(input=input, checked=checked),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
+        cancelled = False
+        if workflow.patched("insert-survives-cancel"):
+            # The insert does not heartbeat, so a cancel would return here while it may
+            # still commit, leaving a `running` row nothing ends (review #1061 2). It
+            # finishes, and its row is recorded cancelled.
+            try:
+                run = await asyncio.shield(insert)
+            except asyncio.CancelledError:
+                cancelled = True
+                run = await insert
+        else:
+            run = await insert
         accepted = Accepted(run=run, source=checked.source, prepared=checked.prepared)
-        self.row = accepted.run
-        self._upsert(status="running")
-        try:
-            self.row = await self._print(input, accepted)
-        except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
-            # The record exists: whatever happened is recorded, and the execution completes.
-            self.row = await workflow.execute_activity(
-                "print_fail",
-                FailInput(run_id=accepted.run.id, slug=input.slug, error=problem_of(error)),
-                result_type=PrintRun,
-                start_to_close_timeout=SHORT,
-                retry_policy=RECORD_RETRY,
-            )
+        if cancelled:
+            self.row = await self._fail(input, accepted, CANCELLED)
+        else:
+            self.row = accepted.run
+            self._upsert(status="running")
+            try:
+                self.row = await self._print(input, accepted)
+            except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
+                # The record exists: whatever happened is recorded, and the execution
+                # completes.
+                self.row = await self._fail(input, accepted, problem_of(error))
         self._upsert(status=self.row.status, may_have_queued=self.row.may_have_queued)
         if self.row.status == "succeeded" or self.row.may_have_queued:
             # Repeats of a body-only key inside the window get this row (§5.2). A cancel
@@ -199,6 +215,18 @@ class PrintRunWorkflow:
                 await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
         return self.row
+
+    async def _fail(
+        self, input: PrintRunInput, accepted: Accepted, error: PrintRunError
+    ) -> PrintRun:
+        failed: PrintRun = await workflow.execute_activity(
+            "print_fail",
+            FailInput(run_id=accepted.run.id, slug=input.slug, error=error),
+            result_type=PrintRun,
+            start_to_close_timeout=SHORT,
+            retry_policy=RECORD_RETRY,
+        )
+        return failed
 
     async def _refuse(self, refusal: PrintRunError) -> None:
         """Answer the Update with ``refusal``; nothing was written."""
@@ -294,10 +322,11 @@ class PrintRunWorkflow:
             ),
             result_type=PrintRunResult,
             start_to_close_timeout=SHORT,
-            retry_policy=BOUNDED_RETRY,
+            # Every plate is queued: from here a settings read that fails for a while
+            # delays the run and never fails it (review #1061 1).
+            retry_policy=RECORD_RETRY,
         )
-        # Every plate is queued: from here only the record is left, and it does not
-        # give up (review #1061).
+        # Only the record is left, and it does not give up either (review #1061).
         finished: PrintRun = await workflow.execute_activity(
             "print_succeed",
             SucceedInput(input=input, run_id=accepted.run.id, result=result),

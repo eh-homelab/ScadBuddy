@@ -10,6 +10,13 @@ import { countConflicts } from '../lib/upstream'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 
+/** The read of the record a save's `base` comes from failed. */
+class RecordUnreadError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+  }
+}
+
 /**
  * The same editor as "New model", prefilled. Saving overwrites the source in place.
  * A built-in template (#184) opens read-only: the server refuses to write it, and
@@ -25,15 +32,20 @@ export function EditSourcePage() {
   // The source and the version it was read at. The version is read first, so a save
   // made in between leaves the base older than the source: a save is then refused
   // rather than written over a change this page never showed (#1054). A record that
-  // does not load is `model`'s error to show; its retry reads both again.
+  // does not load fails the page as `model`'s does, so nothing saves without its
+  // version (review #1130 2); its retry reads both again.
   const loaded = useAsync(async () => {
     const version = await api.getModel(slug).then(
       (record) => record.version ?? undefined,
-      () => undefined,
+      (error: unknown) => {
+        // No model at all is the source not being here either.
+        throw error instanceof ApiError && error.status === 404 ? error : new RecordUnreadError(error)
+      },
     )
     return { source: await api.getSource(slug), version }
   }, [slug])
   const model = useAsync(() => api.getModel(slug), [slug])
+  const recordError = model.error ?? (loaded.error instanceof RecordUnreadError ? loaded.error : null)
   const upstream = useAsync(
     async () => (merging ? await api.getUpstream(slug) : null),
     [slug, merging],
@@ -125,7 +137,10 @@ export function EditSourcePage() {
     )
   }
 
-  if (loaded.error || source === null) {
+  // A source that does not load says so first; the record's read failing is the
+  // branch below, with its retry.
+  const sourceUnread = loaded.error !== undefined && !(loaded.error instanceof RecordUnreadError)
+  if (sourceUnread || (source === null && !recordError)) {
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">That source is not here</h1>
@@ -138,11 +153,11 @@ export function EditSourcePage() {
   }
 
   // Whether the source may be saved is the record's to say; without it, nothing is offered.
-  if (model.error) {
+  if (recordError || source === null) {
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">Could not load this model</h1>
-        <p className="mt-2 text-[13px] text-muted">{model.error.message}</p>
+        <p className="mt-2 text-[13px] text-muted">{recordError?.message}</p>
         <Button
           size="sm"
           className="mt-4"

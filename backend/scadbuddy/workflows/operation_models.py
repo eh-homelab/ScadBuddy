@@ -61,6 +61,8 @@ class OperationInput(BaseModel):
     author: OperationAuthor | None = None
     #: The kind's prelude, when the request needs it (``OperationKind.prelude``).
     prelude: PreludeStep | None = None
+    #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
+    idempotency_key: str | None = None
 
 
 class OperationAnswer(BaseModel):

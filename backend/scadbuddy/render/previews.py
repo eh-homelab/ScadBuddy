@@ -44,6 +44,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.split import split_by_material
+from scadbuddy.workflows.previews import PAUSE
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,9 @@ logger = logging.getLogger(__name__)
 #: metadata edit, then a README is one render, not three.
 DEFAULT_DEBOUNCE = 2.0
 #: The pause after each render, so a backlog -- the first boot after an upgrade,
-#: with every thumbnail-less model to render -- never runs back to back.
-DEFAULT_INTERVAL = 1.0
+#: with every thumbnail-less model to render -- never runs back to back. The
+#: backfill's, so the two never drift apart.
+DEFAULT_INTERVAL = PAUSE.total_seconds()
 #: A preview renders the schema, the model and its plate image, each bounded by
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
@@ -63,6 +65,10 @@ PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 class PreviewFailedError(Exception):
     pass
+
+
+class PreviewUnrunError(Exception):
+    """The render could not be run at all, which says nothing about the source."""
 
 
 #: What a render activity's failure carries as its type when it raised one of these.
@@ -192,12 +198,14 @@ class PreviewScheduler:
             loop.call_soon_threadsafe(self._schedule, slug, self.debounce)
 
     def due(self) -> list[str]:
-        """The models whose preview is missing or stale: the backfill's listing. One
-        that cannot be planned is logged and left out; a listing that fails raises."""
+        """The models whose preview is missing, stale or no longer wanted: the
+        backfill's listing. It only reads; each refresh plans again, and drops, under
+        the lock. One that cannot be looked at is logged and left out; a listing that
+        fails raises."""
         due: list[str] = []
         for slug in self.catalogue.slugs():
             try:
-                if self.plan(slug) is not None:
+                if self.needs_refresh(slug):
                     due.append(slug)
             except Exception:
                 logger.exception("could not plan a model's preview", extra={"slug": slug})
@@ -242,14 +250,16 @@ class PreviewScheduler:
             if rendered and self.interval > 0:
                 await asyncio.sleep(self.interval)
 
-    async def refresh(self, slug: str) -> bool:
+    async def refresh(self, slug: str, *, raise_unrun: bool = False) -> bool:
         """Render ``slug``'s preview if it needs one. True when a render ran. Planned
         under the lock, so a refresh that waited on another of the same model finds
-        its preview current and renders nothing."""
+        its preview current and renders nothing. With ``raise_unrun``, a render that
+        could not be run raises `PreviewUnrunError` (the backfill's failure) rather
+        than counting as one that ran."""
         async with self._lock:
-            return await self._refresh(slug)
+            return await self._refresh(slug, raise_unrun=raise_unrun)
 
-    async def _refresh(self, slug: str) -> bool:
+    async def _refresh(self, slug: str, *, raise_unrun: bool) -> bool:
         key = await asyncio.to_thread(self.plan, slug)
         if key is None:
             return False
@@ -266,6 +276,8 @@ class PreviewScheduler:
                     "could not run the default render for a preview; it is tried again later",
                     extra={"slug": slug, "error": reason},
                 )
+                if raise_unrun:
+                    raise PreviewUnrunError(reason) from error
                 return True
             logger.warning(
                 "the default render for a preview failed; the model keeps no thumbnail",
@@ -294,10 +306,7 @@ class PreviewScheduler:
         and comes back if the output is deleted. Otherwise a preview already made
         from this source -- or already failed from it -- is left as it is.
         """
-        if not self.catalogue.exists(slug) or self.catalogue.thumbnail_path(slug).is_file():
-            self.store.drop(slug)
-            return None
-        if self.catalogue.has_output_cover(slug):
+        if not self._keeps_preview(slug):
             self.store.drop(slug)
             return None
         # A delete landing after the `exists` check above makes this None, and
@@ -309,6 +318,23 @@ class PreviewScheduler:
             return None
         return key
 
+    def needs_refresh(self, slug: str) -> bool:
+        """Whether `plan` would render ``slug``'s preview or drop it, without doing
+        either."""
+        if not self._keeps_preview(slug):
+            return self.store.record(slug) is not None
+        key = source_key(self.catalogue.paths, slug)
+        return key is not None and not self.store.current(slug, key)
+
+    def _keeps_preview(self, slug: str) -> bool:
+        """Whether ``slug`` shows a preview: it exists, with no thumbnail of its own
+        and no generated output."""
+        return (
+            self.catalogue.exists(slug)
+            and not self.catalogue.thumbnail_path(slug).is_file()
+            and not self.catalogue.has_output_cover(slug)
+        )
+
     def _still_wanted(self, slug: str, key: str) -> bool:
         """Whether a render from ``key`` is still the one to keep, now that it is done.
 
@@ -316,9 +342,4 @@ class PreviewScheduler:
         renders. An edit has requested a render of its own, so this one is dropped
         rather than kept as a stale stand-in.
         """
-        return (
-            self.catalogue.exists(slug)
-            and not self.catalogue.thumbnail_path(slug).is_file()
-            and not self.catalogue.has_output_cover(slug)
-            and source_key(self.catalogue.paths, slug) == key
-        )
+        return self._keeps_preview(slug) and source_key(self.catalogue.paths, slug) == key

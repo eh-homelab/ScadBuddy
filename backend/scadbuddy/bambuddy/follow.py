@@ -38,6 +38,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from prometheus_client import Gauge
 from pydantic import BaseModel
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -72,6 +73,11 @@ HEARTBEAT_SLICE = 5.0
 SETTLE_TIMEOUT = 60.0
 
 FOLLOW_ACTIVITY = "follow_print"
+#: The follow worker's slots (review #1091 2): each attempt holds one for as long as its
+#: print moves, and a poke's old attempt holds its own until its next heartbeat. Past
+#: this many, new follows wait on the queue and nothing is published for their prints;
+#: `scadbuddy_print_follows_running` and a warning say so.
+FOLLOW_SLOTS = 200
 
 Reader = Callable[[OutputMeta], Awaitable[PrintProgress | None]]
 Ended = Literal["settled", "gone", "deleted", "quiet"]
@@ -224,14 +230,35 @@ class Follower:
 
 
 class FollowActivities:
-    def __init__(self, follower: Follower) -> None:
+    def __init__(
+        self, follower: Follower, *, slots: int = FOLLOW_SLOTS, running: Gauge | None = None
+    ) -> None:
         self.follower = follower
+        self.slots = slots
+        self.running = running
+        self._held = 0
 
     @activity.defn(name=FOLLOW_ACTIVITY)
     async def follow_print(self, input: FollowInput) -> str:
         """Follow the print; a retried attempt resumes the age its heartbeat carried, and
         only a poke's first attempt reads at once. A worker shutting down ends the
         attempt rather than holding the shutdown up: another worker retries it."""
+        self._held += 1
+        if self.running is not None:
+            self.running.inc()
+        if self._held >= self.slots:
+            logger.warning(
+                "every follow slot is taken: the next prints wait to be followed",
+                extra={"slots": self.slots},
+            )
+        try:
+            return await self._follow_print(input)
+        finally:
+            self._held -= 1
+            if self.running is not None:
+                self.running.dec()
+
+    async def _follow_print(self, input: FollowInput) -> str:
         info = activity.info()
         active = self.follower.now()
         if info.heartbeat_details:
