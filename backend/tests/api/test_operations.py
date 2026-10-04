@@ -95,6 +95,7 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
     state.operations.kinds["test_threaded"] = OperationKind(
         "test_threaded", check, threaded, run_timeout=timedelta(seconds=2)
     )
+
     async def slow_check(request: dict[str, Any]) -> dict[str, Any]:
         await asyncio.sleep(10)
         return {}

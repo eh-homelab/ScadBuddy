@@ -108,8 +108,7 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
             if kind.queue == "bambuddy":
                 slow = ApiError(
                     status.HTTP_504_GATEWAY_TIMEOUT,
-                    f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; "
-                    "nothing was done",
+                    f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; nothing was done",
                     type_=UNAVAILABLE_PROBLEM,
                 )
             else:
