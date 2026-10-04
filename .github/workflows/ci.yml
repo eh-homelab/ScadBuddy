@@ -257,6 +257,36 @@ jobs:
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
 
+      # deploy/grafana is built by kustomize in ArgoCD's repo-server, which
+      # runs 5.6.0 (clusters/prod/bambuddy/kustomization.yaml says so), so the
+      # lint builds it with that release, never whatever kustomize the runner
+      # image happens to carry. The sha256 is the one kustomize published in
+      # that release's checksums.txt, pinned here so a replaced asset fails.
+      - name: Install kustomize
+        env:
+          KUSTOMIZE_VERSION: v5.6.0
+          KUSTOMIZE_SHA256: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
+        run: |
+          set -euo pipefail
+          tarball="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/${tarball}"
+          echo "${KUSTOMIZE_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/kustomize"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/kustomize" kustomize
+          "$RUNNER_TEMP/kustomize/kustomize" version
+          echo "KUSTOMIZE=$RUNNER_TEMP/kustomize/kustomize" >> "$GITHUB_ENV"
+
+      # The dashboard (#988, spec 2026-10-01 §7): JSON, uid, datasource
+      # variables, the series and span names its queries read, and the
+      # ConfigMap kustomize builds from it. Its own tests first, so a
+      # regression in the lint reads as a failing case.
+      - name: Test the dashboard lint
+        run: .github/scripts/lint-dashboard.test.sh
+
+      - name: Lint the Grafana dashboard
+        run: .github/scripts/lint-dashboard.sh
+
       # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
       # in CI reads: a skill that loses its frontmatter still loads with its
       # description gone, and a malformed marketplace.json only fails when a
