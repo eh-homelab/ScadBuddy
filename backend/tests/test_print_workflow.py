@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client, WorkflowFailureError
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import (
@@ -59,7 +59,13 @@ from scadbuddy.workflows.print_models import (
     SourceSpec,
     SucceedInput,
 )
-from scadbuddy.workflows.printing import CANCELLED, PrintRunWorkflow
+from scadbuddy.workflows.printing import (
+    ACCEPT_TIMEOUT,
+    CANCELLED,
+    CLIENT_ACCEPTING,
+    READ_RETRY,
+    PrintRunWorkflow,
+)
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -565,3 +571,36 @@ async def test_a_cancel_during_the_check_answers_the_update_before_the_execution
         assert fake.calls == ["check"]
     finally:
         fake.check_gate.set()
+
+
+async def test_a_cancel_during_the_repeat_window_completes_with_the_run(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (third) 5: the window ends early, but the execution completes, so
+    the failed-only reuse policy still keeps a re-sent request off a second print."""
+    arg = run_input(window=600)
+    answer = await start(client, worker, arg)
+    assert answer.run is not None
+    handle = client.get_workflow_handle(f"print-{arg.key}")
+    # Inside the window: its timer has started.
+    while not any(
+        event.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+        for event in (await handle.fetch_history()).events
+    ):
+        await asyncio.sleep(0.05)
+    await handle.cancel()
+    finished = await ended(client, arg)
+    assert finished.status == "succeeded"
+    assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+
+
+def test_the_clients_still_accepting_budget_outlasts_the_check() -> None:
+    """Review #1061 (third) 6: the frontend's and the agent's 240 s, held to the check."""
+    attempts = READ_RETRY.maximum_attempts
+    backoff = sum(
+        READ_RETRY.initial_interval.total_seconds() * READ_RETRY.backoff_coefficient**n
+        for n in range(attempts - 1)
+    )
+    worst = attempts * ACCEPT_TIMEOUT.total_seconds() + backoff
+    assert CLIENT_ACCEPTING.total_seconds() == 240
+    assert CLIENT_ACCEPTING.total_seconds() > worst
