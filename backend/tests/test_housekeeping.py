@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -9,7 +10,12 @@ from datetime import timedelta
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, ScheduleOverlapPolicy
+from temporalio.client import (
+    Client,
+    ScheduleActionExecutionStartWorkflow,
+    ScheduleActionStartWorkflow,
+    ScheduleOverlapPolicy,
+)
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
@@ -22,6 +28,7 @@ from scadbuddy.workflows.housekeeping import (
     Housekeeping,
     ensure_schedule,
     ensure_schedules,
+    housekeeping_timeout,
     prune_schedule_id_for,
     schedule_id_for,
 )
@@ -166,3 +173,99 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         await prune.delete()
         await terminate_open_workflows(client, queue)
     assert described.schedule.spec.intervals[0].every == timedelta(seconds=300)
+
+
+async def _actions(client: Client, schedule_id: str, count: int) -> int:
+    """The Schedule's action count once it reaches ``count``, or after ~5 s."""
+    for _ in range(50):
+        described = await client.get_schedule_handle(schedule_id).describe()
+        if described.info.num_actions >= count:
+            break
+        await asyncio.sleep(0.1)
+    return described.info.num_actions
+
+
+async def test_the_boots_trigger_queues_behind_an_open_run(client: Client) -> None:
+    """Review #1095 1a: a start while a run is still open (a rollout stopped the old
+    pod mid-sweep) still gets its converging sweep, after that run."""
+    schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ran: list[str] = []
+
+    @activity.defn(name=PRUNE_SWEEPS[0])
+    async def prune() -> None:
+        ran.append(PRUNE_SWEEPS[0])
+        started.set()
+        await release.wait()
+
+    try:
+        async with Worker(client, task_queue=queue, workflows=[Housekeeping], activities=[prune]):
+            await ensure_schedule(
+                client, queue, 3600.0, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
+            )
+            await asyncio.wait_for(started.wait(), 10)
+            await ensure_schedule(
+                client, queue, 3600.0, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
+            )
+            release.set()
+            assert await _actions(client, schedule_id, 2) == 2
+            for _ in range(50):
+                if len(ran) == 2:
+                    break
+                await asyncio.sleep(0.1)
+    finally:
+        await client.get_schedule_handle(schedule_id).delete()
+        await terminate_open_workflows(client, queue)
+    assert ran == [PRUNE_SWEEPS[0]] * 2
+
+
+async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
+    """Review #1095 1b: a run that can never finish (a workflow task that fails on
+    replay) ends, so the Schedule's overlap SKIP does not hold back every later tick."""
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    prune = client.get_schedule_handle(prune_schedule_id_for(queue))
+    sweeps = client.get_schedule_handle(schedule_id_for(queue))
+    try:
+        await ensure_schedules(client, queue, 600.0)
+        prune_action = (await prune.describe()).schedule.action
+        sweeps_action = (await sweeps.describe()).schedule.action
+    finally:
+        await prune.delete()
+        await sweeps.delete()
+        await terminate_open_workflows(client, queue)
+    assert isinstance(prune_action, ScheduleActionStartWorkflow)
+    assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
+    assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
+    assert timedelta(minutes=2) < prune_action.execution_timeout <= timedelta(minutes=10)
+    assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
+    assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
+
+
+async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Client) -> None:
+    """Review #1095 1c: a restart neither resumes a Schedule an operator paused nor
+    runs it."""
+    schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    handle = client.get_schedule_handle(schedule_id)
+    try:
+        await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
+        assert await _actions(client, schedule_id, 1) == 1
+        # The boot's run, ended: no open run that a trigger could queue behind.
+        started = (await handle.describe()).info.recent_actions[-1].action
+        assert isinstance(started, ScheduleActionExecutionStartWorkflow)
+        await client.get_workflow_handle(
+            started.workflow_id, run_id=started.first_execution_run_id
+        ).terminate("ended by the test")
+        await handle.pause(note="incident")
+        await ensure_schedule(client, queue, 120.0, schedule_id=schedule_id)
+        actions = await _actions(client, schedule_id, 2)
+        described = await handle.describe()
+    finally:
+        await handle.delete()
+        await terminate_open_workflows(client, queue)
+    assert described.schedule.state.paused
+    assert described.schedule.state.note == "incident"
+    assert described.schedule.spec.intervals[0].every == timedelta(seconds=120)
+    assert actions == 1

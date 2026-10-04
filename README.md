@@ -174,7 +174,9 @@ on shutdown.
     (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
     also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
     converges the uploads with the store (reconcile and backfill), so expect that
-    Bambuddy traffic right after a deploy. Settled render jobs are pruned every 300 s by a second
+    Bambuddy traffic right after a deploy. A run still open from before the start
+    goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
+    paused across restarts, and a start does not trigger it. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
