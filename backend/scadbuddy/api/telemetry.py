@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+from functools import partial
 from typing import Final
 
 from fastapi import APIRouter, FastAPI, Request, Response
 
 from scadbuddy.api.limits import RouteLimit
+from scadbuddy.api.realtime import origin_allowed
 from scadbuddy.core.problems import ApiError
 from scadbuddy.telemetry.admission import check_content_type, check_origin, relay_client
 from scadbuddy.telemetry.component import TraceRelayDep
@@ -76,7 +78,16 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
     peer = request.client.host if request.client is not None else None
     relay.limits.take(relay_client(request.headers, peer, settings))
     try:
-        batch = await asyncio.to_thread(prepare, await request.body(), _route_matcher(request.app))
+        batch = await asyncio.to_thread(
+            prepare,
+            await request.body(),
+            _route_matcher(request.app),
+            partial(
+                origin_allowed,
+                public_url=settings.public_url,
+                allowed_origins=settings.allowed_origin_list,
+            ),
+        )
     except BatchTooLargeError as error:
         raise ApiError(413, str(error)) from error
     except PayloadError as error:

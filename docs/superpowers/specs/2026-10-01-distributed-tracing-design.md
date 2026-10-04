@@ -257,7 +257,7 @@ path except `/api/v1/ai/*` to the backend.
     the entry and its reason.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
-  attribute dropped except `service.version` and `user_agent.original`. Then
+  attribute dropped except `service.version` (no user agent: §6). Then
   per-span caps; beyond them the excess is dropped (truncated, for strings) and
   the span counts it in `otel.dropped_attributes_count` (OTel's own field):
   - 64 attributes;
@@ -272,8 +272,11 @@ path except `/api/v1/ai/*` to the backend.
 - A page span's URL (`url.full`, `http.url`, `http.target`, `url.path`, on the
   span, its events and its links) is reduced to the backend route template its
   path matches, after the `scheme://host` of an absolute URL, or else to that
-  origin alone; a relative URL on no route is dropped. The SPA's routes are the
-  browser's own, so a page's URL keeps only its origin.
+  origin alone; a relative URL on no route is dropped. Only a relative URL, or
+  one on ScadBuddy's own origins (the public URL, `SCADBUDDY_ALLOWED_ORIGINS`
+  or loopback, as the `Origin` check takes them), is matched against the
+  routes: any other host has none of them, so its URL keeps only its origin.
+  The SPA's routes are the browser's own, so a page's URL keeps only its origin.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
@@ -554,7 +557,11 @@ before it leaves the process. It:
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 
-The relay applies the same scrub to browser spans before forwarding. Our own
+The relay applies the same scrub to browser spans before forwarding, and since a
+page's input is not the SDK's, applies it wherever the page put a value:
+`exception.message` is dropped from the span, every event and every link, not
+only from an `exception` event, and no user agent (`user_agent.original`,
+`http.user_agent`) is kept anywhere, the rebuilt resource included. Our own
 spans set `scadbuddy.failure_class` (the problem `type_` for an `ApiError`,
 plus the client's `Scope` for a Bambuddy call) as the readable cause. Where
 the message is needed, it is already in the job row or the response the user

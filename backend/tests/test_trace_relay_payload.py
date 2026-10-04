@@ -7,11 +7,13 @@ import re
 
 import pytest
 
+from scadbuddy.api.realtime import origin_allowed
 from scadbuddy.telemetry import payload
 from scadbuddy.telemetry.payload import BatchTooLargeError, PayloadError
 from tests.support.otlp import SENTINEL, SPAN_ID, TRACE_ID, Json, export, span, string
 
 FILES_ROUTE = "/api/v1/models/{slug}/files/{path:path}"
+PUBLIC_URL = "https://scadbuddy.example"
 
 
 def routes(path: str) -> str | None:
@@ -23,8 +25,13 @@ def routes(path: str) -> str | None:
     return None
 
 
+def own_origin(origin: str) -> bool:
+    """Stands in for the relay's check: the public URL, or loopback."""
+    return origin_allowed(origin, PUBLIC_URL)
+
+
 def prepare(body: bytes) -> bytes | None:
-    return payload.prepare(body, routes)
+    return payload.prepare(body, routes, own_origin)
 
 
 def _prepared(body: bytes) -> bytes:
@@ -62,7 +69,6 @@ def test_the_resource_is_rebuilt_as_the_web_service() -> None:
         "attributes": [
             string("service.name", "scadbuddy-web"),
             string("service.version", "1.2.3"),
-            string("user_agent.original", "Mozilla/5.0"),
         ]
     }
 
@@ -530,6 +536,23 @@ def test_a_stack_without_a_message_header_keeps_every_frame() -> None:
     assert scrubbed["attributes"] == [string("exception.stacktrace", stack)]
 
 
+def test_an_exception_message_is_removed_from_a_span_every_event_and_a_link() -> None:
+    """The page's input is untrusted: a message is dropped wherever it is put, not only
+    from an ``exception`` event (spec §6)."""
+    attributes = [string("exception.message", SENTINEL), string("http.method", "GET")]
+    events = [
+        {"name": "exception", "attributes": attributes},
+        {"name": "fetch", "attributes": attributes},
+    ]
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": attributes}
+    body = export(span(attributes=attributes, events=events, links=[link]))
+    assert SENTINEL not in _prepared(body).decode()
+    result = only_span(body)
+    for scrubbed in (result, *result["events"], result["links"][0]):
+        assert scrubbed["attributes"] == [string("http.method", "GET")]
+        assert scrubbed["droppedAttributesCount"] == 0
+
+
 def test_header_attributes_are_removed_from_a_span_an_event_and_a_link() -> None:
     headers = [
         string("http.request.header.cookie", SENTINEL),
@@ -568,6 +591,34 @@ def test_a_url_on_no_route_keeps_only_its_origin() -> None:
 
 
 @pytest.mark.parametrize(
+    ("url", "kept"),
+    [
+        (f"https://bambuddy.lan/api/v1/models/a/files/{SENTINEL}", "https://bambuddy.lan"),
+        (
+            f"https://scadbuddy.example.evil/api/v1/models?q={SENTINEL}",
+            "https://scadbuddy.example.evil",
+        ),
+        (f"//bambuddy.lan/api/v1/models/a/files/{SENTINEL}", "//bambuddy.lan"),
+    ],
+)
+def test_a_url_on_another_host_keeps_only_its_origin_though_its_path_matches_a_route(
+    url: str, kept: str
+) -> None:
+    """Another host has none of ScadBuddy's routes: a template would name one it lacks."""
+    result = only_span(export(span(attributes=[string("url.full", url)])))
+    assert result["attributes"] == [string("url.full", kept)]
+
+
+@pytest.mark.parametrize(
+    "url", ["http://localhost:5173/api/v1/models", "http://127.0.0.1:8080/api/v1/models"]
+)
+def test_a_loopback_url_on_a_route_keeps_the_route_template(url: str) -> None:
+    result = only_span(export(span(attributes=[string("url.full", url)])))
+    origin = url.removesuffix("/api/v1/models")
+    assert result["attributes"] == [string("url.full", f"{origin}/api/v1/models")]
+
+
+@pytest.mark.parametrize(
     "value", [f"/m/{SENTINEL}", f"m/{SENTINEL}", f"javascript:{SENTINEL}", f"?{SENTINEL}", ""]
 )
 def test_a_relative_url_on_no_route_is_dropped_uncounted(value: str) -> None:
@@ -581,7 +632,7 @@ def test_each_url_of_an_array_is_reduced_and_an_unmatched_relative_one_left_out(
     urls = {
         "arrayValue": {
             "values": [
-                {"stringValue": f"https://h.example/api/v1/models/a/files/{SENTINEL}"},
+                {"stringValue": f"https://scadbuddy.example/api/v1/models/a/files/{SENTINEL}"},
                 {"stringValue": f"/api/v1/models/b/files/{SENTINEL}"},
                 {"stringValue": f"/m/{SENTINEL}"},
                 {"boolValue": True},
@@ -595,7 +646,7 @@ def test_each_url_of_an_array_is_reduced_and_an_unmatched_relative_one_left_out(
             "value": {
                 "arrayValue": {
                     "values": [
-                        {"stringValue": f"https://h.example{FILES_ROUTE}"},
+                        {"stringValue": f"https://scadbuddy.example{FILES_ROUTE}"},
                         {"stringValue": FILES_ROUTE},
                         {"boolValue": True},
                     ]
@@ -607,7 +658,7 @@ def test_each_url_of_an_array_is_reduced_and_an_unmatched_relative_one_left_out(
 
 def test_urls_on_events_and_links_are_reduced_too() -> None:
     urls = [
-        string("url.full", f"http://h.example/api/v1/models/a/files/{SENTINEL}"),
+        string("url.full", f"http://localhost:5173/api/v1/models/a/files/{SENTINEL}"),
         string("http.target", f"/m/{SENTINEL}"),
     ]
     event = {"name": "fetch", "attributes": urls}
@@ -616,7 +667,7 @@ def test_urls_on_events_and_links_are_reduced_too() -> None:
     assert SENTINEL not in (prepare(body) or b"").decode()
     result = only_span(body)
     for scrubbed in (result, result["events"][0], result["links"][0]):
-        assert scrubbed["attributes"] == [string("url.full", f"http://h.example{FILES_ROUTE}")]
+        assert scrubbed["attributes"] == [string("url.full", f"http://localhost:5173{FILES_ROUTE}")]
 
 
 def test_the_matcher_is_given_the_decoded_path_without_query_or_fragment() -> None:
@@ -626,6 +677,6 @@ def test_the_matcher_is_given_the_decoded_path_without_query_or_fragment() -> No
         seen.append(path)
         return None
 
-    url = "https://h.example/api/v1/models/a%20b/files/x?y=1#z"
-    payload.prepare(export(span(attributes=[string("url.full", url)])), spy)
+    url = "https://scadbuddy.example/api/v1/models/a%20b/files/x?y=1#z"
+    payload.prepare(export(span(attributes=[string("url.full", url)])), spy, own_origin)
     assert seen == ["/api/v1/models/a b/files/x"]

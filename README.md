@@ -794,7 +794,9 @@ public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket doe
 most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
 reduced to the backend route template its path matches, or to its origin (a relative
-one on no route is dropped), as a server span keeps only its route. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
+one on no route is dropped), as a server span keeps only its route; a URL on any host
+but those same origins keeps only its origin, since that host has none of the routes.
+No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
 limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per

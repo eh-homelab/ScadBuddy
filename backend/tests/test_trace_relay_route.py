@@ -32,7 +32,7 @@ from scadbuddy.telemetry import payload
 from scadbuddy.telemetry.admission import RelayLimits
 from scadbuddy.telemetry.component import TRACE_RELAY, TraceRelay
 from scadbuddy.telemetry.forwarder import TraceForwarder
-from scadbuddy.telemetry.payload import RouteMatcher
+from scadbuddy.telemetry.payload import OriginCheck, RouteMatcher
 from scadbuddy.telemetry.routes import route_matcher
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.otlp import SENTINEL, export, span, string
@@ -285,13 +285,13 @@ def test_the_payload_is_prepared_off_the_event_loop(
     on_loop: list[bool] = []
     real = payload.prepare
 
-    def spy(body: bytes, match_route: RouteMatcher) -> bytes | None:
+    def spy(body: bytes, match_route: RouteMatcher, own_origin: OriginCheck) -> bytes | None:
         try:
             asyncio.get_running_loop()
             on_loop.append(True)
         except RuntimeError:
             on_loop.append(False)
-        return real(body, match_route)
+        return real(body, match_route, own_origin)
 
     monkeypatch.setattr(telemetry, "prepare", spy)
     assert client.post(PATH, content=export(span()), headers=UI).status_code == 204
@@ -416,8 +416,11 @@ def test_a_page_spans_url_is_forwarded_as_the_route_it_named(
     app.router.routes.append(app.router.routes.pop(-2))
     url = f"https://scadbuddy.example/api/v1/models/box/files/{SENTINEL}.scad?x=1"
     page = f"https://scadbuddy.example/m/{SENTINEL}"
+    foreign = f"https://bambuddy.lan/api/v1/models/box/files/{SENTINEL}.scad"
     body = export(
-        span(attributes=[string("url.full", url)]), span(attributes=[string("url.full", page)])
+        span(attributes=[string("url.full", url)]),
+        span(attributes=[string("url.full", page)]),
+        span(attributes=[string("url.full", foreign)]),
     )
     with TestClient(app) as client:
         assert client.post(PATH, content=body, headers=UI).status_code == 204
@@ -428,6 +431,7 @@ def test_a_page_spans_url_is_forwarded_as_the_route_it_named(
     assert [s["attributes"] for s in spans] == [
         [string("url.full", "https://scadbuddy.example/api/v1/models/{slug}/files/{path:path}")],
         [string("url.full", "https://scadbuddy.example")],
+        [string("url.full", "https://bambuddy.lan")],
     ]
 
 
