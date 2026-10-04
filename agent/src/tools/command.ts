@@ -116,7 +116,7 @@ export async function command<T>(
   const first = await answered(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return ok(Promise.resolve(first), what)
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + ctx.renderWaitMs
+  const deadline = Date.now() + ctx.operationFollowMs
   for (let step = 1; op.status === 'running'; step++) {
     if (Date.now() >= deadline) {
       throw new ToolError(`${what} is still running as operation ${op.id}: follow it with get_operation.`)

@@ -85,8 +85,9 @@ ACCEPT_TIMEOUT = timedelta(seconds=60)
 #: How long a client keeps re-sending a print answered ``command-still-accepting``:
 #: ``frontend`` ``printRunPoll.acceptingMs`` and ``agent`` ``ACCEPTING_MS`` are this, in
 #: ms, and their tests say so. Past ``print_check``'s worst case (three attempts of
-#: ``ACCEPT_TIMEOUT`` and the backoff between them), so no client gives up on a run
-#: that will still be accepted (review #1061).
+#: ``ACCEPT_TIMEOUT`` and the backoff between them), so a client rarely gives up on a run
+#: that will still be accepted (review #1061); one whose check ends past it is refused
+#: before its record, so none is (review #1061 (2) 2).
 CLIENT_ACCEPTING = timedelta(seconds=240)
 #: The upload is one 3MF (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) plus the plates' reads.
 PLAN_TIMEOUT = timedelta(minutes=5)
@@ -111,6 +112,13 @@ CANCELLED = PrintRunError(
     status=409,
     title="Conflict",
     detail="This print was cancelled before it started. Nothing was queued; print again.",
+)
+#: What a run answers when its check ends after every client stopped waiting for it.
+UNWAITED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="Nobody was waiting for this print any more, so it was not started. Nothing was"
+    " queued; print again.",
 )
 
 
@@ -146,12 +154,21 @@ class PrintRunWorkflow:
         except (ActivityError, asyncio.CancelledError) as error:
             # Nothing was written: the execution fails, and a retry may start again. A
             # cancel answers the Update too, so it is never outlived by its execution.
-            self.refusal = CANCELLED if is_cancelled_exception(error) else problem_of(error)
-            self._upsert(status="refused")
-            await workflow.wait_condition(workflow.all_handlers_finished)
-            if is_cancelled_exception(error):
+            cancelled = is_cancelled_exception(error)
+            refusal = CANCELLED if cancelled else problem_of(error)
+            await self._refuse(refusal)
+            if cancelled:
                 raise
-            raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
+            raise ApplicationError(refusal.detail, type=REFUSED, non_retryable=True) from None
+        if (
+            workflow.patched("unwaited-before-insert")
+            and input.accepted_at is not None
+            and workflow.now() - input.accepted_at > CLIENT_ACCEPTING
+        ):
+            # The point of no return: a check that ended after every client stopped
+            # re-sending this run would print it with nobody watching (review #1061 (2) 2).
+            await self._refuse(UNWAITED)
+            raise ApplicationError(UNWAITED.detail, type=REFUSED, non_retryable=True)
         run = await workflow.execute_activity(
             "print_insert",
             InsertInput(input=input, checked=checked),
@@ -182,6 +199,12 @@ class PrintRunWorkflow:
                 await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
         return self.row
+
+    async def _refuse(self, refusal: PrintRunError) -> None:
+        """Answer the Update with ``refusal``; nothing was written."""
+        self.refusal = refusal
+        self._upsert(status="refused")
+        await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _print(self, input: PrintRunInput, accepted: Accepted) -> PrintRun:
         planned = await workflow.execute_activity(

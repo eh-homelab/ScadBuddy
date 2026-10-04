@@ -67,6 +67,7 @@ from scadbuddy.workflows.printing import (
     CANCELLED,
     CLIENT_ACCEPTING,
     READ_RETRY,
+    UNWAITED,
     PrintRunWorkflow,
 )
 from tests.support.temporal import temporal_client
@@ -741,3 +742,27 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print(
     assert answer.refusal.status == 409
     assert "Nothing was queued" in answer.refusal.detail
     assert fake.calls == []
+
+
+async def test_a_check_that_ends_after_every_client_stopped_waiting_records_nothing(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (2) 2: the check started inside `CLIENT_ACCEPTING` but ended past
+    it. The workflow refuses before `print_insert`, so nothing prints unwatched."""
+    fake.check_gate = asyncio.Event()
+    accepted_at = datetime.now(UTC) - CLIENT_ACCEPTING + timedelta(seconds=1)
+    arg = run_input().model_copy(update={"accepted_at": accepted_at})
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "check" not in fake.calls:
+            await asyncio.sleep(0.05)
+        while datetime.now(UTC) - accepted_at <= CLIENT_ACCEPTING:
+            await asyncio.sleep(0.05)
+        fake.check_gate.set()
+        answer = await accepting
+        assert answer.run is None and answer.refusal == UNWAITED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
+    finally:
+        fake.check_gate.set()

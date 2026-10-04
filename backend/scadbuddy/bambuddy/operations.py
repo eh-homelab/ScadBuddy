@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.send import register_sidebar, send_output
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -134,7 +134,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         archive_id: int = request["archive_id"]
         link = await _linked(archive_id)
         cache = components.get(ARCHIVE_CACHE)
-        async with client_for(settings_store.load()) as client:
+        async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
             archive = await cache.archive(client, archive_id)
         if archive is None:
             raise ApiError(
@@ -173,7 +173,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         archive_id: int = request["archive_id"]
         await _linked(archive_id)
         cache = components.get(ARCHIVE_CACHE)
-        async with client_for(settings_store.load()) as client:
+        async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
             if await cache.archive(client, archive_id) is None:
                 raise ApiError(
                     status.HTTP_409_CONFLICT,

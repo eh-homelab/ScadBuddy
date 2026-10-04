@@ -15,9 +15,9 @@ and superseding live in workflow state, and the render reconciler is deleted.
   `render_queue_max` check and inserts the row, idempotently on `(workflow_id, workflow_run_id)`.
 - The first `accepted` answers that row. Each later one adds a claim and answers
   `coalesced: true`.
-- A supersede, or `RenderService.cancel`, sends the old execution the `release` Update. The last
-  release cancels the render task, which projects `cancelled`. Its `RenderPiece` children are
-  left running (`ABANDON`).
+- A supersede sends the old execution the `release` Update. The Update id is derived from the
+  request's key, so a re-sent submit releases once. The last release cancels the render task,
+  which projects `cancelled`. Its `RenderPiece` children are left running (`ABANDON`).
 
 **Tech Stack:** Python 3.12, FastAPI, temporalio 1.33, psycopg 3, Postgres 17; React 19 + msw;
 the agent's TypeScript tools.
@@ -51,10 +51,22 @@ Stacked on PR #1063 (`feat/1053-operations`).
    where today it was accepted.
 6. **A supersede of a job with the same `render_key` answers that job without a new claim**, as
    `JobProjection.submit` does today.
-7. **Drop `render_jobs_pending_key`.** Coalescing is no longer the row's job. A new execution's
-   pending row may coexist with a legacy pending row for the same key while old executions drain.
-   Cost: an old-build API pod overlapping the new one during a rolling deploy gets an
-   `ON CONFLICT` inference error on its render submits for that overlap.
+7. **Keep `render_jobs_pending_key` for now; drop it later (expand/contract).** Coalescing is no
+   longer the row's job, but the previous build's insert names the index as its `ON CONFLICT`
+   target, and that build serves beside this one through a rolling deploy.
+   - Expand (this PR): the migration adds `workflow_run_id` and `render_jobs_execution` and keeps
+     the pending index, so there is still one pending row per key.
+   - `JobProjection.accept` locks the key's pending row (`FOR UPDATE`). Another run's row of the
+     new shape is an orphan, and it is failed with `ORPHANED_ERROR`. An older build's row raises
+     `LegacyPendingError`, and `render_accept` retries until that build runs it, unless
+     `legacy_unrun` says no workflow ever will. Then it calls `accept` again with `orphaned`,
+     which fails that row with `LEGACY_UNSTARTED_ERROR`.
+   - Cost: while an older build's row holds a key, a new-shape accept on that key waits behind
+     `PROJECT_RETRY`, and the route answers `command-still-accepting` until `LEGACY_GRACE`
+     passes.
+   - Contract (#1142): a later migration drops `render_jobs_pending_key`, once no pre-#1053 API
+     can be running. The same change removes the held-row and orphan handling in `accept` and
+     `render_accept`.
 8. **The reconciler goes; one boot pass settles legacy pending rows.**
    - A pending row with no `workflow_run_id` and no execution `render-<id>` (`describe` says
      NOT_FOUND) is failed with `LEGACY_UNSTARTED_ERROR`.
@@ -131,7 +143,8 @@ Stacked on PR #1063 (`feat/1053-operations`).
     raises `QueueFullError(1)`. A retry of an already-inserted execution returns its row even at
     a full queue.
   - `test_two_executions_of_one_key_each_get_a_row`: the same `render_key` under two run ids
-    gives two rows. The pending index is gone.
+    gives two rows. The second run fails the first run's pending row as an orphan, because the
+    pending index stays until #1142 (ruling 7).
   - `test_set_claims_moves_only_an_unfinished_row`.
   - `test_legacy_pending_and_fail_legacy`: a row inserted without a run id is listed. `fail_legacy`
     fails it, and a row of the new shape is never listed.
@@ -142,7 +155,7 @@ Stacked on PR #1063 (`feat/1053-operations`).
   ```sql
   ALTER TABLE render_jobs ADD COLUMN workflow_run_id text;
   CREATE UNIQUE INDEX render_jobs_execution ON render_jobs (workflow_id, workflow_run_id);
-  DROP INDEX render_jobs_pending_key;
+  -- render_jobs_pending_key stays (ruling 7); #1142 drops it.
   ```
 - [ ] **Step 4: Implement `accept`.**
   - In one transaction, `SELECT` the row by `(workflow_id, workflow_run_id)` and return it if it
@@ -260,7 +273,6 @@ Stacked on PR #1063 (`feat/1053-operations`).
 - Produces:
   - `RenderService.submit(...) -> Job`, unchanged in signature. It raises `QueueFullError`,
     `CommandStillAcceptingError` and `TemporalUnavailableError`.
-  - `RenderService.cancel(job_id, *, slug) -> Job | None`.
   - `RenderService.settle_legacy() -> list[str]`.
   - `RenderService.start()` runs `settle_legacy` and the prune loop.
   - `CLOSING_WAIT = 5.0`.
@@ -276,6 +288,8 @@ Stacked on PR #1063 (`feat/1053-operations`).
     - `test_superseding_releases_the_old_execution_after_the_new_one_starts`.
     - `test_superseding_a_finished_job_still_submits`.
     - `test_a_refused_submit_supersedes_nothing`.
+    - `test_a_resent_supersede_releases_the_old_job_once`: the same submit, with one
+      `request_id`, sent twice against a job with two claims leaves it open with one.
     - `test_superseding_a_legacy_row_cancels_its_workflow_the_old_way`: insert a row with
       `workflow_id=render-<id>` and no run id, and start the old workflow id with a blocking
       fake.
@@ -301,12 +315,13 @@ Stacked on PR #1063 (`feat/1053-operations`).
   7. Release the superseded row (`_release(row, "superseded")`). A row with no
      `workflow_run_id` takes `store.release_claim` plus `_cancel_workflow`. Any other takes
      `get_workflow_handle(row.workflow_id, run_id=row.workflow_run_id).execute_update(
-     RELEASE_UPDATE, reason, result_type=ReleaseAnswer, rpc_timeout=RPC_TIMEOUT)`. NOT_FOUND
+     RELEASE_UPDATE, reason, id=..., result_type=ReleaseAnswer, rpc_timeout=RPC_TIMEOUT)`, whose
+     `id` is `f"{request_id}:release:{row.id}"` when the request has a key. NOT_FOUND
      (closed) is ignored, and other errors are logged and counted as today's
      `cancel_workflow` errors.
   8. Update the metrics and return the job.
 - [ ] **Step 4: Implement the rest.**
-  - `cancel` goes through the same `_release` with `"withdrawn"`.
+  - No `cancel`: a withdrawal has no route yet, and comes back with one (review #1066 finding 2).
   - `settle_legacy`: for each row in `legacy_pending()`, a row with no `workflow_id` is failed.
     Otherwise `describe` it (bounded); NOT_FOUND is failed. If Temporal is unreachable, log and
     stop.
