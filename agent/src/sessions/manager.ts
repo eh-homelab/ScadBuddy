@@ -1334,7 +1334,9 @@ export class SessionManager {
       // and it is added instead.
       const total = result.total_cost_usd
       costUsd = total >= session.costUsd ? total : session.costUsd + total
-      const refusal = apiRefusal(result)
+      // Redacted here too: the outcome reaches MCP callers without scrubForLog.
+      const refused = apiRefusal(result)
+      const refusal = refused === undefined ? undefined : redact(refused, secrets)
       if (refusal !== undefined) {
         // Not a reply, so no turn: only what it spent counts (#1101).
         status = 'failed'

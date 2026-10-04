@@ -185,7 +185,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     {
       status: 400,
       type: 'invalid_request_error',
-      message: 'messages: text content blocks must be non-empty',
+      message: 'messages: text content blocks must be non-empty (sent by gw-sessions-test-token)',
       code: 'api_error',
       says: /refused the request \(HTTP 400\): .*text content blocks must be non-empty/,
     },
@@ -211,7 +211,10 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
 
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
-    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(c.says) })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(c.says) })
+    // An API message that echoes the credential is redacted from the outcome too.
+    expect(JSON.stringify(done)).not.toContain('gw-sessions-test-token')
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, turnActive: false })
 
     const events = (await allEvents(m, session.id)).map((e) => e.event)
@@ -219,6 +222,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
     const errors = events.filter((e) => e.type === 'error')
     expect(errors).toEqual([expect.objectContaining({ code: c.code, message: expect.stringMatching(c.says) })])
+    expect(JSON.stringify(events)).not.toContain('gw-sessions-test-token')
     expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
 
     // The session is not spent: the next message is answered as usual.
