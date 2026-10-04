@@ -6,6 +6,7 @@ import type { Commands } from '../operations/run.js'
 import { PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
 import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import type { PackageRepo } from '../plugins/packages/store.js'
+import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -146,9 +147,17 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, InstallBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    // Validated here, before anything crosses: the request is the command's workflow
+    // input, in Temporal history, and a URL with a token in it is refused (source.ts).
+    let source: PackageSource
+    try {
+      source = validateSource(body.source)
+    } catch (err) {
+      return refusal(c, err)
+    }
     const blocked = cannotFetch(c)
     if (blocked) return blocked
-    return commandResponse(c, await deps.commands!.run(INSTALL_KIND, body, key(c)), 201)
+    return commandResponse(c, await deps.commands!.run(INSTALL_KIND, { source }, key(c)), 201)
   })
 
   app.post(`${base}/:name/approve`, async (c) => {
@@ -180,9 +189,15 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, RepinBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    let ref: string | undefined
+    try {
+      ref = body.ref === undefined ? undefined : validateRef(body.ref)
+    } catch (err) {
+      return refusal(c, err)
+    }
     const blocked = cannotFetch(c)
     if (blocked) return blocked
-    const request = { name: c.req.param('name'), ...(body.ref === undefined ? {} : { ref: body.ref }) }
+    const request = { name: c.req.param('name'), ...(ref === undefined ? {} : { ref }) }
     return commandResponse(c, await deps.commands!.run(REPIN_KIND, request, key(c)), 200)
   })
 

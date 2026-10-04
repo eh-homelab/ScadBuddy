@@ -72,7 +72,30 @@ describe('plugin package commands', () => {
     const res = await app(commands).request('/api/v1/ai/plugin-packages', post({ source }, KEY))
     expect(res.status).toBe(201)
     expect(await res.json()).toEqual({ name: 'greeter' })
-    expect(commands.calls).toEqual([['plugin_package_install', { source }, KEY]])
+    // The validated source crosses, defaults filled in.
+    expect(commands.calls).toEqual([['plugin_package_install', { source: { ...source, ref: 'HEAD', path: '' } }, KEY]])
+  })
+
+  it('refuses a source with credentials, or a bad ref, with 400 before any command', async () => {
+    // A command's request is its workflow's input, in Temporal history: a token in the URL
+    // must never get that far.
+    const commands = new FakeCommands({ status: 'done', result: {} })
+    const credentialed = await app(commands).request(
+      '/api/v1/ai/plugin-packages',
+      post({ source: { kind: 'git', url: 'https://user:s3cret@git.test/greeter.git' } }, KEY),
+    )
+    expect(credentialed.status).toBe(400)
+    const body = await credentialed.text()
+    expect(body).toContain('must not carry credentials')
+    expect(body).not.toContain('s3cret')
+    const query = await app(commands).request(
+      '/api/v1/ai/plugin-packages',
+      post({ source: { kind: 'git', url: 'https://git.test/greeter.git?token=s3cret' } }),
+    )
+    expect(query.status).toBe(400)
+    const ref = await app(commands).request('/api/v1/ai/plugin-packages/greeter/repin', post({ ref: '--upload-pack=x' }))
+    expect(ref.status).toBe(400)
+    expect(commands.calls).toEqual([])
   })
 
   it('re-pins through the command and answers 200', async () => {
