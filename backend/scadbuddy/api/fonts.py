@@ -5,10 +5,17 @@ import logging
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import EventsDep, FontsDep, StateDep
+from scadbuddy.api.deps import AppState, FontsDep
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.core.events import FontInstalled, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.fonts import (
@@ -18,6 +25,7 @@ from scadbuddy.library.fonts import (
     InstalledFamily,
 )
 from scadbuddy.library.googlefonts import CatalogueSource, FontVariant, GoogleFontsError
+from scadbuddy.operations.component import OperationsDep
 
 router = APIRouter(tags=["fonts"])
 
@@ -119,16 +127,35 @@ async def get_catalogue(
         "when it does not: the files are on the volume, but a render naming the family "
         "would silently fall back to the default font (#253)."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def install_font(
-    body: InstallRequest, fonts: FontsDep, events: EventsDep, state: StateDep
-) -> InstalledFamily:
+    body: InstallRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> InstalledFamily | JSONResponse:
+    """The ``font_install`` operation (#1054): a second press of the same install, with
+    the same key, joins the first rather than downloading again."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["font_install"],
+        subject=body.family.casefold(),
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, InstalledFamily)
+
+
+async def install_run(family: str, force: bool, state: AppState) -> InstalledFamily:
+    """The ``font_install`` operation's run (#1054)."""
     try:
-        installed = await fonts.install(body.family, force=body.force)
+        installed = await state.fonts.install(family, force=force)
     except FontNotFoundError as exc:
-        raise ApiError(404, f"{body.family!r} is not in the Google Fonts catalogue") from exc
+        raise ApiError(404, f"{family!r} is not in the Google Fonts catalogue") from exc
     except GoogleFontsError as exc:
-        raise ApiError(502, f"{body.family!r} could not be downloaded: {exc}") from exc
+        raise ApiError(502, f"{family!r} could not be downloaded: {exc}") from exc
     except FontNotResolvedError as exc:
         # Nothing to emit: fontconfig, and so every render, sees no new family.
         raise ApiError(
@@ -140,14 +167,12 @@ async def install_font(
             family=exc.family,
             files=exc.files,
         ) from exc
-    emit(events, FontInstalled(family=installed.family))
+    emit(state.events, FontInstalled(family=installed.family))
     if state.store.fonts is not None:
         try:
-            await state.store.fonts.publish(body.family)
+            await state.store.fonts.publish(family)
         except Exception:
             # The family is installed here; the next boot's `backfill` publishes it, so
             # a Bambuddy error does not fail an install that worked.
-            logger.exception(
-                "could not publish an installed font family", extra={"family": body.family}
-            )
+            logger.exception("could not publish an installed font family", extra={"family": family})
     return installed

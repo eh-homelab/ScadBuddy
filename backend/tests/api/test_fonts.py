@@ -164,6 +164,8 @@ def fonts(app: FastAPI, data_dir: Path) -> FakeBackedService:
     """The real FontService with a stubbed Google Fonts client bolted underneath it."""
     service = FakeBackedService(data_dir, client=FakeClient())
     app.dependency_overrides[get_fonts] = lambda: service
+    # The install runs as an operation, which reads the state's (#1054).
+    getattr(app.state, STATE_ATTR).fonts = service
     return service
 
 
