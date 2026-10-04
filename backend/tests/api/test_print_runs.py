@@ -558,6 +558,7 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
 
     assert response.status_code == 500, response.text
     assert "temporal-unavailable" not in response.json()["type"]
+    assert "namespace not found" not in response.text
     assert any(record.levelname == "ERROR" for record in caplog.records)
 
 

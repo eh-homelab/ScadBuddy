@@ -367,10 +367,15 @@ async def accept_run(
         ) from None
     except (RPCError, TemporalUnavailableError) as error:
         # Only an unreachable or slow frontend is worth retrying; a wrong namespace or
-        # a refused permission is a misconfiguration, for the 500 handler to log at
-        # ERROR (review #1061 (3) 3).
+        # a refused permission is a misconfiguration (review #1061 (3) 3). Its gRPC
+        # message stays in the log, out of the response.
         if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
-            raise
+            logger.error("Temporal refused to start a print run", exc_info=True)
+            raise ApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "Temporal refused to start this print; see ScadBuddy's logs. Nothing was"
+                " queued.",
+            ) from None
         logger.warning("could not start a print run on Temporal", exc_info=True)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
