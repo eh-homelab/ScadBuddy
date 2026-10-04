@@ -160,7 +160,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   300 s one) on the `library` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
   process (it holds the data volume). A new periodic pass is an activity in its
-  `SWEEPS`, never a loop in the API.
+  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
+  default-render previews, on its own hourly Schedule on the same queue; the per-change
+  requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table

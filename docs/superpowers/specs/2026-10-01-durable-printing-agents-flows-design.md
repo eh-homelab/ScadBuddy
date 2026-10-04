@@ -1103,6 +1103,21 @@ Each phase is its own implementation plan and ships alone.
      since a fetch from Bambuddy may outlast a check's budget. An asset fetch keeps its
      busy-budget 503 in the route (`before_start`), and claims its URL like an import:
      its record, and the answer's `source_url`, hold scheme, host, port and path only.
+   - As built so far (3f, #1054, plan `2026-10-04-durable-phase-3f-previews.md`): the
+     boot's preview pass is `PreviewBackfill` on `library` (`workflows/previews.py`),
+     started by the Schedule `scadbuddy-previews-<queue>` every hour and once at each boot
+     (overlap `SKIP`, the boot trigger `BUFFER_ONE`, a paused Schedule left paused, the
+     whole run bounded at 12 h). Previews off deletes it. A run lists the models due a
+     preview (`previews_due`) and refreshes them one at a time (`preview_refresh`, the
+     scheduler's own `refresh`), pausing 1 s after each render, and continues as new past
+     100. The per-change requests stay in-process with their debounce: a request per edit
+     on Temporal would buy no durability, since the next tick picks up one that was lost.
+     `RenderPreview` is not started as a child: `start_child_workflow` has no
+     `id_conflict_policy`, so a child could not join the run the scheduler already
+     started. The activity starts it as the scheduler does (`USE_EXISTING` on
+     `preview-<slug>-<key>`), and one lock in the process makes the two take turns, with
+     the plan made again under it, so a model is rendered once. The hourly tick also
+     retries a render that could not be run, which used to wait for the next edit or boot.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the

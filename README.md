@@ -134,7 +134,12 @@ on shutdown.
   a time and behind any render someone asked for, and that plate image is its
   catalogue thumbnail; `false` renders nothing, and such a model shows no image
   until one is set or generated. The previews are kept in the
-  `SCADBUDDY_DATABASE_URL` database's `model_previews` table);
+  `SCADBUDDY_DATABASE_URL` database's `model_previews` table. The pass over every
+  model is the Temporal Schedule `scadbuddy-previews-library`, on the API's own
+  `library` queue: every hour and once at each start, it renders the previews that
+  are missing or stale, which after the first pass is none. `false` deletes it; a
+  Schedule paused in the Temporal UI stays paused across restarts. Its id ends in the
+  library queue's name, like the housekeeping ones);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
