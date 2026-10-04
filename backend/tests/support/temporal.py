@@ -31,6 +31,11 @@ TEST_TEMPORAL_ADDRESS = os.environ.get(TEST_TEMPORAL_ADDRESS_ENV) or None
 TEST_TEMPORAL_DEV_SERVER = os.environ.get(TEST_TEMPORAL_DEV_SERVER_ENV) or None
 #: One task queue per API test (see `temporal_server`), with room to spare.
 MAX_TASK_QUEUES_PER_VERSION = 100_000
+#: A Schedule interval that never ticks during a test (review #1095 2): interval ticks
+#: are aligned to the epoch, not to the Schedule's creation, so the shortest one that
+#: cannot fall inside a run (or a jump of this host's wall clock) is one whose first
+#: tick after 1970 is decades away. Only a trigger then starts a run.
+NO_TICK = 100 * 365 * 86400.0
 
 
 def temporal_available() -> bool:

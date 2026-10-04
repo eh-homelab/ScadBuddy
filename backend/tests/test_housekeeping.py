@@ -32,7 +32,7 @@ from scadbuddy.workflows.housekeeping import (
     prune_schedule_id_for,
     schedule_id_for,
 )
-from tests.support.temporal import temporal_client, terminate_open_workflows
+from tests.support.temporal import NO_TICK, temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -203,11 +203,11 @@ async def test_the_boots_trigger_queues_behind_an_open_run(client: Client) -> No
     try:
         async with Worker(client, task_queue=queue, workflows=[Housekeeping], activities=[prune]):
             await ensure_schedule(
-                client, queue, 3600.0, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
+                client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
             )
             await asyncio.wait_for(started.wait(), 10)
             await ensure_schedule(
-                client, queue, 3600.0, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
+                client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
             )
             release.set()
             assert await _actions(client, schedule_id, 2) == 2
@@ -250,7 +250,7 @@ async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Clien
     queue = f"library-{uuid.uuid4().hex[:8]}"
     handle = client.get_schedule_handle(schedule_id)
     try:
-        assert not await ensure_schedule(client, queue, 600.0, schedule_id=schedule_id)
+        assert not await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id)
         assert await _actions(client, schedule_id, 1) == 1
         # The boot's run, ended: no open run that a trigger could queue behind.
         started = (await handle.describe()).info.recent_actions[-1].action
@@ -260,7 +260,7 @@ async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Clien
         ).terminate("ended by the test")
         await handle.pause(note="incident")
         # Said, so the boot converges the uploads itself (review #1095 2).
-        assert await ensure_schedule(client, queue, 120.0, schedule_id=schedule_id)
+        assert await ensure_schedule(client, queue, 2 * NO_TICK, schedule_id=schedule_id)
         actions = await _actions(client, schedule_id, 2)
         described = await handle.describe()
     finally:
@@ -268,5 +268,5 @@ async def test_a_paused_schedule_stays_paused_and_is_not_triggered(client: Clien
         await terminate_open_workflows(client, queue)
     assert described.schedule.state.paused
     assert described.schedule.state.note == "incident"
-    assert described.schedule.spec.intervals[0].every == timedelta(seconds=120)
+    assert described.schedule.spec.intervals[0].every == timedelta(seconds=2 * NO_TICK)
     assert actions == 1
