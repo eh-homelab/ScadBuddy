@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -35,3 +37,17 @@ def operation_key(kind: str, subject: str, request: dict[str, Any], request_id: 
     """The kind, its subject, the canonical body and the client's key (§4.2 step 1)."""
     canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{kind}\n{subject}\n{canonical}\n{request_id}".encode()).hexdigest()
+
+
+async def to_thread_to_end[T](fn: Callable[[], T]) -> T:
+    """``asyncio.to_thread``, except that a cancel raises only once the thread has
+    returned: a thread cannot be stopped, so a lock held around this stays held for as
+    long as the thread runs. Its effect (a commit, say) still lands."""
+    future = asyncio.ensure_future(asyncio.to_thread(fn))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        raise

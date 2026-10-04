@@ -38,14 +38,15 @@ from scadbuddy.library.libraries import (
     ModelLibrary,
     declared_libraries,
 )
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
 
 
 #: A pin's run: the clone's own limit, plus waiting its turn (installs, a removal holding
-#: the gate) and the commit. Past it the run is cancelled, never left to commit late.
+#: the gate) and the commit. Past it the run is cancelled before its next step; a clone
+#: or commit already in its thread finishes (holding the gate) and a commit can land.
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
@@ -113,7 +114,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
                 pin = await resolve_pin(
                     name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
                 )
-                record = await asyncio.to_thread(
+                record = await to_thread_to_end(
                     partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
                 )
         except LibraryPinChangedError:
@@ -155,7 +156,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
     async def unpin_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         slug, name, index = request["slug"], request["name"], request["index"]
         try:
-            record = await asyncio.to_thread(
+            record = await to_thread_to_end(
                 partial(state.catalogue.unpin_library, slug, name, index=index)
             )
         except LibraryPinChangedError:
@@ -205,7 +206,7 @@ def library_kinds(state: AppState) -> dict[str, OperationKind]:
                     models=users,
                 )
             try:
-                removed = await asyncio.to_thread(libraries.remove, name, commit)
+                removed = await to_thread_to_end(partial(libraries.remove, name, commit))
             except LibraryCheckoutNotFoundError:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"

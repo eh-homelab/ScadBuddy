@@ -23,7 +23,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.authorship import AUTHOR_HEADER, AUTHOR_SESSION_HEADER, current_author
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
 
@@ -37,6 +37,7 @@ class Counts:
     def __init__(self) -> None:
         self.runs = 0
         self.cancelled = 0
+        self.events: list[str] = []
 
 
 @pytest.fixture
@@ -76,6 +77,23 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
 
     state.operations.kinds["test_slow"] = OperationKind(
         "test_slow", check, slow, run_timeout=timedelta(seconds=2)
+    )
+    gate = asyncio.Lock()
+
+    async def threaded(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        def commit() -> None:
+            time.sleep(12)  # past the 2 s timeout and the heartbeat that delivers it
+            counts.events.append("committed")
+
+        try:
+            async with gate:
+                await to_thread_to_end(commit)
+        finally:
+            counts.events.append("released")
+        return {}
+
+    state.operations.kinds["test_threaded"] = OperationKind(
+        "test_threaded", check, threaded, run_timeout=timedelta(seconds=2)
     )
     state.operations.kinds["test_library"] = OperationKind(
         "test_library", check, where, queue="library"
@@ -217,6 +235,20 @@ def test_a_run_past_its_kinds_timeout_is_cancelled_and_recorded_failed(
     while counts.cancelled == 0 and time.monotonic() < deadline:
         time.sleep(0.2)
     assert counts.cancelled == 1
+
+
+def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
+    client: TestClient, counts: Counts
+) -> None:
+    """Review #1119 1: a pin's clone and commit are threads, which a cancel cannot stop.
+    The run keeps its gate until the thread has returned, so nothing that waits on the
+    gate runs beside it; the effect itself can still land after the record failed."""
+    response = client.post("/api/v1/test-op?kind=test_threaded", json={})
+    assert response.status_code == 500, response.text
+    deadline = time.monotonic() + 40
+    while len(counts.events) < 2 and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert counts.events == ["committed", "released"]
 
 
 def test_an_execution_ended_before_it_answered_is_still_accepting(

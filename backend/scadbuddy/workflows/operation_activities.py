@@ -72,10 +72,17 @@ def operation_activities(
 HEARTBEAT_EVERY = 5.0
 
 
+#: How long a cancelled run is given to unwind (its locks released) before the activity
+#: returns; a run still waiting on a thread then finishes unwinding on its own.
+CANCEL_GRACE = 30.0
+
+
 async def _heartbeating[T](work: Awaitable[T]) -> T:
     """Await ``work``, heartbeating: the Python SDK delivers a timeout or a cancel to an
     activity only through a heartbeat, so without one a run past its timeout would go
-    on to finish an effect the record already calls failed."""
+    on to its next step after the record already calls it failed. A step already in a
+    thread cannot be stopped: one under ``operations.kinds.to_thread_to_end`` keeps its locks until
+    it returns, and its effect (a commit in flight) can still land."""
     task = asyncio.ensure_future(work)
     try:
         while True:
@@ -84,7 +91,9 @@ async def _heartbeating[T](work: Awaitable[T]) -> T:
                 return task.result()
             activity.heartbeat()
     finally:
-        task.cancel()
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=CANCEL_GRACE)
 
 
 def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
