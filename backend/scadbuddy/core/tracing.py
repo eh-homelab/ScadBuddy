@@ -2,12 +2,13 @@
 
 Only the standard ``OTEL_*`` variables configure it. With no
 ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` or ``OTEL_EXPORTER_OTLP_ENDPOINT``, or with
-``OTEL_TRACES_EXPORTER=none``, the provider is installed with no exporter: spans are
-created, so context still propagates, and dropped. ``OTEL_SDK_DISABLED=true`` installs
-nothing at all."""
+``OTEL_TRACES_EXPORTER`` naming anything but ``otlp``, the provider is installed with no
+exporter: spans are created, so context still propagates, and dropped.
+``OTEL_SDK_DISABLED=true`` installs nothing at all."""
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from collections.abc import Iterator, Mapping, Sequence
@@ -26,6 +27,8 @@ from opentelemetry.util.types import Attributes
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
+
+logger = logging.getLogger(__name__)
 
 TRACER_NAME: Final = "scadbuddy"
 _PROPAGATOR: Final = TraceContextTextMapPropagator()
@@ -66,10 +69,25 @@ def tracing_disabled() -> bool:
     return os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true"
 
 
+def _unsupported_exporter() -> str | None:
+    """``OTEL_TRACES_EXPORTER`` when it names neither ``otlp`` (the one exporter shipped)
+    nor ``none``: such a value turns export off rather than being read as ``otlp``."""
+    raw = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
+    names = {name.strip().lower() for name in raw.split(",")}
+    if not raw or "otlp" in names or names == {"none"}:
+        return None
+    return raw
+
+
 def traces_export_enabled() -> bool:
-    """Whether the process exports its spans: an OTLP endpoint is set, and neither
-    ``OTEL_TRACES_EXPORTER=none`` nor ``OTEL_SDK_DISABLED`` turns export off."""
-    if tracing_disabled() or os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none":
+    """Whether spans are exported over OTLP: an endpoint is set
+    (``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` or ``OTEL_EXPORTER_OTLP_ENDPOINT``), the SDK
+    is not disabled, and ``OTEL_TRACES_EXPORTER`` is empty or names ``otlp`` (trimmed,
+    any case, alone or in a comma list)."""
+    if tracing_disabled():
+        return False
+    exporters = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
+    if exporters and "otlp" not in {name.strip().lower() for name in exporters.split(",")}:
         return False
     return any(
         os.environ.get(name, "").strip()
@@ -86,8 +104,8 @@ def build_provider(
     exporter: SpanExporter | None = None,
 ) -> TracerProvider:
     """The process's provider. ``exporter`` is for tests; otherwise the OTLP/HTTP one,
-    and only when `traces_export_enabled`. The exporter reads the endpoint
-    and header variables itself, so nothing is passed to it. Whatever exports is behind
+    and only when `traces_export_enabled`. The exporter reads the endpoint and header
+    variables itself, so nothing is passed to it. Whatever exports is behind
     `ScrubbingSpanExporter`."""
     attributes: dict[str, AttributeValue] = {
         "service.name": service_name,
@@ -101,6 +119,12 @@ def build_provider(
     resource = Resource.create(attributes)
     sampler = None if os.environ.get("OTEL_TRACES_SAMPLER") else DEFAULT_SAMPLER
     provider = TracerProvider(resource=resource, sampler=sampler)
+    if (unsupported := _unsupported_exporter()) is not None:
+        logger.warning(
+            "OTEL_TRACES_EXPORTER=%r names no exporter ScadBuddy ships (only otlp); "
+            "traces are not exported",
+            unsupported,
+        )
     if exporter is None and traces_export_enabled():
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 

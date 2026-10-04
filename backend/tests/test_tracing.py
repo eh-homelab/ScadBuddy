@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 
@@ -20,8 +21,6 @@ _OTEL_VARS = (
     "OTEL_TRACES_SAMPLER",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_HEADERS",
-    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
     "OTEL_TRACES_EXPORTER",
     "OTEL_SDK_DISABLED",
     "OTEL_RESOURCE_ATTRIBUTES",
@@ -212,20 +211,9 @@ def test_a_traces_only_endpoint_turns_export_on(monkeypatch: pytest.MonkeyPatch)
     assert _processors(provider) == 2
 
 
-def test_export_is_enabled_only_by_an_endpoint_and_not_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
+def test_otel_traces_exporter_none_exports_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _clear_otel(monkeypatch)
-    assert not tracing.traces_export_enabled()
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", " ")
-    assert not tracing.traces_export_enabled()
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://t:4318/v1/traces")
-    assert tracing.traces_export_enabled()
-    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
-    assert not tracing.traces_export_enabled()
-
-
-def test_otel_traces_exporter_none_exports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     for value in ("none", "NONE"):
         provider, _ = _provider(
             monkeypatch,
@@ -234,3 +222,57 @@ def test_otel_traces_exporter_none_exports_nothing(monkeypatch: pytest.MonkeyPat
         )
         assert _processors(provider) == 1
         assert not tracing.traces_export_enabled()
+    # `none` is the standard way to turn export off, not a value to warn about.
+    assert "OTEL_TRACES_EXPORTER" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["", "otlp", " OTLP ", "console,otlp", "otlp, console"])
+def test_otel_traces_exporter_otlp_or_unset_exports_as_configured(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str
+) -> None:
+    provider, _ = _provider(
+        monkeypatch, OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318", OTEL_TRACES_EXPORTER=value
+    )
+    assert _processors(provider) == 2
+    assert tracing.traces_export_enabled()
+    assert "OTEL_TRACES_EXPORTER" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["console", "zipkin", "jaeger,console"])
+def test_any_other_otel_traces_exporter_turns_export_off_with_one_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str
+) -> None:
+    # Review 5 of #1064: only `otlp` is shipped, so another exporter is not silently OTLP.
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.core.tracing"):
+        provider, _ = _provider(
+            monkeypatch,
+            OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318",
+            OTEL_TRACES_EXPORTER=value,
+        )
+    assert _processors(provider) == 1
+    assert not tracing.traces_export_enabled()
+    (warning,) = [r for r in caplog.records if r.name == "scadbuddy.core.tracing"]
+    assert warning.levelno == logging.WARNING
+    assert value in warning.getMessage()
+
+
+def test_export_is_off_without_an_endpoint_or_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_otel(monkeypatch)
+    assert not tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    assert not tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://c:4318")
+    assert tracing.traces_export_enabled()
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    assert not tracing.traces_export_enabled()
+
+
+def test_either_endpoint_variable_turns_export_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_otel(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://t:4318/custom/")
+    assert tracing.traces_export_enabled()
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://general:4318")
+    assert tracing.traces_export_enabled()

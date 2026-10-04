@@ -1002,3 +1002,36 @@ async def test_the_reconciler_roots_a_row_with_no_valid_traceparent_in_a_span_of
     (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
     assert start.parent is not None
     assert start.parent.span_id == root.context.span_id
+
+
+async def test_the_reconciler_records_its_own_span_when_it_rejoins_a_trace(
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
+) -> None:
+    # Review 5 of #1064: a late start shows it came from the reconciler, in the
+    # original trace, between the request's span and StartWorkflow.
+    trace_id, span_id = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+    stale = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params={"width": 14},
+        inputs={"params": {"width": 14}},
+        created_at=now(),
+        traceparent=f"00-{trace_id}-{span_id}-01",
+    )
+    await asyncio.to_thread(projection.submit, stale, render_key(SLUG, {"width": 14}, None))
+    async with temporal_client() as plain:
+        config = plain.config()
+        config["interceptors"] = [TracingInterceptor()]
+        client = Client(**config)
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        assert await service.reconcile_once() == 1
+        await service.aclose()
+    finished = spans.get_finished_spans()
+    (reconcile,) = [s for s in finished if s.name == "render.reconcile"]
+    assert reconcile.parent is not None
+    assert f"{reconcile.context.trace_id:032x}" == trace_id
+    assert f"{reconcile.parent.span_id:016x}" == span_id
+    assert (reconcile.attributes or {})["scadbuddy.job_id"] == stale.id
+    (start,) = [s for s in finished if s.name == "StartWorkflow:TemplatePipeline"]
+    assert start.parent is not None
+    assert start.parent.span_id == reconcile.context.span_id
