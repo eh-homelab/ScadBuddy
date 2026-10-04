@@ -80,6 +80,19 @@ def test_a_trusted_peer_names_the_client_with_its_last_value() -> None:
     assert forwarded_client("::ffff:10.42.0.5", "203.0.113.9", trusted) == "203.0.113.9"
 
 
+@pytest.mark.parametrize(
+    "value", ["unknown", "attacker-chosen bucket", "203.0.113.9:443", "_hidden"]
+)
+def test_a_trusted_peer_naming_something_other_than_an_address_names_no_client(
+    value: str,
+) -> None:
+    """The value keys a rate-limit bucket: arbitrary text would let a client pick one."""
+    trusted = parse_cidr_list(INGRESS)
+    assert forwarded_client("10.42.0.5", value, trusted) is None
+    assert client_address("10.42.0.5", value, trusted) == "10.42.0.5"
+    assert forwarded_client("10.42.0.5", "2001:db8::1", trusted) == "2001:db8::1"
+
+
 def test_an_untrusted_peer_is_not_believed() -> None:
     trusted = parse_cidr_list(INGRESS)
     assert forwarded_client("10.43.0.5", "203.0.113.9", trusted) is None

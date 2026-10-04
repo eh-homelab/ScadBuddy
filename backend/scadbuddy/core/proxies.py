@@ -100,8 +100,17 @@ def forwarded_client(
     peer: str | None, forwarded_for: str | None, trusted: Sequence[Network]
 ) -> str | None:
     """The client a trusted proxy names; None from any other peer, whose header is not
-    believed."""
-    return last_value(forwarded_for) if in_networks(trusted, peer) else None
+    believed, or when the value is not an IP address (it keys a rate-limit bucket)."""
+    if not in_networks(trusted, peer):
+        return None
+    client = last_value(forwarded_for)
+    if client is None:
+        return None
+    try:
+        ipaddress.ip_address(plain_address(client))
+    except ValueError:
+        return None
+    return client
 
 
 def client_address(

@@ -793,7 +793,9 @@ problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.m
 `$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
 `OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
 public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
-`same-origin`, so a page on another allowed origin is refused), at
+`same-origin`, so a page on another allowed origin is refused; a request without
+`Sec-Fetch-Site`, from an older browser or a non-browser client, is admitted on `Origin`
+alone), at
 most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
 reduced to the backend route template its path matches, or to its origin (a relative

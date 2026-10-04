@@ -61,6 +61,11 @@ KEPT_RESOURCE_ATTRIBUTES: Final = ("service.version",)
 #: on an ``exception`` event, but the page's input is not the SDK's (spec §6).
 #: ``http.status_text`` is the server's words, which can carry a message.
 _DROPPED: Final = DROPPED_ATTRIBUTES | {"exception.message", "http.status_text"}
+#: Of ``url.*``, only the scheme passes as sent: the reduced ones (`URL_ATTRIBUTES`)
+#: are rewritten, and any other (``url.original``, ``url.fragment``, a key a future
+#: semantic convention adds) is dropped, since it may hold the path or query.
+_URL_PREFIX: Final = "url."
+_URL_KEPT: Final = frozenset({"url.scheme"})
 
 _MAX_UINT32: Final = 2**32 - 1
 _MAX_INT64: Final = 2**63 - 1
@@ -353,6 +358,8 @@ def _attributes(raw: object, limit: int, reduce_url: _UrlReducer) -> tuple[list[
             dropped += 1
             continue
         if key in _DROPPED or key.startswith(HEADER_PREFIXES):
+            continue
+        if key.startswith(_URL_PREFIX) and key not in URL_ATTRIBUTES | _URL_KEPT:
             continue
         value = _value(item.get("value"))
         if value is None or len(kept) >= limit:

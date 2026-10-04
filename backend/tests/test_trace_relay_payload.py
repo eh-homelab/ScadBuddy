@@ -666,6 +666,29 @@ def test_a_path_on_a_route_becomes_the_route_template(key: str) -> None:
     assert result["attributes"] == [string(key, FILES_ROUTE)]
 
 
+def test_a_url_attribute_the_relay_does_not_reduce_is_dropped_uncounted() -> None:
+    """``url.original``, ``url.fragment`` and any other ``url.*`` can carry the path or
+    query; only ``url.scheme`` passes, in spans, events and links alike."""
+    attributes = [
+        string("url.original", f"https://scadbuddy.example/m/{SENTINEL}?q={SENTINEL}"),
+        string("url.fragment", SENTINEL),
+        string("url.template", f"/m/{SENTINEL}"),
+        string("url.scheme", "https"),
+        string("http.method", "GET"),
+    ]
+    event = {"name": "fetch", "attributes": attributes}
+    link = {"traceId": TRACE_ID, "spanId": SPAN_ID, "attributes": attributes}
+    body = export(span(attributes=attributes, events=[event], links=[link]))
+    assert SENTINEL not in _prepared(body).decode()
+    result = only_span(body)
+    for scrubbed in (result, result["events"][0], result["links"][0]):
+        assert scrubbed["attributes"] == [
+            string("url.scheme", "https"),
+            string("http.method", "GET"),
+        ]
+        assert scrubbed["droppedAttributesCount"] == 0
+
+
 def test_a_url_on_no_route_keeps_only_its_origin() -> None:
     """A document-load span's page URL: the SPA's routes are the browser's own."""
     url = f"https://user:{SENTINEL}@scadbuddy.example:8443/m/{SENTINEL}?q=1"
