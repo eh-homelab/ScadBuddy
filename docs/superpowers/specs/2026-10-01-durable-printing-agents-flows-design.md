@@ -1078,6 +1078,25 @@ Each phase is its own implementation plan and ships alone.
      agent's `commandAnswer` (`agent/src/tools/command.ts`) returns a followed
      operation's failure as the route's problem, so `apply_patch` still reads
      `current`.
+   - As built so far (3e, #1054, plan `2026-10-04-durable-phase-3e-uploads.md`): the
+     remaining volume writes are `library` kinds. A model's media
+     (`model_media_upload`, `_patch`, `_order`, `_cover`, `_delete`); outputs
+     (`output_create`, `output_thumbnail`, `output_delete`); assets (`asset_upload`,
+     `asset_fetch`); `font_install` (subject: the family, lower-cased, so a second press
+     with the same key joins the first download); and the preset writes that run
+     openscad (`preset_create`, `preset_duplicate`, `preset_update`). The library check,
+     the dependencies route and a preset delete stay requests: the first two record
+     nothing, and a preset delete is one Postgres statement with no openscad. An output
+     delete with `delete_inbox_copies` deletes the Bambuddy inbox copies in its run,
+     before the files, on `library`, not `bambuddy` as §4.3 has it: acceptable while both
+     workers run in the API process, and #1060 splits it. A media upload is claimed by
+     file: it can be 1 GiB, so it is streamed to disk, hashed as it streams, and moved in
+     under that digest (`ClaimStore.hold_file`); a repeat answered from its record leaves
+     no file behind. An output create's job checks (404, 409) are its check; fetching
+     the result from the blob store, and its 404 when the result is gone, are its run,
+     since a fetch from Bambuddy may outlast a check's budget. An asset fetch keeps its
+     busy-budget 503 in the route (`before_start`), and claims its URL like an import:
+     its record, and the answer's `source_url`, hold scheme, host, port and path only.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the

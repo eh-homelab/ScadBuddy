@@ -174,10 +174,18 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   and edits (`library/model_operations.py` `model_kinds`: create, import, patch,
   duplicate, delete, source, README, thumbnail, sibling files, restore and upstream; an
   upstream merge that would conflict is refused by the route, so its merged text never
-  enters a history). Request bytes too large for a workflow
-  payload (a create's source, thumbnail, README, a patch's presets, an import's URL) go
+  enters a history), a model's media (`media_operations.py`), outputs
+  (`output_operations.py`: create, thumbnail, delete with its inbox copies until #1060
+  splits the Bambuddy part out), assets (`asset_operations.py`: upload, fetch), font
+  install (`font_operations.py`) and the preset writes that run openscad
+  (`preset_operations.py`; a preset delete stays a plain route). Request bytes too large
+  for a workflow payload (a create's source, thumbnail, README, a patch's presets, an
+  import's or asset fetch's URL, an asset, an output's thumbnail, a media upload) go
   by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
-  sha256 so a re-send keeps its key. `run_operation(..., claimed=)` releases them once
+  sha256 so a re-send keeps its key. A media upload is streamed, never read into
+  memory: `ClaimStore.hold_file` moves the streamed file in under the digest hashed
+  while it streamed, and the run links it (`ClaimStore.link`) to a staging file of its
+  own, so the claim stays for its release. `run_operation(..., claimed=)` releases them once
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
