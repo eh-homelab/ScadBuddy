@@ -13,6 +13,11 @@
 # pins the agent too, to the same version at its own digest, and a manifest
 # without the agent's line fails.
 #
+# The dashboard's `ref=` in clusters/prod/scadbuddy/kustomization.yaml (#988,
+# spec 2026-10-01 §7) is optional: an overlay that never mentions
+# deploy/grafana deploys the images alone, one exact line is moved to the
+# revision, and a near miss or a second line fails the deploy.
+#
 # Runs in ci.yml's `lint` job. Needs mikefarah yq v4 (as the step does).
 set -euo pipefail
 
@@ -28,6 +33,8 @@ export IMAGE=ghcr.io/eh-homelab/scadbuddy
 export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
+export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
+export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
@@ -74,16 +81,36 @@ EOF
   done
 }
 
+# `overlay [line]...` prints the clusters overlay's kustomization with the given
+# extra resource lines; with none, it is today's overlay, which has no
+# dashboard pin. `run` writes $overlay, which a case sets before calling it.
+overlay() {
+  printf '%s\n' '---' 'kind: Kustomization' 'namespace: bambuddy' 'resources:' \
+    '  - ../../../applications/scadbuddy' "$@"
+}
+overlay=$(overlay)
+old_ref="$(printf '1%.0s' {1..40})"
+dashboard_line="  - $DASHBOARD_RESOURCE?ref="
+
 # `run <api-manifest> [worker-manifest]`: a fresh repo, then the step. Output
 # lands in $work/log, and the manifests stay in $work/repo for the checks.
 run() {
-  rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy"
+  rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
   printf '%s\n' "$1" > "$work/repo/$MANIFEST"
   [ $# -lt 2 ] || printf '%s\n' "$2" > "$work/repo/$MANIFEST_WORKER"
+  [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  (cd "$work/repo" && git init -q)
+  rerun
+}
+
+# `rerun`: commit the repo as it stands (a clusters main that already merged
+# what the last run wrote), then run the step on it again.
+rerun() {
   (
     cd "$work/repo"
-    git init -q && git add -A
-    git -c user.email=t@t -c user.name=t commit -qm base
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base --allow-empty
+    : > "$work/out"
     GITHUB_OUTPUT="$work/out" bash -e "$work/edit.sh"
   ) > "$work/log" 2>&1
 }
@@ -147,6 +174,92 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$agent")"; then
 else
   grep -q 'expected exactly one agent image line, found 2' "$work/log" \
     || fail "two agent lines: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
+# beside an overlay carrying those lines; the step must fail with that error.
+api_and_agent="$(deployment scadbuddy "$IMAGE:$old" "$agent")"
+dashboard_fails() {
+  local name=$1 expected=$2; shift 2
+  overlay=$(overlay "$@")
+  if run "$api_and_agent"; then
+    fail "$name: step passed, expected an error"
+  else
+    grep -qF "$expected" "$work/log" || fail "$name: wrong error: $(grep '::error' "$work/log")"
+  fi
+}
+near_miss="mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly"
+
+# 8. Not configured: today's overlay. A notice, the images pinned, the overlay
+#    untouched and not among the files the PR names.
+overlay=$(overlay)
+if run "$api_and_agent"; then
+  grep -q '::notice::.*has no dashboard pin yet' "$work/log" || fail "no dashboard: no notice"
+  has_line "$pinned" "$MANIFEST" || fail "no dashboard: api image not pinned"
+  (cd "$work/repo" && git diff --quiet -- "$KUSTOMIZATION") || fail "no dashboard: overlay changed"
+  grep -qx 'dashboard=none' "$work/out" || fail "no dashboard: dashboard output is not none"
+  grep -q "^files=.*kustomization" "$work/out" && fail "no dashboard: overlay listed in files"
+else
+  fail "no dashboard: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 9. One exact line: moved to REVISION, and the overlay is among the files.
+overlay=$(overlay "${dashboard_line}${old_ref}")
+if run "$api_and_agent"; then
+  grep -qxF "${dashboard_line}${REVISION}" "$work/repo/$KUSTOMIZATION" || fail "dashboard: ref not moved"
+  grep -qF "$old_ref" "$work/repo/$KUSTOMIZATION" && fail "dashboard: old ref survived"
+  grep -qx 'dashboard=pinned' "$work/out" || fail "dashboard: dashboard output is not pinned"
+  grep -q "^files=.*$KUSTOMIZATION" "$work/out" || fail "dashboard: overlay not listed in files"
+  has_line "$pinned" "$MANIFEST" || fail "dashboard: api image not pinned"
+else
+  fail "dashboard: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 10. The same deploy again, once clusters merged the first: nothing to deploy.
+overlay=$(overlay "${dashboard_line}${old_ref}")
+if run "$api_and_agent" && rerun; then
+  grep -qx 'unchanged=true' "$work/out" || fail "dashboard current: expected unchanged=true"
+else
+  fail "dashboard current: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 11. Only the dashboard is behind (clusters added the line after the last
+#     deploy): the deploy PR moves just the ref.
+overlay=$(overlay)
+if run "$api_and_agent" \
+  && printf '%s\n' "${dashboard_line}${old_ref}" >> "$work/repo/$KUSTOMIZATION" \
+  && rerun; then
+  grep -qx 'unchanged=false' "$work/out" || fail "dashboard behind: expected unchanged=false"
+  grep -qx "files=$KUSTOMIZATION" "$work/out" || fail "dashboard behind: expected only the overlay in files"
+else
+  fail "dashboard behind: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 12-17. Near misses are errors, never "not configured".
+dashboard_fails "short sha" "$near_miss" "${dashboard_line}1111111"
+dashboard_fails "branch ref" "$near_miss" "${dashboard_line}main"
+dashboard_fails "trailing comment" "$near_miss" "${dashboard_line}${old_ref} # dashboard"
+dashboard_fails "lower case" "$near_miss" "  - https://github.com/eh-homelab/scadbuddy//deploy/grafana?ref=${old_ref}"
+dashboard_fails "commented out" "$near_miss" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
+dashboard_fails "extra space" "$near_miss" "  -  $DASHBOARD_RESOURCE?ref=${old_ref}"
+dashboard_fails ".git form" "$near_miss" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=${old_ref}"
+# ...and beside an exact line they are errors too: a second, unpinned copy.
+dashboard_fails "exact line plus .git near miss" "times but only 1 line is exactly" \
+  "${dashboard_line}${old_ref}" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=main"
+dashboard_fails "exact line plus commented-out line" "times but only 1 line is exactly" \
+  "${dashboard_line}${old_ref}" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
+
+# 18. Two exact lines: an error, as for any other pinned line.
+dashboard_fails "two dashboard lines" "expected at most one dashboard line, found 2" \
+  "${dashboard_line}${old_ref}" "${dashboard_line}${old_ref}"
+
+# 19. No overlay at all: an error, not a silent skip. clusters moved it, and
+#     this run cannot tell whether the new one pins the dashboard.
+overlay=""
+if run "$api_and_agent"; then
+  fail "no overlay: step passed, expected an error"
+else
+  grep -qF "$KUSTOMIZATION is not in clusters" "$work/log" || fail "no overlay: wrong error: $(grep '::error' "$work/log")"
 fi
 
 if [ "$failures" -gt 0 ]; then
