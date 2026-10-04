@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ok } from './call.js'
+import { command } from './command.js'
 import { binary } from './binary.js'
 import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
@@ -32,11 +33,14 @@ export const outputTools: Tool[] = [
     input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional() }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/outputs'],
-    handler: async ({ slug, job_id, name }, { backend }) =>
+    handler: async ({ slug, job_id, name }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/outputs', { params: { path: { slug } }, body: { job_id, name: name ?? null } }),
-          `save output of ${job_id}`,
+        await command(ctx, `save output of ${job_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/outputs', {
+            params: { path: { slug } },
+            body: { job_id, name: name ?? null },
+            headers,
+          }),
         ),
       ),
   }),
@@ -70,8 +74,10 @@ export const outputTools: Tool[] = [
     risk: 'outward',
     routes: ['DELETE /api/v1/outputs/{output_id}'],
     summarize: ({ output_id }) => `Delete output ${output_id} and its 3MF`,
-    handler: async ({ output_id }, { backend }) => {
-      await ok(backend.DELETE('/api/v1/outputs/{output_id}', { params: { path: { output_id } } }), `delete output ${output_id}`)
+    handler: async ({ output_id }, ctx) => {
+      await command(ctx, `delete output ${output_id}`, (headers) =>
+        ctx.backend.DELETE('/api/v1/outputs/{output_id}', { params: { path: { output_id } }, headers }),
+      )
       return json({ deleted: output_id })
     },
   }),

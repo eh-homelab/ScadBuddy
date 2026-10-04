@@ -338,7 +338,11 @@ export const libraryTools: Tool[] = [
     input: z.object({ family: z.string().min(1).max(100), force: z.boolean().default(false) }),
     risk: 'write',
     routes: ['POST /api/v1/fonts/install'],
-    handler: async ({ family, force }, { backend }) =>
-      json(await ok(backend.POST('/api/v1/fonts/install', { body: { family, force } }), `install font ${family}`)),
+    handler: async ({ family, force }, ctx) =>
+      json(
+        await command(ctx, `install font ${family}`, (headers) =>
+          ctx.backend.POST('/api/v1/fonts/install', { body: { family, force }, headers }),
+        ),
+      ),
   }),
 ]

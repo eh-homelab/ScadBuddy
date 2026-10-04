@@ -411,6 +411,18 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
   const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
+  return followOperation<T>(first, signal)
+}
+
+/**
+ * A command's first answer to its end: the route's own body, or a 202's operation
+ * followed through `GET /operations/{id}` to its result, or to the problem the route
+ * would have answered.
+ */
+async function followOperation<T>(
+  first: { status: number; body: T | Operation },
+  signal?: AbortSignal,
+): Promise<T> {
   if (first.status !== 202) return first.body as T
   let op = first.body as Operation
   const began = Date.now()
@@ -548,20 +560,20 @@ export const api = {
   listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
 
   createPreset: (slug: string, body: ParamPresetCreate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** Copies any preset, shipped or saved, to a new saved one with the same values. */
   duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -684,50 +696,57 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ) =>
-    new Promise<ModelSummary>((resolve, reject) => {
-      const body = new FormData()
-      body.append('file', file)
-      if (options.caption) body.append('caption', options.caption)
-      if (options.poster) body.append('poster', options.poster)
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-      xhr.setRequestHeader('Accept', 'application/json')
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-      })
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText) as ModelSummary)
-          return
+  ): Promise<ModelSummary> => {
+    // A command (#1054): one key for this upload, kept on a re-send after an answer
+    // that never arrived, so the server adds the item once.
+    const key = newRequestId()
+    const send = () =>
+      new Promise<{ status: number; body: ModelSummary | Operation }>((resolve, reject) => {
+        const body = new FormData()
+        body.append('file', file)
+        if (options.caption) body.append('caption', options.caption)
+        if (options.poster) body.append('poster', options.poster)
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
+        xhr.setRequestHeader('Accept', 'application/json')
+        xhr.setRequestHeader('Idempotency-Key', key)
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+        })
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | Operation })
+            return
+          }
+          reject(new ApiError(xhrProblem(xhr)))
         }
-        reject(new ApiError(xhrProblem(xhr)))
-      }
-      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-      // have landed, and `mayHaveRun` says so.
-      xhr.onerror = () =>
-        reject(
-          new ApiError({
-            type: UNANSWERED,
-            title: 'The upload failed',
-            status: 0,
-            detail: 'The upload failed',
-          }),
-        )
-      xhr.onabort = () =>
-        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-      xhr.send(body)
-    }),
+        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+        // have landed, and `mayHaveRun` says so.
+        xhr.onerror = () =>
+          reject(
+            new ApiError({
+              type: UNANSWERED,
+              title: 'The upload failed',
+              status: 0,
+              detail: 'The upload failed',
+            }),
+          )
+        xhr.onabort = () =>
+          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+        xhr.send(body)
+      })
+    return reattach(send).then((first) => followOperation<ModelSummary>(first))
+  },
 
   patchMedia: (slug: string, id: string, caption: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ caption }),
     }),
 
   /** `ids` names every item once, in the new order; the first is the cover. */
   reorderMedia: (slug: string, ids: string[]) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/order`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/order`, {
       method: 'PUT',
       body: JSON.stringify({ ids }),
     }),
@@ -738,13 +757,13 @@ export const api = {
    * it ships.
    */
   setMediaCover: (slug: string, id: string | null) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
       method: 'PUT',
       body: JSON.stringify({ id }),
     }),
 
   deleteMedia: (slug: string, id: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
@@ -753,7 +772,7 @@ export const api = {
   uploadAsset: (slug: string, file: File) => {
     const body = new FormData()
     body.append('file', file)
-    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+    return command<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
   },
 
   getAsset: (slug: string, id: string) =>
@@ -847,7 +866,7 @@ export const api = {
       .join('/')}`,
 
   createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
-    request<Output>(`/models/${seg(slug)}/outputs`, {
+    command<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
       body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
     }),
@@ -861,7 +880,7 @@ export const api = {
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
-    request<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
+    command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
       method: 'DELETE',
     }),
 
@@ -899,7 +918,7 @@ export const api = {
   putThumbnail: (outputId: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
+    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
@@ -1134,7 +1153,7 @@ export const api = {
 
   /** Downloads the family onto the data volume so the renderer can resolve it. */
   installFont: (family: string) =>
-    request<InstalledFamily>('/fonts/install', {
+    command<InstalledFamily>('/fonts/install', {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),

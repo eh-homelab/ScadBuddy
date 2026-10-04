@@ -1428,6 +1428,53 @@ describe("a model's edits as operations (#1054)", () => {
   })
 })
 
+describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
+  const op = { id: 'op-6', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const OUT = 'b'.repeat(32)
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
+
+  it.each([
+    ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
+    ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
+    ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
+    ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
+    ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],
+    ['save_preset', { slug: 'w', name: 'Wide' }, 'post', '/api/v1/models/w/presets', { id: 'p1' }],
+    ['update_preset', { slug: 'w', preset_id: 'p1', name: 'Wider' }, 'patch', '/api/v1/models/w/presets/p1', { id: 'p1' }],
+    ['duplicate_preset', { slug: 'w', preset_id: 'p1', name: 'Copy' }, 'post', '/api/v1/models/w/presets/p1/duplicate', { id: 'p2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, result) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result })),
+    )
+    const answer = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(answer.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.stringify(answer.content)).not.toContain('"running"')
+  })
+
+  it("render_model's save sends an Idempotency-Key and follows a 202 to the output", async () => {
+    let key: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result: { id: OUT } })),
+    )
+    const done = await runTool(tool('render_model'), { slug: 'box', save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done', output: { id: OUT } })
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)
