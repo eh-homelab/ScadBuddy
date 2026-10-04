@@ -88,6 +88,15 @@ overlay() {
   printf '%s\n' '---' 'kind: Kustomization' 'namespace: bambuddy' 'resources:' \
     '  - ../../../applications/scadbuddy' "$@"
 }
+# The overlay a dashboard line needs: no top-level `namespace:`, which would
+# move the ConfigMap out of cattle-dashboards, but a NamespaceTransformer with
+# unsetOnly (clusters#1596 Phase 5).
+overlay_ns() {
+  printf '%s\n' '---' 'kind: Kustomization' 'resources:' \
+    '  - ../../../applications/scadbuddy' "$@" 'transformers:' '  - |-' \
+    '    apiVersion: builtin' '    kind: NamespaceTransformer' \
+    '    metadata:' '      name: ns' '    namespace: bambuddy' "    unsetOnly: ${UNSET_ONLY:-true}"
+}
 overlay=$(overlay)
 old_ref="$(printf '1%.0s' {1..40})"
 dashboard_line="  - $DASHBOARD_RESOURCE?ref="
@@ -204,7 +213,7 @@ else
 fi
 
 # 9. One exact line: moved to REVISION, and the overlay is among the files.
-overlay=$(overlay "${dashboard_line}${old_ref}")
+overlay=$(overlay_ns "${dashboard_line}${old_ref}")
 if run "$api_and_agent"; then
   grep -qxF "${dashboard_line}${REVISION}" "$work/repo/$KUSTOMIZATION" || fail "dashboard: ref not moved"
   grep -qF "$old_ref" "$work/repo/$KUSTOMIZATION" && fail "dashboard: old ref survived"
@@ -216,7 +225,7 @@ else
 fi
 
 # 10. The same deploy again, once clusters merged the first: nothing to deploy.
-overlay=$(overlay "${dashboard_line}${old_ref}")
+overlay=$(overlay_ns "${dashboard_line}${old_ref}")
 if run "$api_and_agent" && rerun; then
   grep -qx 'unchanged=true' "$work/out" || fail "dashboard current: expected unchanged=true"
 else
@@ -225,7 +234,7 @@ fi
 
 # 11. Only the dashboard is behind (clusters added the line after the last
 #     deploy): the deploy PR moves just the ref.
-overlay=$(overlay)
+overlay=$(overlay_ns)
 if run "$api_and_agent" \
   && printf '%s\n' "${dashboard_line}${old_ref}" >> "$work/repo/$KUSTOMIZATION" \
   && rerun; then
@@ -248,6 +257,16 @@ dashboard_fails "exact line plus .git near miss" "times but only 1 line is exact
   "${dashboard_line}${old_ref}" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=main"
 dashboard_fails "exact line plus commented-out line" "times but only 1 line is exactly" \
   "${dashboard_line}${old_ref}" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
+
+# 17b. The line beside a plain namespace: the ConfigMap would leave
+#      cattle-dashboards and the sidecar never see it: an error.
+dashboard_fails "plain namespace" "top-level namespace:" "${dashboard_line}${old_ref}"
+overlay=$(UNSET_ONLY=false overlay_ns "${dashboard_line}${old_ref}")
+if run "$api_and_agent"; then
+  fail "transformer without unsetOnly: step passed, expected an error"
+else
+  grep -qF "NamespaceTransformer with unsetOnly: true" "$work/log" || fail "no unsetOnly: wrong error: $(grep '::error' "$work/log")"
+fi
 
 # 18. Two exact lines: an error, as for any other pinned line.
 dashboard_fails "two dashboard lines" "expected at most one dashboard line, found 2" \
