@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
@@ -48,6 +50,8 @@ ATTEMPT_TIMEOUT = MAX_AGE * 2
 MAX_POKES = 100
 #: The progress route's start or poke never holds its read up for long.
 RPC_TIMEOUT = timedelta(seconds=5)
+#: How long the progress route trusts a follow it found running (review #1091 4).
+FOLLOWED_FOR = 60.0
 
 
 def follow_id(output_id: str) -> str:
@@ -122,6 +126,50 @@ async def follow(client: Client, task_queue: str, output_id: str) -> bool:
         logger.warning("could not follow a print", extra={"output_id": output_id}, exc_info=True)
         return False
     return True
+
+
+class Follows:
+    """The progress route's follows (#268, review #1091 4, 5): each started in the
+    background, so a Temporal that does not answer never holds a read up. An output
+    found followed is not asked about again for `FOLLOWED_FOR`: each change of a print
+    re-reads its progress in every open UI. The lifespan cancels what is still starting
+    (`aclose`)."""
+
+    def __init__(
+        self,
+        client: Client,
+        task_queue: str,
+        *,
+        followed_for: float = FOLLOWED_FOR,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.client = client
+        self.task_queue = task_queue
+        self.followed_for = followed_for
+        self.clock = clock
+        #: Kept until they finish: a task nothing references may be collected mid-flight.
+        self.starting: set[asyncio.Task[bool]] = set()
+        self._followed: dict[str, float] = {}
+
+    def ensure(self, output_id: str) -> None:
+        if self._followed.get(output_id, float("-inf")) > self.clock():
+            return
+        task = asyncio.create_task(self._start(output_id))
+        self.starting.add(task)
+        task.add_done_callback(self.starting.discard)
+
+    async def _start(self, output_id: str) -> bool:
+        if not await follow(self.client, self.task_queue, output_id):
+            return False
+        now = self.clock()
+        self._followed = {key: until for key, until in self._followed.items() if until > now}
+        self._followed[output_id] = now + self.followed_for
+        return True
+
+    async def aclose(self) -> None:
+        for task in self.starting:
+            task.cancel()
+        await asyncio.gather(*self.starting, return_exceptions=True)
 
 
 def _recent_watches(pool: ConnectionPool[Any], cutoff: datetime) -> list[str]:
