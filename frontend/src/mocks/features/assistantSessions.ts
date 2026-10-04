@@ -132,7 +132,7 @@ export const handlers = [
     return resources ? HttpResponse.json({ resources }) : detail('session not found', 404)
   }),
 
-  http.get(`${base}/resources/:type/:id/sessions`, ({ params }) => {
+  http.get(`${base}/resources/:type/:id/sessions`, ({ params, request }) => {
     const type = String(params.type)
     if (!VALID_TYPES.includes(type)) return detail(`resource type must be one of ${VALID_TYPES.join(', ')}`, 400)
     const ref = { type, id: String(params.id) } as ResourceRef
@@ -140,6 +140,7 @@ export const handlers = [
       .filter(([, rows]) => touched(rows, ref))
       .map(([id]) => state.views.get(id) ?? view({ id }))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      .slice(0, Number(new URL(request.url).searchParams.get('limit') ?? 100))
     return HttpResponse.json({ sessions })
   }),
 

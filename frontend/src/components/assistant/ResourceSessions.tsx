@@ -5,6 +5,9 @@ import { api } from '../../api/client'
 import type { ResourceRef } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 
+/** The most sessions listed; one more is asked for, so the count can say there are more. */
+export const RESOURCE_SESSIONS_SHOWN = 100
+
 interface Props {
   resource: ResourceRef
   /** The toggle's text, before the count. */
@@ -24,9 +27,9 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
   const opener = useAssistantOpener()
   const enabled = opener !== null
   const listed = useAsync(
-    async () => (enabled ? (await api.listAiResourceSessions(resource)).sessions : null),
+    async () => (enabled ? (await api.listAiResourceSessions(resource, RESOURCE_SESSIONS_SHOWN + 1)).sessions : null),
     [enabled, resource.type, resource.id],
-    model ? [`model:${model}`] : undefined,
+    enabled && model ? [`model:${model}`] : undefined,
   )
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
@@ -55,8 +58,9 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
     }
   }, [open])
 
-  const sessions = listed.data
-  if (!opener || !sessions || sessions.length === 0) return null
+  if (!opener || !listed.data || listed.data.length === 0) return null
+  const more = listed.data.length > RESOURCE_SESSIONS_SHOWN
+  const sessions = more ? listed.data.slice(0, RESOURCE_SESSIONS_SHOWN) : listed.data
 
   return (
     <div ref={root} className="relative">
@@ -68,7 +72,7 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
         aria-controls={open ? listId : undefined}
         className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
       >
-        {label} ({sessions.length})
+        {label} ({sessions.length}{more ? '+' : ''})
       </button>
       {open && (
         <ul
@@ -94,6 +98,11 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
               </button>
             </li>
           ))}
+          {more && (
+            <li className="px-3 py-1.5 text-[11px] text-faint">
+              Showing the {RESOURCE_SESSIONS_SHOWN} most recent.
+            </li>
+          )}
         </ul>
       )}
     </div>

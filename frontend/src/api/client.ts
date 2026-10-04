@@ -1208,9 +1208,9 @@ export const api = {
     request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
 
   /** #931 — the sessions whose tool calls touched a resource, newest first. */
-  listAiResourceSessions: (resource: ResourceRef) =>
+  listAiResourceSessions: (resource: ResourceRef, limit: number) =>
     request<{ sessions: AiSessionView[] }>(
-      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions`,
+      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions?limit=${limit}`,
     ),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */

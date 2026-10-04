@@ -5,7 +5,7 @@ import type { ResourceRef, SessionResource } from '../../api/types'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
-import { ResourceSessions } from './ResourceSessions'
+import { RESOURCE_SESSIONS_SHOWN, ResourceSessions } from './ResourceSessions'
 
 // #931: the sessions whose tool calls touched a resource, from
 // GET /api/v1/ai/resources/:type/:id/sessions, each opening that session in the panel.
@@ -83,11 +83,26 @@ describe('ResourceSessions', () => {
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
+  it('says when there are more sessions than it lists', async () => {
+    for (let i = 0; i < RESOURCE_SESSIONS_SHOWN + 5; i++) {
+      const at = new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString()
+      setSessionResources(`sess-${i}`, [row({ type: 'model', id: 'big', model: 'big' })], { title: `S${i}`, updated_at: at })
+    }
+    const { user } = renderWith({ type: 'model', id: 'big' })
+    await user.click(await screen.findByRole('button', { name: `Changed by assistant (${RESOURCE_SESSIONS_SHOWN}+)` }))
+    const list = screen.getByRole('list', { name: 'Assistant sessions that changed this' })
+    expect(within(list).getAllByRole('button')).toHaveLength(RESOURCE_SESSIONS_SHOWN)
+    expect(within(list).getByText(`Showing the ${RESOURCE_SESSIONS_SHOWN} most recent.`)).toBeInTheDocument()
+  })
+
   it('looks an output up by its own id, under the label given', async () => {
     setSessionResources('sess-out', [row({ type: 'output', id: 'out/7', model: 'my-bin' })], { title: 'Saved it' })
     const requests: string[] = []
+    const searches: string[] = []
     const onStart = ({ request }: { request: Request }) => {
-      if (request.url.includes('/ai/resources/')) requests.push(new URL(request.url).pathname)
+      if (!request.url.includes('/ai/resources/')) return
+      requests.push(new URL(request.url).pathname)
+      searches.push(new URL(request.url).search)
     }
     server.events.on('request:start', onStart)
     try {
@@ -95,6 +110,7 @@ describe('ResourceSessions', () => {
       await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
       expect(screen.getByRole('button', { name: /Saved it/ })).toBeInTheDocument()
       expect(requests).toEqual(['/api/v1/ai/resources/output/out%2F7/sessions'])
+      expect(searches).toEqual(['?limit=101'])
     } finally {
       server.events.removeListener('request:start', onStart)
     }

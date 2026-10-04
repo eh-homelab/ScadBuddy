@@ -63,6 +63,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // Mounted from the first open on, and hidden rather than unmounted when closed, so
   // closing the panel doesn't drop the connection or the transcript.
   const [mounted, setMounted] = useState(false)
+  // #931 — a page asked for one session ("Changed by assistant"): the panel opens on it.
+  // Cleared once the panel has selected it, or when the panel goes, so a later mount
+  // does not select it.
+  const [openRequest, setOpenRequest] = useState<{ sessionId: string } | null>(null)
   // A mounted panel rides out an outage: while the agent restarts, or its status
   // read fails for a moment, the panel's transport keeps reconnecting with its
   // transcript and anything queued for the reconnect (a decision, say) intact,
@@ -76,6 +80,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     if (!shown) {
       setOpen(false)
       setMounted(false)
+      // #931 — a session asked for but not yet selected goes too.
+      setOpenRequest(null)
     }
   }, [shown])
   // #815 — approvals waiting on the user, shown on the toggle so a closed panel (or a
@@ -92,9 +98,6 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setOpen(true)
     setFocusKey((k) => k + 1)
   }, [])
-  // #931 — a page asked for one session ("Changed by assistant"): the panel opens on it.
-  // Cleared once the panel has selected it, so a later remount does not select it again.
-  const [openRequest, setOpenRequest] = useState<{ sessionId: string } | null>(null)
   const openHandled = useCallback(() => setOpenRequest(null), [])
   const opener = useMemo<AssistantOpener | null>(
     () =>
@@ -250,7 +253,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   factory={assistantTransport}
                   embedded={embedded}
                   openRequest={openRequest}
-                onOpenHandled={openHandled}
+                  onOpenHandled={openHandled}
                 />
               </Suspense>
             </aside>

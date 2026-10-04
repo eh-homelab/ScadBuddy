@@ -355,6 +355,24 @@ describe('assistant panel', () => {
     expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument()
   })
 
+  it('drops a requested session the panel never got to when the assistant goes off (#931)', async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    const item = screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ })
+    // Picked, and the assistant goes off before the panel has loaded.
+    act(() => {
+      fireEvent.click(item)
+      availability.set({ available: false, state: 'not_configured' })
+    })
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
+
+    act(() => availability.set({ available: true }))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
+    expect(sentOf('session.attach')).toEqual([])
+  })
+
   it("shows what a session touched, linking to each resource's page (#931)", async () => {
     const { user } = renderShell('/')
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
