@@ -445,9 +445,44 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         *PrintActivities(deps).all(),
         *operation_activities(ops.store, state.settings_store, ops.kinds),
     ]
+    # Beside the workers (review #1091 4): each follow it starts may wait out an RPC
+    # timeout on a slow Temporal, and the queue is polled meanwhile.
+    handoff = asyncio.create_task(_hand_off_watches(state, client))
+    try:
+        while not stop.is_set():
+            # A worker that fails is said at once and started again: until then every
+            # print run waits on a queue nothing polls.
+            queue = settings.temporal_task_queue_bambuddy
+            workers = [
+                bambuddy_worker(client, queue, activities),
+                follow_worker(
+                    client,
+                    queue,
+                    FollowActivities(
+                        state.print_follower, running=state.metrics.print_follows_running
+                    ).follow_print,
+                ),
+            ]
+            if not await _serve_until(
+                workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+            ):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        # A row whose follow did not start stays for the next boot.
+        handoff.cancel()
+        with suppress(asyncio.CancelledError):
+            await handoff
+
+
+async def _hand_off_watches(state: AppState, client: Client) -> None:
+    """Follow on Temporal the prints the old in-process watcher recorded (#268)."""
     try:
         resumed = await resume_followed(
-            state.projection.pool, client, settings.temporal_task_queue_bambuddy, datetime.now(UTC)
+            state.projection.pool,
+            client,
+            state.settings.temporal_task_queue_bambuddy,
+            datetime.now(UTC),
         )
         if resumed:
             logger.info(
@@ -456,25 +491,6 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             )
     except Exception:
         logger.exception("could not hand the old watcher's prints to FollowPrint")
-    while not stop.is_set():
-        # A worker that fails is said at once and started again: until then every
-        # print run waits on a queue nothing polls.
-        queue = settings.temporal_task_queue_bambuddy
-        workers = [
-            bambuddy_worker(client, queue, activities),
-            follow_worker(
-                client,
-                queue,
-                FollowActivities(
-                    state.print_follower, running=state.metrics.print_follows_running
-                ).follow_print,
-            ),
-        ]
-        if not await _serve_until(
-            workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
-        ):
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
 async def _serve_until(
