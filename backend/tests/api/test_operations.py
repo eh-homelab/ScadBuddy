@@ -95,6 +95,13 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
     state.operations.kinds["test_threaded"] = OperationKind(
         "test_threaded", check, threaded, run_timeout=timedelta(seconds=2)
     )
+    async def slow_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {}
+
+    state.operations.kinds["test_slow_check"] = OperationKind(
+        "test_slow_check", slow_check, where, queue="library"
+    )
     state.operations.kinds["test_library"] = OperationKind(
         "test_library", check, where, queue="library"
     )
@@ -249,6 +256,16 @@ def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
     while len(counts.events) < 2 and time.monotonic() < deadline:
         time.sleep(0.2)
     assert counts.events == ["committed", "released"]
+
+
+def test_a_library_kinds_slow_check_does_not_blame_bambuddy(client: TestClient) -> None:
+    """Review #1119 2: a ``library`` check reads the data volume, not Bambuddy."""
+    response = client.post("/api/v1/test-op?kind=test_slow_check", json={})
+    assert response.status_code == 504, response.text
+    problem = response.json()
+    assert problem["type"] == "about:blank"
+    assert "Bambuddy" not in problem["detail"]
+    assert "the check did not finish" in problem["detail"]
 
 
 def test_an_execution_ended_before_it_answered_is_still_accepting(

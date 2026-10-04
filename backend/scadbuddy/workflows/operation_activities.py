@@ -105,11 +105,20 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
             async with asyncio.timeout(CHECK_BUDGET_SECONDS):
                 return await kind.check(request)
         except TimeoutError:
-            slow = ApiError(
-                status.HTTP_504_GATEWAY_TIMEOUT,
-                f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; nothing was done",
-                type_=UNAVAILABLE_PROBLEM,
-            )
+            if kind.queue == "bambuddy":
+                slow = ApiError(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; "
+                    "nothing was done",
+                    type_=UNAVAILABLE_PROBLEM,
+                )
+            else:
+                # A ``library`` check reads the data volume; Bambuddy is not involved.
+                slow = ApiError(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    f"the check did not finish within {CHECK_BUDGET_SECONDS:.0f}s; "
+                    "nothing was done",
+                )
             raise raised_as(slow, REFUSED) from None
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
