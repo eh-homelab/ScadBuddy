@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,34 +12,29 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
-    EventsDep,
     OutputIdPath,
     OutputsDep,
-    PrintLinksDep,
-    RenderDep,
+    PathsDep,
     SettingsStoreDep,
     SlugPath,
-    StateDep,
     UploadsDep,
 )
-from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    Claimed,
     IdempotencyKey,
     operation_answer,
     run_operation,
 )
-from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
 )
 from scadbuddy.bambuddy.send import SendRequest, SendResult
-from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
-from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -52,20 +45,16 @@ from scadbuddy.library.outputs import (
     OutputStore,
     require_output,
 )
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import Operation
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
-    InputsDisagreeError,
-    InputsError,
     legacy_inputs,
-    normalize_inputs,
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
-from scadbuddy.store.cache import materialize_result
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["outputs"])
 
@@ -120,7 +109,7 @@ class EditTarget(BaseModel):
     source: Literal["record", "3mf"]
 
 
-def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+def detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
     params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
@@ -136,9 +125,7 @@ async def _details(
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
     # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(
-        lambda: [_detail(store, meta, copies[meta.id]) for meta in metas]
-    )
+    return await asyncio.to_thread(lambda: [detail(store, meta, copies[meta.id]) for meta in metas])
 
 
 @router.post(
@@ -146,60 +133,27 @@ async def _details(
     response_model=OutputDetail,
     status_code=status.HTTP_201_CREATED,
     summary="Persist a finished render",
+    responses=OPERATION_RESPONSES,
 )
 async def create_output(
     slug: SlugPath,
     body: CreateOutputRequest,
-    catalogue: CatalogueDep,
-    outputs: OutputsDep,
-    render: RenderDep,
-    store: SettingsStoreDep,
-    events: EventsDep,
-    state: StateDep,
-) -> OutputDetail:
-    await asyncio.to_thread(require_model, catalogue, slug)
-    job = await asyncio.to_thread(require_job, render, body.job_id)
-    if job.slug != slug:
-        raise ApiError(
-            status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
-        )
-    if job.state != "done" or job.result is None:
-        raise ApiError(
-            status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
-        )
-    inputs: dict[str, Any] | None = None
-    if body.inputs is not None:
-        rendered = f"inputs.params are not the parameters job {job.id} rendered"
-        # One pass: the shape checks, then the typed comparison with what the job
-        # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
-        try:
-            inputs = normalize_inputs(body.inputs, job.params).data
-        except InputsDisagreeError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
-        except InputsError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        # The job with no params: nothing was compared above, so compare here.
-        if inputs["params"] != job.params:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
-    # The copy reads the job's files, which on the bambuddy backend come through the cache.
-    await materialize_result(state.store.blobs, job.result)
-    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
-    # fetched, and the copy would fail with a server path in its message: say so instead.
-    files = (job.result.model_3mf, job.result.preview_glb)
-    if not all((outputs.paths.root / name).is_file() for name in files):
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
-    public_url = (await asyncio.to_thread(store.load)).public_url
-    try:
-        meta = await asyncio.to_thread(
-            outputs.create, job, name=body.name, public_url=public_url, inputs=inputs
-        )
-    except OSError:
-        # Evicted or swept after the check above, or unreadable: the same answer, not
-        # the copy's path.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
-    emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
-    # A new output has no uploads yet: no read to make.
-    return _detail(outputs, meta, [])
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_create`` operation (#1054): its check makes the 404 for the model
+    or the job and the 409 for a job of another model or not done; its run fetches the
+    result, compares ``inputs`` with what the job rendered (422) and copies it."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_create"],
+        subject=slug,
+        request={"slug": slug, **body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
@@ -272,16 +226,17 @@ def get_edit_target(
 
 
 @router.delete(
-    "/outputs/{output_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an output"
+    "/outputs/{output_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an output",
+    responses=OPERATION_RESPONSES,
 )
 async def delete_output(
     output_id: OutputIdPath,
-    outputs: OutputsDep,
-    uploads: UploadsDep,
-    links: PrintLinksDep,
-    events: EventsDep,
-    store: SettingsStoreDep,
+    response: Response,
+    ops: OperationsDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
     """Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's
     inbox folder (#316).
@@ -291,26 +246,20 @@ async def delete_output(
     sliced files, which a queued print may still reference. A Bambuddy delete that
     fails stops here, before the record goes — it is the only pointer to the file.
     """
-    meta = require_output(outputs, output_id)
-    if delete_inbox_copies and await uploads.for_output(meta.id):
-        settings = store.load()
-        async with client_for(settings) as client:
-            await remove_inbox_copies(client, uploads, meta, settings)
-    outputs.delete(output_id)
-    # After the files: a failed delete keeps the output, and so must keep its records.
-    # Best effort once the files are gone, as for a deleted model: the output is. Each
-    # on its own, so a failed upload cleanup cannot leave links serving its archives.
-    try:
-        await uploads.delete_outputs([output_id])
-    except (DatabaseRequiredError, psycopg.Error):
-        logger.exception(
-            "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
-        )
-    try:
-        await links.delete_outputs([output_id])
-    except (DatabaseRequiredError, psycopg.Error):
-        logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
-    emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_delete"],
+        subject=output_id,
+        request={"output_id": output_id, "delete_inbox_copies": delete_inbox_copies},
+        idempotency_key=idempotency_key,
+    )
+    return _no_content(result)
+
+
+def _no_content(result: dict[str, Any] | Operation) -> Response:
+    if isinstance(result, Operation):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -464,18 +413,32 @@ def get_output_geometry(
     "/outputs/{output_id}/thumbnail",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Upload the canvas capture",
+    responses=OPERATION_RESPONSES,
 )
 async def put_output_thumbnail(
     output_id: OutputIdPath,
-    outputs: OutputsDep,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
     file: Annotated[UploadFile, File(description="PNG captured by the viewer")],
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
-    require_output(outputs, output_id)
     png = await file.read()
     if not png.startswith(PNG_MAGIC):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
-    outputs.write_thumbnail(output_id, png)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # By claim: a canvas capture may be past a workflow payload's limit (#1054).
+    claims = ClaimStore(paths.claims)
+    held = await asyncio.to_thread(claims.hold, png)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_thumbnail"],
+        subject=output_id,
+        request={"output_id": output_id, "png": held.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [held]),
+    )
+    return _no_content(result)
 
 
 @router.post(
