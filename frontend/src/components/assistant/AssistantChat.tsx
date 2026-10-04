@@ -8,6 +8,7 @@ import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
+import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
@@ -47,6 +48,9 @@ export interface OpenRequest {
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
 
+/** How many sessions the picker's model filter asks the agent for (its list route's maximum). */
+const PICKER_FILTER_LIMIT = 500
+
 /** The panel's Advanced switch, per browser (the Library page's pattern). */
 const ADVANCED_KEY = 'scadbuddy.assistant.advanced'
 
@@ -64,6 +68,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  const pageModel = pageContext(pathname).modelSlug ?? null
+  const [onlyPageModel, setOnlyPageModel] = useState(false)
+  // Read again each time the picker opens or the filter is turned on, so it is current.
+  const touchingIds = useAsync(
+    async () =>
+      onlyPageModel && pageModel && pickerOpen
+        ? new Set(
+            (await api.listAiResourceSessions({ type: 'model', id: pageModel }, PICKER_FILTER_LIMIT)).sessions.map(
+              (s) => s.id,
+            ),
+          )
+        : null,
+    [onlyPageModel, pageModel, pickerOpen],
+  )
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
@@ -185,6 +203,10 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
   const prompts = suggestedPrompts(pathname)
   const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
+  // #931 — on a model's page, the picker can show only the sessions that changed that model.
+  const filterBy = onlyPageModel && pageModel ? pageModel : null
+  const touching = filterBy ? touchingIds : undefined
+  const listed = touching?.data ? sessions.filter((s) => touching.data!.has(s.id)) : sessions
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -220,11 +242,28 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
       {pickerOpen && (
         <nav id={pickerId} aria-label="Sessions" className="shrink-0 border-b border-line bg-surface-2">
+          {pageModel && (
+            <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                checked={onlyPageModel}
+                onChange={(event) => setOnlyPageModel(event.target.checked)}
+              />
+              Only sessions that changed {pageModel}
+            </label>
+          )}
+          {touching?.error ? (
+            <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
+              {touching.error instanceof ApiError ? touching.error.detail : 'The assistant service did not answer; try again.'}
+            </p>
+          ) : null}
           {sessions.length === 0 ? (
             <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
+          ) : filterBy && touching?.data && listed.length === 0 ? (
+            <p className="px-3 py-2 text-[12.5px] text-muted">No session changed {filterBy}.</p>
           ) : (
             <ul className="max-h-56 overflow-y-auto py-1">
-              {sessions.map((s) => (
+              {listed.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"

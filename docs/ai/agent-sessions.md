@@ -230,7 +230,9 @@ however often it touched the resource. A model's page shows **Changed by assista
 output (`/edit/{id}`); picking a session opens it in the assistant panel
 (`frontend/src/components/assistant/ResourceSessions.tsx`, through `AppShell`'s
 `AssistantOpener`). It shows nothing when no session touched the resource, or the
-assistant is off.
+assistant is off. On a model's page the assistant panel's session picker offers
+**Only sessions that changed {slug}**, which narrows its list to the sessions the same
+route returns for that model, read again each time the picker opens.
 
 ## 5. Not built yet
 
@@ -242,5 +244,4 @@ assistant is off.
 - **A2A** is deferred (spec §6).
 - **The rest of #931**: extractors for the remaining tools (libraries, fonts, Bambuddy
   projects, settings and remembered choices, `browser_*` param changes), a backfill
-  from `ai_audit`, a resource filter in the panel's own session picker, and
-  "restore to before this session".
+  from `ai_audit`, and "restore to before this session".

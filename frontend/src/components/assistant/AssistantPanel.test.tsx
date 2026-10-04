@@ -7,7 +7,9 @@ import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { HttpResponse, http } from 'msw'
 import { AppShell } from '../AppShell'
 import { ResourceSessions } from './ResourceSessions'
 
@@ -371,6 +373,54 @@ describe('assistant panel', () => {
     await screen.findByRole('textbox', { name: 'Message the assistant' })
     await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
     expect(sentOf('session.attach')).toEqual([])
+  })
+
+  it("filters the session picker to the sessions that changed this page's model (#931)", async () => {
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.type(box, 'Make the name bigger and send it{Enter}')
+    await screen.findByRole('region', { name: 'Needs your approval' })
+
+    await view.user.click(screen.getByRole('button', { name: 'Sessions (2)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    expect(within(picker).getAllByRole('listitem')).toHaveLength(2)
+    const only = within(picker).getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' })
+    expect(only).not.toBeChecked()
+    await view.user.click(only)
+    // The desktop agent's session changed gridfinity-bin; the new chat changed nothing.
+    await waitFor(() => expect(within(picker).getAllByRole('listitem')).toHaveLength(1))
+    expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+
+    await view.user.click(only)
+    expect(within(picker).getAllByRole('listitem')).toHaveLength(2)
+  })
+
+  it('says when no session changed the model, and when the agent cannot say (#931)', async () => {
+    const view = renderShell('/m/name-keychain')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox', { name: 'Only sessions that changed name-keychain' }))
+    expect(await within(picker).findByText('No session changed name-keychain.')).toBeInTheDocument()
+
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', () =>
+        HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }),
+      ),
+    )
+    await view.user.click(within(picker).getByRole('checkbox'))
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    // The full list stays usable.
+    expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+  })
+
+  it('offers no model filter off a model page (#931)', async () => {
+    const view = renderShell('/')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    expect(within(screen.getByRole('navigation', { name: 'Sessions' })).queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
   it("shows what a session touched, linking to each resource's page (#931)", async () => {
