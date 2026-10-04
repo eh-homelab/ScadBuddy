@@ -12,7 +12,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from psycopg import Connection
@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 
 #: As the decision store's: a request is told the store is unavailable rather than hang.
 CONNECT_TIMEOUT = 5.0
+#: Bounds every query on this store's connections, so a stuck read releases its thread
+#: and connection even after an awaiting caller has stopped waiting (#1086 review).
+STATEMENT_TIMEOUT_MS = 15_000
+#: How long one archive's read from Bambuddy may take in a settle (#1086 review), so a
+#: stalled read costs that archive and not the ones after it. The write that follows is
+#: bounded by ``STATEMENT_TIMEOUT_MS`` instead: a write cut off here would run on in its
+#: thread and could land after a warning that said it had not. Read, write and a wait
+#: for a pool connection can take ~35 s, so the watcher's ``SETTLE_TIMEOUT`` (60 s)
+#: covers one or two slow archives; it can cut the hook off mid-write, and that
+#: archive's write then still lands (``tests/rack/test_settle.py``).
+ARCHIVE_TIMEOUT = 15.0
 
 
 class PickedHotend(BaseModel):
@@ -67,6 +78,17 @@ class RackUsage(Protocol):
     ) -> int: ...
 
 
+def _bound_statements(conn: Connection[DictRow]) -> None:
+    """Lower the connection's statement timeout to ``STATEMENT_TIMEOUT_MS``; one the
+    conninfo already sets lower is kept (#1086 review)."""
+    row = conn.execute(
+        "SELECT current_setting('statement_timeout')::interval AS current"
+    ).fetchone()
+    current = row["current"] if row is not None else timedelta(0)
+    if not current or current > timedelta(milliseconds=STATEMENT_TIMEOUT_MS):
+        conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+
+
 class RackUsageStore:
     def __init__(
         self, conninfo: str, *, pool_size: int = 2, connect_timeout: float = CONNECT_TIMEOUT
@@ -83,6 +105,9 @@ class RackUsageStore:
                 "row_factory": dict_row,
                 "connect_timeout": max(1, int(connect_timeout)),
             },
+            # Set per connection rather than as ``options``, which would replace any the
+            # conninfo already carries (a search_path, say). It only ever lowers one.
+            configure=_bound_statements,
             name="scadbuddy-rack-usage",
         )
         self._pool_open = False
@@ -96,7 +121,21 @@ class RackUsageStore:
                 self._pool_open = True
         if not self._migrated:
             with self._pool.connection() as conn:
-                migrate(conn)
+                # Unbounded while migrating, deliberately (#1086 review): the wait for
+                # another process's migration lock, and a slow migration, count toward
+                # it. This also lifts a timeout the conninfo sets, so the first rack call
+                # in a process (on the print path too) waits as long as the lock is
+                # held. The bound it had is restored afterwards.
+                row = conn.execute("SHOW statement_timeout").fetchone()
+                bound = row["statement_timeout"] if row is not None else "0"
+                conn.execute("SET statement_timeout = 0")
+                try:
+                    migrate(conn)
+                finally:
+                    # Not on a broken connection: the pool drops it, and a second error
+                    # here would replace the migration's own (#1086 review).
+                    if not conn.broken:
+                        conn.execute("SELECT set_config('statement_timeout', %s, false)", (bound,))
             self._migrated = True
         return self._pool
 
@@ -118,7 +157,11 @@ class RackUsageStore:
             conn.execute(
                 "INSERT INTO rack_nozzle_seen (serial, printer_id)"
                 " SELECT serial, %s FROM unnest(%s::text[]) AS serial"
-                " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id",
+                " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id"
+                # Rewrite only a hotend that moved: /check re-records the rack on every
+                # debounced re-check (#1082). A row this skips makes no new version, but
+                # is still locked, so a re-check is cheap rather than free.
+                " WHERE rack_nozzle_seen.printer_id IS DISTINCT FROM excluded.printer_id",
                 (printer_id, unique),
             )
 
@@ -310,13 +353,16 @@ async def record_settled(
     links: LinkReader,
     store: RackUsage,
     now: Callable[[], datetime] = _now,
+    archive_timeout: float = ARCHIVE_TIMEOUT,
 ) -> int:
     """One ``rack_nozzle_prints`` row per linked archive and picked group (spec §4); the
     rows written. Every ended archive counts, whatever the print's outcome: the hotend
     wore either way (spec §10). One still running is left for its own settle. An
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
-    and ids and skipped; nothing is retried."""
+    and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
+    Nothing is retried now: an archive skipped here is recorded by the output's next
+    settle, which reads every linked archive not yet recorded."""
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -331,28 +377,32 @@ async def record_settled(
             extra={"output_id": output_id, "error": type(exc).__name__},
         )
         return 0
+
+    async def record_one(archive_id: int, queue_item_id: int) -> int:
+        archive = await asyncio.wait_for(client.archive(archive_id), timeout=archive_timeout)
+        if archive.status not in SETTLED_STATUSES:
+            # Another print of this output, still running: its own settle counts it,
+            # with its real time, which DO NOTHING would never let in after this.
+            return 0
+        seconds = (
+            archive.actual_time_seconds
+            if archive.actual_time_seconds is not None
+            else archive.print_time_seconds
+        )
+        return await store.record_prints(
+            archive_id=archive_id,
+            queue_item_id=queue_item_id,
+            settled_at=now(),
+            print_seconds=seconds,
+            grams=archive.filament_used_grams,
+        )
+
     written = 0
     for archive_id, queue_item_id in linked:
         if queue_item_id not in picked or archive_id in recorded:
             continue
         try:
-            archive = await client.archive(archive_id)
-            if archive.status not in SETTLED_STATUSES:
-                # Another print of this output, still running: its own settle counts it,
-                # with its real time, which DO NOTHING would never let in after this.
-                continue
-            seconds = (
-                archive.actual_time_seconds
-                if archive.actual_time_seconds is not None
-                else archive.print_time_seconds
-            )
-            written += await store.record_prints(
-                archive_id=archive_id,
-                queue_item_id=queue_item_id,
-                settled_at=now(),
-                print_seconds=seconds,
-                grams=archive.filament_used_grams,
-            )
+            written += await record_one(archive_id, queue_item_id)
         except Exception as exc:
             logger.warning(
                 "could not record a rack nozzle's print",
@@ -378,7 +428,12 @@ def settle_hook(
     async def hook(meta: OutputMeta) -> None:
         if not links.available:
             return
-        async with client_for(load()) as client:
+        # A settings read is a database read: off the event loop, so the watcher stops
+        # waiting on it at its timeout (#1083). The thread itself runs on: the settings
+        # pool has no statement timeout (only this store's queries do), so a stuck
+        # settings read holds its thread and connection until Postgres answers.
+        settings = await asyncio.to_thread(load)
+        async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 
     return hook
