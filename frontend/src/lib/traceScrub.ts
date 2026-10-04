@@ -5,8 +5,10 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 
 /**
  * The browser's `ScrubbingSpanExporter` (tracing spec 2026-10-01 §6), in front of
- * `RelayExporter`: what §6 never records is removed once, here, whichever code made
- * the span. It also applies the relay's two caps the SDK's `spanLimits` cannot
+ * `RelayExporter`: it removes, whichever code made the span, what the page must never
+ * send (query strings, user agents, captured headers, error messages and a stack's
+ * message lines). It is not the whole of §6: the relay's `prepare` is, and it also
+ * reduces `url.path`, host names and the URLs in events and links. It also applies the relay's two caps the SDK's `spanLimits` cannot
  * (§5.2: a span name of 128 characters, arrays of 32 items), so a well-behaved page
  * never meets them at the relay.
  */
