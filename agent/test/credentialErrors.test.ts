@@ -68,7 +68,8 @@ describe('describeApiFailure (#1101)', () => {
     [{ status: 400, message: 'bad request' }, 'the model API refused the request (HTTP 400): bad request'],
     [{ status: 400, message: '  ' }, 'the model API refused the request (HTTP 400)'],
   ])('%j', (evidence, said) => {
-    expect(describeApiFailure(evidence)).toBe(said)
+    // A refusal confirmed by the probe; the other classes take no probe.
+    expect(describeApiFailure(evidence, { probe: 'refused' })).toBe(said)
   })
 
   it.each<[ProbeVerdict['verdict'] | undefined, string]>([
@@ -79,7 +80,11 @@ describe('describeApiFailure (#1101)', () => {
       'the model endpoint refused this request (HTTP 403), and the credential could not be checked; try again, then check it under Settings → AI: blocked',
     ],
     ['refused', 'the Claude credential was rejected (HTTP 403); check it under Settings → AI: blocked'],
-    [undefined, 'the Claude credential was rejected (HTTP 403); check it under Settings → AI: blocked'],
+    // No probe confirmed it: not blamed on the key.
+    [
+      undefined,
+      'the model endpoint refused this request (HTTP 403), and the credential could not be checked; try again, then check it under Settings → AI: blocked',
+    ],
   ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
     expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
   })

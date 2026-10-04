@@ -1200,7 +1200,8 @@ export class SessionManager {
     // replica, resumes from a complete transcript.
     if (lost) return { kind: 'lost_claim' }
     const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-    return this.finish(session, turnId, stopped, result, result ? refused : undefined, failure, secrets)
+    // A turn stopped after its refusal was reported is still the caller's.
+    return this.finish(session, turnId, stopped, result, result && stopped === undefined ? refused : undefined, failure, secrets)
   }
 
   /**

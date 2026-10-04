@@ -87,10 +87,8 @@ export function describeApiFailure(
       // A refusal is the key's only once a probe confirms it (fallback.ts).
       if (judged.probe === 'answered') return `the model endpoint refused this request (${http}); the credential itself works${detail}`
       if (judged.probe === 'rate_limited') return `the Claude credential is rate limited (${http}); try again later${detail}`
-      if (judged.probe === 'unknown') {
-        return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
-      }
-      return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+      if (judged.probe === 'refused') return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+      return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
     case 'rate_limited':
       return `the Claude credential is rate limited (${http}); try again later${detail}`
     case 'transient':
