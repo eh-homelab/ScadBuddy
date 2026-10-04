@@ -780,7 +780,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
   afterEach(() => {
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
-    printRunPoll.operationFollowMs = 900_000
+    printRunPoll.operationFollowMs = 1_260_000
   })
 
   const operation = {
@@ -1135,7 +1135,27 @@ describe('render (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
-  it('stops re-sending once its signal aborts (a superseded preview)', async () => {
+  it('after an abort between re-sends, sends once more to learn the job it claimed (review #1066 1.1)', async () => {
+    printRunPoll.intervalMs = 50
+    const keys: (string | null)[] = []
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length > 1) return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+        setTimeout(() => controller.abort(), 10)
+        return accepting()
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('gives up after that one last send when it is still being accepted', async () => {
     printRunPoll.intervalMs = 20
     let posts = 0
     const controller = new AbortController()
@@ -1149,7 +1169,7 @@ describe('render (#1053)', () => {
 
     await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).rejects.toBeDefined()
     await new Promise((resolve) => setTimeout(resolve, 60))
-    expect(posts).toBe(1)
+    expect(posts).toBe(2)
   })
 })
 

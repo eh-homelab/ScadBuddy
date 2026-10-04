@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import timedelta
 from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
@@ -57,7 +57,6 @@ from scadbuddy.library.libraries import (
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
     from scadbuddy.core.components import Components, Core
 
 
@@ -69,7 +68,9 @@ if TYPE_CHECKING:
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
-def answered_as_routes[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+def answered_as_routes[**P, R](
+    fn: Callable[P, Awaitable[R]],
+) -> Callable[P, Coroutine[Any, Any, R]]:
     """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
     checkout is gone, as the 409 every route answers it with (``api/models.py``,
     ``install_library_handlers``), rather than the operation's unexpected 500."""
@@ -132,7 +133,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
                     name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
                 )
                 record = await to_thread_to_end(
-                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
+                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing),
+                    lambda _: library_changed(state.events, slug, name),
                 )
         except LibraryPinChangedError:
             raise ApiError(
@@ -145,7 +147,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def model_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +182,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         slug, name, index = request["slug"], request["name"], request["index"]
         try:
             record = await to_thread_to_end(
-                partial(state.catalogue.unpin_library, slug, name, index=index)
+                partial(state.catalogue.unpin_library, slug, name, index=index),
+                lambda _: library_changed(state.events, slug, name),
             )
         except LibraryPinChangedError:
             raise ApiError(
@@ -196,7 +198,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def _refuse_removal(name: str, commit: str | None) -> None:
@@ -249,16 +250,18 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         async with checkouts.removing():
             await _refuse_removal(name, commit)
             try:
-                removed = await to_thread_to_end(partial(libraries.remove, name, commit))
+                # No model changes -- a removal is refused while one pins it -- so no
+                # `model.updated`: only the checkouts on the volume moved.
+                await to_thread_to_end(
+                    partial(libraries.remove, name, commit),
+                    lambda commits: emit(state.events, LibraryRemoved(name=name, commits=commits)),
+                )
             except LibraryCheckoutNotFoundError:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
                 ) from None
             except LibraryError as error:
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        # No model changes -- a removal is refused while one pins it -- so no
-        # `model.updated`: only the checkouts on the volume moved.
-        emit(state.events, LibraryRemoved(name=name, commits=removed))
         return {}
 
     return [
@@ -294,10 +297,17 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
     imports this module. Its runs are the routes' former bodies, which take the whole
-    ``AppState``; the core is one."""
+    ``AppState`` and read services the ``Core`` does not name, so any other core is
+    refused here rather than failing inside an operation (review #1126 1.2)."""
+    from scadbuddy.api.deps import AppState
     from scadbuddy.library.model_operations import model_kinds
 
-    return [*library_kinds(core, components), *model_kinds(cast("AppState", core))]
+    if not isinstance(core, AppState):
+        raise TypeError(
+            "the model operation kinds run the routes' bodies, which need the API's "
+            f"AppState, not a {type(core).__name__}"
+        )
+    return [*library_kinds(core, components), *model_kinds(core)]
 
 
 OPERATION_KINDS: KindsBuild = _kinds

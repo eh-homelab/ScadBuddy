@@ -9,6 +9,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from temporalio.client import WorkflowUpdateFailedError
+from temporalio.service import RPCError
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -70,6 +72,9 @@ from scadbuddy.workflows.commands import (
 )
 
 router = APIRouter(tags=["jobs"])
+
+#: A render whose `accepted` Update failed for a reason a re-send would not change.
+RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -214,13 +219,16 @@ def require_job(render: RenderService, job_id: str) -> Job:
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); or Temporal, where renders run, is unreachable "
-                "(`temporal-unavailable`, nothing was queued); or the render is still "
-                "being accepted (`command-still-accepting`: send the same request again, "
-                "with the same `Idempotency-Key`, to follow it as one request). Retry "
-                "after `Retry-After` seconds"
+                "limit is set); or Temporal, where renders run, is unreachable or refused "
+                "the start (`temporal-unavailable`, nothing was queued); or the render is "
+                "still being accepted (`command-still-accepting`: send the same request "
+                "again, with the same `Idempotency-Key`, to follow it as one request). "
+                "Retry after `Retry-After` seconds"
             )
-        }
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": "The render's execution refused it (`render-unstartable`)"
+        },
     },
 )
 async def render_model(
@@ -286,8 +294,15 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except TemporalUnavailableError:
+    except (RPCError, TemporalUnavailableError):
+        # Any refusal of the start, as the print and operation routes answer it.
         raise temporal_unavailable("renders") from None
+    except WorkflowUpdateFailedError as error:
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"the render could not be started: {error.cause}",
+            type_=RENDER_UNSTARTABLE_PROBLEM,
+        ) from None
     except StoreFullError as error:
         # `submit` pins the template's snapshot in the blob store before the job exists.
         raise ApiError(

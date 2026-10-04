@@ -46,6 +46,8 @@ class OperationInput(BaseModel):
     search_attributes: bool = False
     #: The request's agent author, when an agent made it.
     author: OperationAuthor | None = None
+    #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
+    idempotency_key: str | None = None
 
 
 class OperationAnswer(BaseModel):
