@@ -327,15 +327,16 @@ const seg = encodeURIComponent
 /**
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
- * `operationFollowMs` is the same for an operation (review #1063): past its effect's
- * five minutes and the server's reconcile of one whose execution is gone.
+ * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
+ * longest kind's `run_timeout` plus the run's cancel grace (library pins: 600 s + 30 s),
+ * as the agent's `operationFollowMs` does (agent/src/tools/registry.ts).
  */
 export const printRunPoll = {
   intervalMs: 1000,
   reattempts: 3,
   acceptingMs: 240_000,
   followMs: 3_600_000,
-  operationFollowMs: 600_000,
+  operationFollowMs: 900_000,
 }
 
 /**

@@ -62,9 +62,9 @@ class OperationStore:
             raise DatabaseRequiredError
         return self._pool
 
-    async def find(self, key: str) -> Operation | None:
+    async def find(self, operation_key: str) -> Operation | None:
         """The key's newest operation, whatever its status: one key is one effect."""
-        return await asyncio.to_thread(self._find, key)
+        return await asyncio.to_thread(self._find, operation_key)
 
     async def get(self, op_id: str) -> Operation | None:
         return await asyncio.to_thread(self._get, op_id)
@@ -75,7 +75,7 @@ class OperationStore:
         *,
         kind: str,
         subject: str,
-        key: str,
+        operation_key: str,
         request: dict[str, Any],
         workflow_id: str,
         workflow_run_id: str,
@@ -89,7 +89,7 @@ class OperationStore:
             op_id,
             kind,
             subject,
-            key,
+            operation_key,
             request,
             workflow_id,
             workflow_run_id,
@@ -117,12 +117,12 @@ class OperationStore:
                 conn, OperationEvent(operation_id=op.id, op_kind=op.kind, subject=op.subject)
             )
 
-    def _find(self, key: str) -> Operation | None:
+    def _find(self, operation_key: str) -> Operation | None:
         with self._require().connection() as conn:
             row = conn.execute(
-                f"SELECT {_COLUMNS} FROM operations WHERE idempotency_key = %s"
+                f"SELECT {_COLUMNS} FROM operations WHERE operation_key = %s"
                 " ORDER BY created_at DESC LIMIT 1",
-                (key,),
+                (operation_key,),
             ).fetchone()
         return Operation.model_validate(row) if row else None
 
@@ -138,7 +138,7 @@ class OperationStore:
         op_id: str,
         kind: str,
         subject: str,
-        key: str,
+        operation_key: str,
         request: dict[str, Any],
         workflow_id: str,
         workflow_run_id: str,
@@ -148,11 +148,11 @@ class OperationStore:
             if retention is not None:
                 conn.execute("DELETE FROM operations WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
-                "INSERT INTO operations (id, kind, subject, idempotency_key, status, request,"
+                "INSERT INTO operations (id, kind, subject, operation_key, status, request,"
                 " workflow_id, workflow_run_id) VALUES (%s, %s, %s, %s, 'running', %s, %s, %s)"
                 " ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING"
                 f" RETURNING {_COLUMNS}",
-                (op_id, kind, subject, key, Jsonb(request), workflow_id, workflow_run_id),
+                (op_id, kind, subject, operation_key, Jsonb(request), workflow_id, workflow_run_id),
             ).fetchone()
             if row is not None:
                 op = Operation.model_validate(row)

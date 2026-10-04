@@ -20,7 +20,12 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.operations.kinds import THREAD_STEPS, OperationKind, ThreadSteps
+from scadbuddy.operations.kinds import (
+    CHECK_ON_BAMBUDDY,
+    THREAD_STEPS,
+    OperationKind,
+    ThreadSteps,
+)
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.workflows.operation_models import (
     FINISH_ACTIVITY,
@@ -51,7 +56,7 @@ def operation_activities(
             uuid.uuid4().hex,
             kind=op.kind,
             subject=op.subject,
-            key=op.key,
+            operation_key=op.key,
             request=op.request,
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
@@ -127,20 +132,22 @@ async def _heartbeating[T](work: Awaitable[T], *, where: str) -> T:
 def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=check_activity(kind.name))
     async def check(request: dict[str, Any]) -> dict[str, Any]:
+        waiting = [False]
+        CHECK_ON_BAMBUDDY.set(waiting)
         try:
-            # Inside the activity's own timeout, so a slow Bambuddy is its problem, as
-            # the route answered it before #1053, not an unexpected failure.
+            # Inside the activity's own timeout, so a slow check is a problem the route
+            # answers, not an unexpected failure. Only a wait on Bambuddy blames it, as
+            # the route did before #1053.
             async with asyncio.timeout(CHECK_BUDGET_SECONDS):
                 return await kind.check(request)
         except TimeoutError:
-            if kind.queue == "bambuddy":
+            if waiting[0]:
                 slow = ApiError(
                     status.HTTP_504_GATEWAY_TIMEOUT,
                     f"Bambuddy did not answer within {CHECK_BUDGET_SECONDS:.0f}s; nothing was done",
                     type_=UNAVAILABLE_PROBLEM,
                 )
             else:
-                # A ``library`` check reads the data volume; Bambuddy is not involved.
                 slow = ApiError(
                     status.HTTP_504_GATEWAY_TIMEOUT,
                     f"the check did not finish within {CHECK_BUDGET_SECONDS:.0f}s; "

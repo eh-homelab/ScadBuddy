@@ -4,7 +4,7 @@ CREATE TABLE operations (
     id text PRIMARY KEY,
     kind text NOT NULL,
     subject text NOT NULL,
-    idempotency_key text NOT NULL,
+    operation_key text NOT NULL,
     status text NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
     request jsonb NOT NULL,
     result jsonb,
@@ -15,5 +15,5 @@ CREATE TABLE operations (
     finished_at timestamptz
 );
 CREATE UNIQUE INDEX operations_execution ON operations (workflow_id, workflow_run_id);
-CREATE INDEX operations_key ON operations (idempotency_key, created_at DESC);
+CREATE INDEX operations_operation_key ON operations (operation_key, created_at DESC);
 CREATE INDEX operations_finished ON operations (finished_at) WHERE finished_at IS NOT NULL;

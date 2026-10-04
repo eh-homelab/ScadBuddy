@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
@@ -44,6 +45,22 @@ class OperationKind:
     def __post_init__(self) -> None:
         if self.where is None:
             object.__setattr__(self, "where", WHERE[self.queue])
+
+
+#: Set by the check activity; true while its check waits on Bambuddy, and left true when
+#: that wait is cut short, so a check out of time blames the right service.
+CHECK_ON_BAMBUDDY: ContextVar[list[bool] | None] = ContextVar("check_on_bambuddy", default=None)
+
+
+@asynccontextmanager
+async def waiting_on_bambuddy() -> AsyncIterator[None]:
+    """Wraps a check's Bambuddy calls: only a timeout inside one is Bambuddy's."""
+    waiting = CHECK_ON_BAMBUDDY.get()
+    if waiting is not None:
+        waiting[0] = True
+    yield
+    if waiting is not None:
+        waiting[0] = False
 
 
 #: A feature's kinds, built over the core and the components (`operations/component.py`).
