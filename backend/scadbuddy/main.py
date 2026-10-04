@@ -578,7 +578,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     queue = settings.temporal_task_queue_library
     schedules = asyncio.create_task(
         _set_up_housekeeping(
-            client, queue, state.config.asset_sweep_interval, state.previews is not None, stop
+            client,
+            queue,
+            state.config.asset_sweep_interval,
+            state.previews.timeout if state.previews is not None else None,
+            stop,
         )
     )
     ops = state.components.get(OPERATIONS)
@@ -608,15 +612,17 @@ def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
 
 
 async def _set_up_housekeeping(
-    client: Client, queue: str, interval: float, previews: bool, stop: asyncio.Event
+    client: Client, queue: str, interval: float, previews: float | None, stop: asyncio.Event
 ) -> None:
-    """The housekeeping Schedules and the preview backfill's (none with ``previews``
-    off), retried until Temporal takes them: a frontend can answer the connect before
-    it can create one."""
+    """The housekeeping Schedules and the preview backfill's (``previews``: the
+    scheduler's render bound; None, previews off: none), retried until Temporal takes
+    them: a frontend can answer the connect before it can create one. Each set-up
+    triggers its Schedule, so the preview one comes last: a retry after the
+    housekeeping ones failed does not run the backfill twice."""
     while not stop.is_set():
         try:
-            await ensure_preview_schedule(client, queue, previews)
             await ensure_schedules(client, queue, interval)
+            await ensure_preview_schedule(client, queue, previews)
             return
         except Exception:
             logger.warning("could not set up the library Schedules; retrying", exc_info=True)

@@ -127,6 +127,19 @@ async def _schedule_runs(state: AppState, schedule_id: str, runs: int) -> Any:
     raise AssertionError(f"{schedule_id} never started {runs} runs")
 
 
+async def _schedule_gone(state: AppState, schedule_id: str) -> None:
+    """Return once the Schedule is deleted, within ~30 s."""
+    assert state.temporal is not None
+    handle = state.temporal.get_schedule_handle(schedule_id)
+    for _ in range(600):
+        try:
+            await handle.describe()
+        except RPCError:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{schedule_id} was never deleted")
+
+
 def backfilled(client: TestClient, state: AppState, runs: int = 1) -> None:
     """Wait for the preview backfill's ``runs``-th run (one per boot) to end; raises
     as that run failed."""
@@ -608,14 +621,10 @@ def test_previews_off_leaves_no_backfill_schedule(settings: Settings, paths: Dat
 
     app, off = _boot(settings.model_copy(update={"preview_renders": False}), StubRender(paths))
     with TestClient(app) as client:
-        # The preview Schedule is set up first, so once the prune's has this boot's
-        # run, the preview one is settled too.
+        # The preview Schedule is set up after the housekeeping ones (final review M3):
+        # once the prune's has this boot's run, the preview one is deleted shortly.
         client.portal.call(_schedule_runs, off, prune_schedule_id_for(queue), 2)  # type: ignore[union-attr]
-        assert off.temporal is not None
-        with pytest.raises(RPCError):
-            client.portal.call(  # type: ignore[union-attr]
-                off.temporal.get_schedule_handle(preview_schedule_id_for(queue)).describe
-            )
+        client.portal.call(_schedule_gone, off, preview_schedule_id_for(queue))  # type: ignore[union-attr]
 
 
 def test_a_render_that_failed_on_the_worker_is_recorded_like_one_that_failed_here(

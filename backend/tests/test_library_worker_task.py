@@ -86,27 +86,29 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     """Review I2: a create that fails after the connect (a frontend up before its
     history service) is retried, not left to the next restart."""
     calls: list[float] = []
-    previews: list[bool] = []
+    previews: list[float | None] = []
 
     async def flaky(client: object, queue: str, interval: float) -> None:
         calls.append(interval)
         if len(calls) == 1:
             raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
 
-    async def preview_schedule(client: object, queue: str, enabled: bool) -> None:
-        previews.append(enabled)
+    async def preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
+        previews.append(render_bound)
 
     monkeypatch.setattr(main, "ensure_schedules", flaky)
     monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
     await asyncio.wait_for(
-        main._set_up_housekeeping(object(), "library", 600.0, True, stop),  # type: ignore[arg-type]
+        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop),  # type: ignore[arg-type]
         5,
     )
     assert calls == [600.0, 600.0]
-    # The preview backfill's Schedule (#1054) is set up on the same retries.
-    assert previews == [True, True]
+    # The preview backfill's Schedule (#1054) is set up once the housekeeping ones
+    # are: each set-up triggers a run, so a retry must not set it up again (final
+    # review M3).
+    assert previews == [360.0]
 
 
 def _broken(error: Exception) -> Callable[..., Any]:
