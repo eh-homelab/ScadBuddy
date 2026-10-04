@@ -342,6 +342,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
             await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
         except Exception:
             logger.exception("could not sweep operation claims")
+            raise
 
     return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
 

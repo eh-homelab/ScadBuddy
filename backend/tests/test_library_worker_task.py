@@ -129,6 +129,9 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "_remote_assets", lambda state: None)
     monkeypatch.setattr(main, "sweep_assets", _broken(RuntimeError("the volume is gone")))
     monkeypatch.setattr(main, "sweep_blobs", _broken(RuntimeError("the refs are gone")))
+    monkeypatch.setattr(
+        main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
+    )
     state = SimpleNamespace(
         render=SimpleNamespace(prune=_broken_async),
         store=SimpleNamespace(content=None),
@@ -136,6 +139,7 @@ async def test_a_failing_sweep_fails_its_activity(
         refs=object(),
         config=SimpleNamespace(job_ttl=60.0),
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(OSError("read-only"))),
+        paths=SimpleNamespace(claims=None),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
