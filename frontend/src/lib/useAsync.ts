@@ -10,9 +10,11 @@ export interface AsyncState<T> {
    * Fetch again in the background: the current data stays until the answer lands.
    * With `accept`, the answer (if still the newest) is applied only when `accept`
    * returns true as it lands: a page holding unsaved edits decides there, and does
-   * whatever else it must (a "changed elsewhere" banner) instead.
+   * whatever else it must (a "changed elsewhere" banner) instead. `failed` is called
+   * when the read (if still the newest) fails.
    */
-  refresh: (accept?: (data: T) => boolean) => void
+  refresh: (accept?: (data: T) => boolean, failed?: () => void) => void
+  /** Shows `next` now; a read already in flight no longer replaces it. */
   setData: (next: T) => void
 }
 
@@ -71,15 +73,18 @@ export function useAsync<T>(
 
   const queued = useRef(false)
   const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
-  const refresh = useCallback((accept?: (data: T) => boolean) => {
+  const failing = useRef<(() => void) | undefined>(undefined)
+  const refresh = useCallback((accept?: (data: T) => boolean, failed?: () => void) => {
     // Signals that arrive together are read once, deciding by the latest `accept`.
     accepting.current = accept
+    failing.current = failed
     if (queued.current) return
     queued.current = true
     queueMicrotask(() => {
       queued.current = false
       const { load: current, key: at } = latest.current
       const decide = accepting.current
+      const fail = failing.current
       const mine = ++sequence.current
       current().then(
         (data) => {
@@ -93,6 +98,7 @@ export function useAsync<T>(
           // A failed background read keeps what is on screen: the next change reads
           // again. Only a key with nothing to show yet shows the error.
           setSnapshot((s) => (s.key === at && s.data !== undefined ? s : { key: at, error }))
+          fail?.()
         },
       )
     })
@@ -109,7 +115,10 @@ export function useAsync<T>(
   }, [topicList, refresh])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
-  const setData = useCallback((data: T) => setSnapshot((s) => ({ ...s, data, error: undefined })), [])
+  const setData = useCallback((data: T) => {
+    ++sequence.current
+    setSnapshot({ key: latest.current.key, data })
+  }, [])
 
   const settled = snapshot.key === key
   return {

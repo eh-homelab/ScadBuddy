@@ -185,6 +185,38 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByTestId('ai-credential-kind-warning')).toHaveTextContent('looks like an Anthropic API key')
   })
 
+  it('warns when a replacement looks like the other Anthropic kind', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Replace the key of ${KEY}` }))
+    await user.type(screen.getByLabelText('New API key'), 'sk-ant-oat01-ZZ34abcd')
+    expect(screen.getByTestId('ai-credential-replace-kind-warning')).toHaveTextContent(
+      'looks like a Claude Code OAuth token',
+    )
+    await user.clear(screen.getByLabelText('New API key'))
+    await user.type(screen.getByLabelText('New API key'), 'sk-ant-api03-ZZ34abcd')
+    expect(screen.queryByTestId('ai-credential-replace-kind-warning')).not.toBeInTheDocument()
+  })
+
+  it('opens the delete dialog without an earlier action\'s error, and shows a failed delete once', async () => {
+    server.use(
+      http.post(`${entries}/default/test`, () =>
+        HttpResponse.json({ detail: 'a connection test ran moments ago' }, { status: 429, headers: { 'Retry-After': '7' } }),
+      ),
+      http.delete(`${entries}/default`, () =>
+        HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Test ${KEY}` }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('moments ago')
+    await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
+    const dialog = await screen.findByRole('dialog')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+  })
+
   it('replaces an OAuth token as an OAuth token', async () => {
     setCredentials([credentialEntry({ id: 'default', kind: 'claude_oauth_token', last4: 'ZZ34' })])
     const saves = bodiesOf('PUT', `${entries}/default`)

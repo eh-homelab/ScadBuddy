@@ -56,6 +56,19 @@ function kindMismatch(kind: AiCredentialKind, secret: string): string | null {
   return null
 }
 
+/** The same warning for a replacement, which cannot change the credential's kind. */
+function replaceMismatch(kind: AiCredentialKind, secret: string): string | null {
+  const typed = secret.trim()
+  const other =
+    kind === 'anthropic_api_key' && typed.startsWith('sk-ant-oat01-')
+      ? 'a Claude Code OAuth token'
+      : kind === 'claude_oauth_token' && typed.startsWith('sk-ant-api03-')
+        ? 'an Anthropic API key'
+        : null
+  if (!other) return null
+  return `This looks like ${other}, and a replacement keeps the credential's kind. Add it as a new credential instead, then delete this one.`
+}
+
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -157,7 +170,7 @@ export function AiCredentialSection() {
   // The agent works a cooldown out at read time, so read again just after the earliest one ends.
   // This browser's clock may run ahead of the database's, which decides: a cooldown that has
   // passed here but still comes back is read again after 1 s, 2 s, 4 s… up to 30 s.
-  const { data: listed, setData } = list
+  const { data: listed, refresh } = list
   const overdue = useRef({ until: Number.NaN, tries: 0 })
   // Bumped when a timed re-read fails, so the effect schedules the next one.
   const [missed, setMissed] = useState(0)
@@ -180,16 +193,16 @@ export function AiCredentialSection() {
       wait = Math.min(OVERDUE_FIRST_MS * 2 ** tries, OVERDUE_MAX_MS)
     }
     const timer = setTimeout(() => {
-      api.listAiCredentials().then(
-        (next) => {
+      refresh(
+        () => {
           setMissed(0)
-          setData(next)
+          return true
         },
         () => setMissed((n) => n + 1),
       )
     }, wait)
     return () => clearTimeout(timer)
-  }, [listed, setData, missed])
+  }, [listed, refresh, missed])
 
   if (notDeployed(list.error)) return null
   const current = list.data
@@ -447,7 +460,11 @@ export function AiCredentialSection() {
                   <Button
                     size="sm"
                     variant="danger"
-                    onClick={() => setConfirmDelete(entry)}
+                    onClick={() => {
+                      // An earlier action's error is not this delete's.
+                      setError(null)
+                      setConfirmDelete(entry)
+                    }}
                     disabled={busy !== null}
                     aria-label={`Delete ${nameOf(entry)}`}
                   >
@@ -468,6 +485,11 @@ export function AiCredentialSection() {
                         spellCheck={false}
                       />
                     </label>
+                    {replaceMismatch(entry.kind, replacement) && (
+                      <p data-testid="ai-credential-replace-kind-warning" className="basis-full text-[12px] text-warn">
+                        {replaceMismatch(entry.kind, replacement)}
+                      </p>
+                    )}
                     <Button
                       type="submit"
                       variant="primary"
@@ -584,7 +606,7 @@ export function AiCredentialSection() {
           {notice}
         </p>
       )}
-      {error && (
+      {error && confirmDelete === null && (
         <p role="alert" className="text-[12px] text-warn">
           {error}
         </p>
