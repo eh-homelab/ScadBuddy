@@ -147,10 +147,16 @@ def test_the_body_gate_holds_it_to_256_kib(relay_client: TestClient) -> None:
     assert streamed.headers["content-type"] == "application/problem+json"
 
 
-@pytest.mark.parametrize("path", [PATH, "/telemetry/v1/traces/", "/telemetry"])
-def test_the_page_is_never_served_for_it(relay_client: TestClient, path: str) -> None:
+@pytest.mark.parametrize(
+    ("path", "status", "allow"),
+    [(PATH, 405, "POST"), ("/telemetry/v1/traces/", 404, None), ("/telemetry", 404, None)],
+)
+def test_the_page_is_never_served_for_it(
+    relay_client: TestClient, path: str, status: int, allow: str | None
+) -> None:
     response = relay_client.get(path)
-    assert response.status_code in (404, 405)
+    assert response.status_code == status
+    assert response.headers.get("allow") == allow
     assert response.headers["content-type"] == "application/problem+json"
 
 
