@@ -69,8 +69,13 @@ is one `library` kind; #1060 splits it). Stacked on `feat/1054-previews` (3f).
 5. **Versioning: `PrintRun` and `Operation` are PINNED, `FollowPrint` is AUTO_UPGRADE.** "Drained
    like `scadbuddy-render`" holds for runs with a bounded life: a print run lasts its slices
    plus `REPEAT_WINDOW` (10 min). A follow lasts the print (hours), so pinning it would hold
-   every drain to its bound; it declares `versioning_behavior=AUTO_UPGRADE` on its
-   `@workflow.defn` and keeps the `workflow.patched` discipline its docstring already states.
+   every drain to its bound; it is AUTO_UPGRADE and keeps the `workflow.patched`
+   discipline its docstring already states. (As built: an unversioned worker refuses a
+   workflow that declares a versioning behavior, "versioning behavior cannot be specified
+   without deployment options", so the versioned worker registers `VersionedFollowPrint`,
+   a subclass declaring AUTO_UPGRADE under the same workflow name, and the in-process one
+   `FollowPrint`. The drain's visibility count skips `WorkflowType="FollowPrint"`, which
+   stays attributed to the old build until its next workflow task.)
    The follow queue's worker carries the same deployment version, so an activity scheduled
    there is routed within the version. The drain bound is `PRINT_DRAIN_TIMEOUT` =
    `REPEAT_WINDOW + 2 × DEFAULT_SLICE_TIMEOUT + 120` s (1920 s).
@@ -395,7 +400,7 @@ prints working.
 
 1. **New file `scadbuddy-print.yaml`**: a Deployment `scadbuddy-print`, one replica, the same
    image line and the three `scadbuddy.eh-homelab.io/*` annotations as `scadbuddy-render.yaml`
-   (so `deploy.reusable.yml` pins it too, once it learns the file; until then pin it by hand),
+   (`deploy.reusable.yml` pins `scadbuddy-print.yaml` too once the file exists, #1060),
    and:
 
 ```yaml

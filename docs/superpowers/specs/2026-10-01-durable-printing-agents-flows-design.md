@@ -994,6 +994,25 @@ Each phase is its own implementation plan and ships alone.
      beyond the print POST's re-send on `command-still-accepting`, move to phase 2. The
      Search Attributes are upserted only with `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` set,
      until the clusters change registers them.
+   - As built (1b, #1060, plan `2026-10-04-durable-phase-1b-print-deployment.md`):
+     `python -m scadbuddy.worker --queue bambuddy` is the `scadbuddy-print` worker, with no
+     data volume. Everything on `bambuddy` reads outputs through `OutputReader`:
+     `RemoteOutputs` calls the API's hidden `/api/v1/internal/outputs/{id}`,
+     `…/model.3mf` (the stored bytes, not the download laid out for the default printer)
+     and `…/naming` (the project stem and `print_settings`). The 3MF is not read from the
+     blob store: an output's copy lives on the volume, and its job's piece is swept. An
+     output's last print (`record_send`) is `output_last_prints` in Postgres, laid over an
+     older `meta.json`'s. `PrintRun` and `Operation` are pinned to the build; `FollowPrint`
+     is AUTO_UPGRADE, as its own class (`VersionedFollowPrint`) because an unversioned
+     worker refuses a versioning behavior, and the drain skips it. The drain is bounded at
+     1920 s (`REPEAT_WINDOW` and two slice timeouts). The API serves `bambuddy` only with
+     `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or the new
+     `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`, unversioned, and always runs the lost-run
+     reconcile and the `print_watches` hand-off. Output delete's inbox copies are the
+     `bambuddy` kind `output_inbox_delete`, run as `output_delete`'s prelude: `Operation`
+     executes it on that queue before the run (`workflow.patched("op-prelude")`), only for
+     `delete_inbox_copies`. The manifests and the Search Attributes are the plan's clusters
+     section.
 2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
    join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
    sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
@@ -1095,7 +1114,7 @@ Each phase is its own implementation plan and ships alone.
      nothing, and a preset delete is one Postgres statement with no openscad. An output
      delete with `delete_inbox_copies` deletes the Bambuddy inbox copies in its run,
      before the files, on `library`, not `bambuddy` as §4.3 has it: acceptable while both
-     workers run in the API process, and #1060 splits it. A media upload is claimed by
+     workers run in the API process, and #1060 splits it (1b's note). A media upload is claimed by
      file: it can be 1 GiB, so it is streamed to disk, hashed as it streams, and moved in
      under that digest (`ClaimStore.hold_file`); a repeat answered from its record leaves
      no file behind. An output create's job checks (404, 409) are its check; fetching

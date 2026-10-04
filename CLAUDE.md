@@ -219,10 +219,22 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
-  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain).
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
+  (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
+  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
+  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
+  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
-  error mapping (`errors.py`).
+  error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
+  `output_reader.py`'s `OutputReader` (#1060): `LocalOutputs` on the volume,
+  `RemoteOutputs` through the API's hidden `/api/v1/internal/outputs/…` routes
+  (`api/internal.py`). An output's last print is `output_last_prints` in Postgres
+  (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
+  `prelude`, another kind run first on its own queue: `output_delete` (library) names
+  `output_inbox_delete` (bambuddy).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
