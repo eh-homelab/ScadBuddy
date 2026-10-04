@@ -6,8 +6,8 @@ The API process's periodic loops are two Schedules that start ``Housekeeping`` o
 ``scadbuddy-prune-<queue>`` prunes settled render jobs every `PRUNE_INTERVAL`, as the
 render service's loop did, whatever that interval. The queue is served in the API
 process, which holds the data volume the sweeps read. Each sweep is best effort, as the
-loop's were: one that fails is logged and the rest still run, and the next tick tries
-again.
+loop's were: one that fails is logged, fails its activity (the run returns it, and
+Temporal's UI shows it), the rest still run, and the next tick tries again.
 """
 
 from __future__ import annotations
@@ -63,6 +63,11 @@ SWEEPS = (
 PRUNE_SWEEPS = SWEEPS[:1]
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
+#: A long sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
+#: `SWEEP_TIMEOUT`, so the Schedules' overlap SKIP does not hold the next ticks back.
+HEARTBEAT_TIMEOUT = timedelta(minutes=1)
+#: The prune is two deletes; it fits well inside the prune Schedule's interval.
+PRUNE_TIMEOUT = timedelta(minutes=2)
 
 
 @workflow.defn(name=HOUSEKEEPING_WORKFLOW)
@@ -72,9 +77,11 @@ class Housekeeping:
         failed: list[str] = []
         for sweep in SWEEPS if sweeps is None else sweeps:
             try:
+                prune = sweep in PRUNE_SWEEPS
                 await workflow.execute_activity(
                     sweep,
-                    start_to_close_timeout=SWEEP_TIMEOUT,
+                    start_to_close_timeout=PRUNE_TIMEOUT if prune else SWEEP_TIMEOUT,
+                    heartbeat_timeout=None if prune else HEARTBEAT_TIMEOUT,
                     # The next tick is the retry, as it was for the loop.
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
