@@ -268,7 +268,7 @@ export type TurnOutcome =
 export type Turn = { turnId: string; done: Promise<TurnOutcome> }
 
 /** A turn that ended on a failed model request (fallback.ts `onRefused`). */
-type Refused = { evidence: FailureEvidence; requests: number }
+type Refused = { evidence: FailureEvidence; credentialWorks: boolean }
 
 export type StartOptions = {
   origin: Origin
@@ -1152,8 +1152,8 @@ export class SessionManager {
         ...(this.deps.probe ? { probe: this.deps.probe } : {}),
         // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
         ...(resume ? { priorCostUsd: session.costUsd } : {}),
-        onRefused: (evidence, requests) => {
-          refused = { evidence, requests }
+        onRefused: (evidence, judged) => {
+          refused = { evidence, ...judged }
         },
       })
       for await (const message of turn) {
@@ -1347,8 +1347,9 @@ export class SessionManager {
         // `is_error` set, and its "API Error: …" text as a synthetic reply
         // (#1101). Redacted here too: the outcome reaches MCP callers without
         // scrubForLog. The refused request is not a turn; any before it are.
-        const refusal = redact(describeApiFailure(refused.evidence), secrets)
-        turns = session.turns + Math.max(result.num_turns - refused.requests, 0)
+        const refusal = redact(describeApiFailure(refused.evidence, refused), secrets)
+        // `num_turns` counts the refused request (fallback.ts `onRefused`).
+        turns = session.turns + Math.max(result.num_turns - 1, 0)
         status = 'failed'
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
         tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal }))

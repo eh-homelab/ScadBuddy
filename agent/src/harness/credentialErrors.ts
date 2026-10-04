@@ -71,13 +71,16 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
 
 /**
  * What the user is told about a turn that ended on a failed model request
- * (#1101), from the same evidence `classifyFailure` reads. Claude Code's own
+ * (#1101), from the same evidence `classifyFailure` reads, unless a probe
+ * found the credential works. Claude Code's own
  * "API Error: …" text, when there is one, follows as the detail.
  */
-export function describeApiFailure(evidence: FailureEvidence): string {
+export function describeApiFailure(evidence: FailureEvidence, judged: { credentialWorks?: boolean } = {}): string {
   const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
   const text = evidence.message?.trim()
   const detail = text ? `: ${text}` : ''
+  // A probe answered: the refusal was this request's (fallback.ts), not the key's.
+  if (judged.credentialWorks) return `the model endpoint refused this request (${http}); the credential itself works${detail}`
   switch (classifyFailure(evidence)) {
     case 'permanent':
       return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`

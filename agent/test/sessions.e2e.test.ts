@@ -271,6 +271,43 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'api_error' })])
   }, 60_000)
 
+  it('a refusal the probe finds is not the credential’s says so, and does not send the user to Settings (#1101)', async () => {
+    script = () => ({ error: { status: 403, type: 'permission_error', message: 'blocked by policy' } })
+    const m = await replica({ probe: () => Promise.resolve({ verdict: 'answered', until: new Date(Date.now() + 1000) }) })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused this request \(HTTP 403\); the credential itself works/) })
+    expect(JSON.stringify(done)).not.toContain('Settings')
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+  }, 60_000)
+
+  it('a refused request on one credential is not a turn when the next one answers (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-working-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { text: 'a box' }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+  }, 60_000)
+
   it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
     script = (r) =>
       conversation(r).includes('tool_result')

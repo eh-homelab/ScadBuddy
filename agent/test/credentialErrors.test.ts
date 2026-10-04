@@ -69,6 +69,12 @@ describe('describeApiFailure (#1101)', () => {
   ])('%j', (evidence, said) => {
     expect(describeApiFailure(evidence)).toBe(said)
   })
+
+  it('says the credential works when a probe found it does, whatever the status says', () => {
+    expect(describeApiFailure({ status: 403, message: 'blocked by policy' }, { credentialWorks: true })).toBe(
+      'the model endpoint refused this request (HTTP 403); the credential itself works: blocked by policy',
+    )
+  })
 })
 
 describe('rateLimitResetFromHeaders', () => {

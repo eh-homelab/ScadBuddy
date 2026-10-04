@@ -141,10 +141,11 @@ export type FallbackOptions = {
   /**
    * Called when the turn ends on a failed model request, before its held
    * synthetic message and result are yielded (#1101): the failure as this
-   * file judged it, and how many refused requests the result's `num_turns`
-   * counts (each attempt that ended on one counts its own).
+   * file judged it, and whether a probe found the credential itself works
+   * (so the request, not the key, was refused). The result's `num_turns`
+   * counts that refused request; an earlier attempt's never is.
    */
-  onRefused?: (failure: FailureEvidence, refusedRequests: number) => void
+  onRefused?: (failure: FailureEvidence, judged: { credentialWorks: boolean }) => void
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -253,8 +254,6 @@ export async function* runWithFallback(
   let sawInit = false
   /** Whether this attempt resumes a session, so its total carries what came before. */
   let resumed = base.resume !== undefined
-  /** Earlier attempts that ended on a refused request, which their turns (in `spend`) count. */
-  let refusedRequests = 0
 
   for (let i = 0; i < candidates.length; i++) {
     const current = candidates[i] as PooledCredential
@@ -358,9 +357,9 @@ export async function* runWithFallback(
       controller.abort()
     }
 
-    const release = function* (): Generator<SDKMessage> {
+    const release = function* (credentialWorks = false): Generator<SDKMessage> {
       const ended = resultHeld ? apiFailure(result, synthetic, lastRetry) : undefined
-      if (ended) options.onRefused?.(ended, refusedRequests + 1)
+      if (ended) options.onRefused?.(ended, { credentialWorks })
       for (const m of held) yield withSpent(m, spend, resumed)
     }
     if (base.signal?.aborted) {
@@ -393,7 +392,7 @@ export async function* runWithFallback(
         return
       }
       if (check.verdict === 'answered') {
-        yield* release()
+        yield* release(true)
         if (thrown !== undefined) throw thrown
         throw new Error(`the model endpoint refused this request (${reason}); the credential itself works`)
       }
@@ -451,8 +450,8 @@ export async function* runWithFallback(
       return
     }
     spend.usd += own
-    spend.turns += turns
-    if (resultHeld) refusedRequests += 1
+    // The refused request that ended the attempt is not a turn (#1101).
+    spend.turns += resultHeld ? Math.max(turns - 1, 0) : turns
     if (sessionSeen !== undefined) {
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT

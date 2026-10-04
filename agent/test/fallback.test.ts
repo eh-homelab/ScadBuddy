@@ -62,7 +62,7 @@ function harness(script: Script) {
   const runs: HarnessRun[] = []
   const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
   const probes: (Credential & { model: string | undefined; signal: AbortSignal | undefined })[] = []
-  const refusals: { failure: FailureEvidence; requests: number }[] = []
+  const refusals: { failure: FailureEvidence; credentialWorks: boolean }[] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -104,8 +104,8 @@ function harness(script: Script) {
               return typeof probeVerdict === 'function' ? probeVerdict() : Promise.resolve(probeVerdict)
             },
             ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
-            onRefused: (failure, requests) => {
-              refusals.push({ failure, requests })
+            onRefused: (failure, judged) => {
+              refusals.push({ failure, ...judged })
             },
           },
         )) {
@@ -284,10 +284,11 @@ describe('runWithFallback (#1093)', () => {
     )
     const { messages } = await h.collect([A, B], { maxTurns: 10, maxBudgetUsd: 1 })
     expect(kinds(messages)).toEqual(['system/init', 'assistant', 'user', 'assistant', 'result/success'])
-    // The cost is not added again; the turns are, since num_turns is the query's own.
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.04, num_turns: 3 })
+    // The cost is not added again; the turns are, since num_turns is the query's own,
+    // less A's refused request, which is not a turn (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.04, num_turns: 2 })
     // The budget check is the query's own spend, so the next attempt gets what is left.
-    expect(h.runs[1]).toMatchObject({ resume: SESSION, prompt: CONTINUE_PROMPT, maxTurns: 8, maxBudgetUsd: 0.97 })
+    expect(h.runs[1]).toMatchObject({ resume: SESSION, prompt: CONTINUE_PROMPT, maxTurns: 9, maxBudgetUsd: 0.97 })
   })
 
   it('counts what the session spent before this turn once, on a turn that itself resumed', async () => {
@@ -298,7 +299,8 @@ describe('runWithFallback (#1093)', () => {
         : [init(), success('done', 0.54, 1)],
     )
     const { messages } = await h.collect([A, B], { resume: SESSION, sessionId: undefined, maxBudgetUsd: 0.5 }, undefined, 0.5)
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.54, num_turns: 3 })
+    // A's tool call and B's reply; A's refused request is not a turn (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.54, num_turns: 2 })
     expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.47, 10)
   })
 
@@ -320,11 +322,11 @@ describe('runWithFallback (#1093)', () => {
         : { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.05, 1)], throws: new Error('x') },
     )
     const { messages } = await h.collect([A, B])
-    // B resumed: its 0.05 already holds A's 0.03.
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 3 })
+    // B resumed: its 0.05 already holds A's 0.03. A adds its tool call, not its refused request (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 2 })
   })
 
-  it('says what the turn ended on, and how many refused requests its turns count (#1101)', async () => {
+  it('says what the turn ended on, and counts no earlier attempt’s refused request as a turn (#1101)', async () => {
     const h = harness((_r, n) =>
       n === 0
         ? { messages: [init(), toolUse(), toolResult(), retry(529, 'server_error'), apiError('API Error: 429 slow down', 'rate_limit'), errorResult(429, 'API Error: 429 slow down', 0.03, 2)], throws: new Error('x') }
@@ -332,10 +334,23 @@ describe('runWithFallback (#1093)', () => {
     )
     const { messages } = await h.collect([A, B], {}, { verdict: 'unknown', until: new Date(Date.now() + 60_000) })
     // B's own evidence: neither A's 529 retry nor its rate_limit category.
-    expect(h.refusals).toEqual([{ failure: { status: null, category: 'invalid_request', message: 'API Error: 400 bad' }, requests: 2 }])
-    // A's tool call (1 turn) and the two refused requests.
-    expect(messages.at(-1)).toMatchObject({ type: 'result', num_turns: 3 })
+    expect(h.refusals).toEqual([
+      { failure: { status: null, category: 'invalid_request', message: 'API Error: 400 bad' }, credentialWorks: false },
+    ])
+    // A's tool call (1 turn), and B's own refused request, which the manager takes off.
+    expect(messages.at(-1)).toMatchObject({ type: 'result', num_turns: 2 })
     expect(kinds(messages).slice(-2)).toEqual(['assistant', 'result/success'])
+  })
+
+  it('says the credential works when the probe answers after a refusal (#1101)', async () => {
+    const h = harness(() => ({
+      messages: [init(), apiError('API Error: 403 blocked by policy', 'unknown'), errorResult(403, 'API Error: 403 blocked by policy')],
+      throws: new Error('x'),
+    }))
+    await h.collect([A, B], {}, { verdict: 'answered', until: new Date() })
+    // No fallback: the request, not the key, was refused.
+    expect(h.runs).toHaveLength(1)
+    expect(h.refusals).toEqual([{ failure: expect.objectContaining({ status: 403 }), credentialWorks: true }])
   })
 
   it('reports no refusal when the turn ends on a reply, or on a synthetic message it went on from (#1101)', async () => {
