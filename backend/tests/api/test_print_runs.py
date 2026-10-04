@@ -26,6 +26,7 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
@@ -513,6 +514,51 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.headers["Retry-After"] == "5"
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("code", [RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED])
+@respx.mock
+def test_a_transient_rpc_error_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, code: RPCStatusCode
+) -> None:
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise RPCError("blip", code, b"")
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+
+
+@respx.mock
+def test_a_permanent_rpc_error_is_a_500_logged_at_error(
+    client: TestClient,
+    model: str,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review #1061 (3) 3: a wrong namespace is a misconfiguration, not a blip, so it is
+    never "try again shortly"."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise RPCError("namespace not found", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    with caplog.at_level("ERROR"):
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"/api/v1/print/outputs/{output_id}/run", json=body()
+        )
+
+    assert response.status_code == 500, response.text
+    assert "temporal-unavailable" not in response.json()["type"]
+    assert any(record.levelname == "ERROR" for record in caplog.records)
 
 
 def _insert_run(conninfo: str, output_id: str, key: str) -> str:

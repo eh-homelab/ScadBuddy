@@ -17,7 +17,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import (
     OutputIdPath,
@@ -83,6 +83,8 @@ logger = logging.getLogger(__name__)
 #: Problem ``type``s for a print the route could not hand to Temporal (#1052).
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
+#: The `RPCError`s that answer `temporal-unavailable`; any other is a 500.
+TRANSIENT_RPC = frozenset({RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED})
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -363,7 +365,12 @@ async def accept_run(
             type_=STILL_ACCEPTING_PROBLEM,
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
-    except (RPCError, TemporalUnavailableError):
+    except (RPCError, TemporalUnavailableError) as error:
+        # Only an unreachable or slow frontend is worth retrying; a wrong namespace or
+        # a refused permission is a misconfiguration, for the 500 handler to log at
+        # ERROR (review #1061 (3) 3).
+        if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
+            raise
         logger.warning("could not start a print run on Temporal", exc_info=True)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
