@@ -194,7 +194,11 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   the call runs once more. A reply other than "Carry on without the tab" also retries.
   After 5 minutes with no reply the call fails with `timed_out`, and the agent carries on
   with what needs no tab; a timeout never approves anything. Only once per call: a tab
-  that came back on another replica is still not here, and the retry says so.
+  that came back on another replica is still not here, so the retry fails with the
+  hub's usual `no browser attached: …` error (it names the other replica only when the
+  session's own tab is the one that is gone, not when the user re-paired from a tab on
+  another replica). A turn waits for its tab at most 3 times (`TAB_WAITS_PER_TURN`), and
+  after "Carry on without the tab" or a timeout it does not ask again that turn.
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.

@@ -434,3 +434,50 @@ def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjec
             )
         )
     assert "render_jobs_settled_at" in plan
+
+
+def test_a_coalesced_submit_returns_the_first_callers_traceparent(
+    projection: JobProjection,
+) -> None:
+    key = render_key("demo", {"width": 1}, None)
+    first = _job(width=1)
+    first.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    projection.submit(first, key)
+    joined = projection.submit(_job(width=1), key)
+    assert joined.coalesced
+    assert joined.job.traceparent == first.traceparent
+    assert projection.read(first.id).traceparent == first.traceparent
+
+
+def test_a_resubmit_that_supersedes_its_twin_adopts_a_traceparent_the_row_lacks(
+    projection: JobProjection,
+) -> None:
+    """The `supersedes` coalesce, like ON CONFLICT, keeps the first traceparent and
+    fills one in only where the row has none."""
+    key = render_key("demo", {"width": 1}, None)
+    first = _job(width=1)
+    projection.submit(first, key)
+    again = _job(width=1)
+    again.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    joined = projection.submit(again, key, supersedes=first.id)
+    assert joined.coalesced
+    assert joined.job.traceparent == again.traceparent
+    assert projection.read(first.id).traceparent == again.traceparent
+    later = _job(width=1)
+    later.traceparent = "00-1af7651916cd43dd8448eb211c80319c-c7ad6b7169203331-01"
+    projection.submit(later, key, supersedes=first.id)
+    assert projection.read(first.id).traceparent == again.traceparent
+
+
+def test_a_resubmit_of_a_running_twin_adopts_no_traceparent(projection: JobProjection) -> None:
+    """A running row's workflow already has its parent; the coalesce writes nothing."""
+    key = render_key("demo", {"width": 2}, None)
+    first = _job(width=2)
+    projection.submit(first, key)
+    projection.mark_started(first.id)
+    again = _job(width=2)
+    again.traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    joined = projection.submit(again, key, supersedes=first.id)
+    assert joined.coalesced
+    assert joined.job.traceparent is None
+    assert projection.read(first.id).traceparent is None
