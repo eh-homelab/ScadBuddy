@@ -19,7 +19,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
-from typing import IO, Annotated, Any
+from typing import IO, TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -58,6 +58,9 @@ from scadbuddy.library.media import (
 )
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+
+if TYPE_CHECKING:
+    from _hashlib import HASH
 
 router = APIRouter(tags=["media"])
 
@@ -119,7 +122,7 @@ class _Received:
     files: dict[str, FilePath] = field(default_factory=dict)
     sizes: dict[str, int] = field(default_factory=dict)
     #: Each file part's sha256, computed while it streamed: its claim's name (#1054).
-    hashes: dict[str, Any] = field(default_factory=dict)
+    hashes: dict[str, HASH] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
 
     def discard(self) -> None:

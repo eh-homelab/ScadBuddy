@@ -181,7 +181,9 @@ on shutdown.
     converges the uploads with the store (reconcile and backfill), so expect that
     Bambuddy traffic right after a deploy. A run still open from before the start
     goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
-    paused across restarts, and a start does not trigger it. Settled render jobs are pruned every 300 s by a second
+    paused across restarts, and a start does not trigger it: while it is paused nothing
+    sweeps the uploads or reconciles them with the store, and a start only backfills
+    them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
@@ -215,7 +217,10 @@ on shutdown.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
     (`render_jobs`), so accepted renders survive a restart. A row is written by its
     workflow's first activity, so it exists only once Temporal has the render; with
-    Temporal unreachable a render is refused (503 `temporal-unavailable`).
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
+    every five minutes the API fails the rows nothing will settle: one whose workflow
+    closed without settling it (terminated by hand, say), and a pending one an older
+    release left with no workflow running.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
@@ -417,7 +422,9 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   output's record, its stored `model.3mf` and the names taken from the model's files from
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, not in the OpenAPI
   schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
-  `http://scadbuddy:8080`; never the ingress). An output's last print is recorded in
+  `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
+  like the rest of the API they have no auth today, so whoever reaches the API reaches
+  them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
@@ -446,11 +453,15 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   API out with `Recreate`, so no old replica keeps polling the queue unversioned beside
   the new worker.
 - **Upgrading to the release with #1053** adds two workflow types (`Operation`,
-  `FollowPrint`) and their activities to that queue. A replica still on the old build
-  takes the new tasks and fails them as unregistered; nothing is corrupted (the task is
-  retried), but each Bambuddy write that lands there stalls until the old pod is gone.
-  Roll this release out with `Recreate`, or scale the old replicas to 0 before the new
-  ones start.
+  `FollowPrint`) and their activities to that queue, and the `<bambuddy queue>-follow`
+  queue beside it. The follow worker has `FOLLOW_SLOTS` (200, `bambuddy/follow.py`) slots
+  per process: each print holds one while it moves (a poke's old attempt holds its own
+  for up to about 24 s more). Past them, new prints wait on the queue unfollowed: watch
+  `scadbuddy_print_follows_running`, and the warning "every follow slot is taken". A
+  replica still on the old build takes the new tasks and fails them as unregistered;
+  nothing is corrupted (the task is retried), but each Bambuddy write that lands there
+  stalls until the old pod is gone. Roll this release out with `Recreate`, or scale the
+  old replicas to 0 before the new ones start.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   should be at least the Temporal namespace's retention. A retry of an operation whose
   record was deleted while Temporal still holds its closed execution answers 409 "may

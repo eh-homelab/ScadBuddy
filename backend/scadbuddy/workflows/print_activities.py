@@ -18,14 +18,14 @@ import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.print_run import (
@@ -142,11 +142,12 @@ class PrintActivities:
         """Today's refusals before the 202 (§5.1 step 2); nothing is written."""
         if (
             input.accepted_at is not None
-            and datetime.now(UTC) - input.accepted_at > CLIENT_ACCEPTING
+            and activity.info().started_time - input.accepted_at > CLIENT_ACCEPTING
         ):
             # No worker ran this in time and every client has stopped re-sending it, so
             # nobody would see it print (review #1061 1b). The workflow checks again
-            # once the check has ended, right before the record.
+            # once the check has ended, right before the record. Both times are the
+            # server's: the execution's start and this attempt's (review #1061 3).
             raise ApplicationError(UNWAITED.detail, UNWAITED, type=REFUSED, non_retryable=True)
         settings = self._settings()
         spec = input.source
@@ -274,10 +275,16 @@ class PrintActivities:
     async def finish(self, input: FinishInput) -> PrintRunResult:
         """What the run queued, for ``print_succeed`` to record, and the project's printer
         and nozzle remembered for its next Generate (#317). Every plate is queued, so
-        that is best effort: a failure there never fails the run (review #1061 1a)."""
+        that is best effort: a failure there never fails the run (review #1061 1a), and
+        the workflow retries this without limit (review #1061 1). Bambuddy's settings
+        removed meanwhile would never come back on a retry, so that fails the run."""
         settings = self._settings()
         planned = input.planned
-        async with client_for(settings) as client:
+        try:
+            config = BambuddyConfig.from_settings(settings)
+        except ApiError as error:
+            raise raised_as(error, FAILED) from None
+        async with BambuddyClient(config) as client:
             if planned.project_id is not None:
                 try:
                     source = await self._source(client, input.input.source, settings)

@@ -16,6 +16,7 @@ from temporalio.client import (
     ScheduleOverlapPolicy,
     WorkflowExecutionStatus,
 )
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
@@ -26,6 +27,7 @@ from scadbuddy.workflows.previews import (
     PREVIEW_BACKFILL_WORKFLOW,
     REFRESH_ACTIVITY,
     REFRESH_TIMEOUT,
+    UNRUN_FAILURE,
     PreviewBackfill,
     ensure_preview_schedule,
     preview_schedule_id_for,
@@ -38,11 +40,17 @@ pytestmark = pytest.mark.requires_temporal
 
 class FakePreviews:
     def __init__(
-        self, due: list[str], *, rendered: bool = True, failing: str | None = None
+        self,
+        due: list[str],
+        *,
+        rendered: bool = True,
+        failing: str | None = None,
+        unrun: str | None = None,
     ) -> None:
         self.due = due
         self.rendered = rendered
         self.failing = failing
+        self.unrun = unrun
         self.listed = 0
         self.refreshed: list[str] = []
 
@@ -57,6 +65,8 @@ class FakePreviews:
             self.refreshed.append(slug)
             if slug == self.failing:
                 raise RuntimeError(f"{slug} broke")
+            if slug == self.unrun:
+                raise ApplicationError("no render worker", type=UNRUN_FAILURE)
             return self.rendered
 
         return [previews_due, preview_refresh]
@@ -127,6 +137,26 @@ async def test_a_failing_refresh_does_not_stop_the_rest(client: Client) -> None:
     assert fake.refreshed == ["a", "b", "c"]
     # Nothing rendered, so nothing paused.
     assert await _timers(client, workflow_id) == 0
+
+
+async def test_a_render_that_could_not_run_ends_the_run(client: Client) -> None:
+    """Review #1195 2: the render queue is unreachable, so each later refresh would
+    only wait out the same timeout; the run ends with that model failed, and the next
+    tick is the retry."""
+    queue = _queue()
+    fake = FakePreviews(["a", "b", "c"], unrun="b")
+    workflow_id = f"previews-{uuid.uuid4().hex}"
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[PreviewBackfill],
+        activities=fake.activities(),  # type: ignore[arg-type]
+    ):
+        failed = await client.execute_workflow(
+            PreviewBackfill.run, id=workflow_id, task_queue=queue
+        )
+    assert failed == ["b"]
+    assert fake.refreshed == ["a", "b"]
 
 
 async def test_a_long_backlog_continues_as_new(client: Client) -> None:

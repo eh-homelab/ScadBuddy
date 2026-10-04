@@ -660,7 +660,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
                 {kind.name: kind for kind in kinds},
             ),
         ],
-        follow_print=FollowActivities(follower).follow_print,
+        follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
     )
 
 

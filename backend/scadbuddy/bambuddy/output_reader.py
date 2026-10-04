@@ -10,6 +10,7 @@ and :class:`RemoteOutputs` through the API's internal routes (``api/internal.py`
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -17,6 +18,7 @@ import httpx
 from fastapi import status
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
@@ -28,6 +30,11 @@ INTERNAL_OUTPUTS = "/api/v1/internal/outputs"
 REMOTE_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 #: RFC 9457's members; the rest of a problem document is its extensions.
 PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
+JSON_MEDIA_TYPE = "application/json"
+#: The waits between attempts while the API does not answer at all (45 s in all): a
+#: restart under Recreate takes tens of seconds, and one attempt of ``print_check``
+#: (``ACCEPT_TIMEOUT``, 60 s) still fits around it.
+RESTART_DELAYS = (1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 10.0)
 
 
 class OutputNaming(BaseModel):
@@ -97,22 +104,52 @@ def _problem(response: httpx.Response) -> ApiError:
     )
 
 
-def _answer(response: httpx.Response) -> httpx.Response:
-    """A success, or the API's problem as `ApiError`. Anything else (a proxy's 502, a
-    restart) raises as is, so the activity's retry policy retries it."""
+class UnexpectedAnswerError(httpx.HTTPError):
+    """A success that is not what the internal route answers: the SPA's ``index.html``
+    fallback (``static.py``) of a URL that missed the API, say."""
+
+
+def _media_type(response: httpx.Response) -> str:
+    return str(response.headers.get("content-type", ""))
+
+
+def _is_problem(response: httpx.Response) -> bool:
+    return _media_type(response).startswith(PROBLEM_MEDIA_TYPE)
+
+
+def _answer(response: httpx.Response, media_type: str) -> httpx.Response:
+    """A success of ``media_type``, or the API's problem as `ApiError`. Anything else (a
+    proxy's 502, a restart, a page that is not the API's) raises as is, so the activity's
+    retry policy retries it."""
     if response.is_success:
+        if not _media_type(response).startswith(media_type):
+            raise UnexpectedAnswerError(
+                f"{response.request.url} answered {_media_type(response)!r}, not {media_type!r}"
+            )
         return response
-    if response.headers.get("content-type", "").startswith(PROBLEM_MEDIA_TYPE):
+    if _is_problem(response):
         raise _problem(response)
     response.raise_for_status()
     return response
+
+
+def _gone(response: httpx.Response) -> bool:
+    """The API's own 404 for the output; any other 404 (a misrouted URL) is an error."""
+    return response.status_code == status.HTTP_404_NOT_FOUND and _is_problem(response)
 
 
 class RemoteOutputs:
     """The reader through the API's cluster-internal routes (``base_url``,
     ``SCADBUDDY_API_INTERNAL_URL``): the print worker's, which mounts no volume."""
 
-    def __init__(self, base_url: str, *, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._sleep = sleep
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=REMOTE_TIMEOUT
         )
@@ -120,18 +157,28 @@ class RemoteOutputs:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _get(self, path: str) -> httpx.Response:
+        """One GET, retried on a transport error (the API restarting: the README rolls it
+        with Recreate) for about `RESTART_DELAYS`; past it the error is the activity's."""
+        for delay in RESTART_DELAYS:
+            try:
+                return await self._client.get(path)
+            except httpx.TransportError:
+                await self._sleep(delay)
+        return await self._client.get(path)
+
     async def get(self, output_id: str) -> OutputMeta:
-        response = await self._client.get(f"{INTERNAL_OUTPUTS}/{output_id}")
-        if response.status_code == status.HTTP_404_NOT_FOUND:
+        response = await self._get(f"{INTERNAL_OUTPUTS}/{output_id}")
+        if _gone(response):
             raise OutputNotFoundError(output_id)
-        return OutputMeta.model_validate_json(_answer(response).content)
+        return OutputMeta.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
     async def model_3mf(self, output_id: str) -> bytes | None:
-        response = await self._client.get(f"{INTERNAL_OUTPUTS}/{output_id}/model.3mf")
-        if response.status_code == status.HTTP_404_NOT_FOUND:
+        response = await self._get(f"{INTERNAL_OUTPUTS}/{output_id}/model.3mf")
+        if _gone(response):
             return None
-        return _answer(response).content
+        return _answer(response, THREE_MF_MEDIA_TYPE).content
 
     async def naming(self, meta: OutputMeta) -> OutputNaming:
-        response = await self._client.get(f"{INTERNAL_OUTPUTS}/{meta.id}/naming")
-        return OutputNaming.model_validate_json(_answer(response).content)
+        response = await self._get(f"{INTERNAL_OUTPUTS}/{meta.id}/naming")
+        return OutputNaming.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)

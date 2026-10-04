@@ -128,3 +128,35 @@ def test_a_fetch_refused_on_a_full_budget_leaves_no_url_claim(
     claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
     assert not claim.exists()
     assert _workflow_ids(app, "asset_fetch") == []
+
+
+def test_a_fetch_whose_run_finds_a_full_budget_leaves_no_url_claim(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1194 1.1: the route's check passes, the run's finds the budget full. The
+    operation's recorded 503 is final, so the URL's claim is released."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
+    checks = iter([False])
+    monkeypatch.setattr(_state(app).imports, "full", lambda: next(checks, True))
+    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    assert response.status_code == 503, response.text
+    assert len(_workflow_ids(app, "asset_fetch")) == 1
+    claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
+    assert not claim.exists()
+
+
+@pytest.mark.usefixtures("fake_dns")
+@respx.mock
+def test_an_asset_fetch_names_the_host_of_a_url_pasted_with_whitespace(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """Review #1194 2.2: the subject and the recorded URL come from the URL as fetched."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg"
+    respx.get(url).mock(return_value=httpx.Response(200, content=_svg(4)))
+    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": f" {url}  "})
+    assert response.status_code == 201, response.text
+    pool = _state(app).components.get(OPERATIONS).store._require()
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
+    assert rows[0]["subject"] == "openmoji.org"
+    assert rows[0]["request"]["shown"] == url

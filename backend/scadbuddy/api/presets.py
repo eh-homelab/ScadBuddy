@@ -256,7 +256,6 @@ async def update_preset(
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ParamPreset | JSONResponse:
-    require_saved(slug, preset_id)
     result = await run_operation(
         ops,
         response,

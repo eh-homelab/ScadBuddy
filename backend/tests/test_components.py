@@ -29,6 +29,7 @@ from scadbuddy.core.components import (
 )
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -389,3 +390,11 @@ def test_two_features_claiming_one_kind_name_are_refused() -> None:
 
     with pytest.raises(DuplicateKindError, match="'send'"):
         build_kinds(CORE, Components(CORE, []), [lambda c, cs: [kind("send")]] * 2)
+
+
+def test_the_model_kinds_refuse_a_core_that_is_not_the_app_state() -> None:
+    """Review #1126 1.2: their runs are the routes' bodies, which read services the
+    ``Core`` does not name; a core without them is refused when the kinds are built,
+    not with an ``AttributeError`` inside an operation."""
+    with pytest.raises(TypeError, match="AppState"):
+        library_operations.OPERATION_KINDS(CORE, Components(CORE, []))

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 
 import httpx
@@ -15,6 +19,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from scadbuddy.library.url_import import shown_url
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.operation_models import FINISH_ACTIVITY
 
@@ -218,6 +223,46 @@ def test_an_import_with_every_resolver_thread_busy_is_a_503_not_the_refusal(
     assert "resolver" in response.json()["detail"]
     assert not mock.calls
     assert client.get("/api/v1/models").json() == []
+
+
+@respx.mock
+def test_an_import_whose_run_finds_the_budget_full_waits_for_a_permit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1126 1.1: the run's replica can be out of permits when the route's had
+    room (another replica's library worker, or a second import in between). The run
+    waits for one rather than recording a 503 that every keyed re-send replays."""
+    respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
+    imports: ImportPermits = getattr(client.app.state, STATE_ATTR).imports  # type: ignore[attr-defined]
+    held = ExitStack()
+    filled = threading.Event()
+    get = ClaimStore.get
+
+    def fill_then_get(self: ClaimStore, name: str) -> bytes:
+        # The run's first step reads its URL's claim: after the route and the check.
+        if not filled.is_set():
+            while not imports.full():
+                held.enter_context(imports.hold())
+            filled.set()
+        return get(self, name)
+
+    monkeypatch.setattr(ClaimStore, "get", fill_then_get)
+    key = {"Idempotency-Key": uuid.uuid4().hex}
+
+    async def release() -> None:
+        held.close()
+
+    with ThreadPoolExecutor(1) as pool:
+        sent = pool.submit(client.post, "/api/v1/models/import", json={"url": RAW_URL}, headers=key)
+        assert filled.wait(30)
+        time.sleep(1)  # the run reaches the full budget
+        client.portal.call(release)  # type: ignore[union-attr]
+        response = sent.result(timeout=60)
+
+    assert response.status_code == 201, response.text
+    again = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=key)
+    assert again.status_code == 201, again.text
+    assert again.json() == response.json()
 
 
 @respx.mock

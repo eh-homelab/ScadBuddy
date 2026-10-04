@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import timedelta
 from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
@@ -57,7 +57,6 @@ from scadbuddy.library.libraries import (
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 
 if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
     from scadbuddy.core.components import Components, Core
 
 
@@ -69,7 +68,9 @@ if TYPE_CHECKING:
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
-def answered_as_routes[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+def answered_as_routes[**P, R](
+    fn: Callable[P, Awaitable[R]],
+) -> Callable[P, Coroutine[Any, Any, R]]:
     """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
     checkout is gone, as the 409 every route answers it with (``api/models.py``,
     ``install_library_handlers``), rather than the operation's unexpected 500."""
@@ -132,7 +133,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
                     name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
                 )
                 record = await to_thread_to_end(
-                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
+                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing),
+                    lambda _: library_changed(state.events, slug, name),
                 )
         except LibraryPinChangedError:
             raise ApiError(
@@ -145,7 +147,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def model_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +182,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         slug, name, index = request["slug"], request["name"], request["index"]
         try:
             record = await to_thread_to_end(
-                partial(state.catalogue.unpin_library, slug, name, index=index)
+                partial(state.catalogue.unpin_library, slug, name, index=index),
+                lambda _: library_changed(state.events, slug, name),
             )
         except LibraryPinChangedError:
             raise ApiError(
@@ -196,7 +198,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def _refuse_removal(name: str, commit: str | None) -> None:
@@ -249,16 +250,18 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         async with checkouts.removing():
             await _refuse_removal(name, commit)
             try:
-                removed = await to_thread_to_end(partial(libraries.remove, name, commit))
+                # No model changes -- a removal is refused while one pins it -- so no
+                # `model.updated`: only the checkouts on the volume moved.
+                await to_thread_to_end(
+                    partial(libraries.remove, name, commit),
+                    lambda commits: emit(state.events, LibraryRemoved(name=name, commits=commits)),
+                )
             except LibraryCheckoutNotFoundError:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
                 ) from None
             except LibraryError as error:
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        # No model changes -- a removal is refused while one pins it -- so no
-        # `model.updated`: only the checkouts on the volume moved.
-        emit(state.events, LibraryRemoved(name=name, commits=removed))
         return {}
 
     return [
@@ -297,7 +300,9 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     for its file parameters (``asset_operations.py``), font installs
     (``font_operations.py``) and preset writes (``preset_operations.py``). Imported
     here, as they import this module. Their runs are the routes' former bodies, which
-    take the whole ``AppState``; the core is one."""
+    take the whole ``AppState`` and read services the ``Core`` does not name, so any
+    other core is refused here rather than failing inside an operation (review #1126 1.2)."""
+    from scadbuddy.api.deps import AppState
     from scadbuddy.library.asset_operations import asset_kinds
     from scadbuddy.library.font_operations import font_kinds
     from scadbuddy.library.media_operations import media_kinds
@@ -305,15 +310,19 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     from scadbuddy.library.output_operations import output_kinds
     from scadbuddy.library.preset_operations import preset_kinds
 
-    state = cast("AppState", core)
+    if not isinstance(core, AppState):
+        raise TypeError(
+            "the model operation kinds run the routes' bodies, which need the API's "
+            f"AppState, not a {type(core).__name__}"
+        )
     return [
         *library_kinds(core, components),
-        *model_kinds(state),
-        *media_kinds(state),
-        *output_kinds(state),
-        *asset_kinds(state),
-        *font_kinds(state),
-        *preset_kinds(state),
+        *model_kinds(core),
+        *media_kinds(core),
+        *output_kinds(core),
+        *asset_kinds(core),
+        *font_kinds(core),
+        *preset_kinds(core),
     ]
 
 

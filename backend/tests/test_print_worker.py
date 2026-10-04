@@ -12,13 +12,22 @@ from typing import Any
 
 import httpx
 import pytest
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import Client
+from temporalio.common import VersioningBehavior
 from temporalio.worker import Worker
 
+from scadbuddy.bambuddy import output_reader
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.store import Operation
-from scadbuddy.worker import ApiUrlMissingError, build_print_deps, parse_queue, run_print_worker
+from scadbuddy.worker import (
+    PRINT_UNPINNED,
+    ApiUrlMissingError,
+    build_print_deps,
+    parse_queue,
+    run_print_worker,
+)
+from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import PRINT_DEPLOYMENT_NAME, is_current
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_models import (
@@ -50,6 +59,31 @@ def test_the_queue_flag_picks_the_worker() -> None:
     assert parse_queue(["--queue", "bambuddy"]) == "bambuddy"
     with pytest.raises(SystemExit):
         parse_queue(["--queue", "library"])
+
+
+def test_the_drain_skips_exactly_the_workflows_not_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PRINT_UNPINNED`` names every workflow the versioned print worker registers that
+    is not PINNED, and only those (plan 1b Ruling 7)."""
+    registered: list[type] = []
+
+    def record(*_: Any, workflows: list[type], **__: Any) -> None:
+        registered.extend(workflows)
+
+    monkeypatch.setattr(client_module, "Worker", record)
+    client_module.bambuddy_worker(None, "q", [], build_id="b")  # type: ignore[arg-type]
+
+    unpinned: list[str] = []
+    for cls in registered:
+        defn = workflow._Definition.must_from_class(cls)
+        if defn.versioning_behavior not in (
+            VersioningBehavior.UNSPECIFIED,
+            VersioningBehavior.PINNED,
+        ):
+            assert defn.name is not None
+            unpinned.append(defn.name)
+    assert registered and sorted(unpinned) == sorted(PRINT_UNPINNED)
 
 
 def test_the_print_worker_needs_the_apis_internal_url(tmp_path: Path) -> None:
@@ -112,10 +146,12 @@ class Library:
 @pytest.mark.requires_postgres
 @pytest.mark.requires_temporal
 async def test_the_print_worker_is_current_serves_a_prelude_and_stops(
-    pg_conninfo: str, tmp_path: Path
+    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Made current as ``scadbuddy-print``, it serves the inbox step of a delete started
     on an unversioned (library) queue, and it stops on ``stop``."""
+    # The API is never there: no wait for it to come back.
+    monkeypatch.setattr(output_reader, "RESTART_DELAYS", ())
     queue = f"p-{uuid.uuid4().hex[:8]}"
     library_queue = f"l-{uuid.uuid4().hex[:8]}"
     build_id = f"test-{uuid.uuid4().hex[:8]}"

@@ -26,6 +26,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore, Held
@@ -42,6 +43,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
+    PRELUDE_REQUESTED,
     OperationAnswer,
     OperationAuthor,
     OperationInput,
@@ -54,6 +56,9 @@ logger = logging.getLogger(__name__)
 #: Problem ``type``s for a command the route could not hand to Temporal (#1052, #1053).
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
+
+#: The problems after which the operation may still run, so its claims are kept.
+_MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
 
 #: The client's key for one deliberate press (§4.2 step 1).
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
@@ -177,11 +182,12 @@ async def run_operation(
 ) -> dict[str, Any] | Operation:
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
     A refusal or a recorded failure is raised as the problem the route answers with.
-    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
-    the operation may still run. ``before_start`` is a route's own refusal, made only
-    when no record answers and the same request is not still running: a repeat is its
-    first answer whatever has changed since (§4.2). Its refusal, 503 included, releases
-    ``claimed`` too: nothing started (review 3e final I1)."""
+    ``claimed`` is dropped once the answer is final: not on a 202, or on a 503 that
+    says the operation may still run (a recorded 503 is final, review #1194 1.1).
+    ``before_start`` is a route's own refusal, made only when no record answers and the
+    same request is not still running: a repeat is its first answer whatever has changed
+    since (§4.2). Its refusal, 503 included, releases ``claimed`` too: nothing started
+    (review 3e final I1)."""
     refused = False
 
     async def refuse() -> None:
@@ -204,7 +210,7 @@ async def run_operation(
             before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and (refused or error.status != status.HTTP_503_SERVICE_UNAVAILABLE):
+        if claimed is not None and (refused or error.type not in _MAY_STILL_RUN):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
@@ -255,16 +261,18 @@ async def _run_operation(
         idempotency_key is not None and await _running(ops, workflow_id)
     ):
         await before_start()
+    prelude = _prelude(ops, kind, body)
     arg = OperationInput(
         kind=kind.name,
         subject=subject,
         key=key,
-        request=body,
+        request=body if prelude is None else {**body, PRELUDE_REQUESTED: prelude.kind},
         run_attempts=kind.run_attempts,
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
-        prelude=_prelude(ops, kind, body),
+        prelude=prelude,
+        idempotency_key=idempotency_key,
     )
     try:
         answer = await start_command(
@@ -295,7 +303,8 @@ async def _run_operation(
             raise still_accepting() from None
         return _answer(recorded, response, repeated=False)
     except CommandClosedError:
-        # Ended before it answered: nothing was recorded, and the same request starts again.
+        # Ended before it answered. A re-send reads whatever it recorded (the reconciler
+        # ends a row it left running); with no record, the same request starts again.
         raise still_accepting() from None
     except (RPCError, TemporalUnavailableError):
         raise temporal_unavailable("operations") from None
@@ -319,12 +328,16 @@ def operation_answer[M: BaseModel](
 
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
-    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"}
+    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"},
+    413: {
+        "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
+        "bytes; nothing was started"
+    },
 }
 
 
 @router.get("/{operation_id}", responses={404: {"description": "No such operation"}})
-async def get_operation(operation_id: str, ops: OperationsDep) -> Operation:
+async def get_operation(operation_id: OperationIdPath, ops: OperationsDep) -> Operation:
     """One operation (§4.2 "Our record"): follow a 202 here until it is not ``running``."""
     op = await ops.store.get(operation_id)
     if op is None:

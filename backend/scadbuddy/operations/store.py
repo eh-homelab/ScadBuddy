@@ -69,6 +69,11 @@ class OperationStore:
     async def get(self, op_id: str) -> Operation | None:
         return await asyncio.to_thread(self._get, op_id)
 
+    async def keyed(self, kind: str, subject: str, idempotency_key: str) -> bool:
+        """Whether an operation of ``kind`` on ``subject`` that the client sent with
+        ``idempotency_key`` is on record, whatever its body (review #1126 1.3)."""
+        return await asyncio.to_thread(self._keyed, kind, subject, idempotency_key)
+
     async def named_by_running(self, names: list[str]) -> set[str]:
         """Those of ``names`` that the request of an operation still running contains
         (a claim's name, #1054)."""
@@ -85,6 +90,7 @@ class OperationStore:
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
+        idempotency_key: str | None = None,
     ) -> Operation:
         """Record an accepted operation; the execution's row if it has one already (a
         retried activity), announced only when inserted. Prunes operations that finished
@@ -99,6 +105,7 @@ class OperationStore:
             workflow_id,
             workflow_run_id,
             retention,
+            idempotency_key,
         )
 
     async def finish(
@@ -138,6 +145,15 @@ class OperationStore:
             ).fetchone()
         return Operation.model_validate(row) if row else None
 
+    def _keyed(self, kind: str, subject: str, idempotency_key: str) -> bool:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM operations"
+                " WHERE idempotency_key = %s AND kind = %s AND subject = %s LIMIT 1",
+                (idempotency_key, kind, subject),
+            ).fetchone()
+        return row is not None
+
     def _named_by_running(self, names: list[str]) -> set[str]:
         with self._require().connection() as conn:
             rows = conn.execute(
@@ -158,16 +174,27 @@ class OperationStore:
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
+        idempotency_key: str | None,
     ) -> Operation:
         with self._require().connection() as conn, conn.transaction():
             if retention is not None:
                 conn.execute("DELETE FROM operations WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
                 "INSERT INTO operations (id, kind, subject, operation_key, status, request,"
-                " workflow_id, workflow_run_id) VALUES (%s, %s, %s, %s, 'running', %s, %s, %s)"
+                " workflow_id, workflow_run_id, idempotency_key)"
+                " VALUES (%s, %s, %s, %s, 'running', %s, %s, %s, %s)"
                 " ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING"
                 f" RETURNING {_COLUMNS}",
-                (op_id, kind, subject, operation_key, Jsonb(request), workflow_id, workflow_run_id),
+                (
+                    op_id,
+                    kind,
+                    subject,
+                    operation_key,
+                    Jsonb(request),
+                    workflow_id,
+                    workflow_run_id,
+                    idempotency_key,
+                ),
             ).fetchone()
             if row is not None:
                 op = Operation.model_validate(row)

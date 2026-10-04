@@ -215,6 +215,8 @@ def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
 def test_an_unknown_model_is_a_404(client: TestClient) -> None:
     assert client.get(_url("nope")).status_code == 404
     assert client.post(_url("nope"), json={"name": "X", "params": {}}).status_code == 404
+    # Review #1194 2.3: the missing model answers before a shipped preset's id would.
+    assert client.patch(_url("nope", "template-wide"), json={"name": "X"}).status_code == 404
 
 
 @pytest.mark.requires_git
