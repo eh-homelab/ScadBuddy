@@ -157,7 +157,9 @@ class Follower:
                 interval = self.error_interval
                 continue
             try:
-                progress = await self.read(meta)
+                # Two Bambuddy calls of up to 30 s each: longer than ``FOLLOW_HEARTBEAT``
+                # (review #1091 1).
+                progress = await self._heartbeating(self.read(meta), active, heartbeat)
             except ApiError as error:
                 failure = (error.status, error.detail)
                 if failure != last_failure:
@@ -205,11 +207,17 @@ class Follower:
     ) -> None:
         """Await ``work`` for at most `settle_timeout` (`TimeoutError` past it),
         heartbeating ``active`` at least every `HEARTBEAT_SLICE` meanwhile."""
+        async with asyncio.timeout(self.settle_timeout):
+            await self._heartbeating(work, active, heartbeat)
+
+    async def _heartbeating[T](
+        self, work: Awaitable[T], active: datetime, heartbeat: Callable[[datetime], None]
+    ) -> T:
+        """Await ``work``, heartbeating ``active`` at least every `HEARTBEAT_SLICE`."""
         task = asyncio.ensure_future(work)
         try:
-            async with asyncio.timeout(self.settle_timeout):
-                while not (await asyncio.wait({task}, timeout=HEARTBEAT_SLICE))[0]:
-                    heartbeat(active)
+            while not (await asyncio.wait({task}, timeout=HEARTBEAT_SLICE))[0]:
+                heartbeat(active)
             return task.result()
         finally:
             task.cancel()
