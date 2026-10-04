@@ -815,30 +815,35 @@ async def test_cancelling_an_unknown_job_touches_nothing(
     assert cancelled == []
 
 
-async def test_settle_legacy_fails_rows_with_no_execution_and_leaves_running_ones(
-    make_service: ServiceFactory, projection: JobProjection
+async def test_settle_legacy_fails_only_old_rows_that_name_no_workflow(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Only a row with no workflow, old enough that no older API is still between its
+    insert and its start, is certainly orphaned (review #1066 1.2). A row naming a
+    workflow is the older build's to start, whether or not Temporal knows it yet."""
     async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        orphan, draining, ancient = (_legacy(projection) for _ in range(3))
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        unstarted, ancient, fresh = (_legacy(projection) for _ in range(3))
         with psycopg.connect(projection.conninfo) as conn:
-            conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (ancient.id,))
-        # The old build's execution of `draining`: no worker here, so it stays running.
-        await client.start_workflow(
-            "TemplatePipeline", id=workflow_id_for(draining.id), task_queue=queue
-        )
-        try:
-            failed = await service.settle_legacy()
-        finally:
-            await client.get_workflow_handle(workflow_id_for(draining.id)).terminate()
+            conn.execute(
+                "UPDATE render_jobs SET workflow_id = NULL WHERE id = ANY(%s)",
+                ([ancient.id, fresh.id],),
+            )
+            conn.execute(
+                "UPDATE render_jobs SET created_at = now() - interval '1 hour'"
+                " WHERE id = ANY(%s)",
+                ([unstarted.id, ancient.id],),
+            )
+        # Nothing asks Temporal: a handle here has no `describe`.
+        _spy_cancel(monkeypatch, client)
+        failed = await service.settle_legacy()
         await service.aclose()
 
-    assert sorted(failed) == sorted([orphan.id, ancient.id])
-    for job_id in (orphan.id, ancient.id):
-        stored = await asyncio.to_thread(projection.read, job_id)
-        assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
-    assert (await asyncio.to_thread(projection.read, draining.id)).state == "pending"
+    assert failed == [ancient.id]
+    stored = await asyncio.to_thread(projection.read, ancient.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    for job_id in (unstarted.id, fresh.id):
+        assert (await asyncio.to_thread(projection.read, job_id)).state == "pending"
 
 
 # ── inputs Temporal can never take (final review I2) ────────────────────────────

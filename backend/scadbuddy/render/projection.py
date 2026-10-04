@@ -214,13 +214,15 @@ class JobProjection:
                 (claims, job_id),
             )
 
-    def legacy_pending(self) -> list[Job]:
-        """Pending rows inserted before renders moved to update-with-start: no
-        execution of `render-<render_key>` owns them."""
+    def legacy_pending(self, older_than: timedelta) -> list[Job]:
+        """Pending rows an older release inserted that name no workflow, inserted over
+        ``older_than`` ago: certainly orphaned. One naming its `render-<id>` is that
+        build's to start (its insert precedes its start)."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM render_jobs WHERE state = 'pending' AND workflow_run_id IS NULL"
-                " ORDER BY created_at, id"
+                " AND workflow_id IS NULL AND created_at < now() - %s ORDER BY created_at, id",
+                (older_than,),
             ).fetchall()
         return [_job(row) for row in rows]
 
@@ -230,7 +232,7 @@ class JobProjection:
             rows = conn.execute(
                 "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
                 " WHERE id = ANY(%s) AND state = 'pending' AND workflow_run_id IS NULL"
-                " RETURNING *",
+                " AND workflow_id IS NULL RETURNING *",
                 (error, job_ids),
             ).fetchall()
             for row in rows:

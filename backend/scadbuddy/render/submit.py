@@ -21,7 +21,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
 RPC_TIMEOUT = timedelta(seconds=5)
+#: How old a legacy pending row with no workflow must be before `settle_legacy` fails
+#: it: a few of the older API's own start timeouts.
+LEGACY_GRACE = 6 * RPC_TIMEOUT
 #: How long a submit that reached an execution closing on its last release waits for it
 #: to close before it starts again (ruling 10 of the phase 2b plan).
 CLOSING_WAIT = 5.0
@@ -276,28 +279,11 @@ class RenderService:
 
     async def settle_legacy(self) -> list[str]:
         """Once at start: fail the pending rows an older release inserted that no
-        workflow will run (none named, or none Temporal knows). A row whose workflow
-        still runs on its pinned build is left to it."""
-        failed: list[str] = []
-        for job in await asyncio.to_thread(self.store.legacy_pending):
-            if job.workflow_id is not None:
-                try:
-                    described = await self.client.get_workflow_handle(job.workflow_id).describe(
-                        rpc_timeout=RPC_TIMEOUT
-                    )
-                    # A closed run (terminated, failed) that retention still keeps will
-                    # never settle its row either.
-                    if described.status == WorkflowExecutionStatus.RUNNING:
-                        continue
-                except RPCError as error:
-                    if error.status != RPCStatusCode.NOT_FOUND:
-                        logger.warning(
-                            "could not ask Temporal about the renders an older release left"
-                            " pending; the next start tries again",
-                            extra={"status": error.status.name},
-                        )
-                        break
-            failed.append(job.id)
+        workflow will run. Only a row naming none, past `LEGACY_GRACE`, is certainly
+        orphaned; one naming its workflow is left to the older build, which starts it
+        after its insert (review #1066 1.2)."""
+        stale = await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE)
+        failed = [job.id for job in stale]
         if failed:
             settled = await asyncio.to_thread(
                 self.store.fail_legacy, failed, LEGACY_UNSTARTED_ERROR

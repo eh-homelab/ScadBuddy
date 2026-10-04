@@ -399,16 +399,29 @@ def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> N
 
 
 def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProjection) -> None:
-    legacy = _job(width=45)
+    legacy, named = _job(width=45), _job(width=48)
     _row(announcing, legacy)
+    _row(announcing, named)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_id = NULL, created_at = now() - interval '1 hour'"
+            " WHERE id = %s",
+            (legacy.id,),
+        )
+        conn.execute(
+            "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = %s",
+            (named.id,),
+        )
     ours = _accept(announcing, "run-1", width=46)
-    assert [job.id for job in announcing.legacy_pending()] == [legacy.id]
+    assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [legacy.id]
+    assert announcing.legacy_pending(timedelta(hours=2)) == []
 
-    failed = announcing.fail_legacy([legacy.id, ours.id], LEGACY_UNSTARTED_ERROR)
+    failed = announcing.fail_legacy([legacy.id, named.id, ours.id], LEGACY_UNSTARTED_ERROR)
 
     assert [job.id for job in failed] == [legacy.id]
     assert announcing.read(legacy.id).state == "failed"
     assert announcing.read(legacy.id).error == LEGACY_UNSTARTED_ERROR
     assert announcing.read(ours.id).state == "pending"
-    assert announcing.legacy_pending() == []
-    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.failed"]
+    assert announcing.read(named.id).state == "pending"
+    assert announcing.legacy_pending(timedelta(minutes=1)) == []
+    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.pending", "job.failed"]
