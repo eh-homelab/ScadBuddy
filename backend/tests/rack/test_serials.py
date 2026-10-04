@@ -20,7 +20,6 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import (
-    RACK_SEEN_FALLBACK,
     RACK_SETTLE_FALLBACK,
     RACK_STORE_FALLBACKS,
     PickedHotend,
@@ -208,7 +207,8 @@ def test_the_guard_flags_a_programming_error_but_not_an_api_one() -> None:
 def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() -> None:
     """#1112: the store's writes and reads swallow exceptions too. A Postgres outage or
     timeout there is expected; a programming error, such as a typo in the seen upsert, is
-    not."""
+    not. Only the per-archive settle also reads Bambuddy, so only it expects Bambuddy's
+    errors and the archive read's ``TimeoutError``."""
     assert RACK_STORE_FALLBACKS <= MESSAGES
 
     def record(message: str, error: str) -> logging.LogRecord:
@@ -217,9 +217,12 @@ def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() 
         return made
 
     for message in sorted(RACK_STORE_FALLBACKS):
-        expected = [record(message, name) for name in ("QueryCanceled", "PoolTimeout", "ApiError")]
+        expected = [record(message, name) for name in ("QueryCanceled", "PoolTimeout")]
         assert foreign_rack_errors(expected) == [], message
         bugs = [record(message, name) for name in ("UndefinedColumn", "KeyError", "TypeError")]
         assert foreign_rack_errors(bugs) == ["UndefinedColumn", "KeyError", "TypeError"], message
-    assert foreign_rack_errors([record(RACK_SETTLE_FALLBACK, "TimeoutError")]) == []
-    assert foreign_rack_errors([record(RACK_SEEN_FALLBACK, "TimeoutError")]) == ["TimeoutError"]
+    bambuddy = ("ApiError", "ConnectError", "TimeoutError")
+    assert foreign_rack_errors([record(RACK_SETTLE_FALLBACK, name) for name in bambuddy]) == []
+    for message in sorted(RACK_STORE_FALLBACKS - {RACK_SETTLE_FALLBACK}):
+        records = [record(message, name) for name in bambuddy]
+        assert foreign_rack_errors(records) == list(bambuddy), message

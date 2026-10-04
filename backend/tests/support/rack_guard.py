@@ -41,12 +41,13 @@ _POSTGRES = (
     | _subclass_names(psycopg.InterfaceError)
 )
 
-#: The usage read and the store's own advisory writes and reads (#1112) are Postgres
-#: calls. A settle also reads each archive from Bambuddy under a timeout, which raises
-#: the builtin ``TimeoutError``.
+#: The usage read is a Postgres call made inside a pick that also reads Bambuddy. The
+#: store's own advisory writes and reads (#1112) call only Postgres, so a Bambuddy or
+#: httpx error there can only be a bug. Only the per-archive settle also reads Bambuddy,
+#: under a timeout that raises the builtin ``TimeoutError``.
 _EXPECTED_BY_MESSAGE = {
     RACK_USAGE_FALLBACK: _EXPECTED | _POSTGRES,
-    **{message: _EXPECTED | _POSTGRES for message in RACK_STORE_FALLBACKS},
+    **{message: _POSTGRES for message in RACK_STORE_FALLBACKS},
     RACK_SETTLE_FALLBACK: _EXPECTED | _POSTGRES | {TimeoutError.__name__},
 }
 
