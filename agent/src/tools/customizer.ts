@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { reattach } from '../api/command.js'
+import { reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
