@@ -125,8 +125,11 @@ class Projection(BaseModel):
 #: they never wait behind openscad runs for the worker's activity slots.
 ACCEPT_ACTIVITY = "render_accept"
 CLAIMS_ACTIVITY = "render_claims"
-#: The Update a supersede or a withdrawal sends the job's execution.
+#: The Update a supersede sends the job's execution.
 RELEASE_UPDATE = "release"
+#: Why a claim is released: the API sends ``superseded``; ``cancelled`` is a release
+#: sent by hand (a withdrawal has no route yet, review #1066 3.2).
+ReleaseReason = Literal["superseded", "cancelled"]
 #: `render_accept`'s refusal: `render_queue_max` jobs already wait.
 QUEUE_FULL = "QueueFull"
 
