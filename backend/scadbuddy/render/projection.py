@@ -44,6 +44,7 @@ class LegacyPendingError(Exception):
     """A row an older build inserted waits on the same render key: its pending key
     holds until that build runs it, so `render_accept` retries."""
 
+
 PROJECTION_COLUMNS = (
     "id",
     "slug",
