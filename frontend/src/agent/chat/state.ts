@@ -1,4 +1,5 @@
 import type {
+  Attention,
   Origin,
   Owner,
   Question,
@@ -48,6 +49,8 @@ export type FeedItem =
       /** The AskUserQuestion or `ask_user` tool_use id; a subagent's call has no `tool.call` in the feed (#1108). */
       tool: string
       questions: Question[]
+      /** #815 — set when this is an attention request rather than a question. */
+      attention?: Attention
       state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'
       answers?: string[]
       by?: Owner
@@ -304,6 +307,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           questions: event.questions,
+          ...(event.attention ? { attention: event.attention } : {}),
           state: s.queuedAnswers?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
