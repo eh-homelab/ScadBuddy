@@ -8,6 +8,7 @@ import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
 import type { McpAuthMode } from '../api/mcpTokens'
+import { AiCredentialSection } from '../components/assistant/AiCredentialSection'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
@@ -1121,6 +1122,8 @@ export function SettingsPage() {
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
             <AiStatusSection />
+            {/* Not behind ai.available: a missing credential is why the assistant is off (#1000). */}
+            <AiCredentialSection />
             {/* Per browser and applied at once. Only the user may flip it: an agent must
                 not grant itself access (#254). */}
             <div>

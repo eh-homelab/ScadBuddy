@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
@@ -53,7 +54,7 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
     return manager({
       sql: db.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       approvalPollMs: 50,
       ...(audit ? { audit } : {}),
