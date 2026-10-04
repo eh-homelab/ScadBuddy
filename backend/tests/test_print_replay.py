@@ -6,14 +6,13 @@ rolling update an old pod and a new one share running executions. A change to
 this test is what says so.
 
 These histories are the phase-1 baseline (#1052), recorded before any ``PrintRun`` ran in
-the wild. Never re-record them: a later change to the workflow's commands, including a
-new activity, goes behind ``workflow.patched`` and adds a history recorded on the
-changed code beside them, so both replay. ``cancelled_during_print`` (a cancel while
-``print_plan`` runs: the run is recorded failed) was added by review #1061 5a, on the
-same workflow code, with ``accepted_at`` in its input. ``cancelled_during_insert`` (a
-cancel while ``print_insert`` runs: the row is recorded cancelled) was recorded by
-review #1061 2 and 3, behind their patches ``insert-survives-cancel`` and
-``unwaited-server-clock``.
+the wild: ``succeeded``, ``refused``, ``enqueue_failed``, ``cancelled_during_print`` (a
+cancel while ``print_plan`` runs: the run is recorded failed) and
+``cancelled_during_insert`` (a cancel while ``print_insert`` runs: the row is recorded
+cancelled). They were re-recorded once, when the pre-merge patches came out (#1236).
+Never re-record them again: a later change to the workflow's commands, including a new
+activity, goes behind ``workflow.patched`` and adds a history recorded on the changed
+code beside them, so both replay.
 """
 
 from __future__ import annotations

@@ -60,6 +60,7 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "traceparent",
 )
 
 
@@ -144,6 +145,18 @@ class JobProjection:
                     (supersedes, job.slug),
                 ).fetchone()
                 if previous is not None and previous["render_key"] == key:
+                    # Like ON CONFLICT: a pending row with no trace adopts this one. A
+                    # running row's workflow already has its parent.
+                    if (
+                        previous["state"] == "pending"
+                        and previous["traceparent"] is None
+                        and job.traceparent is not None
+                    ):
+                        previous = conn.execute(
+                            "UPDATE render_jobs SET traceparent = %s WHERE id = %s RETURNING *",
+                            (job.traceparent, previous["id"]),
+                        ).fetchone()
+                        assert previous is not None
                     return Submitted(_job(previous), coalesced=True)
                 if previous is not None:
                     superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)
@@ -160,10 +173,11 @@ class JobProjection:
                         raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
-                " created_at, render_key, workflow_id, kind)"
-                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)"
+                " created_at, render_key, workflow_id, kind, traceparent)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)"
                 " ON CONFLICT (render_key) WHERE state = 'pending'"
-                " DO UPDATE SET claims = render_jobs.claims + 1"
+                " DO UPDATE SET claims = render_jobs.claims + 1,"
+                " traceparent = COALESCE(render_jobs.traceparent, EXCLUDED.traceparent)"
                 " RETURNING *, (xmax = 0) AS inserted",
                 (
                     job.id,
@@ -175,6 +189,7 @@ class JobProjection:
                     key,
                     workflow_id_for(job.id),
                     job.kind,
+                    job.traceparent,
                 ),
             ).fetchone()
             assert row is not None

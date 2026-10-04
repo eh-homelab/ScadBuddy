@@ -90,6 +90,7 @@ describe('LibraryPage', () => {
         89,
         expect.objectContaining({ project_id: 2 }),
         expect.any(AbortSignal),
+        expect.any(Function),
       ),
     )
     run.mockRestore()
