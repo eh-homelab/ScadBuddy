@@ -21,7 +21,6 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
 from scadbuddy.api.deps import (
-    OperationsDep,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -42,7 +41,6 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -56,6 +54,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
+    ProjectAttach,
     ProjectChoices,
     ProjectRequest,
     ProjectView,
@@ -63,7 +62,9 @@ from scadbuddy.bambuddy.projects import (
 )
 from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
@@ -113,18 +114,6 @@ class PrinterRackAlgorithm(BaseModel):
 
     printer_id: int
     algorithm: RackAlgorithm
-
-
-class ProjectAttach(BaseModel):
-    """Which of this output's queue entries to file under the project.
-
-    The ids come from the progress read (#89): a plate's queue item only exists once it
-    has sliced, so the caller learns them by polling.
-    """
-
-    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
-    project_id: int | None = None
-    queue_item_ids: list[int] = Field(default_factory=list)
 
 
 @router.put(

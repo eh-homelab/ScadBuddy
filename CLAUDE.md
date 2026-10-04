@@ -157,11 +157,13 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
-  `operations`) and `kinds.py` (`OperationKind`: a kind's check, its effect, its
-  attempts). `api/operations.py` `run_operation` is how a route runs a kind
-  (`Idempotency-Key` header; 202 with the operation past the deadline) and serves
-  `GET /operations/{id}`. The Bambuddy kinds are `bambuddy/operations.py`
-  (`bambuddy_kinds`), registered in `create_app`. The browser's `command()`
+  `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts) and `component.py` (`OPERATIONS`, `OperationsDep`). A feature registers
+  its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list;
+  the Bambuddy kinds are `bambuddy/operations.py`. `api/operations.py` `run_operation`
+  is how a route runs a kind (`Idempotency-Key` header; 202 with the operation past the
+  deadline) and serves `GET /operations/{id}`. The browser's `command()`
   (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`) send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad

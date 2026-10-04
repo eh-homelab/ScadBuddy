@@ -26,7 +26,6 @@ from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.print_run import (
@@ -42,12 +41,13 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PrintWatcher
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
-from scadbuddy.library.outputs import OutputStore, PlateSend
+from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (

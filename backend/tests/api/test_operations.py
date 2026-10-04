@@ -17,9 +17,10 @@ from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import operations as operations_api
-from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.component import OPERATIONS, OperationsDep
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
@@ -55,7 +56,12 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return {"done": checked["checked"], "n": counts.runs}
 
     state: AppState = getattr(app.state, STATE_ATTR)
-    state.operations.kinds["test"] = OperationKind("test", check, run)
+    ops = state.components.get(OPERATIONS)
+    test_kind = OperationKind("test", check, run)
+    # Before the app starts, so its `bambuddy` worker serves the kind too.
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, kinds={**ops.kinds, "test": test_kind})
+    )
     router = APIRouter()
 
     @router.post("/api/v1/test-op")
@@ -65,7 +71,7 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return await run_operation(
             ops,
             response,
-            kind=state.operations.kinds["test"],
+            kind=test_kind,
             subject="s",
             request=body,
             idempotency_key=key,
@@ -148,12 +154,14 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     client: TestClient, app: FastAPI, pg_conninfo: str
 ) -> None:
     state: AppState = getattr(app.state, STATE_ATTR)
-    ops = state.operations
-    state.operations = dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
     try:
         response = post(client, {"a": 1}, key=PRESS_5)
     finally:
-        state.operations = ops
+        state.components.override(OPERATIONS, ops)
     assert response.status_code == 503
     assert response.json()["type"].endswith("/temporal-unavailable")
     with psycopg.connect(pg_conninfo) as conn:

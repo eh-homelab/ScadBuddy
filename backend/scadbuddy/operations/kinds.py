@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from scadbuddy.core.components import Components, Core
 
 #: The route's refusals: raises ``ApiError`` to refuse, writes nothing, and returns what
 #: ``run`` needs (JSON).
@@ -22,6 +25,30 @@ class OperationKind:
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     run_attempts: int = 1
+
+
+#: A feature's kinds, built over the core and the components (`operations/component.py`).
+KindsBuild = Callable[["Core", "Components"], Iterable[OperationKind]]
+#: Where a feature exports its ``KindsBuild``: ``scadbuddy/<feature>/operations.py``.
+KINDS_MODULE = "operations"
+KINDS_ATTR = "OPERATION_KINDS"
+
+
+class DuplicateKindError(ValueError):
+    pass
+
+
+def build_kinds(
+    core: Core, components: Components, builds: Iterable[KindsBuild]
+) -> dict[str, OperationKind]:
+    """Every feature's kinds by name; a name claimed twice is refused, not shadowed."""
+    kinds: dict[str, OperationKind] = {}
+    for build in builds:
+        for kind in build(core, components):
+            if kind.name in kinds:
+                raise DuplicateKindError(f"two operation kinds are named {kind.name!r}")
+            kinds[kind.name] = kind
+    return kinds
 
 
 def operation_key(kind: str, subject: str, request: dict[str, Any], request_id: str) -> str:

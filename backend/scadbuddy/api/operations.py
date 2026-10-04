@@ -21,8 +21,8 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from scadbuddy.api.deps import OperationCommands, OperationsDep
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
