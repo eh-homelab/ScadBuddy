@@ -207,12 +207,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `frontend/src/lib/tracing.ts` — the browser's OpenTelemetry (#988), a lazy chunk
   `main.tsx` loads after the first paint; spans leave through `traceScrub.ts` and
   `relayExporter.ts` to the backend relay `/telemetry/v1/traces`, and stop for the
-  page's life when it answers `X-ScadBuddy-Tracing: off` (`startTracing` then undoes itself, so
-  no `traceparent` is sent; msw always answers off,
-  `src/mocks/features/telemetry.ts`). A user action is `traceAction` (`lib/traceAction.ts`,
-  entry chunk, API only): a request issued after an `await` joins the action's trace
-  only inside its `within`. `traceparent` goes on same-origin requests only. The chunk loads through
-  `loadOptionalChunk` (`lib/staleChunks.ts`), so a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk reload; any other chunk's error still does.
+  page's life when it answers `X-ScadBuddy-Tracing: off` (`startTracing` then undoes
+  itself, so no `traceparent` is sent; msw always answers off,
+  `src/mocks/features/telemetry.ts`). A user action is `traceAction`
+  (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
+  the action's trace only inside its `within`. `traceparent` goes on same-origin
+  requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
+  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
+  reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
