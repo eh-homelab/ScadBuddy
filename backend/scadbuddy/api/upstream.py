@@ -3,19 +3,28 @@ taking, dismissing or detaching it. The work is in :mod:`scadbuddy.library.upstr
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.deps import AppState, CatalogueDep, OperationsDep, SlugPath
 from scadbuddy.api.models import announce_source_change, require_mine
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelNotFoundError, ModelRecord
 from scadbuddy.library.history import GitError, GitUnavailableError
 from scadbuddy.library.upstream import (
     MergeConflictError,
+    MergePlan,
     NoUpstreamError,
     UpstreamStateError,
     UpstreamStatus,
@@ -105,6 +114,7 @@ def get_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamStatus:
         "`dismissed` and is worth retrying."
     ),
     responses={
+        **OPERATION_RESPONSES,
         status.HTTP_409_CONFLICT: {
             "description": (
                 "The merge conflicts (`merged`, `merge_base`, `conflicts`: resolve it in "
@@ -112,13 +122,53 @@ def get_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamStatus:
                 "`gone`), or the template or its upstream kept changing while the merge "
                 "was worked out (`state` is `update` or `dismissed`: retry)"
             )
-        }
+        },
     },
 )
-def merge_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> UpstreamMerge:
+async def merge_upstream(
+    slug: SlugPath,
+    response: Response,
+    ops: OperationsDep,
+    catalogue: CatalogueDep,
+    idempotency_key: IdempotencyKey = None,
+) -> UpstreamMerge | JSONResponse:
     require_mine(slug)
-    record, plan = _answer(slug, lambda: catalogue.merge_upstream(slug))
-    announce_source_change(events, slug)
+
+    def refuse_a_conflict() -> None:
+        plan = catalogue.merge_plan(slug)
+        if plan is not None and plan.conflicts:
+            raise MergeConflictError(plan)
+
+    # Here, not in the operation: the conflict's 409 carries `merged`, the whole
+    # three-way result, which has no place in a workflow's history (#1054).
+    await asyncio.to_thread(_answer, slug, refuse_a_conflict)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_upstream_merge"],
+        subject=slug,
+        request={"slug": slug},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, UpstreamMerge)
+
+
+def merge_run(slug: str, state: AppState) -> UpstreamMerge:
+    """The ``model_upstream_merge`` operation's run (#1054). A conflict here means the
+    upstream or this template moved after the route found the merge clean: the
+    retryable 409 of a merge that kept changing, without `merged`."""
+
+    def merge() -> tuple[ModelRecord, MergePlan]:
+        try:
+            return state.catalogue.merge_upstream(slug)
+        except MergeConflictError:
+            raise UpstreamStateError(
+                f"{slug!r} or its upstream changed while the merge was checked; merge again",
+                state="update",
+            ) from None
+
+    record, plan = _answer(slug, merge)
+    announce_source_change(state.events, slug)
     return UpstreamMerge(model=record, taken=plan.preview.taken, kept=plan.preview.kept)
 
 
@@ -131,11 +181,30 @@ def merge_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -
         "offered; a later upstream revision is. One commit, "
         "`Dismiss <upstream id> update in <slug>`. 409 when there is no update."
     ),
+    responses=OPERATION_RESPONSES,
 )
-def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
+async def dismiss_upstream(
+    slug: SlugPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    record = _answer(slug, lambda: catalogue.dismiss_upstream(slug))
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_upstream_dismiss"],
+        subject=slug,
+        request={"slug": slug},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def dismiss_run(slug: str, state: AppState) -> ModelRecord:
+    """The ``model_upstream_dismiss`` operation's run (#1054)."""
+    record = _answer(slug, lambda: state.catalogue.dismiss_upstream(slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 
@@ -148,9 +217,28 @@ def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep)
         "ordinary template of mine. One commit, `Detach <slug> from <upstream id>`. "
         "409 while the upstream still exists."
     ),
+    responses=OPERATION_RESPONSES,
 )
-def detach_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
+async def detach_upstream(
+    slug: SlugPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    record = _answer(slug, lambda: catalogue.detach_upstream(slug))
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_upstream_detach"],
+        subject=slug,
+        request={"slug": slug},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def detach_run(slug: str, state: AppState) -> ModelRecord:
+    """The ``model_upstream_detach`` operation's run (#1054)."""
+    record = _answer(slug, lambda: state.catalogue.detach_upstream(slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record

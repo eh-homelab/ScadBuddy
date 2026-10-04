@@ -2001,6 +2001,16 @@ class Catalogue:
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
 
+    def merge_plan(self, slug: str) -> MergePlan | None:
+        """The merge a ``merge_upstream`` would make now, written nowhere; None when
+        there is no update to merge (#1054: the merge route answers a conflict from it)."""
+        upstream, revision, state = self._upstream_now(slug)
+        if state not in ("update", "dismissed") or revision is None:
+            return None
+        return plan_merge(
+            self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
+        )
+
     def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
         """Take the upstream's current revision as one commit, or raise
         :class:`MergeConflictError` having written nothing.

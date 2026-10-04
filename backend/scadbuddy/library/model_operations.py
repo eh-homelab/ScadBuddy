@@ -16,6 +16,8 @@ from fastapi import status
 
 from scadbuddy.api import library_pins, model_files
 from scadbuddy.api import models as models_api
+from scadbuddy.api import upstream as upstream_api
+from scadbuddy.api import versions as versions_api
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelMeta, ModelPatch, ModelRecord
 from scadbuddy.library.libraries import CheckoutFetcher
@@ -191,6 +193,30 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         record = await model_files.file_delete_run(request["slug"], request["name"], state)
         return _record(record)
 
+    async def restore_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(
+            versions_api.restore_check, request["slug"], request["commit"], state
+        )
+        return {}
+
+    async def restore_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        version = await asyncio.to_thread(
+            versions_api.restore_run, request["slug"], request["commit"], state
+        )
+        dumped: dict[str, Any] = version.model_dump(mode="json")
+        return dumped
+
+    async def merge_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        merged = await asyncio.to_thread(upstream_api.merge_run, request["slug"], state)
+        dumped: dict[str, Any] = merged.model_dump(mode="json")
+        return dumped
+
+    async def dismiss_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return _record(await asyncio.to_thread(upstream_api.dismiss_run, request["slug"], state))
+
+    async def detach_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return _record(await asyncio.to_thread(upstream_api.detach_run, request["slug"], state))
+
     def kind(name: str, check: Any, run: Any, **options: Any) -> OperationKind:
         return OperationKind(
             name, answered_as_routes(check), answered_as_routes(run), queue="library", **options
@@ -212,5 +238,9 @@ def model_kinds(state: AppState) -> dict[str, OperationKind]:
         kind("model_readme_delete", exists_check, readme_delete_run),
         kind("model_file_put", exists_check, file_put_run),
         kind("model_file_delete", exists_check, file_delete_run),
+        kind("model_restore", restore_check, restore_run),
+        kind("model_upstream_merge", exists_check, merge_run),
+        kind("model_upstream_dismiss", exists_check, dismiss_run),
+        kind("model_upstream_detach", exists_check, detach_run),
     ]
     return {each.name: each for each in kinds}

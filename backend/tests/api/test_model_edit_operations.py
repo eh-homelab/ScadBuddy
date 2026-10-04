@@ -145,3 +145,14 @@ def test_removing_a_missing_readme_is_still_404(client: TestClient) -> None:
     response = client.delete(f"/api/v1/models/{slug}/readme")
     assert response.status_code == 404, response.text
     assert "has no README" in response.json()["detail"]
+
+
+def test_a_restore_is_an_operation(client: TestClient, app: FastAPI) -> None:
+    slug, first = _model(client, "Restored")
+    moved = client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"})
+    assert moved.status_code == 200, moved.text
+    restored = client.post(f"/api/v1/models/{slug}/versions/{first}/restore")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["current"] is True
+    assert client.get(f"/api/v1/models/{slug}/source").text == SOURCE
+    assert _workflow_ids(app, "model_restore")

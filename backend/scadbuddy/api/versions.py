@@ -13,19 +13,27 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
+    AppState,
     CatalogueDep,
     CommitPath,
     ConfigDep,
-    EventsDep,
     FetcherDep,
     HistoryDep,
+    OperationsDep,
     PathsDep,
     SlugPath,
 )
 from scadbuddy.api.models import announce_source_change, require_mine, require_model_exists
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.core.paths import MODEL_META_NAME, SOURCE_NAME, model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import with_samples
@@ -291,16 +299,37 @@ def get_version_diff(
     "/models/{slug}/versions/{commit}/restore",
     response_model=ModelVersion,
     summary="Restore a revision as a new commit",
+    responses=OPERATION_RESPONSES,
 )
-def restore_version(
+async def restore_version(
     slug: SlugPath,
     commit: CommitPath,
-    catalogue: CatalogueDep,
-    history: HistoryDep,
-    events: EventsDep,
-) -> ModelVersion:
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelVersion | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_restore"],
+        subject=slug,
+        request={"slug": slug, "commit": commit},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelVersion)
+
+
+def restore_check(slug: str, commit: str, state: AppState) -> None:
+    """The ``model_restore`` operation's check (#1054): the model, its history and the
+    revision exist."""
+    require_model_exists(state.catalogue, slug)
+    _require_revision(require_history(state.history), commit)
+
+
+def restore_run(slug: str, commit: str, state: AppState) -> ModelVersion:
+    """The ``model_restore`` operation's run (#1054)."""
+    catalogue, history = state.catalogue, state.history
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
@@ -310,7 +339,7 @@ def restore_version(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    announce_source_change(events, slug)
+    announce_source_change(state.events, slug)
     # Straight through the history, so the catalogue did not see it: the source, and
     # whether the model has a thumbnail of its own, can both have changed.
     catalogue.notify_change(slug)

@@ -23,6 +23,7 @@ from scadbuddy.library.upstream import MergePlan, UpstreamStateError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES
+from tests.api.test_model_operations import _workflow_ids
 
 pytestmark = pytest.mark.requires_git
 
@@ -594,3 +595,28 @@ def test_a_built_ins_upstream_actions_and_details_writes_are_all_refused(
     assert response.status_code == 403, response.text
     readme = client.put(f"/api/v1/models/{BUILTIN}/readme", json={"content": "# x\n"})
     assert readme.status_code == 403
+
+
+def test_a_conflicting_merge_answers_merged_and_starts_nothing(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    """#1054 (phase 3d) Ruling 1: the route answers the conflict, so `merged`, the whole
+    three-way result, never reaches an operation's history or record."""
+    _duplicate(client)
+    _json(_put(client, MINE, SOURCE.replace('layout = "row";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    refused = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"), 409)
+    assert f"<<<<<<< {MINE}\n" in refused["merged"]
+    assert _workflow_ids(app, "model_upstream_merge") == []
+
+
+def test_upstream_actions_are_operations(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    _duplicate(client)
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss"))
+    assert _workflow_ids(app, "model_upstream_dismiss")
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    assert merged["model"]["slug"] == MINE
+    assert _workflow_ids(app, "model_upstream_merge")
