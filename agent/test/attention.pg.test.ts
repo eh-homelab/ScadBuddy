@@ -215,6 +215,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
   })
 
+  it('holds the rate limit across sessions raising at once: one parks, the other is refused', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3 }) }), approvalPollMs: 20 })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
+      await db.sql`
+        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                  expires_at, outcome, reason, resolved_at)
+        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
+                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+    }
+    const [a, b] = await Promise.all([
+      m.start(browser, { origin: 'chat', prompt: 'one' }),
+      m.start(browser, { origin: 'chat', prompt: 'two' }),
+    ])
+    await Promise.all([a.turn!.done, b.turn!.done])
+    expect(verdicts.filter((v) => !v.answered && 'timedOut' in v && v.timedOut)).toHaveLength(1)
+    expect(verdicts.filter((v) => !v.answered && /at most 10/.test(v.message))).toHaveLength(1)
+    const parked = await db.sql`SELECT 1 FROM ai_questions WHERE session_id IN (${a.session.id}, ${b.session.id})`
+    expect(parked).toHaveLength(1)
+  })
+
   it('a question cannot be timed out, by the schema itself', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
     const { session } = await m.start(browser, { origin: 'chat', title: 'q' })

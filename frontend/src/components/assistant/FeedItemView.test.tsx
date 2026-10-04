@@ -329,9 +329,14 @@ describe('the attention card (#815)', () => {
     expect(onAnswer).toHaveBeenCalledWith('att1', ['Back in five minutes'])
   })
 
-  it("says how long 'wait' waits", () => {
-    raise('wait')
-    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(/^It waits for you until .+, then stops\.$/)
+  it("says how long 'wait' waits, naming the day when it is not today", () => {
+    const tomorrow = new Date(Date.now() + 86_400_000)
+    const { unmount } = raise('wait', { attention: { reason: 'blocked', onTimeout: 'wait', expiresAt: tomorrow.toISOString() } })
+    const day = tomorrow.toLocaleString([], { weekday: 'short' })
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(new RegExp(`^It waits for you until ${day}.+, then stops\\.$`))
+    unmount()
+    raise('proceed', { attention: { reason: 'blocked', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 60_000).toISOString() } })
+    expect(screen.getByTestId('agent-attention-timer')).not.toHaveTextContent(day)
   })
 
   it('once timed out, says nobody replied, and offers nothing to answer', () => {

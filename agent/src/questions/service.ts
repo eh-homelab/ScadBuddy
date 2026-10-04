@@ -53,6 +53,8 @@ export const DEFAULT_QUESTION_POLL_MS = 1000
 /** #815 §5's per-user rate limit on attention requests: this many per window. */
 export const ATTENTION_RATE_LIMIT = 10
 export const ATTENTION_RATE_WINDOW_S = 600
+/** The advisory lock the rate limit's count and insert are taken under. */
+const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
 
@@ -461,6 +463,9 @@ export class QuestionService {
         if (attention) {
           // #815 §5: a per-user rate limit (every session is the browser user's,
           // or the request was refused above), then one open request per reason.
+          // The limit spans sessions and replicas, so its count and insert hold one
+          // lock that does too (to commit), or two turns could each read 9 and insert.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
           const [recent] = await tx<{ n: number }[]>`
             SELECT count(*)::int AS n FROM ai_questions
             WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`

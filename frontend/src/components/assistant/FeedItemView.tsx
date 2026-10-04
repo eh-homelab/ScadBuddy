@@ -213,16 +213,13 @@ function previewOf(q: AskedQuestion, c: Choice): string | undefined {
   return picked.length === 1 ? picked[0]!.preview : picked.map((o) => o.preview).join('\n\n---\n\n') || undefined
 }
 
-/**
- * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
- * the question allows it, or answer in your own words. A question with a draft (an
- * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
- * starting from that draft, so editing it returns the edited text.
- */
 /** #815 — what an attention request's timer does, as its card says it. */
 function attentionTimer(a: NonNullable<QuestionItem['attention']>): string {
   const at = new Date(a.expiresAt)
-  const when = Number.isNaN(at.getTime()) ? 'soon' : `by ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  // A wait can last a day: past today, the day is named, or tomorrow's 09:05 would read as this morning's.
+  const today = at.toDateString() === new Date().toDateString()
+  const time = at.toLocaleString([], { ...(today ? {} : { weekday: 'short' }), hour: '2-digit', minute: '2-digit' })
+  const when = Number.isNaN(at.getTime()) ? 'soon' : `by ${time}`
   switch (a.onTimeout) {
     case 'proceed':
       return `No reply ${when}: it carries on with work that needs no approval. A timeout never approves anything.`
@@ -233,6 +230,12 @@ function attentionTimer(a: NonNullable<QuestionItem['attention']>): string {
   }
 }
 
+/**
+ * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
+ * the question allows it, or answer in your own words. A question with a draft (an
+ * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
+ * starting from that draft, so editing it returns the edited text.
+ */
 function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answers: string[]) => void }) {
   const [choices, setChoices] = useState<Choice[]>(() => item.questions.map(() => NO_CHOICE))
   const headingId = `question-${item.id}`
