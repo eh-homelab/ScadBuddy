@@ -45,3 +45,29 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     assert len(built) == 2
     assert built[1].stopped.is_set()
     assert "the library worker failed" in caplog.text
+
+
+async def test_a_library_worker_still_connecting_stops_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connecting = asyncio.Event()
+
+    async def never(*args: Any, **kwargs: Any) -> Any:
+        connecting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "connect", never)
+    state = SimpleNamespace(
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library",
+            temporal_address="unused:7233",
+            temporal_namespace="default",
+        ),
+        temporal=None,
+        config=SimpleNamespace(asset_sweep_interval=0),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(connecting.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 1)

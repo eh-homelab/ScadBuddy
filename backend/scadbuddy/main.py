@@ -484,17 +484,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
     sweeps need the data volume this process holds. Once connected it sets the
     Schedule up; Temporal down at boot only delays that."""
+    client = await _connect_until(state, stop, "library")
+    if client is None:
+        return
     settings = state.settings
-    client = state.temporal
-    while client is None:
-        try:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
-        except Exception:
-            logger.warning("the library worker cannot reach Temporal yet; retrying", exc_info=True)
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-            if stop.is_set():
-                return
     queue = settings.temporal_task_queue_library
     schedules = asyncio.create_task(
         _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
