@@ -76,6 +76,27 @@ def test_a_repeated_create_makes_one_model(client: TestClient, app: FastAPI) -> 
     assert _workflow_ids(app, "model_create")
 
 
+def test_a_repeated_upload_answers_the_model_it_made(client: TestClient, app: FastAPI) -> None:
+    """Review 3c I1: the multipart re-send of a create whose answer was lost gets that
+    model, not a 409 for the slug it took."""
+    key = uuid.uuid4().hex
+
+    def upload() -> Any:
+        return client.post(
+            "/api/v1/models",
+            files={"file": ("uploaded_once.scad", SOURCE.encode(), "text/plain")},
+            headers={"Idempotency-Key": key},
+        )
+
+    first = upload()
+    assert first.status_code == 201, first.text
+    commits = _commits(app)
+    again = upload()
+    assert again.status_code == 201, again.text
+    assert again.json() == first.json()
+    assert _commits(app) == commits
+
+
 def test_a_large_source_goes_by_claim_not_in_history(client: TestClient, app: FastAPI) -> None:
     """Past Temporal's 512 KB payload warning: the source is a claim, never a payload."""
     source = "// " + "x" * 700_000 + "\ncube(1);\n"
@@ -154,3 +175,16 @@ def test_patch_duplicate_and_delete_are_operations(client: TestClient, app: Fast
     assert client.delete("/api/v1/models/base").status_code == 204
     for kind in ("model_patch", "model_duplicate", "model_delete"):
         assert _workflow_ids(app, kind), kind
+
+
+def test_a_request_too_large_for_history_is_refused_before_any_operation(
+    client: TestClient, app: FastAPI
+) -> None:
+    """Review 3c I2: a field that is not a claim is still bounded, so Temporal never
+    refuses the input as a 503 that a retry repeats."""
+    created = client.post("/api/v1/models", json={"name": "Wordy", "source": SOURCE})
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    response = client.patch(f"/api/v1/models/{slug}", json={"description": "x" * 300_000})
+    assert response.status_code == 413, response.text
+    assert _workflow_ids(app, "model_patch") == []

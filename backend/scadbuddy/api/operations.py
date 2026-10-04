@@ -11,6 +11,7 @@ with the operation when it has not within the deadline.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Annotated, Any
@@ -93,6 +94,11 @@ def _answer(op: Operation, response: Response, *, repeated: bool) -> dict[str, A
     return op.model_copy(update={"repeated": repeated})
 
 
+#: The most an operation's request may carry inline: well under Temporal's 512 KB
+#: payload warning, since it is repeated in the start, check, insert and run inputs.
+MAX_REQUEST_BYTES = 128 * 1024
+
+
 async def run_operation(
     ops: OperationCommands,
     response: Response,
@@ -105,6 +111,15 @@ async def run_operation(
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
     A refusal or a recorded failure is raised as the problem the route answers with."""
     body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+    size = len(json.dumps(body, separators=(",", ":")).encode())
+    if size > MAX_REQUEST_BYTES:
+        # The request rides in every input of the operation's history; past this it
+        # nears Temporal's payload limit, which would answer as a 503 every retry
+        # repeats (review 3c I2). Large bytes travel by claim instead.
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
+        )
     key = operation_key(kind.name, subject, body, idempotency_key or uuid.uuid4().hex)
     recorded = await ops.store.find(key)
     if recorded is not None:

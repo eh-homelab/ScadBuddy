@@ -1070,9 +1070,10 @@ Each phase is its own implementation plan and ships alone.
      named by their sha256, and the operation carries only the names, because a source
      may be 1M characters and a thumbnail 10 MB, past Temporal's payload limits. Since
      the name is the digest, a re-send reaches the same operation key. A claim is
-     removed by the housekeeping sweep (`housekeeping_sweep_claims`, a day after the
-     last request put it), not by its run, because two requests may share the same
-     bytes. The UI's and the agent's calls to these routes go through `command()`.
+     removed by the claim sweep (`housekeeping_sweep_claims`, on the prune Schedule
+     every 300 s whatever the sweep interval, a day after the last request put it), not
+     by its run, because two requests may share the same bytes. An operation's inline
+     request is capped at 128 KB (413 past it), and an import's subject is the URL's host. The UI's and the agent's calls to these routes go through `command()`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the

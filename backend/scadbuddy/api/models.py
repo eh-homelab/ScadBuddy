@@ -9,6 +9,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import (
@@ -554,8 +555,10 @@ async def create_model(
             f"the upload needs a filename that yields a slug: {exc}",
         ) from None
     # Before the parts are read, and so before any library is cloned (#436). The
-    # operation's check makes it again: this one spares a taken slug the reads.
-    _require_new(catalogue, slug)
+    # operation's check makes it again: this one spares a taken slug the reads. Not
+    # for a keyed re-send, whose slug its own first send took (review 3c I1).
+    if idempotency_key is None:
+        _require_new(catalogue, slug)
 
     try:
         source = decode_source(await file.read())
@@ -883,7 +886,8 @@ async def import_model(
         ops,
         response,
         kind=ops.kinds["model_import"],
-        subject=body.url,
+        # The host, never the URL: the subject is a search attribute (review 3c M6).
+        subject=urlsplit(body.url).hostname or "url",
         request=body.model_dump(mode="json"),
         idempotency_key=idempotency_key,
     )
