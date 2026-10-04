@@ -5,10 +5,11 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/approvals'
+import { setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
+import { ResourceSessions } from './ResourceSessions'
 
 /** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
 const availability = vi.hoisted(() => {
@@ -250,13 +251,13 @@ describe('assistant panel', () => {
     setPendingApprovals(2)
     document.title = 'ScadBuddy'
     const { user } = renderShell()
-    const button = await screen.findByRole('button', { name: 'Assistant, 2 actions waiting for your approval' })
-    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 actions waiting for your approval')
+    const button = await screen.findByRole('button', { name: 'Assistant, 2 waiting for you' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 waiting for you (2 approvals)')
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('2')
     // Announced, not only shown: the badge appears while focus is elsewhere.
     const live = screen.getByTestId('assistant-attention-live')
     expect(live).toHaveAttribute('aria-live', 'polite')
-    expect(live).toHaveTextContent('2 actions waiting for your approval')
+    expect(live).toHaveTextContent('2 waiting for you')
     await waitFor(() => expect(document.title).toBe('(2) ScadBuddy'))
 
     // Decided elsewhere: toggling the panel reads again, and the badge goes.
@@ -280,7 +281,7 @@ describe('assistant panel', () => {
       </Routes>,
       { route: '/' },
     )
-    const button = await screen.findByRole('button', { name: 'Assistant, 1 action waiting for your approval' })
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' })
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
     expect(document.title).toBe('ScadBuddy')
   })
@@ -315,6 +316,61 @@ describe('assistant panel', () => {
     expect(sentOf('session.handoff')).toEqual([{ v: 1, type: 'session.handoff', sessionId: EXTERNAL_SESSION_ID }])
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled())
     expect(screen.queryByText('Controlled by Claude Desktop')).not.toBeInTheDocument()
+  })
+
+  it("opens a session that changed the page's model in the panel, closed or already open (#931)", async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    const panel = () => screen.queryByRole('complementary', { name: 'Assistant' })
+    expect(panel()).not.toBeInTheDocument()
+
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    expect(panel()).toBeVisible()
+    expect(sentOf('session.attach')).toEqual([{ v: 1, type: 'session.attach', sessionId: EXTERNAL_SESSION_ID }])
+
+    // Open and on another chat: picking it again switches back to it.
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+    await waitFor(() => expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    expect(sentOf('session.attach')).toHaveLength(2)
+  })
+
+  it('selects a requested session once: a remounted panel does not open it again (#931)', async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    // The assistant goes off (the panel unmounts) and comes back: a fresh panel, on nothing.
+    act(() => availability.set({ available: false, state: 'not_configured' }))
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument())
+    act(() => availability.set({ available: true }))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
+    expect(sentOf('session.attach')).toEqual([])
+    expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument()
+  })
+
+  it('drops a requested session the panel never got to when the assistant goes off (#931)', async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    const item = screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ })
+    // Picked, and the assistant goes off before the panel has loaded.
+    act(() => {
+      fireEvent.click(item)
+      availability.set({ available: false, state: 'not_configured' })
+    })
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
+
+    act(() => availability.set({ available: true }))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
+    expect(sentOf('session.attach')).toEqual([])
   })
 
   it("shows what a session touched, linking to each resource's page (#931)", async () => {

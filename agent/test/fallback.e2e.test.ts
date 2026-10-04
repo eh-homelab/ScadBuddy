@@ -219,6 +219,7 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const one = reference.result?.type === 'result' ? reference.result.total_cost_usd : NaN
     expect(one).toBeGreaterThan(0)
     expect(result?.type === 'result' ? result.total_cost_usd : NaN).toBeCloseTo(2 * one, 12)
-    expect(result).toMatchObject({ num_turns: 3 })
+    // A's tool call and B's reply; A's refused request is not a turn (#1101).
+    expect(result).toMatchObject({ num_turns: 2 })
   }, 60_000)
 })

@@ -38,6 +38,14 @@ export type QuestionView = {
   options: { label: string; description: string; preview?: string }[]
 }
 
+/** #815: what makes a `question.asked` an attention request. */
+export type AttentionView = {
+  reason: 'tab_disconnected' | 'question' | 'blocked' | 'done'
+  /** What the timer does at `expiresAt` (ISO 8601): it never answers. */
+  onTimeout: 'proceed' | 'wait' | 'stop'
+  expiresAt: string
+}
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -67,7 +75,18 @@ export type ServerEvent = V &
      * The agent asks the user (#940): `tool` is the AskUserQuestion (or a subagent's ask_user) tool_use id.
      * The turn waits (`waiting_input`) until `question.resolved`.
      */
-    | { type: 'question.asked'; sessionId: string; id: string; tool: string; questions: QuestionView[] }
+    | {
+        type: 'question.asked'
+        sessionId: string
+        id: string
+        tool: string
+        questions: QuestionView[]
+        /**
+         * #815: an attention request (harness/attention.ts), not a question: one
+         * card, and a timer that resolves it at `expiresAt` without an answer.
+         */
+        attention?: AttentionView
+      }
     /**
      * Answered (`answers`: one per question, in order, and who answered), or
      * not: cancelled with its turn, with `reason`. Never answered by itself.

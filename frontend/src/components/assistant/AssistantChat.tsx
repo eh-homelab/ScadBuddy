@@ -36,6 +36,13 @@ interface Props {
   focusKey: number
   /** Inside Bambuddy's iframe, where the microphone may be blocked (#257). */
   embedded?: boolean
+  /** #931 — a session a page asked to open; selected once, then `onOpenHandled` clears it. */
+  openRequest?: OpenRequest | null
+  onOpenHandled?: () => void
+}
+
+export interface OpenRequest {
+  sessionId: string
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -51,7 +58,7 @@ function readAdvanced(): boolean {
   }
 }
 
-export function AssistantChat({ factory, onClose, focusKey, embedded = false }: Props) {
+export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -82,7 +89,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const owned = !active || isOwnedByBrowser(active)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
-  const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending') ?? false
+  const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
+  const pendingAttention = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention) ?? false
   const itemCount = active?.items.length ?? 0
   const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 
@@ -109,6 +117,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   useEffect(() => {
     composer.current?.focus()
   }, [focusKey])
+
+  // Before the socket is open this only sets what is on screen; the connection attaches it.
+  const { select } = chat
+  useEffect(() => {
+    if (!openRequest) return
+    setPickerOpen(false)
+    select(openRequest.sessionId)
+    onOpenHandled?.()
+  }, [openRequest, select, onOpenHandled])
 
   // Follow the stream. Instant when the user asked for reduced motion.
   const lastText = active?.items.at(-1)
@@ -346,7 +363,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           ? 'The assistant needs your approval.'
           : pendingQuestion
             ? 'The assistant has a question for you.'
-            : ''}
+            : pendingAttention
+              ? 'The assistant needs your attention.'
+              : ''}
       </p>
 
       {/* The user's own voice: the bridge's fill/click never type or send here (#254). */}

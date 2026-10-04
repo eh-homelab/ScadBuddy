@@ -42,6 +42,7 @@ from scadbuddy.core.config import (
     Config,
     StoreBackend,
 )
+from scadbuddy.core.proxies import Network, parse_cidr_list
 
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
 # The curated libraries the image bakes in (#169); no dev equivalent.
@@ -124,6 +125,21 @@ class Settings(BaseSettings):
     # pages may reach the server, so it belongs to the deployment.
     allowed_origins: str = ""
 
+    # SCADBUDDY_TRUSTED_PROXIES: comma-separated CIDRs (a bare address is one host) whose
+    # `X-Forwarded-For` is believed, and then only its last value (`core/proxies.py`, the
+    # agent's SCADBUDDY_AGENT_TRUSTED_PROXIES rules). The browser trace relay's per-client
+    # rate limit keys on it (spec 2026-10-01 §5.2). Empty, no forwarding header is
+    # believed and every browser behind the gateway shares one client bucket (uvicorn
+    # runs with --no-proxy-headers in the image, so it believes none either). Not a
+    # stored setting: it decides who the server believes about who it is talking to.
+    trusted_proxies: str = ""
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _trusted_proxies_are_cidrs(cls, value: str) -> str:
+        parse_cidr_list(value)
+        return value
+
     @field_validator("bambuddy_web_urls")
     @classmethod
     def _web_urls_are_http(cls, value: str | None) -> str | None:
@@ -176,6 +192,13 @@ class Settings(BaseSettings):
     temporal_address: str = Field(default="", validate_default=True)
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs run (#1052, spec
+    # 2026-10-01 §4.3). The API serves it itself in this phase (#1060).
+    temporal_task_queue_bambuddy: str = "bambuddy"
+    # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
+    # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
+    # an unregistered attribute fails the workflow task.
+    temporal_search_attributes: bool = False
     # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
     # process (one replica, dev and tests). Production runs `python -m
     # scadbuddy.worker` as its own Deployment and leaves this off.
@@ -200,7 +223,12 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_TEMPORAL_UI_URL must be an http(s) URL, not {value!r}")
         return value
 
-    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @field_validator(
+        "temporal_address",
+        "temporal_namespace",
+        "temporal_task_queue_render",
+        "temporal_task_queue_bambuddy",
+    )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
         # As `database_url`: a value that is only whitespace would read as "set" (the
@@ -250,6 +278,11 @@ class Settings(BaseSettings):
     def allowed_origin_list(self) -> list[str]:
         """`SCADBUDDY_ALLOWED_ORIGINS` split on commas, blanks dropped."""
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[Network, ...]:
+        """`SCADBUDDY_TRUSTED_PROXIES` parsed; the validator has already refused a bad one."""
+        return parse_cidr_list(self.trusted_proxies)
 
     @field_validator("revision")
     @classmethod
@@ -334,6 +367,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
             " decides who can reach the server, so it belongs to the deployment."
         ),
+        "trusted_proxies": (
+            "Which peers are believed about the client they forward for. Like the allowed"
+            " origins, it decides who the server believes it is talking to, so it belongs"
+            " to the deployment."
+        ),
         "seed_models_dir": "Image layout, fixed when the image is built.",
         "seed_libraries_dir": "Image layout, fixed when the image is built.",
         "frontend_dir": "Image layout, fixed when the image is built.",
@@ -355,6 +393,14 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_render": (
             "Paired with the Temporal address: the API and the render workers must name the"
             " same queue, and only the deployment sets both."
+        ),
+        "temporal_task_queue_bambuddy": (
+            "Paired with the Temporal address: the API starts print runs on it, and the"
+            " worker that serves it must name the same queue."
+        ),
+        "temporal_search_attributes": (
+            "Whether the namespace has ScadBuddy's Search Attributes registered, which the"
+            " deployment's Temporal manifests decide."
         ),
         "temporal_worker_inprocess": (
             "Whether this process runs a render worker at all, decided by how the deployment"

@@ -186,6 +186,9 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
+    #: How long a finished print run's row is kept (#1052, spec 2026-10-01 §5.4).
+    #: ``None`` keeps every one: the rows are the start of print history.
+    print_run_retention_seconds: float | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
@@ -289,6 +292,9 @@ class SettingsPatch(BaseModel):
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
+    #: At least a day, past the repeat window: a pruned row would turn a retry of a print
+    #: that succeeded into "print again" (review #1061).
+    print_run_retention_seconds: float | None = Field(default=None, ge=86400)
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets

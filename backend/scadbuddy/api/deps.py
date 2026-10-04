@@ -8,21 +8,23 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Path, status
+from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
-from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
+    Event,
     EventBus,
     UpstreamAvailable,
     VersionCommitted,
@@ -143,8 +145,9 @@ class AppState:
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
-    #: The print dialog's runs, answered 202 and run in the background (#470).
-    print_runs: PrintRuns
+    #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
+    #: start them.
+    print_runs: PrintCommands
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -205,6 +208,34 @@ class AppState:
     #: The in-process worker's client (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), which the
     #: lifespan connects eagerly: a worker cannot run on the API's lazy one.
     temporal: Client | None = field(default=None)
+
+
+@dataclass(frozen=True)
+class PrintCommands:
+    """What the print routes need (#1052): our record, and the client and queue that
+    ``PrintRun`` starts on. The client is the API's lazy one, so the API boots while
+    Temporal is down; a print then answers 503 until it is back."""
+
+    store: PrintRunStore
+    client: Client
+    task_queue: str
+    search_attributes: bool = False
+
+
+class _Immediate:
+    """``publish_in`` for a bus that has no transaction of its own (the in-process bus
+    of a test): publishes at once, before the caller's transaction commits, so a
+    subscriber that re-reads the row may see it as it was (review #1061 5)."""
+
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None:
+        emit(self.bus, event)
+
+
+def _transactional(events: EventBus) -> TransactionalEvents:
+    return events if isinstance(events, PgNotifyEventBus) else _Immediate(events)
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
@@ -296,9 +327,10 @@ def _build_core(settings: Settings) -> AppState:
     history.on_commit = announce_commits(events, catalogue)
     # Lazy, so the API boots while Temporal is down: its renders wait, and the
     # reconciler starts them once it is back.
+    temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
     render = RenderService(
         projection=projection,
-        client=connect_lazily(settings.temporal_address, settings.temporal_namespace),
+        client=temporal,
         task_queue=settings.temporal_task_queue_render,
         config=config,
         paths=paths,
@@ -356,7 +388,12 @@ def _build_core(settings: Settings) -> AppState:
             prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
-        print_runs=PrintRuns(PrintRunStore(pool), events),
+        print_runs=PrintCommands(
+            store=PrintRunStore(pool, events=_transactional(events)),
+            client=temporal,
+            task_queue=settings.temporal_task_queue_bambuddy,
+            search_attributes=settings.temporal_search_attributes,
+        ),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -500,7 +537,7 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
 
-def require_print_runs(state: StateDep) -> PrintRuns:
+def require_print_runs(state: StateDep) -> PrintCommands:
     """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
     if not state.print_runs.store.available:
         raise ApiError(
@@ -547,7 +584,7 @@ RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
+PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]

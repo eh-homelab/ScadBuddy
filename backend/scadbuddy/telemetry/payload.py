@@ -1,0 +1,617 @@
+"""Browser spans made safe to forward (spec 2026-10-01 §5.2, §6).
+
+The relay's input is untrusted: any script on the page writes it. So nothing passes
+through by default. The resource is rebuilt with ``service.name`` forced to
+``scadbuddy-web`` and ``service.version`` its only other attribute; each span is
+rebuilt from the OTLP/JSON fields it may carry; every list and string is capped at the
+limits the browser SDK's provider is configured with (the frontend ``RelayExporter``'s
+``spanLimits``), so a well-behaved page never meets them; and the backend's own scrub
+(`core/trace_scrub.py`) is applied, wherever the page put the value rather than only
+where the SDK would: no ``exception.message`` nor ``http.status_text`` on a span, an
+event or a link, an ``exception.stacktrace`` there reduced to its frames, no query
+string, no user agent (nor on the resource), no captured header. A URL keeps no path of
+its own either, as a server span keeps none: a path on one of the app's routes becomes
+that route's template, when the URL is relative or on one of ScadBuddy's own origins
+(`OriginCheck`; after its ``scheme://host``). Any other URL leaves only its
+``scheme://host``, or nothing when it is relative: another host has none of the app's
+routes. The SPA's routes are the browser's own, so a page's URL keeps only its origin. The
+same goes for the URLs inside a stack's frames, which keep their ``:line:col`` (and a
+path under ``/assets/``, a bundle script).
+
+What is dropped for a cap is counted in OTLP's own field for its kind, as the SDK's
+limits count it: ``droppedAttributesCount`` on the span, an event or a link,
+``droppedEventsCount``, ``droppedLinksCount``. A string or an array cut to its cap is
+not counted, as the SDK does not count one.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import string
+from collections import deque
+from collections.abc import Callable
+from functools import partial
+from typing import Any, Final, Protocol
+from urllib.parse import unquote, urlsplit
+
+from scadbuddy.core.trace_scrub import DROPPED_ATTRIBUTES, HEADER_PREFIXES, URL_ATTRIBUTES
+
+MAX_SPANS: Final = 512
+#: Bound what an empty ``{}`` entry can be rewritten into: each resource and scope is
+#: rebuilt with a resource and a scope object, so unbounded they amplify a body ~36x.
+MAX_RESOURCES: Final = 16
+MAX_SCOPES: Final = 64
+MAX_NAME_CHARS: Final = 128
+MAX_ATTRIBUTES: Final = 64
+MAX_STRING_CHARS: Final = 1024
+MAX_ARRAY_ITEMS: Final = 32
+MAX_EVENTS: Final = 16
+MAX_EVENT_ATTRIBUTES: Final = 16
+MAX_LINKS: Final = 8
+#: The spec names no cap for a link's attributes; the event cap, which the frontend's
+#: ``spanLimits`` sets as ``attributePerLinkCountLimit`` too.
+MAX_LINK_ATTRIBUTES: Final = 16
+
+WEB_SERVICE_NAME: Final = "scadbuddy-web"
+#: Every other resource attribute the page sends is dropped.
+KEPT_RESOURCE_ATTRIBUTES: Final = ("service.version",)
+#: The backend's scrub, and the message wherever a page puts it: the SDK writes it only
+#: on an ``exception`` event, but the page's input is not the SDK's (spec §6).
+#: ``http.status_text`` is the server's words, which can carry a message.
+_DROPPED: Final = DROPPED_ATTRIBUTES | {"exception.message", "http.status_text"}
+#: Of ``url.*``, only the scheme passes as sent: the reduced ones (`URL_ATTRIBUTES`)
+#: are rewritten, and any other (``url.original``, ``url.fragment``, a key a future
+#: semantic convention adds) is dropped, since it may hold the path or query.
+_URL_PREFIX: Final = "url."
+_URL_KEPT: Final = frozenset({"url.scheme"})
+
+_MAX_UINT32: Final = 2**32 - 1
+_MAX_INT64: Final = 2**63 - 1
+_MAX_TRACE_STATE_CHARS: Final = 512
+_TRACE_ID: Final = re.compile(r"^[0-9a-fA-F]{32}$")
+_SPAN_ID: Final = re.compile(r"^[0-9a-fA-F]{16}$")
+_STATUS_CODES: Final = {"STATUS_CODE_UNSET": 0, "STATUS_CODE_OK": 1, "STATUS_CODE_ERROR": 2}
+#: OTLP/JSON writes a 64-bit integer as a decimal string.
+_INT_STRING: Final = re.compile(r"^-?[0-9]{1,19}$")
+#: A browser stack frame: V8's ``    at f (https://…/x.js:1:2)``, or Firefox and
+#: Safari's ``f@https://…/x.js:1:2``. Every other line of a stack is the message.
+_BROWSER_FRAME: Final = re.compile(r"^(?:\s+at \S.*:\d+:\d+\)?|[^\s@]*@\S+:\d+:\d+)$")
+
+type Json = dict[str, Any]
+#: A request path (decoded, without query or fragment) to the template of the app's
+#: route it names, or None. `telemetry/routes.py` builds one from the app.
+type RouteMatcher = Callable[[str], str | None]
+#: Whether a URL's ``scheme://host[:port]`` is one of ScadBuddy's own (the relay passes
+#: `origin_allowed` over the public URL and allowed origins, which also takes loopback).
+type OriginCheck = Callable[[str], bool]
+
+
+#: A URL attribute's value to what is forwarded of it (`_reduced_url`), or None.
+class _UrlReducer(Protocol):
+    def __call__(self, url: str, /, *, frame: bool = False) -> str | None: ...
+
+
+#: A stack line longer than this is dropped before any pattern sees it, and frames stop
+#: once they fill a string's cap: the stack is the page's, as long as the body allows.
+MAX_FRAME_LINE_CHARS: Final = 512
+#: What separates a frame line's tokens; a frame URL is one token (no whitespace).
+_WHITESPACE: Final = re.compile(r"(\s+)")
+#: A URL scheme's characters (RFC 3986), and those of them that cannot start one.
+_SCHEME_TAIL_CHARS: Final = string.digits + "+.-"
+_SCHEME_CHARS: Final = string.ascii_letters + _SCHEME_TAIL_CHARS
+#: Each ``:line:col`` in a token, overlapping ones too: the lookahead's two digit runs
+#: are split by a colon, so each run is read at most twice whatever the token holds.
+_POSITION: Final = re.compile(r":(?=(\d+:\d+))")
+
+
+def _id(value: object, pattern: re.Pattern[str]) -> str | None:
+    """A trace or span id: hex of the right length, not all zeros (OTLP's invalid id)."""
+    if isinstance(value, str) and pattern.fullmatch(value) and value.strip("0"):
+        return value
+    return None
+
+
+def _uint(value: object, limit: int) -> int | str | None:
+    """An integer in ``0..limit``, as a number or as OTLP/JSON's decimal string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= limit else None
+    if isinstance(value, str) and _INT_STRING.fullmatch(value) and not value.startswith("-"):
+        return value if int(value) <= limit else None
+    return None
+
+
+def _is_int64(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return -(2**63) <= value <= _MAX_INT64
+    if isinstance(value, str) and _INT_STRING.fullmatch(value):
+        return -(2**63) <= int(value) <= _MAX_INT64
+    return False
+
+
+def _is_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _set_valid(target: Json, key: str, value: object) -> None:
+    if value is not None:
+        target[key] = value
+
+
+class PayloadError(ValueError):
+    """The body is not an OTLP/JSON trace export."""
+
+
+class BatchTooLargeError(ValueError):
+    """The batch holds more spans, scopes or resources than the relay takes. Its message
+    names the cap, as the route's 413 does."""
+
+
+def _list(value: object) -> list[Any]:
+    if not isinstance(value, list):
+        raise PayloadError
+    return value
+
+
+def parse(body: bytes) -> Json:
+    """The export's JSON, checked for the shape `rewrite` walks, and its span count."""
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError) as error:
+        # ValueError covers bad JSON and bytes that are not UTF-8; RecursionError, a
+        # body nested deeper than the decoder recurses.
+        raise PayloadError from error
+    if not isinstance(payload, dict):
+        raise PayloadError
+    count = 0
+    scopes = 0
+    resources = _list(payload.get("resourceSpans"))
+    if len(resources) > MAX_RESOURCES:
+        raise BatchTooLargeError(f"a trace batch holds at most {MAX_RESOURCES} resourceSpans")
+    for resource_spans in resources:
+        if not isinstance(resource_spans, dict):
+            raise PayloadError
+        scope_list = _list(resource_spans.get("scopeSpans", []))
+        scopes += len(scope_list)
+        if scopes > MAX_SCOPES:
+            raise BatchTooLargeError(f"a trace batch holds at most {MAX_SCOPES} scopeSpans")
+        for scope_spans in scope_list:
+            if not isinstance(scope_spans, dict):
+                raise PayloadError
+            spans = _list(scope_spans.get("spans", []))
+            if not all(isinstance(span, dict) for span in spans):
+                raise PayloadError
+            count += len(spans)
+    if count > MAX_SPANS:
+        raise BatchTooLargeError(f"a trace batch holds at most {MAX_SPANS} spans")
+    return payload
+
+
+def _frame_url(token: str) -> tuple[int, int, int] | None:
+    """Where a script URL sits in one token of a frame line: ``(start, colon, end)``, the
+    URL being ``token[start:colon]`` and its ``line:col`` ``token[colon + 1 : end]``.
+    The URL starts at a scheme (a letter, then scheme characters, then ``://``) and runs
+    to the last ``:line:col`` in the token. Linear in the token: each stretch between
+    two ``://`` is stripped once, and `_POSITION` reads each run of digits at most twice."""
+    floor = 0
+    separator = token.find("://")
+    while separator != -1:
+        # A scheme holds no colon, so it lies after the previous ``://``.
+        before = token[floor:separator]
+        run = before[len(before.rstrip(_SCHEME_CHARS)) :]
+        scheme = run.lstrip(_SCHEME_TAIL_CHARS)
+        if scheme:
+            start = separator - len(scheme)
+            break
+        floor = separator + 3
+        separator = token.find("://", floor)
+    else:
+        return None
+    # At least one character of the URL follows the ``://``.
+    positions = deque(_POSITION.finditer(token, separator + 4), maxlen=1)
+    if not positions:
+        return None
+    last = positions[0]
+    return start, last.start(), last.end(1)
+
+
+def _reduced_frame(line: str, reduce_url: _UrlReducer) -> str:
+    """A frame line with each script URL in it reduced, keeping its ``:line:col``."""
+    tokens = _WHITESPACE.split(line)
+    for index in range(0, len(tokens), 2):
+        found = _frame_url(tokens[index])
+        if found is None:
+            continue
+        token = tokens[index]
+        start, colon, end = found
+        reduced = reduce_url(token[start:colon], frame=True) or "<anonymous>"
+        tokens[index] = f"{token[:start]}{reduced}:{token[colon + 1 : end]}{token[end:]}"
+    return "".join(tokens)
+
+
+def browser_frames_only(stack: str, reduce_url: _UrlReducer) -> str:
+    """The frame lines of a browser stack, and nothing else: the message is the rest.
+    A frame's URL is the page's own for an inline script or an ``eval``, so it is
+    reduced as a URL attribute is, keeping its ``:line:col`` (a bundle script under
+    ``/assets/`` keeps its path). A line over :data:`MAX_FRAME_LINE_CHARS` is dropped
+    unread, and frames stop once they fill :data:`MAX_STRING_CHARS`, where the string is
+    cut anyway: every step is linear in the stack, which the page writes."""
+    frames: list[str] = []
+    length = 0
+    for line in stack.splitlines():
+        if length > MAX_STRING_CHARS:
+            break
+        if len(line) > MAX_FRAME_LINE_CHARS or not _BROWSER_FRAME.fullmatch(line):
+            continue
+        frame = _reduced_frame(line.strip(), reduce_url)
+        frames.append(frame)
+        length += len(frame) + 1
+    return "\n".join(frames)
+
+
+def _count(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return min(value, _MAX_UINT32)
+    return 0
+
+
+def _total(raw: object, local: int) -> int:
+    return min(_count(raw) + local, _MAX_UINT32)
+
+
+def _scalar(value: object) -> Json | None:
+    if not isinstance(value, dict) or len(value) != 1:
+        return None
+    ((kind, inner),) = value.items()
+    if kind == "stringValue" and isinstance(inner, str):
+        return {kind: inner[:MAX_STRING_CHARS]}
+    if kind == "boolValue" and isinstance(inner, bool):
+        return {kind: inner}
+    if kind == "intValue" and _is_int64(inner):
+        return {kind: inner}
+    if kind == "doubleValue" and _is_finite_number(inner):
+        return {kind: inner}
+    return None
+
+
+def _value(value: object) -> Json | None:
+    """A scalar, or an array of at most :data:`MAX_ARRAY_ITEMS` scalars; anything else
+    (a key-value list, bytes, a nested array) is not a value a page sends."""
+    scalar = _scalar(value)
+    if scalar is not None:
+        return scalar
+    if not isinstance(value, dict) or set(value) != {"arrayValue"}:
+        return None
+    array = value["arrayValue"]
+    items = array.get("values", []) if isinstance(array, dict) else None
+    if not isinstance(items, list):
+        return None
+    kept: list[Json] = []
+    for item in items[:MAX_ARRAY_ITEMS]:
+        inner = _scalar(item)
+        if inner is None:
+            return None
+        kept.append(inner)
+    return {"arrayValue": {"values": kept}}
+
+
+def _reduced_url(
+    url: str, match_route: RouteMatcher, own_origin: OriginCheck, *, frame: bool = False
+) -> str | None:
+    """``url`` with its path replaced by the template of the route it names, without
+    query or fragment, when it is relative or on one of ScadBuddy's own origins. Any
+    other absolute URL (``scheme://host`` or ``//host``), and one on no route, keeps
+    its origin, without any userinfo; any other relative URL on no route is None.
+    A ``frame`` URL (a stack frame's) on an own origin also keeps a path under
+    ``/assets/``, a bundle script, without query or fragment."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    origin = None
+    if parts.netloc:
+        host = parts.netloc.rpartition("@")[2]
+        origin = f"{parts.scheme}://{host}" if parts.scheme else f"//{host}"
+        if not own_origin(origin):
+            return origin
+        if frame and parts.path.startswith("/assets/"):
+            return origin + parts.path
+    elif parts.scheme:
+        return None
+    template = match_route(unquote(parts.path)) if parts.path.startswith("/") else None
+    if template:
+        return (origin or "") + template
+    return origin
+
+
+def _reduced_url_value(value: Json, reduce_url: _UrlReducer) -> Json | None:
+    """A URL value reduced (`_reduced_url`): a string, or each string of an array, an
+    item that reduces to nothing left out. None when a string reduces to nothing."""
+    if "stringValue" in value:
+        reduced = reduce_url(value["stringValue"])
+        return None if reduced is None else {"stringValue": reduced}
+    if "arrayValue" in value:
+        items = (_reduced_url_value(item, reduce_url) for item in value["arrayValue"]["values"])
+        return {"arrayValue": {"values": [item for item in items if item is not None]}}
+    return value
+
+
+def _attributes(raw: object, limit: int, reduce_url: _UrlReducer) -> tuple[list[Json], int]:
+    """At most ``limit`` attributes, scrubbed, and how many were dropped for the cap or
+    for a value no page sends. A scrubbed key is removed without being counted, as is a
+    URL that reduces to nothing (`_reduced_url`)."""
+    kept: list[Json] = []
+    dropped = 0
+    for item in _scrub_exception(raw, reduce_url):
+        key = item.get("key") if isinstance(item, dict) else None
+        if not isinstance(key, str):
+            dropped += 1
+            continue
+        if key in _DROPPED or key.startswith(HEADER_PREFIXES):
+            continue
+        if key.startswith(_URL_PREFIX) and key not in URL_ATTRIBUTES | _URL_KEPT:
+            continue
+        value = _value(item.get("value"))
+        if value is None or len(kept) >= limit:
+            dropped += 1
+            continue
+        if key in URL_ATTRIBUTES:
+            value = _reduced_url_value(value, reduce_url)
+            if value is None:
+                continue
+        kept.append({"key": key[:MAX_STRING_CHARS], "value": value})
+    return kept, dropped
+
+
+def _string_attribute(attributes: list[Any], name: str) -> str | None:
+    for item in attributes:
+        if isinstance(item, dict) and item.get("key") == name:
+            value = item.get("value")
+            inner = value.get("stringValue") if isinstance(value, dict) else None
+            if isinstance(inner, str):
+                return inner
+    return None
+
+
+def _without_message(stack: str, error_type: str | None, message: str | None) -> str:
+    """The stack without the message at its head, where V8 writes ``<type>: <message>``
+    (which can span lines). Firefox and Safari write no head, so nothing is removed; nor
+    is the message anywhere else, where it can be text inside a frame. Where the page
+    may have cut either one at its length limit, nothing of the stack is kept."""
+    if not message:
+        return stack
+    heads = [f"{error_type}: {message}"] if error_type else []
+    colon = stack.find(": ")
+    if colon != -1 and "\n" not in stack[:colon]:
+        heads.append(stack[: colon + 2] + message)
+    heads.append(message)
+    for head in heads:
+        if stack.startswith(head):
+            # A message at the page's length limit may have been cut: the rest of it
+            # would follow in the stack, where no line can be told from a frame.
+            return "" if len(message) >= MAX_STRING_CHARS else stack[len(head) :]
+        if head.startswith(stack):
+            # The page cut the stack inside its head: all of it is message.
+            return ""
+    return stack
+
+
+def _scrub_exception(raw: object, reduce_url: _UrlReducer) -> list[Any]:
+    """An attribute list without ``exception.message``, and with only the frame lines of
+    an ``exception.stacktrace`` (spec §6), wherever the page put them: the message and
+    type come from the same list."""
+    scrubbed: list[Any] = []
+    attributes = raw if isinstance(raw, list) else []
+    message = _string_attribute(attributes, "exception.message")
+    error_type = _string_attribute(attributes, "exception.type")
+    for item in attributes:
+        key = item.get("key") if isinstance(item, dict) else None
+        if key == "exception.message":
+            continue
+        if key == "exception.stacktrace":
+            stack = _string_attribute([item], key)
+            if stack is None:
+                continue
+            # A multi-line message can carry a line that looks like a frame.
+            stack = _without_message(stack, error_type, message)
+            item = {"key": key, "value": {"stringValue": browser_frames_only(stack, reduce_url)}}
+        scrubbed.append(item)
+    return scrubbed
+
+
+def _name(value: object) -> str:
+    return value[:MAX_NAME_CHARS] if isinstance(value, str) else ""
+
+
+def _event(raw: Json, reduce_url: _UrlReducer) -> Json:
+    name = _name(raw.get("name"))
+    kept, dropped = _attributes(raw.get("attributes"), MAX_EVENT_ATTRIBUTES, reduce_url)
+    event: Json = {"name": name, "attributes": kept}
+    _set_valid(event, "timeUnixNano", _uint(raw.get("timeUnixNano"), _MAX_INT64))
+    event["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
+    return event
+
+
+def _trace_state(value: object) -> str | None:
+    return value[:_MAX_TRACE_STATE_CHARS] if isinstance(value, str) else None
+
+
+def _link(raw: Json, reduce_url: _UrlReducer) -> Json | None:
+    trace_id = _id(raw.get("traceId"), _TRACE_ID)
+    span_id = _id(raw.get("spanId"), _SPAN_ID)
+    if trace_id is None or span_id is None:
+        return None
+    kept, dropped = _attributes(raw.get("attributes"), MAX_LINK_ATTRIBUTES, reduce_url)
+    link: Json = {"traceId": trace_id, "spanId": span_id}
+    _set_valid(link, "traceState", _trace_state(raw.get("traceState")))
+    _set_valid(link, "flags", _uint(raw.get("flags"), _MAX_UINT32))
+    link["attributes"] = kept
+    link["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
+    return link
+
+
+def _capped(raw: object, limit: int) -> tuple[list[Json], int]:
+    """The first ``limit`` objects of a list, and how many entries were left out."""
+    items = raw if isinstance(raw, list) else []
+    kept = [item for item in items if isinstance(item, dict)][:limit]
+    return kept, len(items) - len(kept)
+
+
+def _exception_type(events: list[Json]) -> str | None:
+    for event in events:
+        if event["name"] != "exception":
+            continue
+        for attribute in event["attributes"]:
+            if attribute["key"] == "exception.type" and "stringValue" in attribute["value"]:
+                return str(attribute["value"]["stringValue"])
+    return None
+
+
+def _status(raw: object, events: list[Json]) -> Json:
+    """The status code as sent; a description, which carries the message, becomes the
+    exception's type or ``error``, as `core/trace_scrub.py` does."""
+    if not isinstance(raw, dict):
+        return {}
+    status: Json = {}
+    code = raw.get("code")
+    if isinstance(code, str):
+        code = _STATUS_CODES.get(code)
+    if isinstance(code, int) and not isinstance(code, bool) and 0 <= code <= 2:
+        status["code"] = code
+    message = raw.get("message")
+    if isinstance(message, str) and message:
+        status["message"] = _exception_type(events) or "error"
+    return status
+
+
+def _span(raw: Json, reduce_url: _UrlReducer) -> Json | None:
+    trace_id = _id(raw.get("traceId"), _TRACE_ID)
+    span_id = _id(raw.get("spanId"), _SPAN_ID)
+    if trace_id is None or span_id is None:
+        return None
+    span: Json = {"traceId": trace_id, "spanId": span_id}
+    _set_valid(span, "parentSpanId", _id(raw.get("parentSpanId"), _SPAN_ID))
+    _set_valid(span, "traceState", _trace_state(raw.get("traceState")))
+    _set_valid(span, "flags", _uint(raw.get("flags"), _MAX_UINT32))
+    kind = raw.get("kind")
+    if isinstance(kind, int) and not isinstance(kind, bool) and 0 <= kind <= 5:
+        span["kind"] = kind
+    for field in ("startTimeUnixNano", "endTimeUnixNano"):
+        _set_valid(span, field, _uint(raw.get(field), _MAX_INT64))
+    span["name"] = _name(raw.get("name"))
+    attributes, dropped = _attributes(raw.get("attributes"), MAX_ATTRIBUTES, reduce_url)
+    span["attributes"] = attributes
+    span["droppedAttributesCount"] = _total(raw.get("droppedAttributesCount"), dropped)
+    events, dropped_events = _capped(raw.get("events"), MAX_EVENTS)
+    span["events"] = [_event(event, reduce_url) for event in events]
+    span["droppedEventsCount"] = _total(raw.get("droppedEventsCount"), dropped_events)
+    links, dropped_links = _capped(raw.get("links"), MAX_LINKS)
+    valid_links = [link for link in (_link(item, reduce_url) for item in links) if link is not None]
+    span["links"] = valid_links
+    span["droppedLinksCount"] = _total(
+        raw.get("droppedLinksCount"), dropped_links + len(links) - len(valid_links)
+    )
+    span["status"] = _status(raw.get("status"), span["events"])
+    return span
+
+
+def _resource(raw: object) -> Json:
+    kept: list[Json] = [{"key": "service.name", "value": {"stringValue": WEB_SERVICE_NAME}}]
+    seen: set[str] = set()
+    attributes = raw.get("attributes") if isinstance(raw, dict) else None
+    for item in attributes if isinstance(attributes, list) else []:
+        key = item.get("key") if isinstance(item, dict) else None
+        if key not in KEPT_RESOURCE_ATTRIBUTES or key in seen:
+            continue
+        value = _scalar(item.get("value"))
+        if value is not None and "stringValue" in value:
+            seen.add(key)
+            kept.append({"key": key, "value": value})
+    return {"attributes": kept}
+
+
+def _scope(raw: object) -> Json:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        field: raw[field][:MAX_NAME_CHARS]
+        for field in ("name", "version")
+        if isinstance(raw.get(field), str)
+    }
+
+
+def _scope_spans(raw: Json, reduce_url: _UrlReducer) -> Json | None:
+    spans = [
+        span
+        for span in (_span(item, reduce_url) for item in raw.get("spans", []))
+        if span is not None
+    ]
+    return {"scope": _scope(raw.get("scope")), "spans": spans} if spans else None
+
+
+def rewrite(payload: Json, match_route: RouteMatcher, own_origin: OriginCheck) -> Json | None:
+    """The export rebuilt from what `parse` accepted: only the fields listed here
+    survive. A scope with no surviving span is dropped, and a resource with no surviving
+    scope; None when no span is left."""
+    reduce_url = partial(_reduced_url, match_route=match_route, own_origin=own_origin)
+    resources: list[Json] = []
+    for resource_spans in payload["resourceSpans"]:
+        scopes = [
+            scope
+            for scope in (
+                _scope_spans(raw, reduce_url) for raw in resource_spans.get("scopeSpans", [])
+            )
+            if scope is not None
+        ]
+        if scopes:
+            resources.append(
+                {"resource": _resource(resource_spans.get("resource")), "scopeSpans": scopes}
+            )
+    return {"resourceSpans": resources} if resources else None
+
+
+def prepare(body: bytes, match_route: RouteMatcher, own_origin: OriginCheck) -> bytes | None:
+    """The body as the relay forwards it, or None when no span survives. ASCII JSON, so
+    a lone surrogate the page escaped stays an escape rather than failing to encode.
+    ``match_route`` names the app's routes and ``own_origin`` ScadBuddy's origins; both
+    run in this thread, so they must not touch the event loop."""
+    rewritten = rewrite(parse(body), match_route, own_origin)
+    if rewritten is None:
+        return None
+    return json.dumps(rewritten, separators=(",", ":")).encode("ascii")
+
+
+__all__ = [
+    "KEPT_RESOURCE_ATTRIBUTES",
+    "MAX_ARRAY_ITEMS",
+    "MAX_ATTRIBUTES",
+    "MAX_EVENTS",
+    "MAX_EVENT_ATTRIBUTES",
+    "MAX_FRAME_LINE_CHARS",
+    "MAX_LINKS",
+    "MAX_LINK_ATTRIBUTES",
+    "MAX_NAME_CHARS",
+    "MAX_RESOURCES",
+    "MAX_SCOPES",
+    "MAX_SPANS",
+    "MAX_STRING_CHARS",
+    "WEB_SERVICE_NAME",
+    "BatchTooLargeError",
+    "OriginCheck",
+    "PayloadError",
+    "RouteMatcher",
+    "browser_frames_only",
+    "parse",
+    "prepare",
+    "rewrite",
+]

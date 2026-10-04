@@ -31,6 +31,12 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import (
+    current_traceparent,
+    link_to,
+    span,
+    use_traceparent,
+)
 from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
@@ -137,6 +143,30 @@ class RenderService:
         inputs: Mapping[str, Any] | None = None,
     ) -> Job:
         """Record the job (or join the waiting one it matches) and start its workflow."""
+        with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
+            job, coalesced = await self._submit(
+                slug, params, model_version=model_version, supersedes=supersedes, inputs=inputs
+            )
+            current.set_attribute("scadbuddy.job_id", job.id)
+            current.set_attribute("scadbuddy.coalesced", coalesced)
+            # A row with no trace of its own took this caller's: no link to itself.
+            if (
+                coalesced
+                and job.traceparent != current_traceparent()
+                and (link := link_to(job.traceparent)) is not None
+            ):
+                current.add_link(link.context)
+            return job
+
+    async def _submit(
+        self,
+        slug: str,
+        params: Mapping[str, ParamValue],
+        *,
+        model_version: str | None = None,
+        supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+    ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
@@ -154,6 +184,7 @@ class RenderService:
             inputs=dict(inputs) if inputs is not None else legacy_inputs(params),
             model_version=model_version,
             created_at=now(),
+            traceparent=current_traceparent(),
         )
         size = len(pydantic_data_converter.payload_converter.to_payload(job).data)
         if size > MAX_WORKFLOW_INPUT_BYTES:
@@ -179,7 +210,7 @@ class RenderService:
             await self._cancel_workflow(submitted.superseded)
         if submitted.coalesced:
             self.metrics.render_coalesced.inc()
-            return submitted.job
+            return submitted.job, True
         self.metrics.render_submitted.inc()
         try:
             await self._start(submitted.job)
@@ -193,7 +224,7 @@ class RenderService:
                     "could not start a render's workflow; the reconciler will",
                     extra={"job_id": submitted.job.id},
                 )
-        return submitted.job
+        return submitted.job, False
 
     async def cancel(self, job_id: str, *, slug: str) -> Job | None:
         """Withdraw one request for the job; the last one cancels it and its workflow."""
@@ -211,9 +242,25 @@ class RenderService:
         started: list[str] = []
         for job in stale:
             try:
-                await self._start(job, WorkflowIDConflictPolicy.FAIL)
-            except WorkflowAlreadyStartedError:
-                continue
+                # A child of the row's first request when it has a valid traceparent,
+                # else a root (NULL, or a value the propagator rejects): without a span
+                # here the default sampler would drop the parentless StartWorkflow
+                # CLIENT span and the workflow with it. Either way the trace shows the
+                # start came from the reconciler.
+                with (
+                    use_traceparent(job.traceparent),
+                    span(
+                        "render.reconcile",
+                        attributes={"scadbuddy.slug": job.slug, "scadbuddy.job_id": job.id},
+                    ) as reconcile,
+                ):
+                    try:
+                        await self._start(job, WorkflowIDConflictPolicy.FAIL)
+                    except WorkflowAlreadyStartedError:
+                        # Expected, not a failure: the workflow is running (a busy
+                        # worker), so the span stays UNSET (spec §6).
+                        reconcile.set_attribute("scadbuddy.reconcile.already_started", True)
+                        continue
             except Exception as error:
                 # One row that cannot start must not hold back the rows behind it.
                 self.metrics.store_errors.labels("start_workflow").inc()

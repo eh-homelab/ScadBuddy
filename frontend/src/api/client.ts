@@ -22,6 +22,7 @@ import type {
   AiSessionView,
   SessionLimits,
   SessionResource,
+  ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -89,10 +90,17 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
-import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
+import type {
+  AiConnectionTest,
+  AiCredentialCreate,
+  AiCredentialEntry,
+  AiCredentialList,
+  AiCredentialSave,
+} from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
+import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
 
@@ -290,6 +298,8 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  // Its run may be checking still, and will print once it is accepted (#1052).
+  if (error.problem.type === STILL_ACCEPTING) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -311,10 +321,16 @@ function bambuddyUnanswered(problem: Problem): boolean {
 const seg = encodeURIComponent
 
 /**
- * How often `runPrint` reads a running print run (#470), and how many times it tries a
- * request no ScadBuddy answer described again before giving up; tests shorten it.
+ * How often `runPrint` reads a running print run (#470), how many times it tries a
+ * request no ScadBuddy answer described again before giving up, and how long it keeps
+ * sending one the server is still accepting (#1052: past the accept's own worst case,
+ * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+/**
+ * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
+ * execution is gone within minutes; this is the backstop, past any run's own length.
+ */
+export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
 
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
@@ -337,16 +353,18 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
+export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ * Or ScadBuddy answered that the same request is still being accepted.
  */
 function unanswered(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    caught.problem.type === UNANSWERED &&
-    [0, 502, 503, 504, 524].includes(caught.status)
-  )
+  if (!(caught instanceof ApiError)) return false
+  if (caught.problem.type === STILL_ACCEPTING) return true
+  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
@@ -369,13 +387,24 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  for (let tries = 0; ; tries++) {
+async function reattach<T>(
+  attempt: () => Promise<T>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<T> {
+  const began = Date.now()
+  for (let tries = 0; ; ) {
     try {
-      return await attempt()
+      return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
-      await wait(printRunPoll.intervalMs, signal)
+      if (signal?.aborted || !unanswered(caught)) throw caught
+      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+        throw caught
+      }
+      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
 }
@@ -386,18 +415,32 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
  * slices and queues in the background, since that takes longer than the proxies in
  * front wait. A repeat of the same request (the same `request_id`) is the same run, so
  * re-sending it after an answer that never arrived re-attaches to that run and never
- * queues a second print. `signal` stops following; the run itself goes on.
+ * queues a second print. `signal` stops following; the run itself goes on. `within`
+ * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
  */
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,
   signal?: AbortSignal,
+  within?: Within,
 ): Promise<PrintRunResult> {
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    within,
   )
+  const began = Date.now()
   while (run.status === 'running') {
+    if (Date.now() - began >= printRunPoll.followMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:print-run-unfinished',
+        title: 'Still preparing',
+        status: 504,
+        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        // It may be queued by now: the dialog says to check before printing again.
+        may_have_queued: true,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = run.id
     run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
@@ -888,8 +931,8 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal, within),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -1024,8 +1067,8 @@ export const api = {
   },
 
   /** #742 — followed to its end like an output's run (`runPrint`). */
-  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/library/${fileId}/run`, body, signal),
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
@@ -1208,6 +1251,12 @@ export const api = {
   listAiSessionResources: (id: string) =>
     request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
 
+  /** #931 — the sessions whose tool calls touched a resource, newest first. */
+  listAiResourceSessions: (resource: ResourceRef, limit: number) =>
+    request<{ sessions: AiSessionView[] }>(
+      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions?limit=${limit}`,
+    ),
+
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
 
@@ -1224,14 +1273,14 @@ export const api = {
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
   /**
-   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
-   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
-   * parse is a real failure and rejects as it would anywhere.
+   * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
+   * four and status only. A non-JSON answer is the backend's SPA fallback (nothing routes
+   * `/api/v1/ai/*` to the agent), and rejects with a problem of type `AI_NOT_ROUTED`; a
+   * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
-  getAiCredential: async (): Promise<AiCredentialView> => {
-    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+  listAiCredentials: async (): Promise<AiCredentialList> => {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
       throw new ApiError({
@@ -1241,14 +1290,28 @@ export const api = {
         detail: 'The agent service did not answer at /api/v1/ai.',
       })
     }
-    return (await response.json()) as AiCredentialView
+    return (await response.json()) as AiCredentialList
   },
 
-  putAiCredential: (body: AiCredentialUpdate) =>
-    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+  /** Added last, so it is tried after every existing one. */
+  createAiCredential: (body: AiCredentialCreate) =>
+    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+  /** Every id exactly once, first tried first; a stale list answers 409. */
+  reorderAiCredentials: (ids: string[]) =>
+    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+
+  saveAiCredential: (id: string, body: AiCredentialSave) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: (id: string) =>
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+
+  /** Back to `active`, for one disabled or cooling down. */
+  resetAiCredential: (id: string) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
-  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
+  testAiCredential: (id: string) =>
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
 }
