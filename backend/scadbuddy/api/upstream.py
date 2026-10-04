@@ -206,6 +206,17 @@ async def dismiss_upstream(
     return operation_answer(result, ModelRecord)
 
 
+def dismiss_check(slug: str, state: AppState) -> None:
+    """The ``model_upstream_dismiss`` operation's check (#1054): there is an update."""
+
+    def check() -> None:
+        _, now = state.catalogue.upstream_state(slug)
+        if now not in ("update", "dismissed"):
+            raise UpstreamStateError(f"{slug!r} has no upstream update to dismiss", now)
+
+    _answer(slug, check)
+
+
 def dismiss_run(slug: str, state: AppState) -> ModelRecord:
     """The ``model_upstream_dismiss`` operation's run (#1054)."""
     record = _answer(slug, lambda: state.catalogue.dismiss_upstream(slug))
@@ -240,6 +251,17 @@ async def detach_upstream(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, ModelRecord)
+
+
+def detach_check(slug: str, state: AppState) -> None:
+    """The ``model_upstream_detach`` operation's check (#1054): the upstream is gone."""
+
+    def check() -> None:
+        upstream_id, now = state.catalogue.upstream_state(slug)
+        if now != "gone":
+            raise UpstreamStateError(f"{upstream_id!r} still exists, so {slug!r} stays linked", now)
+
+    _answer(slug, check)
 
 
 def detach_run(slug: str, state: AppState) -> ModelRecord:

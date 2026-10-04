@@ -29,6 +29,7 @@ from scadbuddy.api.models import (
     MAX_SOURCE_CHARS,
     announce_source_change,
     require_mine,
+    require_model_exists,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -128,9 +129,11 @@ async def put_source_file(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
+    catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
     _require_sibling(name)
     if "\x00" in body.content:
         raise ApiError(
@@ -150,6 +153,25 @@ async def put_source_file(
     return operation_answer(result, ModelRecord)
 
 
+def _too_many(slug: str, count: int) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        f"{slug!r} already has {count} .scad files, the most a model may hold",
+    )
+
+
+def file_put_check(slug: str, name: str, state: AppState) -> None:
+    """The ``model_file_put`` operation's check (#1054): a new file has room. The run
+    counts again under the catalogue's lock."""
+    try:
+        if not (state.paths.model_dir(slug) / name).is_file():
+            count = len(state.catalogue.source_files(slug))
+            if count >= MAX_SOURCE_FILES:
+                raise _too_many(slug, count)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
 async def file_put_run(
     slug: str, name: str, content: str, message: str | None, state: AppState
 ) -> ModelRecord:
@@ -166,10 +188,7 @@ async def file_put_run(
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except TooManySourceFilesError as error:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"{slug!r} already has {error.count} .scad files, the most a model may hold",
-        ) from None
+        raise _too_many(slug, error.count) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     announce_source_change(state.events, slug)
@@ -188,9 +207,11 @@ async def delete_source_file(
     name: FileNamePath,
     response: Response,
     ops: OperationsDep,
+    catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    require_model_exists(catalogue, slug)
     _require_sibling(name)
     result = await run_operation(
         ops,
@@ -201,6 +222,13 @@ async def delete_source_file(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, ModelRecord)
+
+
+def file_delete_check(slug: str, name: str, state: AppState) -> None:
+    """The ``model_file_delete`` operation's check (#1054): the file is there."""
+    require_model_exists(state.catalogue, slug)
+    if not (state.paths.model_dir(slug) / name).is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no file {name!r}")
 
 
 async def file_delete_run(slug: str, name: str, state: AppState) -> ModelRecord:

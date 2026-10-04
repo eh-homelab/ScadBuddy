@@ -697,3 +697,15 @@ def test_a_re_sent_merge_whose_first_is_still_running_skips_the_conflict_check(
         time.sleep(0.2)
         op = _json(client.get(f"/api/v1/operations/{first['id']}"))
     assert op["status"] != "running", op
+
+
+def test_upstream_state_refusals_record_nothing(client: TestClient, app: FastAPI) -> None:
+    """M1: dismissing with no update, or detaching an upstream that still exists, is
+    refused by the operation's check, so nothing is recorded."""
+    _duplicate(client)
+    dismissed = _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss"), 409)
+    assert dismissed["state"] == "current"
+    detached = _json(client.post(f"/api/v1/models/{MINE}/upstream/detach"), 409)
+    assert detached["state"] == "current"
+    assert _workflow_ids(app, "model_upstream_dismiss") == []
+    assert _workflow_ids(app, "model_upstream_detach") == []

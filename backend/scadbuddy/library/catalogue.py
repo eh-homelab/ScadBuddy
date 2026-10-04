@@ -1240,6 +1240,15 @@ class Catalogue:
         self._drop_preview(slug)
         return self.record(slug)
 
+    def has_own_thumbnail(self, slug: str) -> bool:
+        """Whether :meth:`delete_thumbnail` has a thumbnail to remove: the model's
+        ``thumbnail.png``, or with media, its first item when that is an image."""
+        self._require(slug)
+        stored = self._stored_media(slug)
+        if not stored:
+            return self.thumbnail_path(slug).is_file()
+        return stored[0].kind == "image"
+
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
         report one: the next item's, or the fallback's when the model has been
@@ -2000,6 +2009,12 @@ class Catalogue:
                 self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
+
+    def upstream_state(self, slug: str) -> tuple[str, UpstreamState]:
+        """The upstream's id and where this template stands against it, without the
+        merge preview :meth:`upstream_status` works out (#1054: the upstream checks)."""
+        upstream, _, state = self._upstream_now(slug)
+        return upstream.id, state
 
     def merge_plan(self, slug: str) -> tuple[MergePlan, UpstreamState] | None:
         """The merge a ``merge_upstream`` would make now, written nowhere, and the state
