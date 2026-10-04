@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import logging
 import pkgutil
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime
 from functools import partial
@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 from temporalio.client import Client
+from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
@@ -425,13 +426,39 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
         # print run waits on a queue nothing polls.
-        try:
-            async with bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities):
-                await _end_lost_runs_until(client, state.print_runs.store, stop)
-        except Exception:
-            logger.exception("the print worker failed; starting it again")
+        worker = bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities)
+        if not await _serve_until(
+            worker, stop, _end_lost_runs_until(client, state.print_runs.store, stop)
+        ):
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+
+
+async def _serve_until(
+    worker: Worker, stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
+) -> bool:
+    """Run ``worker`` and ``alongside`` until ``stop``: True. A worker that ends first,
+    failed or not, is said at once (review #1061: a poller that dies while running
+    would otherwise leave the queue unpolled until the pod restarts): False."""
+    running = asyncio.create_task(worker.run())
+    beside = asyncio.create_task(alongside)
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        beside.cancel()
+        stopping.cancel()
+    if running.done():
+        error = running.exception()
+        logger.error(
+            "the print worker failed; starting it again",
+            exc_info=error if error is not None else RuntimeError("the worker stopped"),
+        )
+        return False
+    await worker.shutdown()
+    with suppress(Exception):
+        await running
+    return True
 
 
 async def _end_lost_runs_until(client: Client, store: PrintRunStore, stop: asyncio.Event) -> None:

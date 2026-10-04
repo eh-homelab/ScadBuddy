@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from types import SimpleNamespace, TracebackType
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,23 +14,26 @@ from scadbuddy import main
 
 
 class StubWorker:
-    def __init__(self, fail: bool, entered: asyncio.Event) -> None:
-        self.fail = fail
-        self.entered = entered
+    """A worker that fails at once (``fail``), fails once it has run (``fail_after``), or
+    runs until it is shut down."""
 
-    async def __aenter__(self) -> StubWorker:
+    def __init__(self, fail: bool, entered: asyncio.Event, *, fail_after: bool = False) -> None:
+        self.fail = fail
+        self.fail_after = fail_after
+        self.entered = entered
+        self.stopped = asyncio.Event()
+
+    async def run(self) -> None:
         if self.fail:
             raise RuntimeError("the worker could not poll")
         self.entered.set()
-        return self
+        if self.fail_after:
+            await asyncio.sleep(0)
+            raise RuntimeError("the worker's poller died")
+        await self.stopped.wait()
 
-    async def __aexit__(
-        self,
-        kind: type[BaseException] | None,
-        error: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        return None
+    async def shutdown(self) -> None:
+        self.stopped.set()
 
 
 async def test_a_failed_worker_is_logged_at_once_and_started_again(
@@ -99,3 +102,28 @@ async def test_the_worker_task_ends_lost_runs_at_start_and_on_its_interval(
     stop.set()
     await asyncio.wait_for(task, 5)
     assert len(calls) >= 2
+
+
+async def test_a_worker_that_fails_while_running_is_started_again(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1061 1a: a failure after the worker started, not only one entering it."""
+    second = asyncio.Event()
+    built: list[StubWorker] = []
+
+    def build(*args: Any, **kwargs: Any) -> StubWorker:
+        built.append(StubWorker(False, second if built else asyncio.Event(), fail_after=not built))
+        return built[-1]
+
+    monkeypatch.setattr(main, "bambuddy_worker", build)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    stop = asyncio.Event()
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+        await asyncio.wait_for(second.wait(), 5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert len(built) == 2
+    assert built[1].stopped.is_set()  # shut down on stop, not abandoned
+    assert "the print worker failed" in caplog.text
