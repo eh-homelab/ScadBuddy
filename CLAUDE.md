@@ -112,8 +112,11 @@ cd frontend && pnpm exec msw init public --save   # --save, or it prompts and di
 ```
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
-`.github/scripts/*.test.sh` suites. Every `docker run` in a `verify.sh` must carry
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
+`lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
+kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
+repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+`docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
 the same line: `verify-models.sh` reaps a timed-out template's containers by it (#302).
@@ -324,6 +327,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
   09-27 template-pipelines spec makes Postgres and Temporal required.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
+  `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
+  `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
+  `DS_PROMETHEUS`/`DS_TEMPO` variables. clusters will pull it in as a remote
+  resource pinned to a full SHA, once clusters#1596 Phase 5 adds the line, and
+  `deploy.reusable.yml` moves that `ref` with the image.
+  A query may read only series `core/metrics.py` declares and span names the
+  service emits (`lint-dashboard.sh` checks both).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which

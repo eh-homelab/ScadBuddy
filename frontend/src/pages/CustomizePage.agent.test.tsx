@@ -161,7 +161,7 @@ describe('customizer tools', () => {
     expect(!early.ok && early.error.message).toMatch(/generate first/)
 
     const generated = await call('generate', { timeout_ms: 5000 })
-    expect(generated).toMatchObject({ ok: true, result: { output: { id: expect.any(String) } } })
+    expect(generated).toMatchObject({ ok: true, result: { output: { id: expect.any(String), slug: expect.any(String) }, filed: null } })
 
     expect(await call('open_print_dialog', { kind: 'send' })).toMatchObject({ ok: true })
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
@@ -195,7 +195,11 @@ describe('customizer tools', () => {
       ),
     )
     await open()
-    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    // Filed in the remembered project too, which the answer says (#931: the agent records it).
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({
+      ok: true,
+      result: { filed: { project_id: 1, library_file_id: expect.any(Number), created: expect.any(Boolean) } },
+    })
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     expect(await call('open_print_dialog', { kind: 'print' })).toMatchObject({ ok: true })
     const dialog = await screen.findByRole('dialog')
