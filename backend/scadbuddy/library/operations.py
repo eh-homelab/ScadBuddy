@@ -131,7 +131,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
                     name, url=url, ref=ref, libraries=state.libraries, installs=state.installs
                 )
                 record = await to_thread_to_end(
-                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing)
+                    partial(state.catalogue.pin_library, slug, pin, replacing=replacing),
+                    lambda _: library_changed(state.events, slug, name),
                 )
         except LibraryPinChangedError:
             raise ApiError(
@@ -144,7 +145,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def model_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -180,7 +180,8 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         slug, name, index = request["slug"], request["name"], request["index"]
         try:
             record = await to_thread_to_end(
-                partial(state.catalogue.unpin_library, slug, name, index=index)
+                partial(state.catalogue.unpin_library, slug, name, index=index),
+                lambda _: library_changed(state.events, slug, name),
             )
         except LibraryPinChangedError:
             raise ApiError(
@@ -195,7 +196,6 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
         except GitError as error:
             raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-        library_changed(state.events, slug, name)
         return _record(record)
 
     async def _refuse_removal(name: str, commit: str | None) -> None:
@@ -248,16 +248,18 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         async with checkouts.removing():
             await _refuse_removal(name, commit)
             try:
-                removed = await to_thread_to_end(partial(libraries.remove, name, commit))
+                # No model changes -- a removal is refused while one pins it -- so no
+                # `model.updated`: only the checkouts on the volume moved.
+                await to_thread_to_end(
+                    partial(libraries.remove, name, commit),
+                    lambda commits: emit(state.events, LibraryRemoved(name=name, commits=commits)),
+                )
             except LibraryCheckoutNotFoundError:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
                 ) from None
             except LibraryError as error:
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        # No model changes -- a removal is refused while one pins it -- so no
-        # `model.updated`: only the checkouts on the volume moved.
-        emit(state.events, LibraryRemoved(name=name, commits=removed))
         return {}
 
     return [

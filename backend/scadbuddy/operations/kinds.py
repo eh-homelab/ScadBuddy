@@ -105,11 +105,12 @@ class ThreadSteps:
 THREAD_STEPS: ContextVar[ThreadSteps | None] = ContextVar("thread_steps", default=None)
 
 
-async def to_thread_to_end[T](fn: Callable[[], T]) -> T:
+async def to_thread_to_end[T](fn: Callable[[], T], landed: Callable[[T], None] | None = None) -> T:
     """``asyncio.to_thread``, except that a cancel raises only once the thread has
     returned: a thread cannot be stopped, so a lock held around this stays held for as
     long as the thread runs. Its effect (a commit, say) still lands, so it is counted
-    in the run's ``THREAD_STEPS`` while it runs."""
+    in the run's ``THREAD_STEPS`` while it runs, and ``landed`` (its events, say) is
+    called with what the thread returned, cancelled or not."""
     future = asyncio.ensure_future(asyncio.to_thread(fn))
     steps = THREAD_STEPS.get()
     if steps is not None:
@@ -120,9 +121,14 @@ async def to_thread_to_end[T](fn: Callable[[], T]) -> T:
 
         future.add_done_callback(ended)
     try:
-        return await asyncio.shield(future)
+        result = await asyncio.shield(future)
     except asyncio.CancelledError:
         while not future.done():
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait({future})
+        if landed is not None and future.exception() is None:
+            landed(future.result())
         raise
+    if landed is not None:
+        landed(result)
+    return result
