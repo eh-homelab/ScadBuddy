@@ -28,8 +28,8 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         built.append(StubWorker(False, second if built else asyncio.Event(), fail_after=not built))
         return built[-1]
 
-    async def no_schedules(*args: Any) -> None:
-        return None
+    async def no_schedules(*args: Any) -> bool:
+        return False
 
     monkeypatch.setattr(main, "Worker", build)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
@@ -84,16 +84,56 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     history service) is retried, not left to the next restart."""
     calls: list[float] = []
 
-    async def flaky(client: object, queue: str, interval: float) -> None:
+    async def flaky(client: object, queue: str, interval: float) -> bool:
         calls.append(interval)
         if len(calls) == 1:
             raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+        return False
 
     monkeypatch.setattr(main, "ensure_schedules", flaky)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
     await asyncio.wait_for(main._set_up_housekeeping(object(), "library", 600.0, stop), 5)  # type: ignore[arg-type]
     assert calls == [600.0, 600.0]
+
+
+@pytest.mark.parametrize("paused", [True, False])
+async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
+    paused: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1095 2: the Schedule's sweep is what backfills the uploads; while an
+    operator keeps it paused, the start does that instead."""
+    set_up = asyncio.Event()
+    backfilled: list[object] = []
+
+    async def schedules(client: object, queue: str, interval: float) -> bool:
+        set_up.set()
+        return paused
+
+    async def backfill(assets: object) -> int:
+        backfilled.append(assets)
+        return 0
+
+    monkeypatch.setattr(main, "Worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "ensure_schedules", schedules)
+    monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+    state = SimpleNamespace(
+        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        temporal=object(),
+        config=SimpleNamespace(asset_sweep_interval=600.0),
+        store=SimpleNamespace(
+            content=object(), remote_assets=SimpleNamespace(backfill=backfill), fonts=None
+        ),
+        assets=object(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(set_up.wait(), 5)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert backfilled == ([state.assets] if paused else [])
 
 
 def _broken(error: Exception) -> Callable[..., Any]:

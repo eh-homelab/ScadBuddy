@@ -176,7 +176,9 @@ on shutdown.
     converges the uploads with the store (reconcile and backfill), so expect that
     Bambuddy traffic right after a deploy. A run still open from before the start
     goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
-    paused across restarts, and a start does not trigger it. Settled render jobs are pruned every 300 s by a second
+    paused across restarts, and a start does not trigger it: while it is paused nothing
+    sweeps the uploads or reconciles them with the store, and a start only backfills
+    them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
