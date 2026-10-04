@@ -124,3 +124,23 @@ async def test_insert_prunes_operations_finished_before_the_retention(
     await insert(store, "new", key="k2", run="r2", retention=timedelta(days=1))
     assert await store.get("old") is None
     assert await store.get("new") is not None
+
+
+async def test_named_by_running_finds_names_only_in_running_requests(
+    store: OperationStore,
+) -> None:
+    """Review 3c 1.2: a claim a running operation names is not dropped under it."""
+    held, done, loose = "a" * 64, "b" * 64, "c" * 64
+    for op_id, name in (("x", held), ("y", done)):
+        await store.insert(
+            op_id,
+            kind="model_create",
+            subject="w",
+            key=op_id,
+            request={"source": name},
+            workflow_id=f"op-model_create-{op_id}",
+            workflow_run_id="r1",
+            retention=None,
+        )
+    await store.finish("y", result={})
+    assert await store.named_by_running([held, done, loose]) == {held}

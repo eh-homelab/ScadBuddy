@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import ExitStack
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from temporalio.client import Client
 
 from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
 from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
+from scadbuddy.workflows.operation_models import FINISH_ACTIVITY
 
 RAW_URL = "https://raw.githubusercontent.com/someone/models/main/Gridfinity%20Bin.scad"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -251,3 +254,36 @@ def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -
     with state.operations.store._require().connection() as conn:
         rows = conn.execute("SELECT subject FROM operations WHERE kind = 'model_import'").fetchall()
     assert [row["subject"] for row in rows] == ["raw.githubusercontent.com"]
+
+
+@respx.mock
+def test_an_imports_operation_never_records_the_urls_query(client: TestClient) -> None:
+    """Review 3c 1.5: the URL goes by claim; the operation's request, and every input in
+    its history that carries it, hold it without its query, which may carry a token.
+    The answer is the model, whose `origin_url` is the URL as given."""
+    url = RAW_URL + "?token=secret"
+    respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
+    assert client.post("/api/v1/models/import", json={"url": url}).status_code == 201
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.operations.store._require().connection() as conn:
+        (row,) = conn.execute(
+            "SELECT request::text AS request, workflow_id FROM operations"
+            " WHERE kind = 'model_import'"
+        ).fetchall()
+    assert "secret" not in row["request"]
+    assert RAW_URL in row["request"]
+
+    async def inputs() -> str:
+        client = await Client.connect(state.settings.temporal_address, namespace="default")
+        history = await client.get_workflow_handle(row["workflow_id"]).fetch_history()
+        payloads = []
+        for event in history.events:
+            payloads.append(str(event.workflow_execution_started_event_attributes.input))
+            accepted = event.workflow_execution_update_accepted_event_attributes
+            payloads.append(str(accepted.accepted_request.input))
+            scheduled = event.activity_task_scheduled_event_attributes
+            if scheduled.activity_type.name != FINISH_ACTIVITY:
+                payloads.append(str(scheduled.input))
+        return "".join(payloads)
+
+    assert "secret" not in asyncio.run(inputs())

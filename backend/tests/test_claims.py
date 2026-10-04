@@ -75,8 +75,6 @@ def test_a_put_survives_the_sweep_removing_the_claim_under_it(
 ) -> None:
     """Review 3c 1.4: the sweep may unlink a claim while a put renews it; the put
     holds the claim all the same, and never fails over it."""
-    from scadbuddy.operations import claims as claims_module
-
     claims = ClaimStore(tmp_path)
     name = claims.put(b"a")
 
@@ -87,8 +85,8 @@ def test_a_put_survives_the_sweep_removing_the_claim_under_it(
 
         return call
 
-    monkeypatch.setattr(claims_module.os, "utime", swept_first(os.utime))
-    monkeypatch.setattr(claims_module.os, "replace", swept_first(os.replace))
+    monkeypatch.setattr(os, "utime", swept_first(os.utime))
+    monkeypatch.setattr(os, "replace", swept_first(os.replace))
     assert claims.put(b"a") == name
     assert claims.get(name) == b"a"
 

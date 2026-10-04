@@ -172,8 +172,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `library/operations.py` (`library_kinds`, queue `library`, #1054) and a model's
   lifecycle `library/model_operations.py` (`model_kinds`), all registered in
   `create_app`. Request bytes too large for a workflow payload (a create's source,
-  thumbnail, README) go by claim check: `operations/claims.py` `ClaimStore`, under
-  `cache/claims/`, named by sha256 so a re-send keeps its key, and removed only by the
+  thumbnail, README, a patch's presets, an import's URL) go by claim check:
+  `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by sha256 so a
+  re-send keeps its key. `run_operation(..., claimed=)` drops them once the answer is
+  final unless a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
   them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB) with
   413. A kind reads the state when it runs, never a route dependency, so a test

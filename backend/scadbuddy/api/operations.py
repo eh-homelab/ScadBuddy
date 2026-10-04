@@ -11,9 +11,11 @@ with the operation when it has not within the deadline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
@@ -25,6 +27,7 @@ from temporalio.service import RPCError
 from scadbuddy.api.deps import OperationCommands, OperationsDep
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows.commands import (
@@ -107,6 +110,44 @@ def _author() -> OperationAuthor | None:
     return None if author is None else OperationAuthor(**vars(author))
 
 
+@dataclass(frozen=True)
+class Claimed:
+    """The claims a request wrote (``operations/claims.py``), dropped once its answer is
+    final (review 3c 1.2)."""
+
+    store: ClaimStore
+    names: list[str]
+
+
+async def _release(ops: OperationCommands, claimed: Claimed) -> None:
+    """Drop ``claimed``, except what an operation still running names: another request
+    holding the same bytes."""
+    if not claimed.names:
+        return
+    held = await ops.store.named_by_running(claimed.names)
+    for name in set(claimed.names) - held:
+        await asyncio.to_thread(claimed.store.drop, name)
+
+
+async def recorded(
+    ops: OperationCommands,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+) -> Operation | None:
+    """The operation a keyed request already started, which ``run_operation`` answers
+    from; None without a client key, since each such request is its own command."""
+    if idempotency_key is None:
+        return None
+    return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
+
+
+def _body(request: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    return request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+
+
 async def run_operation(
     ops: OperationCommands,
     response: Response,
@@ -115,10 +156,40 @@ async def run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    claimed: Claimed | None = None,
 ) -> dict[str, Any] | Operation:
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
-    A refusal or a recorded failure is raised as the problem the route answers with."""
-    body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+    A refusal or a recorded failure is raised as the problem the route answers with.
+    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
+    the operation may still run."""
+    try:
+        result = await _run_operation(
+            ops,
+            response,
+            kind=kind,
+            subject=subject,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+    except ApiError as error:
+        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+            await _release(ops, claimed)
+        raise
+    if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
+        await _release(ops, claimed)
+    return result
+
+
+async def _run_operation(
+    ops: OperationCommands,
+    response: Response,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+) -> dict[str, Any] | Operation:
+    body = _body(request)
     size = len(json.dumps(body, separators=(",", ":")).encode())
     if size > MAX_REQUEST_BYTES:
         # The request rides in every input of the operation's history; past this it

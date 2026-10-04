@@ -69,6 +69,11 @@ class OperationStore:
     async def get(self, op_id: str) -> Operation | None:
         return await asyncio.to_thread(self._get, op_id)
 
+    async def named_by_running(self, names: list[str]) -> set[str]:
+        """Those of ``names`` that the request of an operation still running contains
+        (a claim's name, #1054)."""
+        return await asyncio.to_thread(self._named_by_running, names)
+
     async def insert(
         self,
         op_id: str,
@@ -127,6 +132,16 @@ class OperationStore:
                 f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)
             ).fetchone()
         return Operation.model_validate(row) if row else None
+
+    def _named_by_running(self, names: list[str]) -> set[str]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT name FROM unnest(%s::text[]) AS name WHERE EXISTS ("
+                " SELECT 1 FROM operations"
+                " WHERE status = 'running' AND strpos(request::text, name) > 0)",
+                (names,),
+            ).fetchall()
+        return {row["name"] for row in rows}
 
     def _insert(
         self,
