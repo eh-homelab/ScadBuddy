@@ -45,7 +45,7 @@ from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.workflows import printing
+from scadbuddy.workflows import print_activities, printing
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.follow import FollowPrint, follow_id, follow_queue
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
@@ -107,6 +107,8 @@ class Fake:
         self.output_id = uuid.uuid4().hex
         #: How many of the next `print_succeed` attempts fail before one succeeds.
         self.succeed_failures = 0
+        #: How many of the next `print_finish` attempts fail before one succeeds.
+        self.finish_failures = 0
         #: Set, the check waits on it, so a test can act while it is in flight.
         self.check_gate: asyncio.Event | None = None
         #: Set, the insert waits on it, then records its row anyway (it never heartbeats).
@@ -190,6 +192,9 @@ class Fake:
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         self.calls.append("finish")
+        if self.finish_failures:
+            self.finish_failures -= 1
+            raise RuntimeError("the settings could not be read")
         items = [item for outcome in input.outcomes for item in outcome.queue_item_ids]
         return PrintRunResult(
             library_file_id=41, copies=1, queue_item_ids=items, bambuddy_url="http://b/queue"
@@ -679,24 +684,24 @@ class _ForgetfulSource:
         raise RuntimeError("the data volume is gone")
 
 
+class _StalledSource:
+    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+        await asyncio.Event().wait()
+
+
 class _Settings:
+    def __init__(self, url: str | None = "http://bambuddy.test") -> None:
+        self.url = url
+
     def load(self) -> StoredSettings:
-        return StoredSettings(bambuddy_url="http://bambuddy.test", bambuddy_api_key="bb_test")
+        return StoredSettings(bambuddy_url=self.url, bambuddy_api_key="bb_test")
 
 
-async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeeded(
-    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review #1061 1a: the real `print_finish`; remembering the project's printer is
-    best effort, so a run with every plate queued never ends `failed`."""
-
-    async def source(*_: object) -> _ForgetfulSource:
-        return _ForgetfulSource()
-
+def real_activities(settings: _Settings | None = None) -> PrintActivities:
     unused: Any = None
-    real = PrintActivities(
+    return PrintActivities(
         PrintDeps(
-            settings_store=cast(Any, _Settings()),
+            settings_store=cast(Any, settings or _Settings()),
             outputs=unused,
             uploads=unused,
             catalogue=unused,
@@ -704,18 +709,88 @@ async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeed
             observer=unused,
         )
     )
-    monkeypatch.setattr(real, "_source", source)
-    fake.project_id = 7
+
+
+async def ended_with_real_finish(
+    client: Client, fake: Fake, real: PrintActivities, arg: PrintRunInput
+) -> PrintRun:
     activities = [real.finish if a == fake.finish else a for a in fake.all()]
     queue = f"print-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client, task_queue=queue, workflows=[PrintRunWorkflow], activities=activities
     ):
-        arg = run_input()
         await start(client, queue, arg)
-        run = await asyncio.wait_for(ended(client, arg), timeout=60)
+        return await asyncio.wait_for(ended(client, arg), timeout=30)
+
+
+async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeeded(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 1a: the real `print_finish`; remembering the project's printer is
+    best effort, so a run with every plate queued never ends `failed`."""
+    real = real_activities()
+    monkeypatch.setattr(real, "_output_source", lambda *_: _ForgetfulSource())
+    fake.project_id = 7
+    run = await ended_with_real_finish(client, fake, real, run_input())
     assert run.status == "succeeded" and run.result is not None
     assert run.result.queue_item_ids == [51]
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+async def test_a_project_remembered_past_its_budget_is_skipped_and_the_run_succeeds(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 (fourth) 1: a stalled volume would outlast the activity's timeout,
+    which no ``except`` sees, and `print_finish` retries without limit; the remember is
+    given up after its budget instead."""
+    real = real_activities()
+    monkeypatch.setattr(real, "_output_source", lambda *_: _StalledSource())
+    monkeypatch.setattr(print_activities, "REMEMBER_BUDGET", 0.5)
+    fake.project_id = 7
+    run = await ended_with_real_finish(client, fake, real, run_input())
+    assert run.status == "succeeded" and run.result is not None
+    assert run.result.queue_item_ids == [51]
+
+
+async def test_a_library_print_reads_nothing_back_from_bambuddy_to_finish(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1061 (fourth) 1: a library file's project is not remembered, so its three
+    Bambuddy reads are not made."""
+    real = real_activities()
+    loaded: list[object] = []
+    monkeypatch.setattr(real, "_source", lambda *args: loaded.append(args))
+    monkeypatch.setattr(real, "_output_source", lambda *args: loaded.append(args))
+    fake.project_id = 7
+    arg = run_input().model_copy(update={"source": SourceSpec(kind="library", file_id=41)})
+    run = await ended_with_real_finish(client, fake, real, arg)
+    assert run.status == "succeeded"
+    assert loaded == []
+
+
+async def test_a_queued_print_whose_bambuddy_url_was_cleared_still_ends_succeeded(
+    client: Client, fake: Fake
+) -> None:
+    """Review #1061 (fourth) 2: every plate is queued, so settings cleared meanwhile
+    cost the result its queue link, never the run."""
+    run = await ended_with_real_finish(client, fake, real_activities(_Settings(None)), run_input())
+    assert run.status == "succeeded" and run.result is not None
+    assert run.result.queue_item_ids == [51]
+    assert run.result.bambuddy_url is None
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+async def test_a_finish_that_fails_a_few_times_still_ends_succeeded(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 (fourth) 3: `print_finish` failing (a settings blip) is retried, and
+    the run is recorded as it queued."""
+    fake.finish_failures = 2
+    arg = run_input()
+    await start(client, worker, arg)
+    run = await asyncio.wait_for(ended(client, arg), timeout=60)
+    assert run.status == "succeeded" and not run.may_have_queued
+    assert fake.calls.count("finish") == 3
     assert not any(call.startswith("fail") for call in fake.calls)
 
 
