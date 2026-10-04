@@ -44,15 +44,35 @@ type FetchResult<T> = { data?: T; error?: unknown; response: Response }
 /** How many more times a print run request no ScadBuddy answer described is sent (#470). */
 export const RUN_REATTEMPTS = 3
 
+/** The backend's 503 while Temporal has not yet answered a print's start (#1052). */
+const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
+/**
+ * How long a print's start is sent again while the backend says it is still accepting
+ * it: the browser's `printRunPoll.acceptingMs` (frontend/src/api/client.ts), past the
+ * accept's own worst case of three 60 s checks. Counting it against `RUN_REATTEMPTS`
+ * gave up within a minute, and a second print_output would be a second print (review
+ * #1061).
+ */
+export const ACCEPTING_MS = 240_000
+
+function stillAccepting(result: FetchResult<unknown>): boolean {
+  const { error, response } = result
+  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown }) : {}
+  return response.status === 503 && problem.type === STILL_ACCEPTING
+}
+
 /**
  * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
  * from something in between, whose body is not one of the backend's problems (they
- * always carry a `detail`). The same list as the browser client's `unanswered`.
+ * always carry a `detail`). Or the backend answered that it is still accepting the same
+ * request. The same rule as the browser client's `unanswered`.
  */
 function unanswered(result: FetchResult<unknown>): boolean {
   const { error, response } = result
-  const detail = typeof error === 'object' && error !== null && typeof (error as { detail?: unknown }).detail === 'string'
-  return [502, 503, 504, 524].includes(response.status) && !detail
+  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
+  if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
+  return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
 }
 
 /**
@@ -67,18 +87,21 @@ async function reattach<T>(
   what: string,
   gaveUp = '',
 ): Promise<T> {
-  for (let tries = 0; ; tries++) {
+  const began = Date.now()
+  // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
+  for (let misses = 0; ; ) {
     let result: FetchResult<T>
     try {
       result = await send()
     } catch (caught) {
       if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
-      if (tries >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
+      if (misses++ >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
       await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
       continue
     }
     if (unanswered(result)) {
-      if (tries >= RUN_REATTEMPTS) {
+      const accepting = stillAccepting(result)
+      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })

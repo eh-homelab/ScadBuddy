@@ -24,6 +24,7 @@ DEFAULTS: dict[str, object] = {
     "printer_id": None,
     "default_plate": None,
     "display_unit": "mm",
+    "print_run_retention_seconds": None,
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
     "temporal_ui_url": None,
@@ -152,6 +153,25 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
     assert (
         client.put("/api/v1/settings", json={"display_unit": None}).json()["display_unit"] == "mm"
     )
+
+
+def test_print_run_retention_is_stored_and_a_clear_keeps_every_run(
+    client: TestClient, settings: Settings
+) -> None:
+    """#1052, spec 2026-10-01 §5.4: empty keeps every run; a number prunes older ones."""
+    saved = client.put("/api/v1/settings", json={"print_run_retention_seconds": 604800})
+    assert saved.json()["print_run_retention_seconds"] == 604800
+    assert read_stored(settings.database_url)["print_run_retention_seconds"] == 604800
+    cleared = client.put("/api/v1/settings", json={"print_run_retention_seconds": None})
+    assert cleared.json()["print_run_retention_seconds"] is None
+
+
+@pytest.mark.parametrize("value", [0, -1, 86, 86399])
+def test_a_print_run_retention_under_a_day_is_refused(client: TestClient, value: int) -> None:
+    """Review #1061 2a: under the repeat window, a pruned row turns a retry of a print
+    that succeeded into "print again"."""
+    response = client.put("/api/v1/settings", json={"print_run_retention_seconds": value})
+    assert response.status_code == 422
 
 
 def test_an_unknown_display_unit_is_refused(client: TestClient) -> None:

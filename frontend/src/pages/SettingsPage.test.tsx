@@ -150,6 +150,43 @@ describe('SettingsPage', () => {
     put.mockRestore()
   })
 
+  it('keeps print runs forever until a number of days is saved, and clearing keeps them again (#1052)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const days = screen.getByLabelText('Keep finished print runs for (days)')
+    expect(days).toHaveValue(null)
+    expect(days).toHaveAttribute('placeholder', 'Forever')
+
+    await user.type(days, '7')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ print_run_retention_seconds: 604800 })
+    expect((await api.getSettings()).print_run_retention_seconds).toBe(604800)
+
+    await user.clear(days)
+    // The button is disabled while the first save is in flight.
+    const save = screen.getByRole('button', { name: 'Save Printing defaults' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ print_run_retention_seconds: null })
+    put.mockRestore()
+  })
+
+  it('refuses a print run retention under a day, which would forget a retried print (#1061)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/at least 1 day/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+
   it('saves the display unit and switches every open view to it', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)

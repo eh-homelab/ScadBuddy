@@ -149,7 +149,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
-  `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
+  `render_worker`, `print_worker`, `make_current`, `drained`), `models.py` (what crosses
+  the history). Printing (#1052): `printing.py` (`PrintRunWorkflow`), `print_activities.py`
+  (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
+  update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
+  `bambuddy` queue's worker runs inside the API process until #1060.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`

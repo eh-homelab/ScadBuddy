@@ -195,6 +195,22 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     server.resetHandlers()
     printRunPoll.intervalMs = 1000
     printRunPoll.reattempts = 3
+    printRunPoll.acceptingMs = 240_000
+    printRunPoll.followMs = 3_600_000
+  })
+
+  it('stops following a run that never ends, saying to check before printing again', async () => {
+    // Review #1061: a run whose execution is gone would otherwise spin the dialog forever.
+    printRunPoll.intervalMs = 1
+    printRunPoll.followMs = 30
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json(started)),
+    )
+    const failure = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).detail).toMatch(/still preparing this print/)
+    expect((failure as ApiError).problem.may_have_queued).toBe(true)
   })
 
   it('reads the run until it succeeds and returns its result', async () => {
@@ -213,6 +229,67 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
 
     await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
     expect(reads).toBe(2)
+  })
+
+  const stillAccepting = () =>
+    HttpResponse.json(
+      {
+        type: 'https://scadbuddy.dev/problems/command-still-accepting',
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy is still checking this print.',
+      },
+      { status: 503, headers: { 'Retry-After': '2' } },
+    )
+
+  it('keeps sending while still accepting, past the re-sends for an unanswered request (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return posts <= printRunPoll.reattempts + 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+  })
+
+  it('says a print still being accepted when it gave up may have started (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.acceptingMs = 20
+    server.use(http.post('/api/v1/print/outputs/out-1/run', stillAccepting))
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('sends the same request again while the server is still accepting it (#1052)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return posts < 2
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this print.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(posts).toBe(2)
   })
 
   it("follows a library file's run the same way (#742)", async () => {
