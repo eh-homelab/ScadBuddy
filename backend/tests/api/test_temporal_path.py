@@ -148,6 +148,7 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
 ) -> None:
     """#1054: the sweeps are a Temporal Schedule on the `library` queue this process
     serves, triggered once at start."""
+    settings = settings.model_copy(update={"asset_sweep_interval": 3600.0})
     app = create_app(settings)
     queue = settings.temporal_task_queue_library
 
@@ -171,10 +172,9 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
         result = await temporal.get_workflow_handle(
             run.workflow_id, run_id=run.first_execution_run_id
         ).result()
-        await handle.delete()
         return schedule.schedule.spec.intervals[0].every, str(result)
 
     with TestClient(app):
         every, result = asyncio.run(described())
-    assert every == timedelta(seconds=settings.asset_sweep_interval)
+    assert every == timedelta(seconds=3600)
     assert result == "[]"  # every sweep ran, none failed
