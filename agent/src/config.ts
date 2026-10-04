@@ -15,7 +15,8 @@ import { OriginConfigError, originPolicy } from './http/origins.js'
 // SCADBUDDY_BROWSER_ALLOWED_ORIGINS is here for the same reason: it decides
 // what on the network the headless browser inside the pod may reach
 // (harness/browserOrigins.ts), which is the operator's call, not a setting a
-// request could change.
+// request could change. The Temporal address and namespace are where the
+// `agent-tools` worker polls (#1055), infrastructure like the database URL.
 
 export type Config = {
   /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
@@ -46,9 +47,24 @@ export type Config = {
    * comma-separated list, or `*` for any. Unset → none.
    */
   browserAllowedOrigins: string | undefined
+  /**
+   * The Temporal frontend's host:port, the same SCADBUDDY_TEMPORAL_ADDRESS the backend
+   * reads. The `agent-tools` worker and the commands run on it (spec 2026-10-01 §6.3,
+   * #1055). Unset → neither: /healthz says so, and plugin installs answer 503.
+   */
+  temporalAddress: string | undefined
+  /** The backend's SCADBUDDY_TEMPORAL_NAMESPACE (default `scadbuddy`). */
+  temporalNamespace: string
+  /**
+   * The backend's SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert §4.2's Search Attributes,
+   * once the deployment has registered them.
+   */
+  temporalSearchAttributes: boolean
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
+/** The backend's `DEFAULT_TEMPORAL_NAMESPACE` (backend/scadbuddy/core/config.py). */
+export const DEFAULT_TEMPORAL_NAMESPACE = 'scadbuddy'
 
 /** The only variable names this service reads. Tests assert nothing else is consulted. */
 export const ENV_VARS = [
@@ -60,6 +76,9 @@ export const ENV_VARS = [
   'SCADBUDDY_ALLOWED_ORIGINS',
   'SCADBUDDY_AGENT_TRUSTED_PROXIES',
   'SCADBUDDY_BROWSER_ALLOWED_ORIGINS',
+  'SCADBUDDY_TEMPORAL_ADDRESS',
+  'SCADBUDDY_TEMPORAL_NAMESPACE',
+  'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -72,6 +91,21 @@ export class ConfigError extends Error {
 function present(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
+}
+
+/** A Temporal value has no whitespace inside, as the backend's settings require. */
+function temporalValue(name: string, value: string | undefined): string | undefined {
+  if (value !== undefined && /\s/.test(value)) throw new ConfigError(`${name} must not contain whitespace`)
+  return value
+}
+
+/** A boolean as pydantic reads the backend's same variable. */
+function flag(name: string, value: string | undefined): boolean {
+  if (value === undefined) return false
+  const lower = value.toLowerCase()
+  if (['true', '1', 'yes', 'on'].includes(lower)) return true
+  if (['false', '0', 'no', 'off'].includes(lower)) return false
+  throw new ConfigError(`${name} must be true or false, not ${value}`)
 }
 
 export function loadConfig(env: Env = process.env): Config {
@@ -129,5 +163,13 @@ export function loadConfig(env: Env = process.env): Config {
     allowedOrigins,
     trustedProxies,
     browserAllowedOrigins,
+    temporalAddress: temporalValue('SCADBUDDY_TEMPORAL_ADDRESS', present(env.SCADBUDDY_TEMPORAL_ADDRESS)),
+    temporalNamespace:
+      temporalValue('SCADBUDDY_TEMPORAL_NAMESPACE', present(env.SCADBUDDY_TEMPORAL_NAMESPACE)) ??
+      DEFAULT_TEMPORAL_NAMESPACE,
+    temporalSearchAttributes: flag(
+      'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+      present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
+    ),
   }
 }
