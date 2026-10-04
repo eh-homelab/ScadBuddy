@@ -54,6 +54,8 @@ export function usePrintChoices(open: boolean, source: PrintSource | undefined) 
    * started for one output or printer can resolve after another has been asked for.
    */
   const attempt = useRef(0)
+  /** The `attempt` of the read the current `choices` came from. */
+  const [choicesRead, setChoicesRead] = useState(0)
   /**
    * Spec §7 — the nozzles, tier and process this model last printed with are applied
    * once per open, on the first read: a later read for another printer must not undo
@@ -83,6 +85,7 @@ export function usePrintChoices(open: boolean, source: PrintSource | undefined) 
       .then((next) => {
         if (token !== attempt.current) return
         setChoices(next)
+        setChoicesRead(token)
         // The server already applied last archive → remembered → default.
         setBedType(next.bed_type)
         if (!seeded.current) {
@@ -181,6 +184,10 @@ export function usePrintChoices(open: boolean, source: PrintSource | undefined) 
   return {
     sourceKey: resetKey,
     choices,
+    /** The read `choices` came from, comparable with `readsStarted`. */
+    choicesRead,
+    /** How many choices reads have started: a read numbered above it starts later. */
+    readsStarted: attempt,
     loading,
     loadError,
     reload,
