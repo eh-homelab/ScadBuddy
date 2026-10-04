@@ -69,6 +69,6 @@ markers = [
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
-    "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, or the usage read) on purpose",
+    "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
 ]

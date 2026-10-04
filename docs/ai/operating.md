@@ -312,16 +312,21 @@ the query read, so a query that started with an old secret cannot disable a new 
 
 The routes are in `registerCredentialRoutes()` in
 [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts). Error
-bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way to use them is Settings → Assistant →
-**Claude credential** (`AiCredentialSection`,
-[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx), #1000),
-which shows the stored kind, base URL and last four, replaces the credential, runs the
-test (showing `Retry-After` on a `429`) and deletes it after a confirmation. The
-`curl` below is the fallback when there is no UI.
+bodies are `{ "detail": "…" }`, plus `code` on the no-database `503`. The normal way
+to use them is Settings → Assistant → **Claude credentials** (`AiCredentialSection`,
+[`frontend/src/components/assistant/AiCredentialSection.tsx`](../../frontend/src/components/assistant/AiCredentialSection.tsx),
+#1000, #1093), a list over the `/entries` and `/order` routes in the order queries try
+the credentials.
+Each row shows the kind, base URL, last four and status (active, rate limited until a
+time, or disabled with the last error), and can be moved up or down, tested (showing
+`Retry-After` on a `429`), reset when not active, given a new key, or deleted after a
+confirmation; a form adds one last. The list is read again just after the earliest
+cooldown ends, since the status is worked out at read time. The `curl` below is the
+fallback when there is no UI.
 
-The routes without `/entries` are the single-credential routes that section uses: they
-act on the first credential by priority. The `/entries` and `/order` routes manage every
-credential (#1093).
+The routes without `/entries` are the single-credential routes from #1000: they act on
+the first credential by priority, for scripts written against them. The UI no longer
+uses them; the `/entries` and `/order` routes manage every credential (#1093).
 
 | Route | Guarded | What it does |
 |---|---|---|

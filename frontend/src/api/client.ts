@@ -90,7 +90,13 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
-import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
+import type {
+  AiConnectionTest,
+  AiCredentialCreate,
+  AiCredentialEntry,
+  AiCredentialList,
+  AiCredentialSave,
+} from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -1237,14 +1243,14 @@ export const api = {
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
   /**
-   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
-   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
-   * parse is a real failure and rejects as it would anywhere.
+   * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
+   * four and status only. A non-JSON answer is the backend's SPA fallback (nothing routes
+   * `/api/v1/ai/*` to the agent), and rejects with a problem of type `AI_NOT_ROUTED`; a
+   * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
-  getAiCredential: async (): Promise<AiCredentialView> => {
-    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+  listAiCredentials: async (): Promise<AiCredentialList> => {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
       throw new ApiError({
@@ -1254,14 +1260,28 @@ export const api = {
         detail: 'The agent service did not answer at /api/v1/ai.',
       })
     }
-    return (await response.json()) as AiCredentialView
+    return (await response.json()) as AiCredentialList
   },
 
-  putAiCredential: (body: AiCredentialUpdate) =>
-    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+  /** Added last, so it is tried after every existing one. */
+  createAiCredential: (body: AiCredentialCreate) =>
+    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+  /** Every id exactly once, first tried first; a stale list answers 409. */
+  reorderAiCredentials: (ids: string[]) =>
+    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+
+  saveAiCredential: (id: string, body: AiCredentialSave) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: (id: string) =>
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+
+  /** Back to `active`, for one disabled or cooling down. */
+  resetAiCredential: (id: string) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
-  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
+  testAiCredential: (id: string) =>
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
 }
