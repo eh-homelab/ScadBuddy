@@ -15,6 +15,9 @@ INSERT_ACTIVITY = "op_insert"
 FINISH_ACTIVITY = "op_finish"
 #: Guards the prelude step (#1060), so a history from before it replays unchanged.
 PRELUDE_PATCH = "op-prelude"
+#: Set in the request of an operation started with a prelude: its run knows the prelude's
+#: part is done. A request without it came from an API from before the prelude (#1060).
+PRELUDE_REQUESTED = "_prelude"
 
 
 def check_activity(kind: str) -> str:

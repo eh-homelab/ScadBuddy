@@ -42,6 +42,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
+    PRELUDE_REQUESTED,
     OperationAnswer,
     OperationAuthor,
     OperationInput,
@@ -255,16 +256,17 @@ async def _run_operation(
         idempotency_key is not None and await _running(ops, workflow_id)
     ):
         await before_start()
+    prelude = _prelude(ops, kind, body)
     arg = OperationInput(
         kind=kind.name,
         subject=subject,
         key=key,
-        request=body,
+        request=body if prelude is None else {**body, PRELUDE_REQUESTED: prelude.kind},
         run_attempts=kind.run_attempts,
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
-        prelude=_prelude(ops, kind, body),
+        prelude=prelude,
     )
     try:
         answer = await start_command(

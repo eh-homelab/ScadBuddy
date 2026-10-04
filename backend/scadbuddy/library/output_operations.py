@@ -3,10 +3,10 @@
 the check makes the ones that read the volume, the render's job or the blob store,
 and the run is the route's former body.
 
-An output delete with ``delete_inbox_copies`` deletes the Bambuddy inbox copies in its
-run, before the files (plan 3e Ruling 4): §4.3 puts that part on ``bambuddy``, which is
-acceptable while both workers run in the API process. #1060, which moves ``bambuddy``
-out, splits it.
+An output delete with ``delete_inbox_copies`` deletes the Bambuddy inbox copies before
+the files. Since #1060 that is its prelude on ``bambuddy`` (``output_inbox_delete``);
+a delete an API from before it started (no ``PRELUDE_REQUESTED`` in the request) still
+deletes them in its run, as plan 3e Ruling 4 had it.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from fastapi import status
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -31,6 +33,7 @@ from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -132,8 +135,17 @@ def output_kinds(state: AppState) -> list[OperationKind]:
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         output_id = request["output_id"]
-        # The inbox copies went first, on `bambuddy` (`output_inbox_delete`, #1060).
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
+        # The inbox copies went first, on `bambuddy` (`output_inbox_delete`, #1060), unless
+        # an API from before that started this delete with no prelude: then they go here.
+        if (
+            request["delete_inbox_copies"]
+            and PRELUDE_REQUESTED not in request
+            and await state.uploads.for_output(meta.id)
+        ):
+            settings = state.settings_store.load()
+            async with client_for(settings) as client:
+                await remove_inbox_copies(client, state.uploads, meta, settings)
         await asyncio.to_thread(state.outputs.delete, output_id)
         # After the files: a failed delete keeps the output, and so must keep its records.
         # Best effort once the files are gone, as for a deleted model: the output is. Each
