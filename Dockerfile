@@ -156,7 +156,11 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY frontend/ ./
-RUN pnpm build
+# The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
+# runtime stage gets. Declared here, after the copy, so a new version reruns only this
+# build step. build-image.yml passes it; ci.yml's builds keep the default.
+ARG SCADBUDDY_VERSION=dev
+RUN VITE_SCADBUDDY_VERSION="${SCADBUDDY_VERSION}" pnpm build
 
 # ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
 # A SEPARATE image, reached with `--target agent` and deployed as a second
