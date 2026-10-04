@@ -71,6 +71,7 @@ from scadbuddy.workflows.commands import (
     DESCRIBE_SECONDS,
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
+    CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     start_command,
@@ -352,7 +353,9 @@ async def accept_run(
             ) from None
         response.status_code = status.HTTP_200_OK
         return closed.model_copy(update={"repeated": True})
-    except CommandStillAcceptingError:
+    except (CommandStillAcceptingError, CommandClosedError):
+        # A closed command recorded nothing, and its execution ended unsuccessfully, so
+        # the same request sent again starts a new one.
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ScadBuddy is still checking this print. Send the same request again to follow it.",

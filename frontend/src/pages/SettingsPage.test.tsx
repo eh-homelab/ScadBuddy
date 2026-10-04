@@ -197,6 +197,18 @@ describe('SettingsPage', () => {
     put.mockRestore()
   })
 
+  it('refuses a print run retention under a day, which would forget a retried print (#1061)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/at least 1 day/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+
   it('saves the display unit and switches every open view to it', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
