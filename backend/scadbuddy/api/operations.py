@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
 
+#: The problems after which the operation may still run, so its claims are kept.
+_MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
+
 #: The client's key for one deliberate press (§4.2 step 1).
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
@@ -176,11 +179,12 @@ async def run_operation(
 ) -> dict[str, Any] | Operation:
     """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
     A refusal or a recorded failure is raised as the problem the route answers with.
-    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
-    the operation may still run. ``before_start`` is a route's own refusal, made only
-    when no record answers and the same request is not still running: a repeat is its
-    first answer whatever has changed since (§4.2). Its refusal, 503 included, releases
-    ``claimed`` too: nothing started (review 3e final I1)."""
+    ``claimed`` is dropped once the answer is final: not on a 202, or on a 503 that
+    says the operation may still run (a recorded 503 is final, review #1194 1.1).
+    ``before_start`` is a route's own refusal, made only when no record answers and the
+    same request is not still running: a repeat is its first answer whatever has changed
+    since (§4.2). Its refusal, 503 included, releases ``claimed`` too: nothing started
+    (review 3e final I1)."""
     refused = False
 
     async def refuse() -> None:
@@ -203,7 +207,7 @@ async def run_operation(
             before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and (refused or error.status != status.HTTP_503_SERVICE_UNAVAILABLE):
+        if claimed is not None and (refused or error.type not in _MAY_STILL_RUN):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
