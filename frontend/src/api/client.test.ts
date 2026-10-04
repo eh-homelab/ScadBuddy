@@ -16,6 +16,12 @@ import type { MediaView } from './types'
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
 const picture = media[GALLERY_SLUG]![0]!
 
+describe('printRunPoll still-accepting budget (#1061)', () => {
+  it('is the backend CLIENT_ACCEPTING (printing.py), as the agent ACCEPTING_MS is', () => {
+    expect(printRunPoll.acceptingMs).toBe(240_000)
+  })
+})
+
 describe('media URLs (#274)', () => {
   it('addresses an item by its id, with the slug encoded', () => {
     expect(api.mediaUrl(BUILTIN_SLUG, picture)).toBe(

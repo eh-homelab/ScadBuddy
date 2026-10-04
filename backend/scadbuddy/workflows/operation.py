@@ -118,7 +118,7 @@ class OperationWorkflow:
         try:
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
-                RunOp(request=input.request, checked=checked),
+                RunOp(request=input.request, checked=checked, author=input.author),
                 result_type=dict,
                 start_to_close_timeout=(
                     timedelta(seconds=input.run_timeout_s) if input.run_timeout_s else RUN_TIMEOUT
