@@ -14,6 +14,8 @@ from unittest import mock
 import psycopg
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -1219,3 +1221,51 @@ def test_a_result_stored_before_the_pins_were_recorded_still_loads() -> None:
     stored = _result().model_dump(mode="json")
     del stored["libraries"]
     assert JobResult.model_validate(stored).libraries == []
+
+
+async def test_a_colour_fallback_leaves_no_span_in_error(
+    paths: DataPaths, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    """Spec 2026-10-01 §6: spans end ERROR exactly when the job fails. One colour's
+    wrapper render failing is that colour's fallback (spec 09-22 §6.3), not a failure."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    solid = write_openscad_3mf(tmp_path / "solid.3mf", [TRAY])
+    binary = tmp_path / "fake-openscad"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *"#FF1493"*) exit 3;; esac\n'
+        f'prev=; for a; do [ "$prev" = -o ] && cp "{solid}" "$a"; prev=$a; done\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    schema = _colour_schema(("floor_color", "#0047BB"), ("wall_color", "#FF1493"))
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    with (
+        mock.patch.object(jobs, "render_3mf", _stage_openscad({0: [TRAY, WALL]}, None)),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+    ):
+        result, _ = await jobs.render_job(
+            _job("j"),
+            config=replace(CONFIG, openscad=str(binary)),
+            paths=paths,
+            assets=AssetStore(paths.assets),
+        )
+
+    assert any(w.startswith("#FF1493: no closed solid") for w in result.warnings)
+    finished = spans.get_finished_spans()
+    assert [s.name for s in finished if s.status.status_code is StatusCode.ERROR] == []
+    fallbacks = [
+        s
+        for s in finished
+        if s.name == "render.solid" and (s.attributes or {}).get("scadbuddy.solid.fallback")
+    ]
+    assert len(fallbacks) == 1
+    # The exit code is the export's, recorded once (review 5 of #1064).
+    assert "scadbuddy.openscad.exit_code" not in (fallbacks[0].attributes or {})
+    exports = [s for s in finished if s.name == "openscad.export"]
+    assert sorted((s.attributes or {})["scadbuddy.openscad.exit_code"] for s in exports) == [0, 3]

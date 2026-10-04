@@ -17,6 +17,7 @@ from temporalio.service import RPCError
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.workflows import follow as follow_module
+from scadbuddy.workflows.component import FOLLOWS
 from scadbuddy.workflows.follow import follow_id
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
@@ -207,7 +208,8 @@ def test_shutdown_cancels_the_follows_still_starting(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review #1091 5: a start that hangs on a Temporal that does not answer is
-    cancelled and awaited by the lifespan, not left to the loop's teardown."""
+    cancelled and awaited by the lifespan, not left to the loop's teardown. The follows
+    are a component (review #1091 3), closed by its ``run``."""
     started = asyncio.Event()
     cancelled: list[str] = []
 
@@ -225,7 +227,7 @@ def test_shutdown_cancels_the_follows_still_starting(
         state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
 
         async def ensure() -> None:
-            state.print_follows.ensure("o" * 32)
+            state.components.get(FOLLOWS).ensure("o" * 32)
             await started.wait()
 
         client.portal.call(ensure)  # type: ignore[union-attr]
