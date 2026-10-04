@@ -47,7 +47,9 @@ cluster does not run and which covers neither the browser nor Temporal context.
   configured before the database is reachable, and it is infrastructure, like
   `SCADBUDDY_DATABASE_URL`.
 - **No endpoint, no export.** With neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` nor
-  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER=none`), each
+  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER` naming anything
+  but `otlp`: `none`, or an exporter the services do not ship, which also logs
+  a warning), each
   service installs a provider with no exporter: spans are created (so context
   still propagates) and dropped. Tests, CI and a local `docker run` need nothing.
 - **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
@@ -82,8 +84,10 @@ needs it, and its values travel as plain text to whatever is called next.
 process-wide (no `HTTPXClientInstrumentor().instrument()`).
 `HTTPXClientInstrumentor.instrument_client` is applied only to clients that
 call ScadBuddy's own services. The Bambuddy client (`bambuddy/client.py`)
-instead gets a manual client span per call (`bambuddy.<operation>`, with the
-status code and the client's `Scope`) and **injects no headers**. A test
+instead gets a manual client span per call (`bambuddy.<operation>`, the
+operation one of a closed set the client names, such as `printers.list` or
+`library.download`, never an id or free text; with the method, the status
+code and the client's `Scope`) and **injects no headers**. A test
 asserts that a Bambuddy request carries no `traceparent`. The relay's
 forwarder to the collector is not instrumented at all (§6).
 
@@ -109,7 +113,8 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   from the returned job and adds a **span link** to it on its own submit span,
   not a parent. The reconciler starts a stale row's workflow under that same
   `traceparent`, so a render started late still lands in its first caller's
-  trace. The column is written whenever the submit span's context is valid
+  trace, under a `render.reconcile` span that shows the reconciler started it
+  (a row with no valid `traceparent` gets that span as a root). The column is written whenever the submit span's context is valid
   and sampled. That includes a process with no exporter, which still creates
   and propagates spans (§3); persisting a context nobody exports is harmless.
   A row gets no `traceparent`, and a coalesced request no link, only when:
@@ -162,8 +167,13 @@ forwarder (§5.2) is not one, since it must stay untraced.
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
 `render.solids`, `render.thumbnail`, `render.write`. Each `openscad` invocation
-(`render/runner.py`) is an `openscad.export` span with format, backend, exit
-code and, for `solids`, the colour index.
+(`render/runner.py`) is an `openscad.export` span with format, backend and exit
+code. Under `render.solids`, each colour is a `render.solid` span carrying
+`scadbuddy.colour_index` (1-based, in the template's colour order): the parent
+of that colour's `openscad.export` and of its mesh parse, so the index lives
+there rather than on the export. A colour whose `openscad` fails falls back to
+the split mesh (`scadbuddy.solid.fallback`) without failing the span; a failed
+mesh parse fails the job, and the span with it.
 
 ### 5.2 Browser relay route
 
@@ -257,7 +267,7 @@ path except `/api/v1/ai/*` to the backend.
     the entry and its reason.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
-  attribute dropped except `service.version` and `user_agent.original`. Then
+  attribute dropped except `service.version` (no user agent: §6). Then
   per-span caps; beyond them the excess is dropped (truncated, for strings) and
   the span counts it in `otel.dropped_attributes_count` (OTel's own field):
   - 64 attributes;
@@ -272,8 +282,11 @@ path except `/api/v1/ai/*` to the backend.
 - A page span's URL (`url.full`, `http.url`, `http.target`, `url.path`, on the
   span, its events and its links) is reduced to the backend route template its
   path matches, after the `scheme://host` of an absolute URL, or else to that
-  origin alone; a relative URL on no route is dropped. The SPA's routes are the
-  browser's own, so a page's URL keeps only its origin.
+  origin alone; a relative URL on no route is dropped. Only a relative URL, or
+  one on ScadBuddy's own origins (the public URL, `SCADBUDDY_ALLOWED_ORIGINS`
+  or loopback, as the `Origin` check takes them), is matched against the
+  routes: any other host has none of them, so its URL keeps only its origin.
+  The SPA's routes are the browser's own, so a page's URL keeps only its origin.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
@@ -328,7 +341,8 @@ path except `/api/v1/ai/*` to the backend.
   - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
   - A refusal's `detail` names the rule ("Origin not allowed", "the relay
     accepts application/json only"), never the request's own values.
-- **Tracing off** (no endpoint, `OTEL_TRACES_EXPORTER=none`, or `OTEL_SDK_DISABLED=true`): `204` with
+- **Tracing off** (no endpoint, `OTEL_TRACES_EXPORTER` naming anything but
+  `otlp`, or `OTEL_SDK_DISABLED=true`: the backend's own export rule, §3): `204` with
   `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
@@ -479,13 +493,19 @@ not copied from that module, which has no such list:
 - OpenSCAD source and its stderr (only the exit code and a failure class);
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
-  is configured; URLs are recorded without the query);
+  is configured; URLs are recorded without the query). That includes the
+  `Host` header: `http.host`, `http.server_name` and `server.address` are
+  dropped, and a server span exports no `http.url` or `url.full`, whose host is
+  that header's (the server's own port, `net.host.port`/`server.port`, stays);
+- the client's address: `net.peer.ip`/`net.peer.port`, `client.address`/
+  `client.port`, `net.sock.peer.*` and `network.peer.*`;
 - the request path: a segment is data (a file path a user chose, a photo
   filename Bambuddy returned, whatever the SPA fallback was asked for), so the
-  route's template stands in for it (`http.target`, `url.path`, and after the
-  `scheme://host` of `http.url`, `url.full`), and a request with no route
-  records no path at all; a page span's URLs are reduced by the relay to the
-  backend route template or to the origin (§5.2);
+  route's template stands in for it (`http.target`, `url.path`, and, on any
+  span but a server span, after the `scheme://host` of `http.url` and
+  `url.full`), and a request with no route records no path at all; a page
+  span's URLs are reduced by the relay to the backend route template or to the
+  origin (§5.2);
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
@@ -554,7 +574,13 @@ before it leaves the process. It:
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 
-The relay applies the same scrub to browser spans before forwarding. Our own
+The relay applies the same scrub to browser spans before forwarding, and since a
+page's input is not the SDK's, applies it wherever the page put a value:
+`exception.message` is dropped from the span, every event and every link, not
+only from an `exception` event, and no user agent (`user_agent.original`,
+`http.user_agent`) is kept anywhere, the rebuilt resource included. A page
+span loses the same host and client-address attributes as a backend span
+(§6's list above). Our own
 spans set `scadbuddy.failure_class` (the problem `type_` for an `ApiError`,
 plus the client's `Scope` for a Bambuddy call) as the readable cause. Where
 the message is needed, it is already in the job row or the response the user

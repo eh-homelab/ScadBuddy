@@ -1265,6 +1265,7 @@ async def test_a_colour_fallback_leaves_no_span_in_error(
         if s.name == "render.solid" and (s.attributes or {}).get("scadbuddy.solid.fallback")
     ]
     assert len(fallbacks) == 1
-    assert (fallbacks[0].attributes or {})["scadbuddy.openscad.exit_code"] == 3
+    # The exit code is the export's, recorded once (review 5 of #1064).
+    assert "scadbuddy.openscad.exit_code" not in (fallbacks[0].attributes or {})
     exports = [s for s in finished if s.name == "openscad.export"]
     assert sorted((s.attributes or {})["scadbuddy.openscad.exit_code"] for s in exports) == [0, 3]

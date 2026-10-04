@@ -194,7 +194,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `scadbuddy/telemetry/`): `admission.py` (same-origin checks and the rate limits; the
   client by `core/proxies.py` and `SCADBUDDY_TRUSTED_PROXIES`, the agent's rules),
   `payload.py` (rebuilds, caps and scrubs the page's spans), `forwarder.py` (the queue
-  and the one uninstrumented httpx client; never retries).
+  and the one uninstrumented httpx client; never retries), `target.py` (the collector URL
+  and headers from the `OTEL_*` variables, `None` unless `traces_export_enabled()`).
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).

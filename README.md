@@ -774,8 +774,11 @@ what makes the running image knowable.
 
 The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
-cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, or with
-`OTEL_TRACES_EXPORTER=none`, nothing is exported; `OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
+exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
+`otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
+also turns it off, with a warning in the log, since only the OTLP exporter ships.
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`
 and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
 variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
 `OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
@@ -794,7 +797,9 @@ public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket doe
 most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
 reduced to the backend route template its path matches, or to its origin (a relative
-one on no route is dropped), as a server span keeps only its route. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
+one on no route is dropped), as a server span keeps only its route; a URL on any host
+but those same origins keeps only its origin, since that host has none of the routes.
+No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
 limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
@@ -802,7 +807,10 @@ client), so with more than one API replica the overall ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
 whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
 `SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
-gets a bucket of its own. Empty, every browser behind the gateway shares one.
+gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
+`FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
+that flag lets any loopback caller name its own client.
 `scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
 `queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
 

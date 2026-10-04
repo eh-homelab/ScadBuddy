@@ -14,9 +14,9 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
-from scadbuddy.core.tracing import otlp_traces_target
 from scadbuddy.telemetry.admission import RelayLimits
 from scadbuddy.telemetry.forwarder import TraceForwarder
+from scadbuddy.telemetry.target import otlp_traces_target
 
 
 @dataclass(frozen=True)

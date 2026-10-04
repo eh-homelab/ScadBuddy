@@ -26,7 +26,7 @@ from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import httpx
 from fastapi import status
@@ -83,17 +83,79 @@ DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 
 
+#: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
+#: 2026-10-01 §4). A closed set, so a span name never carries an id or free text.
+Operation = Literal[
+    "archives.list",
+    "archives.photo.delete",
+    "archives.photo.upload",
+    "archives.printer_media",
+    "archives.read",
+    "archives.runs",
+    "archives.timelapse.info",
+    "archives.timelapse.select",
+    "archives.timelapse.thumbnails",
+    "external_links.create",
+    "external_links.list",
+    "external_links.update",
+    "library.annotate",
+    "library.delete",
+    "library.download",
+    "library.filament_requirements",
+    "library.files.list",
+    "library.files.read",
+    "library.folders.by_project",
+    "library.folders.create",
+    "library.folders.list",
+    "library.listing",
+    "library.plate_thumbnail",
+    "library.plates",
+    "library.thumbnail",
+    "library.upload",
+    "media.download",
+    "media.photo",
+    "media.plate_thumbnail",
+    "media.source",
+    "media.thumbnail",
+    "media.timelapse",
+    "printers.available_filaments",
+    "printers.camera.snapshot",
+    "printers.camera.token",
+    "printers.inventory_remain",
+    "printers.list",
+    "printers.read",
+    "printers.status",
+    "projects.add_archives",
+    "projects.add_queue",
+    "projects.create",
+    "projects.list",
+    "projects.read",
+    "queue.add",
+    "queue.read",
+    "settings.read",
+    "slice.job.status",
+    "slice.start",
+    "slicer.local_presets",
+    "slicer.presets",
+    "spools.assignments",
+    "spools.filament_presets",
+    "spools.list",
+    "version",
+]
+
+
 def _call_span(
-    method: str, scope: Scope, *, detached: bool = False
+    operation: Operation, method: str, scope: Scope, *, detached: bool = False
 ) -> AbstractContextManager[Span]:
     """Our side of a Bambuddy call (spec 2026-10-01 §4): no headers are injected; the
-    span holds the method, the status code and the scope, never a path or a body.
-    ``detached`` is for a call held open across a ``yield`` (a stream), which may be
-    closed from another task: that span is never made current."""
+    span is named by the operation and holds the method, the status code and the scope,
+    never a path or a body. ``detached`` is for a call held open across a ``yield`` (a
+    stream), which may be closed from another task: that span is never made current."""
+    name = f"bambuddy.{operation}"
     attributes = {"http.request.method": method, "scadbuddy.bambuddy.scope": str(scope)}
     if detached:
-        return detached_span(f"bambuddy.{method}", kind=SpanKind.CLIENT, attributes=attributes)
-    return span(f"bambuddy.{method}", kind=SpanKind.CLIENT, attributes=attributes)
+        return detached_span(name, kind=SpanKind.CLIENT, attributes=attributes)
+    return span(name, kind=SpanKind.CLIENT, attributes=attributes)
 
 
 @dataclass(frozen=True)
@@ -158,13 +220,14 @@ class BambuddyClient:
         path: str,
         *,
         scope: Scope,
+        operation: Operation,
         what: str,
         params: Mapping[str, Any] | None = None,
         json: Any | None = None,
         files: Any | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
-        with _call_span(method, scope) as current:
+        with _call_span(operation, method, scope) as current:
             try:
                 response = await self._http.request(
                     method,
@@ -199,7 +262,9 @@ class BambuddyClient:
     async def printers(self) -> list[Printer]:
         what = "list the printers"
         # The trailing slash is required: /api/v1/printers is a 404 on 1.2.5.5.
-        response = await self._send("GET", "/printers/", scope=Scope.READ_STATUS, what=what)
+        response = await self._send(
+            "GET", "/printers/", scope=Scope.READ_STATUS, operation="printers.list", what=what
+        )
         return [Printer.model_validate(row) for row in self._rows(response, what=what)]
 
     async def printer(self, printer_id: int) -> Printer:
@@ -208,6 +273,7 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}",
             scope=Scope.READ_STATUS,
+            operation="printers.read",
             what=f"read printer {printer_id}",
         )
         return Printer.model_validate(response.json())
@@ -218,6 +284,7 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}/status",
             scope=Scope.READ_STATUS,
+            operation="printers.status",
             what=f"read the status of printer {printer_id}",
         )
         return PrinterStatus.model_validate(response.json())
@@ -232,12 +299,17 @@ class BambuddyClient:
         """
         what = f"capture the camera of printer {printer_id}"
         minted = await self._send(
-            "POST", "/printers/camera/stream-token", scope=Scope.READ_STATUS, what=what
+            "POST",
+            "/printers/camera/stream-token",
+            scope=Scope.READ_STATUS,
+            operation="printers.camera.token",
+            what=what,
         )
         response = await self._send(
             "GET",
             f"/printers/{printer_id}/camera/snapshot",
             scope=Scope.READ_STATUS,
+            operation="printers.camera.snapshot",
             what=what,
             params={"token": minted.json()["token"]},
         )
@@ -258,6 +330,7 @@ class BambuddyClient:
             "GET",
             "/printers/available-filaments",
             scope=Scope.READ_STATUS,
+            operation="printers.available_filaments",
             what=what,
             params=params,
         )
@@ -266,13 +339,21 @@ class BambuddyClient:
     async def folders(self) -> list[Folder]:
         what = "list the library folders"
         response = await self._send(
-            "GET", "/library/folders", scope=Scope.MANAGE_LIBRARY, what=what
+            "GET",
+            "/library/folders",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.list",
+            what=what,
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
 
     async def presets(self) -> PresetCatalogue:
         response = await self._send(
-            "GET", "/slicer/presets", scope=Scope.MANAGE_LIBRARY, what="list the slicer presets"
+            "GET",
+            "/slicer/presets",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.presets",
+            what="list the slicer presets",
         )
         return PresetCatalogue.model_validate(response.json())
 
@@ -283,7 +364,11 @@ class BambuddyClient:
         classified them, so the two calls are not interchangeable.
         """
         response = await self._send(
-            "GET", "/local-presets/", scope=Scope.MANAGE_LIBRARY, what="list the local presets"
+            "GET",
+            "/local-presets/",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_presets",
+            what="list the local presets",
         )
         return LocalPresetCatalogue.model_validate(response.json())
 
@@ -300,6 +385,7 @@ class BambuddyClient:
             "GET",
             "/inventory/spools",
             scope=Scope.READ_STATUS,
+            operation="spools.list",
             what=what,
             params={"include_archived": include_archived},
         )
@@ -316,6 +402,7 @@ class BambuddyClient:
             "GET",
             f"/inventory/spools/{spool_id}/filament-presets",
             scope=Scope.READ_STATUS,
+            operation="spools.filament_presets",
             what=what,
         )
         return [SpoolFilamentPreset.model_validate(row) for row in self._rows(response, what=what)]
@@ -331,6 +418,7 @@ class BambuddyClient:
             "GET",
             "/inventory/assignments",
             scope=Scope.READ_STATUS,
+            operation="spools.assignments",
             what=what,
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
@@ -342,6 +430,7 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}/inventory-remain",
             scope=Scope.READ_STATUS,
+            operation="printers.inventory_remain",
             what=f"read the loaded filament of printer {printer_id}",
         )
         return InventoryRemain.model_validate(response.json())
@@ -359,6 +448,7 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}/filament-requirements",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.filament_requirements",
             what=f"read the filament requirements of library file {file_id}",
             params={"plate_id": plate_id} if plate_id is not None else None,
         )
@@ -388,7 +478,12 @@ class BambuddyClient:
         if date_to is not None:
             params["date_to"] = date_to.isoformat()
         response = await self._send(
-            "GET", "/archives/", scope=Scope.READ_STATUS, what=what, params=params
+            "GET",
+            "/archives/",
+            scope=Scope.READ_STATUS,
+            operation="archives.list",
+            what=what,
+            params=params,
         )
         return [Archive.model_validate(row) for row in self._rows(response, what=what)]
 
@@ -397,6 +492,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}",
             scope=Scope.READ_STATUS,
+            operation="archives.read",
             what=f"read archive {archive_id}",
         )
         return ArchiveDetail.model_validate(response.json())
@@ -407,6 +503,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/runs",
             scope=Scope.READ_STATUS,
+            operation="archives.runs",
             what=f"list the runs of archive {archive_id}",
         )
         return ArchiveRunList.model_validate(response.json())
@@ -416,6 +513,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/timelapse/info",
             scope=Scope.READ_STATUS,
+            operation="archives.timelapse.info",
             what=f"read the timelapse of archive {archive_id}",
         )
         return TimelapseInfo.model_validate(response.json())
@@ -425,6 +523,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/timelapse/thumbnails",
             scope=Scope.READ_STATUS,
+            operation="archives.timelapse.thumbnails",
             what=f"read the timelapse frames of archive {archive_id}",
         )
         return TimelapseThumbnails.model_validate(response.json())
@@ -437,6 +536,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/printer-media",
             scope=Scope.READ_STATUS,
+            operation="archives.printer_media",
             what=f"list the printer media of archive {archive_id}",
         )
         return PrinterMedia.model_validate(response.json())
@@ -448,6 +548,7 @@ class BambuddyClient:
             "POST",
             f"/archives/{archive_id}/timelapse/select",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.timelapse.select",
             what=f"attach a timelapse to archive {archive_id}",
             params={"filename": filename},
             timeout=self.config.upload_timeout,
@@ -462,6 +563,7 @@ class BambuddyClient:
             "POST",
             f"/archives/{archive_id}/photos",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.photo.upload",
             what=f"add a photo to archive {archive_id}",
             files={"file": (filename, content)},
             timeout=self.config.upload_timeout,
@@ -473,6 +575,7 @@ class BambuddyClient:
             "DELETE",
             f"/archives/{archive_id}/photos/{filename}",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.photo.delete",
             what=f"delete a photo of archive {archive_id}",
         )
 
@@ -481,6 +584,7 @@ class BambuddyClient:
         self,
         path: str,
         *,
+        operation: Operation,
         what: str,
         range_header: str | None = None,
         if_range: str | None = None,
@@ -503,7 +607,7 @@ class BambuddyClient:
         # The span fails only on what Bambuddy did: an error the consumer raises inside
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         consumer_error: Exception | None = None
-        with _call_span("GET", Scope.READ_STATUS, detached=True) as current:
+        with _call_span(operation, "GET", Scope.READ_STATUS, detached=True) as current:
             try:
                 response = await self._http.send(request, stream=True)
             except httpx.HTTPError as error:
@@ -531,6 +635,7 @@ class BambuddyClient:
             "GET",
             f"/library/folders/by-project/{project_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.by_project",
             what=what,
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
@@ -541,6 +646,7 @@ class BambuddyClient:
             "POST",
             "/library/folders/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.create",
             what=f"create the {folder.name!r} library folder",
             json=folder.model_dump(mode="json", exclude_none=True),
         )
@@ -558,6 +664,7 @@ class BambuddyClient:
             "POST",
             "/library/files",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.upload",
             what=f"upload {filename}",
             params={"folder_id": folder_id} if folder_id is not None else None,
             files={"file": (filename, content, media_type)},
@@ -572,6 +679,7 @@ class BambuddyClient:
             "GET",
             "/library/files",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.list",
             what=what,
             params={"folder_id": folder_id},
         )
@@ -583,6 +691,7 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.read",
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
@@ -600,6 +709,7 @@ class BambuddyClient:
             "GET",
             "/library/files/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.listing",
             what=what,
             params={"folder_id": folder_id} if folder_id is not None else None,
         )
@@ -612,6 +722,7 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}/plates",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.plates",
             what=f"read the plates of library file {file_id}",
         )
         return LibraryPlates.model_validate(response.json())
@@ -623,7 +734,7 @@ class BambuddyClient:
         it in ``contextlib.aclosing``."""
         what = f"download library file {file_id}"
         path = f"/library/files/{file_id}/download"
-        with _call_span("GET", Scope.MANAGE_LIBRARY, detached=True) as current:
+        with _call_span("library.download", "GET", Scope.MANAGE_LIBRARY, detached=True) as current:
             try:
                 async with self._http.stream(
                     "GET",
@@ -661,6 +772,7 @@ class BambuddyClient:
             "PUT",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.annotate",
             what=f"annotate library file {file_id}",
             json={"notes": notes},
         )
@@ -671,6 +783,7 @@ class BambuddyClient:
             "DELETE",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.delete",
             what=f"delete library file {file_id}",
         )
 
@@ -681,6 +794,7 @@ class BambuddyClient:
             "POST",
             f"/library/files/{file_id}/slice",
             scope=Scope.MANAGE_LIBRARY,
+            operation="slice.start",
             what=f"slice library file {file_id}",
             json=request.model_dump(mode="json", exclude_none=True),
         )
@@ -691,6 +805,7 @@ class BambuddyClient:
             "GET",
             f"/slice-jobs/{job_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="slice.job.status",
             what=f"read slice job {job_id}",
         )
         return SliceJob.model_validate(response.json())
@@ -719,6 +834,7 @@ class BambuddyClient:
             "GET",
             f"/queue/{item_id}",
             scope=Scope.MANAGE_QUEUE,
+            operation="queue.read",
             what=f"read queue item {item_id}",
         )
         return QueueItem.model_validate(response.json())
@@ -733,6 +849,7 @@ class BambuddyClient:
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
+            operation="queue.add",
             what=(
                 f"queue archive {item.archive_id}"
                 if item.library_file_id is None
@@ -747,7 +864,11 @@ class BambuddyClient:
     async def version(self) -> str:
         """``GET /api/v1/updates/version``, which Bambuddy serves without a key."""
         response = await self._send(
-            "GET", "/updates/version", scope=Scope.READ_STATUS, what="read Bambuddy's version"
+            "GET",
+            "/updates/version",
+            scope=Scope.READ_STATUS,
+            operation="version",
+            what="read Bambuddy's version",
         )
         return str(response.json().get("version") or "unknown")
 
@@ -755,7 +876,9 @@ class BambuddyClient:
         """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which
         needs ``SETTINGS_READ``: Read Status for a key)."""
         what = "read Bambuddy's settings"
-        response = await self._send("GET", "/settings/", scope=Scope.READ_STATUS, what=what)
+        response = await self._send(
+            "GET", "/settings/", scope=Scope.READ_STATUS, operation="settings.read", what=what
+        )
         value = response.json().get("capture_finish_photo")
         if not isinstance(value, bool):
             raise ApiError(
@@ -773,6 +896,7 @@ class BambuddyClient:
             "GET",
             "/projects/",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.list",
             what=what,
             params={"status": status_filter} if status_filter is not None else None,
         )
@@ -785,6 +909,7 @@ class BambuddyClient:
             "GET",
             f"/projects/{project_id}",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.read",
             what=f"read project {project_id}",
         )
         return Project.model_validate(response.json())
@@ -794,6 +919,7 @@ class BambuddyClient:
             "POST",
             "/projects/",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.create",
             what=f"create the {project.name!r} project",
             json=project.model_dump(mode="json", exclude_none=True),
         )
@@ -805,6 +931,7 @@ class BambuddyClient:
             "POST",
             f"/projects/{project_id}/add-archives",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.add_archives",
             what=f"add archives to project {project_id}",
             json={"archive_ids": archive_ids},
         )
@@ -814,6 +941,7 @@ class BambuddyClient:
             "POST",
             f"/projects/{project_id}/add-queue",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.add_queue",
             what=f"add queue items to project {project_id}",
             json={"queue_item_ids": queue_item_ids},
         )
@@ -823,7 +951,11 @@ class BambuddyClient:
     async def external_links(self) -> list[ExternalLink]:
         what = "list the external links"
         response = await self._send(
-            "GET", "/external-links/", scope=Scope.MANAGE_LIBRARY, what=what
+            "GET",
+            "/external-links/",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.list",
+            what=what,
         )
         return [ExternalLink.model_validate(row) for row in self._rows(response, what=what)]
 
@@ -834,6 +966,7 @@ class BambuddyClient:
             "POST",
             "/external-links/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.create",
             what=f"create the {name!r} external link",
             json={"name": name, "url": url, "icon": icon, "open_in_new_tab": open_in_new_tab},
         )
@@ -858,6 +991,7 @@ class BambuddyClient:
             "PATCH",
             f"/external-links/{link_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.update",
             what=f"update external link {link_id}",
             json={key: value for key, value in patch.items() if value is not None},
         )
