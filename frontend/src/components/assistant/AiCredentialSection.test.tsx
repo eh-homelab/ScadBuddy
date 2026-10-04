@@ -541,6 +541,54 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByLabelText('Anthropic API key')).toHaveValue('sk-ant-api03-one-too-many')
   }, 15_000)
 
+  it('says so when the list cannot be read again after an add, and reads it on Retry', async () => {
+    let failing = false
+    server.use(
+      http.get(entries, () => (failing ? HttpResponse.json({ detail: 'database not ready' }, { status: 503 }) : undefined)),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    failing = true
+    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-api03-added-1234')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(await screen.findByTestId('ai-credentials-stale')).toHaveTextContent('may be out of date')
+    expect(rows()).toHaveLength(2)
+    failing = false
+    await user.click(within(screen.getByTestId('ai-credentials-stale')).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument()
+  })
+
+  it('keeps reading after a cooldown when an action overtakes the timed read and fails', async () => {
+    const until = new Date(Date.now() + 400).toISOString()
+    setCredentials([
+      credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: until }),
+      credentialEntry({ id: 'c2', kind: 'gateway', base_url: 'https://gateway.example/anthropic', last4: 'GW99', status: 'disabled' }),
+    ])
+    let reads = 0
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(entries, async () => {
+        reads += 1
+        // 2: the timed read, held until the reset's read has failed. 3: the reset's read.
+        if (reads === 2) await held
+        if (reads === 3) return HttpResponse.json({ detail: 'Bad Gateway' }, { status: 502 })
+        return undefined
+      }),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await screen.findAllByTestId('ai-credential')
+    await waitFor(() => expect(reads).toBe(2), { timeout: 3000 })
+    await user.click(screen.getByRole('button', { name: `Reset ${GATEWAY}` }))
+    expect(await screen.findByTestId('ai-credentials-stale')).toBeInTheDocument()
+    release()
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('Active'), { timeout: 6000 })
+    expect(screen.queryByTestId('ai-credentials-stale')).not.toBeInTheDocument()
+  }, 10_000)
+
   it('tries again when the read after a cooldown fails', async () => {
     const until = new Date(Date.now() + 500).toISOString()
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: until })])

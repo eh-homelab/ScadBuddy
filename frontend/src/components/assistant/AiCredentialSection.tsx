@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { recheckAiAvailability, useAiAvailability } from '../../agent/chat/availability'
 import { USER_ONLY } from '../../agent/dom'
 import type {
@@ -190,8 +190,28 @@ export function AiCredentialSection() {
   // passed here but still comes back is read again after 1 s, 2 s, 4 s… up to 30 s.
   const { data: listed, refresh } = list
   const overdue = useRef({ until: Number.NaN, tries: 0 })
-  // Bumped when a timed re-read fails, so the effect schedules the next one.
+  // Bumped when a re-read fails, so the effect schedules the next one.
   const [missed, setMissed] = useState(0)
+  // The last re-read failed: what is on screen may be out of date.
+  const [stale, setStale] = useState(false)
+  // Every re-read goes through here with the same handlers. Whichever read turns out the
+  // newest (the timer's, or an action's that overtook it) either changes `listed` or bumps
+  // `missed`, so the timer below is always scheduled again.
+  const reread = useCallback(
+    () =>
+      refresh(
+        () => {
+          setMissed(0)
+          setStale(false)
+          return true
+        },
+        () => {
+          setMissed((n) => n + 1)
+          setStale(true)
+        },
+      ),
+    [refresh],
+  )
   useEffect(() => {
     const ends = (listed?.credentials ?? [])
       .filter((c) => c.status === 'cooling_down' && c.cooldown_until)
@@ -210,17 +230,9 @@ export function AiCredentialSection() {
       overdue.current = { until: earliest, tries }
       wait = Math.min(OVERDUE_FIRST_MS * 2 ** tries, OVERDUE_MAX_MS)
     }
-    const timer = setTimeout(() => {
-      refresh(
-        () => {
-          setMissed(0)
-          return true
-        },
-        () => setMissed((n) => n + 1),
-      )
-    }, wait)
+    const timer = setTimeout(reread, wait)
     return () => clearTimeout(timer)
-  }, [listed, refresh, missed])
+  }, [listed, reread, missed])
 
   if (notDeployed(list.error)) return null
   const current = list.data
@@ -259,8 +271,10 @@ export function AiCredentialSection() {
     setNotice(null)
     try {
       const answer = await run()
-      if ('credentials' in answer) list.setData(answer)
-      else list.refresh()
+      if ('credentials' in answer) {
+        list.setData(answer)
+        setStale(false)
+      } else reread()
       if (next && (next.action === 'replace' || next.action === 'reset' || next.action === 'delete')) forgetTest(next.id)
       if (done) setNotice(typeof done === 'function' ? done(answer) : done)
       void recheckAiAvailability({ force: true })
@@ -276,7 +290,7 @@ export function AiCredentialSection() {
 
   /** A stale order, a credential deleted elsewhere, or a full list: show what the agent has now. */
   function refreshIfStale(caught: unknown) {
-    if (caught instanceof ApiError && (caught.status === 409 || caught.status === 404)) list.refresh()
+    if (caught instanceof ApiError && (caught.status === 409 || caught.status === 404)) reread()
   }
 
   function forgetTest(id: string) {
@@ -299,7 +313,7 @@ export function AiCredentialSection() {
       setNotice(
         credentials.length === 0 ? 'Saved. Use Test to check it works.' : 'Added last; it is tried after the others.',
       )
-      list.refresh()
+      reread()
       void recheckAiAvailability({ force: true })
     } catch (caught) {
       setError(describeError(caught, 'Could not save the credential'))
@@ -623,6 +637,18 @@ export function AiCredentialSection() {
         <p role="status" className="text-[12px] text-ok">
           {notice}
         </p>
+      )}
+      {stale && (
+        <div
+          role="alert"
+          data-testid="ai-credentials-stale"
+          className="flex flex-wrap items-center gap-2 text-[12px] text-warn"
+        >
+          Could not read the credentials again, so this list may be out of date.
+          <Button size="sm" onClick={reread}>
+            Retry
+          </Button>
+        </div>
       )}
       {error && confirmDelete === null && (
         <p role="alert" className="text-[12px] text-warn">
