@@ -10,6 +10,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.api.test_library_copies import API, run, set_up, uploads
@@ -85,7 +86,8 @@ def test_an_inbox_copy_that_fails_to_delete_keeps_the_output(
     )
     response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
     assert response.status_code >= 500, response.text
-    (workflow_id,) = _workflow_ids(app, "output_delete")
-    assert workflow_id
+    # Bambuddy's failure, recorded: not a 503 from before the operation started.
+    assert response.json()["type"] != STILL_ACCEPTING_PROBLEM, response.text
+    assert len(_workflow_ids(app, "output_delete")) == 1
     assert output_id in _outputs(paths, model)
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
