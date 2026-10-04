@@ -130,6 +130,14 @@ export const QuestionSchema = z.object({
   .refine((q) => !q.multiSelect || q.options.every((o) => !o.label.includes(',')), 'no comma in a multi-select label')
 export type Question = z.infer<typeof QuestionSchema>
 
+/** #815 — what makes a `question.asked` an attention request (agent `src/sessions/protocol.ts` `AttentionView`). */
+export const AttentionSchema = z.object({
+  reason: z.enum(['tab_disconnected', 'question', 'blocked', 'done']),
+  onTimeout: z.enum(['proceed', 'wait', 'stop']),
+  expiresAt: z.string().min(1),
+})
+export type Attention = z.infer<typeof AttentionSchema>
+
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
   title: z.string(),
@@ -251,6 +259,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     id: z.string().min(1),
     tool: z.string().min(1),
     questions: z.array(QuestionSchema).min(1).max(QUESTIONS_MAX),
+    /**
+     * #815 — an attention request (`request_user_attention`), not a question: one card,
+     * and a timer that resolves it at `expiresAt` without an answer (`onTimeout` says
+     * what the agent does then; never an approval).
+     */
+    attention: AttentionSchema.optional(),
   }),
   /**
    * Answered (`answers`, one per question in order, and `by`), or cancelled with its

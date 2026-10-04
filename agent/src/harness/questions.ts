@@ -1,5 +1,6 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, type PermissionResult, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
+import { ATTENTION_DESCRIPTION, ATTENTION_TOOL_NAME, ATTENTION_TOOL_SHAPE, type AttentionSpec, attentionHandler } from './attention.js'
 
 // Structured questions for the user (#940): multiple choice, and a draft to
 // approve (an option's `preview`, Markdown). The agent asks them with Claude
@@ -30,10 +31,12 @@ export const ASK_USER_QUESTION = 'AskUserQuestion'
 /** The in-process server and tool a subagent asks with (see above). */
 export const QUESTION_SERVER = 'scadbuddy_questions'
 export const ASK_USER_TOOL = `mcp__${QUESTION_SERVER}__ask_user`
+/** #815: an attention request (attention.ts), on the same server and gate. */
+export const ATTENTION_TOOL = `mcp__${QUESTION_SERVER}__${ATTENTION_TOOL_NAME}`
 
-/** Either way of asking the user: both only ask, so both are tiered `read`. */
+/** Every way of asking the user: they only ask, so all are tiered `read`. */
 export function isQuestionTool(name: string): boolean {
-  return name === ASK_USER_QUESTION || name === ASK_USER_TOOL
+  return name === ASK_USER_QUESTION || name === ASK_USER_TOOL || name === ATTENTION_TOOL
 }
 
 /** Claude Code's own limits (sdk-tools.d.ts `AskUserQuestionInput`), and caps on what the panel shows. */
@@ -92,13 +95,17 @@ export type QuestionRequest = {
   toolUseId: string
   /** Aborted when the SDK drops the request (the query stops). */
   signal: AbortSignal
+  /** #815: an attention request (attention.ts), which has a timer; a question has none. */
+  attention?: AttentionSpec
 }
 
 export type QuestionVerdict =
   /** Keyed by question text; a multi-select answer is its labels joined by ", ". */
   | { answered: true; answers: Record<string, string> }
   /** Not answered; `message` is what the model reads as the tool's error. */
-  | { answered: false; message: string }
+  | { answered: false; message: string; timedOut?: false }
+  /** #815: an attention request's `proceed` timer fired. Never an answer, and never an approval. */
+  | { answered: false; timedOut: true; message: string }
 
 /** Parks a question until it is answered or the turn ends; a rejection counts as unanswered. */
 export type QuestionGate = (request: QuestionRequest) => Promise<QuestionVerdict>
@@ -189,7 +196,11 @@ export async function askUserHandler(gate: QuestionGate, args: unknown, extra: u
   return result.answered ? { content: [{ type: 'text', text: answersText(result.answers) }] } : failed(result.message)
 }
 
-/** ASK_USER_TOOL, on the run's question gate. */
+/**
+ * ASK_USER_TOOL and ATTENTION_TOOL, on the run's question gate. An attention
+ * request waits at most a day (attention.ts WAIT_CEILING_S), well inside the
+ * server's timeout, so its own timer is always the one that fires.
+ */
 export function questionServer(gate: QuestionGate): McpSdkServerConfigWithInstance {
   const askUser = tool(
     'ask_user',
@@ -199,5 +210,8 @@ export function questionServer(gate: QuestionGate): McpSdkServerConfigWithInstan
     { questions: QuestionsSchema },
     (args, extra) => askUserHandler(gate, args, extra),
   )
-  return { ...createSdkMcpServer({ name: QUESTION_SERVER, tools: [askUser] }), timeout: ASK_USER_TIMEOUT_MS }
+  const attention = tool(ATTENTION_TOOL_NAME, ATTENTION_DESCRIPTION, ATTENTION_TOOL_SHAPE, (args, extra) =>
+    attentionHandler(gate, ATTENTION_TOOL, args, extra),
+  )
+  return { ...createSdkMcpServer({ name: QUESTION_SERVER, tools: [askUser, attention] }), timeout: ASK_USER_TIMEOUT_MS }
 }

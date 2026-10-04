@@ -1,4 +1,4 @@
-import type { ServerEvent } from './protocol'
+import { type ServerEvent, ServerEventSchema } from './protocol'
 import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
@@ -155,6 +155,31 @@ describe('chatReducer', () => {
     // flight names no question: the answer may already be accepted, so the card stays sent.
     const unparsed = run([server({ type: 'error', code: 'invalid', message: 'ignored a malformed message' })], sent)
     expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+  })
+
+  it('keeps an attention request as one, and parses its timer from the wire (#815)', () => {
+    const questions = [
+      {
+        question: 'The tab closed; reopen it?',
+        header: 'Tab disconnected',
+        multiSelect: false,
+        options: [
+          { label: "I'm here", description: '' },
+          { label: 'Carry on without me', description: '' },
+        ],
+      },
+    ]
+    const attention = { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: '2026-10-04T09:05:00.000Z' } as const
+    const frame = { v: 1, type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions, attention }
+    expect(ServerEventSchema.parse(frame)).toEqual(frame)
+    expect(ServerEventSchema.safeParse({ ...frame, attention: { ...attention, onTimeout: 'approve' } }).success).toBe(false)
+    const waiting = run([server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions, attention })], started)
+    expect(waiting.sessions.s1?.items[0]).toEqual({ kind: 'question', id: 'q1', tool: 't3', questions, attention, state: 'pending' })
+    const timedOut = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'nobody replied in time (on_timeout: proceed)' })],
+      waiting,
+    )
+    expect(timedOut.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', attention })
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {
