@@ -150,9 +150,17 @@ function publish(next: AiAvailability & { state: AiState }) {
  * Asks the agent again (Settings' "Check again"; on focus and on a timer while off;
  * the chat transport after failed handshakes), and resolves with the answer as
  * published: what every `useAiAvailability` sees, or the value in force when the
- * read was dropped by a reset.
+ * read was dropped by a reset or a forced read.
  */
-export function recheckAiAvailability(): Promise<AiAvailability & { state: AiState }> {
+export function recheckAiAvailability(
+  options: { force?: boolean } = {},
+): Promise<AiAvailability & { state: AiState }> {
+  // `force`: a read that started before a change (a credential save) must not answer for
+  // after it, so it is dropped like a reset's and a fresh one starts.
+  if (options.force) {
+    generation += 1
+    inflight = null
+  }
   if (inflight) return inflight
   const started = generation
   const read: Promise<AiAvailability & { state: AiState }> = fetchAiAvailability()

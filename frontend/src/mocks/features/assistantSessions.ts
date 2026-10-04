@@ -4,10 +4,16 @@
  * `src/routes/sessions.ts` (fork, raise a budget). Fork and raise act on the open
  * scripted agent (`../agent.ts` `mockAgentSessions`), so the panel sees the new session
  * or the raised budget over its socket, as it does against the real agent.
+ *
+ * #931 — what a session touched (`GET /sessions/:id/resources`) is a list per session
+ * id that tests set with `setSessionResources`; the desktop agent's session
+ * (`EXTERNAL_SESSION_ID`) starts with what its script did, so the mocked build shows
+ * the panel filled. Any other session the open mock agent knows touched nothing; one it
+ * does not know is a 404, as the real route refuses a session it cannot find or show.
  */
 import { HttpResponse, http } from 'msw'
-import type { AiSessionView, SessionLimits } from '../../api/types'
-import { mockAgentSessions } from '../agent'
+import type { AiSessionView, SessionLimits, SessionResource } from '../../api/types'
+import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
 
 const base = '/api/v1/ai'
 
@@ -16,15 +22,47 @@ export const MAX_BUDGET_USD = 100
 export const MAX_TURNS = 200
 const DEFAULTS: SessionLimits = { budget_usd: 1, max_turns: 25 }
 
+/** What the desktop agent's scripted session (`../agent.ts`) changed. */
+const EXTERNAL_RESOURCES: readonly SessionResource[] = [
+  {
+    type: 'revision',
+    id: '3f9c2a1b7d4e',
+    action: 'created',
+    model: 'gridfinity-bin',
+    before: null,
+    after: '3f9c2a1b7d4e',
+    tool: 'update_source',
+    at: '2026-10-03T09:00:00.000Z',
+  },
+  {
+    type: 'preset',
+    id: 'preset-tall',
+    action: 'created',
+    model: 'gridfinity-bin',
+    before: null,
+    after: null,
+    tool: 'save_preset',
+    at: '2026-10-03T09:00:05.000Z',
+  },
+]
+
 const state = {
   limits: { ...DEFAULTS },
   /** Every limits write, for tests. */
   writes: [] as SessionLimits[],
+  resources: new Map<string, SessionResource[]>(),
 }
 
 export function reset(): void {
   state.limits = { ...DEFAULTS }
   state.writes = []
+  state.resources = new Map([[EXTERNAL_SESSION_ID, [...EXTERNAL_RESOURCES]]])
+}
+reset()
+
+/** #931 — what `GET /sessions/:id/resources` answers for one session, oldest first. */
+export function setSessionResources(sessionId: string, resources: readonly SessionResource[]): void {
+  state.resources.set(sessionId, [...resources])
 }
 
 export function mockSessionLimitWrites(): readonly SessionLimits[] {
@@ -54,6 +92,12 @@ export const handlers = [
     state.limits = { budget_usd: Math.round(budget_usd * 100) / 100, max_turns }
     state.writes.push(state.limits)
     return HttpResponse.json(state.limits)
+  }),
+
+  http.get(`${base}/sessions/:id/resources`, ({ params }) => {
+    const id = String(params.id)
+    const resources = state.resources.get(id) ?? (mockAgentSessions()?.has(id) ? [] : undefined)
+    return resources ? HttpResponse.json({ resources }) : detail('session not found', 404)
   }),
 
   http.post(`${base}/sessions/:id/fork`, ({ params }) => {

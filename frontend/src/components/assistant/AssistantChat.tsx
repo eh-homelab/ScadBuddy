@@ -12,6 +12,7 @@ import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
+import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 
@@ -56,6 +57,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  // #931 — the active session's "Touched" panel.
+  const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -71,6 +74,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const composer = useRef<HTMLTextAreaElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
+  const touchedId = useId()
   const voiceNoteId = useId()
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -80,6 +84,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending') ?? false
   const itemCount = active?.items.length ?? 0
+  const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 
   // Voice (#257): dictation fills the draft for the user to review; replies can be read aloud.
   // Kept in step with every write, so dictation reconciles against typing that hasn't
@@ -243,6 +248,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
               Stop
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={touchedOpen}
+            aria-controls={touchedOpen ? touchedId : undefined}
+            title="What this session's tool calls created, changed or deleted"
+            onClick={() => setTouchedOpen((o) => !o)}
+          >
+            Touched
+          </Button>
           <BudgetMeter session={active} />
           {!owned && (
             <div className="flex w-full items-center gap-2">
@@ -253,6 +268,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
             </div>
           )}
         </div>
+      )}
+
+      {active && touchedOpen && (
+        <section
+          id={touchedId}
+          aria-label="What this session touched"
+          className="shrink-0 border-b border-line bg-surface-2"
+        >
+          {/* Read again when the status moves or a tool call finishes, so a running turn's
+              changes show as they land. Keyed per session, so a switch reads once. */}
+          <SessionTouched
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}`}
+          />
+        </section>
       )}
 
       <div
