@@ -126,7 +126,7 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
     const days = Number(raw)
-    if (!Number.isFinite(days) || days <= 0) return { problem: 'Enter a number of days above 0, or leave it empty to keep every one.' } satisfies Problem
+    if (!Number.isFinite(days) || days < 1) return { problem: 'Enter at least 1 day, or leave it empty to keep every one.' } satisfies Problem
     return days * DAY_SECONDS
   }
   const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind

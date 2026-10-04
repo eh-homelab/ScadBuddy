@@ -29,7 +29,7 @@ from scadbuddy.workflows.operation_models import (
     RunOp,
 )
 from scadbuddy.workflows.print_models import FAILED, REFUSED
-from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
+from scadbuddy.workflows.problems import OPERATION_CANCELLED, OPERATION_UNEXPECTED_DETAIL
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -45,6 +45,8 @@ class Fake:
         self.run_error: Exception | None = None
         self.hold = asyncio.Event()
         self.hold.set()
+        #: Set, the check waits on it, so a test can act while it is in flight.
+        self.check_gate: asyncio.Event | None = None
 
     def _op(self, status: str = "running", **fields: Any) -> Operation:
         return Operation(
@@ -59,6 +61,8 @@ class Fake:
     @activity.defn(name="op.test.check")
     async def check(self, request: dict[str, Any]) -> dict[str, Any]:
         self.calls.append("check")
+        if self.check_gate is not None:
+            await self.check_gate.wait()
         if self.refuse:
             raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)
         return {"checked": True}
@@ -218,3 +222,24 @@ async def test_a_second_update_while_running_is_a_repeat_that_runs_nothing(
     answers = await asyncio.gather(first, second)
     assert sorted(a.repeated for a in answers) == [False, True]
     assert fake.calls.count("run") == 1
+
+
+async def test_a_cancel_during_the_check_answers_the_update_before_the_execution_ends(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 1c: the Update answers a refusal, never outlived by its execution."""
+    fake.check_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "check" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        answer = await accepting
+        assert answer.operation is None
+        assert answer.refusal == OPERATION_CANCELLED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
+    finally:
+        fake.check_gate.set()
