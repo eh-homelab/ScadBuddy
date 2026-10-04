@@ -17,15 +17,16 @@ from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import operations as operations_api
-from scadbuddy.api.deps import STATE_ATTR, AppState, OperationsDep
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.component import OPERATIONS, OperationsDep
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import CommandClosedError
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5 = (uuid.uuid4().hex for _ in range(5))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -55,7 +56,12 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return {"done": checked["checked"], "n": counts.runs}
 
     state: AppState = getattr(app.state, STATE_ATTR)
-    state.operations.kinds["test"] = OperationKind("test", check, run)
+    ops = state.components.get(OPERATIONS)
+    test_kind = OperationKind("test", check, run)
+    # Before the app starts, so its `bambuddy` worker serves the kind too.
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, kinds={**ops.kinds, "test": test_kind})
+    )
     router = APIRouter()
 
     @router.post("/api/v1/test-op")
@@ -65,7 +71,7 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return await run_operation(
             ops,
             response,
-            kind=state.operations.kinds["test"],
+            kind=test_kind,
             subject="s",
             request=body,
             idempotency_key=key,
@@ -133,6 +139,21 @@ def test_a_retry_after_a_recorded_failure_answers_it_and_runs_nothing(
     assert counts.runs == 1
 
 
+def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
+    client: TestClient, counts: Counts, pg_conninfo: str
+) -> None:
+    """Review #1063 8: a retention shorter than Temporal's leaves a closed execution
+    with no row. The answer says it may have been done; it never runs it again."""
+    assert post(client, {"a": 1}, key=PRESS_6).status_code == 200
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = post(client, {"a": 1}, key=PRESS_6)
+    assert again.status_code == 409, again.text
+    assert "may have been done" in again.json()["detail"]
+    assert "Check Bambuddy" in again.json()["detail"]
+    assert counts.runs == 1
+
+
 def test_a_slow_done_command_answers_202_and_is_followed(client: TestClient) -> None:
     started = post(client, {"delay": 12}, key=PRESS_4)
     assert started.status_code == 202, started.text
@@ -148,12 +169,14 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     client: TestClient, app: FastAPI, pg_conninfo: str
 ) -> None:
     state: AppState = getattr(app.state, STATE_ATTR)
-    ops = state.operations
-    state.operations = dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
     try:
         response = post(client, {"a": 1}, key=PRESS_5)
     finally:
-        state.operations = ops
+        state.components.override(OPERATIONS, ops)
     assert response.status_code == 503
     assert response.json()["type"].endswith("/temporal-unavailable")
     with psycopg.connect(pg_conninfo) as conn:

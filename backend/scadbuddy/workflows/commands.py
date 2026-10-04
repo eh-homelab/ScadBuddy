@@ -95,9 +95,11 @@ async def start_command[T](
     search_attributes: TypedSearchAttributes | None = None,
     memo: Mapping[str, Any] | None = None,
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
+    update_id: str | None = None,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
-    ``update``'s answer."""
+    ``update``'s answer. ``update_id`` names the Update: Temporal answers a second one
+    with the same id on the same execution with the first's outcome."""
     operation: WithStartWorkflowOperation[object, object] = WithStartWorkflowOperation(
         workflow,
         arg,
@@ -118,6 +120,7 @@ async def start_command[T](
             answer: T = await client.execute_update_with_start_workflow(
                 update,
                 start_workflow_operation=operation,
+                id=update_id,
                 result_type=result_type,
                 rpc_timeout=deadline,
             )

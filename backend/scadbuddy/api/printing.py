@@ -12,7 +12,7 @@ import logging
 import time
 from collections.abc import Coroutine
 from contextlib import suppress
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Response, status
@@ -22,7 +22,6 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
 from scadbuddy.api.deps import (
-    OperationsDep,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -43,7 +42,6 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -57,6 +55,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
+    ProjectAttach,
     ProjectChoices,
     ProjectRequest,
     ProjectView,
@@ -64,7 +63,9 @@ from scadbuddy.bambuddy.projects import (
 )
 from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
@@ -115,18 +116,6 @@ class PrinterRackAlgorithm(BaseModel):
 
     printer_id: int
     algorithm: RackAlgorithm
-
-
-class ProjectAttach(BaseModel):
-    """Which of this output's queue entries to file under the project.
-
-    The ids come from the progress read (#89): a plate's queue item only exists once it
-    has sliced, so the caller learns them by polling.
-    """
-
-    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
-    project_id: int | None = None
-    queue_item_ids: list[int] = Field(default_factory=list)
 
 
 @router.put(
@@ -243,7 +232,8 @@ async def post_run(
     nothing (``repeated`` is true), so a retry after a proxy timeout cannot queue the
     print twice. "The same request" includes ``request_id``: a client that makes a new
     one per deliberate Print gets a new print each time, and a retry of one press
-    (same id) its run.
+    (same id) its run, for as long as the run's row is kept
+    (``print_run_retention_seconds``).
     """
     meta = require_output(outputs, output_id)
     return await accept_run(
@@ -299,6 +289,7 @@ async def accept_run(
         # The store's window, so a repeat the record no longer matches starts anew.
         repeat_window_s=runs.store.repeat_window.total_seconds(),
         search_attributes=runs.search_attributes,
+        accepted_at=datetime.now(UTC),
     )
     workflow_id = f"print-{key}"
 
@@ -346,12 +337,14 @@ async def accept_run(
                 raise CommandStillAcceptingError(workflow_id)
             answer = await start(timedelta(seconds=left))
     except AlreadyClosedError:
-        # The press's execution closed after recording its run (§4.2): that run.
+        # The press's execution closed after recording its run (§4.2): that run. With
+        # no row, retention pruned it: the run may well have printed (review #1061 2a).
         closed = await runs.store.find(key, has_request_id=True)
         if closed is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "This print's run has ended and left no record. Print again to retry.",
+                "This print ran before, and its record has expired, so ScadBuddy cannot"
+                " tell whether it was queued. Check Bambuddy's queue before printing again.",
             ) from None
         response.status_code = status.HTTP_200_OK
         return closed.model_copy(update={"repeated": True})

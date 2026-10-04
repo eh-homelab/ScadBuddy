@@ -24,7 +24,6 @@ from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, R
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.follow import FollowActivities
-from scadbuddy.bambuddy.operations import bambuddy_kinds
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -38,6 +37,8 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.store import sweep_blobs
@@ -48,7 +49,12 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import bambuddy_worker, connect, reconcile_lost_runs
+from scadbuddy.workflows.client import (
+    bambuddy_worker,
+    connect,
+    reconcile_lost_operations,
+    reconcile_lost_runs,
+)
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
@@ -433,7 +439,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
     )
-    ops = state.operations
+    ops = state.components.get(OPERATIONS)
     activities = [
         *PrintActivities(deps).all(),
         FollowActivities(state.print_follower).follow_print,
@@ -455,7 +461,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # print run waits on a queue nothing polls.
         worker = bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities)
         if not await _serve_until(
-            worker, stop, _end_lost_runs_until(client, state.print_runs.store, stop)
+            worker, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
         ):
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
@@ -488,9 +494,12 @@ async def _serve_until(
     return True
 
 
-async def _end_lost_runs_until(client: Client, store: PrintRunStore, stop: asyncio.Event) -> None:
-    """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs whose execution
-    closed without ending them (review #1061): one terminated in the Temporal UI."""
+async def _end_lost_runs_until(
+    client: Client, store: PrintRunStore, operations: OperationStore, stop: asyncio.Event
+) -> None:
+    """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
+    the operations (review #1063) whose execution closed without ending them: one
+    terminated in the Temporal UI."""
     while not stop.is_set():
         try:
             ended = await reconcile_lost_runs(client, store)
@@ -498,6 +507,12 @@ async def _end_lost_runs_until(client: Client, store: PrintRunStore, stop: async
                 logger.warning("ended print runs whose execution was gone", extra={"count": ended})
         except Exception:
             logger.exception("could not check print runs for lost executions")
+        try:
+            ended = await reconcile_lost_operations(client, operations)
+            if ended:
+                logger.warning("ended operations whose execution was gone", extra={"count": ended})
+        except Exception:
+            logger.exception("could not check operations for lost executions")
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), LOST_RUN_INTERVAL)
 
@@ -671,8 +686,6 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     state = build_state(app_settings)
-    # The Bambuddy writes run as operations (#1053) on this process's `bambuddy` worker.
-    state.operations.kinds.update(bambuddy_kinds(state))
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)

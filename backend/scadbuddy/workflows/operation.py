@@ -3,6 +3,7 @@
 1. ``op.<kind>.check`` makes the route's refusals and writes nothing. A refusal answers
    the ``accepted`` Update and *fails* the execution, so a retry may start again.
 2. ``op_insert`` writes the record, retried on its own so a refusal never follows it.
+   A cancel waits it out and ends the record, which is never left ``running``.
 3. ``op.<kind>.run`` is the effect, with the kind's attempts; then ``op_finish``. From
    the record on, every outcome completes the execution and is recorded.
 
@@ -37,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
     from scadbuddy.workflows.problems import (
         OPERATION_CANCELLED,
+        OPERATION_CANCELLED_RUNNING,
         OPERATION_UNEXPECTED_DETAIL,
         problem_of,
     )
@@ -105,14 +107,43 @@ class OperationWorkflow:
             if is_cancelled_exception(error):
                 raise
             raise ApplicationError(self.refusal.detail, type=REFUSED, non_retryable=True) from None
-        op: Operation = await workflow.execute_activity(
+        inserting = workflow.start_activity(
             INSERT_ACTIVITY,
             InsertOp(input=input),
             result_type=Operation,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
+        try:
+            op: Operation = await asyncio.shield(inserting)
+            cancelled = False
+        except asyncio.CancelledError:
+            # The insert may commit after the cancel (review #1063 1): it is waited out,
+            # never abandoned, so its row is ended below rather than left running.
+            op = await inserting
+            cancelled = True
         self._upsert(STATUS.value_set("running"))
+        finish = (
+            # Nothing ran: the cancel came before the effect.
+            FinishOp(operation_id=op.id, error=OPERATION_CANCELLED)
+            if cancelled
+            else await self._effect(input, op.id, checked)
+        )
+        self.done = await workflow.execute_activity(
+            FINISH_ACTIVITY,
+            finish,
+            result_type=Operation,
+            start_to_close_timeout=SHORT,
+            retry_policy=RECORD_RETRY,
+        )
+        self._upsert(STATUS.value_set(self.done.status))
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        return self.done
+
+    async def _effect(
+        self, input: OperationInput, operation_id: str, checked: dict[str, Any]
+    ) -> FinishOp:
+        """The kind's run; whatever happened is recorded, and the execution completes."""
         try:
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
@@ -125,22 +156,15 @@ class OperationWorkflow:
                     backoff_coefficient=2.0,
                 ),
             )
-            finish = FinishOp(operation_id=op.id, result=result)
         except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
-            # The record exists: whatever happened is recorded, and the execution completes.
-            finish = FinishOp(
-                operation_id=op.id, error=problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
+            if is_cancelled_exception(error):
+                # The effect may have reached Bambuddy before the cancel (review #1063 2).
+                return FinishOp(operation_id=operation_id, error=OPERATION_CANCELLED_RUNNING)
+            return FinishOp(
+                operation_id=operation_id,
+                error=problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL),
             )
-        self.done = await workflow.execute_activity(
-            FINISH_ACTIVITY,
-            finish,
-            result_type=Operation,
-            start_to_close_timeout=SHORT,
-            retry_policy=RECORD_RETRY,
-        )
-        self._upsert(STATUS.value_set(self.done.status))
-        await workflow.wait_condition(workflow.all_handlers_finished)
-        return self.done
+        return FinishOp(operation_id=operation_id, result=result)
 
     def _upsert(self, *pairs: SearchAttributeUpdate[Any]) -> None:
         """§4.2's attributes: identifiers and states only, never content."""

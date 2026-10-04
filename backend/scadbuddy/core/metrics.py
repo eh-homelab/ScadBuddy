@@ -25,8 +25,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "RenderStage"]
 
-#: How a job settled; ``superseded`` was replaced by a newer render first.
-RenderOutcome = Literal["done", "failed", "superseded"]
+#: How a job settled; ``superseded`` was replaced by a newer render first, and
+#: ``cancelled`` had every request for it withdrawn.
+RenderOutcome = Literal["done", "failed", "superseded", "cancelled"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, or starting a submitted job's workflow or cancelling a superseded one.

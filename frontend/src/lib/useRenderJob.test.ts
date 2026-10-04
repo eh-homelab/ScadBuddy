@@ -75,6 +75,7 @@ describe('useRenderJob', () => {
       { params: { name: 'Hi' }, tab: 'lid' },
       undefined,
       undefined,
+      expect.any(AbortSignal),
     )
   })
 
@@ -84,8 +85,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'demo', params: { n: 2 } })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
   })
 
   it('supersedes a render whose answer arrives after the next one was asked for', async () => {
@@ -101,7 +102,25 @@ describe('useRenderJob', () => {
     first.resolve(accepted(JOB_A))
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
+  })
+
+  it("aborts a superseded render's re-sends, never the request in flight (review #1066 2.2)", async () => {
+    const first = deferred<RenderAccepted>()
+    submit.mockImplementationOnce(() => first.promise)
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    const signal = submit.mock.calls[0]![4]!
+    expect(signal.aborted).toBe(false)
+
+    rerender({ slug: 'demo', params: { n: 2 } })
+    await settle()
+    expect(signal.aborted).toBe(true)
+
+    // Its answer still arrives, and names the job the next render supersedes.
+    first.resolve(accepted(JOB_A))
+    await settle()
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
   })
 
   it('retries a render the full queue refused, after the delay it names', async () => {
@@ -125,7 +144,7 @@ describe('useRenderJob', () => {
     })
 
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
     expect(result.current.busy).toBeUndefined()
     expect(result.current.error).toBeUndefined()
   })
@@ -156,7 +175,7 @@ describe('useRenderJob', () => {
     // The newer render went out within a stale-check, not after the 30 s wait,
     // and the refused one was never retried.
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined, expect.any(AbortSignal))
   })
 
   it('reports a settle only for the newest render, never a superseded one (#254)', async () => {
@@ -171,7 +190,7 @@ describe('useRenderJob', () => {
     await settle()
     rerender({ slug: 'demo', params: second })
     await settle()
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A, expect.any(AbortSignal))
 
     // A says "done" now, but it was superseded: neither its job nor its params count.
     lateA.resolve(job(JOB_A, 'done'))
@@ -196,8 +215,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'other', params: { n: 1 }, version: 'f'.repeat(40) })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined, expect.any(AbortSignal))
   })
 
   describe('following a job (#267)', () => {
