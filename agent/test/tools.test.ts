@@ -1272,6 +1272,24 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(JSON.stringify(result.content)).toContain('Bambuddy said no')
   })
 
+  it('a followed failure is the same tool error as the direct answer (review #1063 4)', async () => {
+    const UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+    const problem = { type: UNAVAILABLE, status: 504, title: 'Gateway Timeout', detail: 'Bambuddy did not answer' }
+    const run = async (answer: () => Response) => {
+      server.use(
+        http.post(`${BACKEND}/api/v1/prints/35/reprint`, answer),
+        http.get(`${BACKEND}/api/v1/operations/op-1`, () =>
+          HttpResponse.json({ ...op, status: 'failed', error: { ...problem, extensions: { slice_job_id: 's-1' } } }),
+        ),
+      )
+      return runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    }
+    const direct = await run(() => HttpResponse.json({ ...problem, slice_job_id: 's-1' }, { status: 504 }))
+    const followed = await run(() => HttpResponse.json(op, { status: 202 }))
+    expect(followed.isError).toBe(true)
+    expect(followed.content).toEqual(direct.content)
+  })
+
   it.each([
     ['send_to_bambuddy', { output_id: OUT }, `/api/v1/outputs/${OUT}/send`],
     ['create_print_project', { name: 'P' }, '/api/v1/print/projects'],
