@@ -509,23 +509,26 @@ def test_running_follows_are_counted_and_a_full_worker_is_said(
     the prints after it wait unfollowed."""
     write_output(paths)
     follower, _ = follower_for(paths, Script(progress("running")), min_interval=60, max_interval=60)
-    gauge = Metrics().print_follows_running
-    activities = FollowActivities(follower, slots=1, running=gauge)
+    metrics = Metrics()
+    activities = FollowActivities(follower, slots=1, running=metrics.print_follows_running)
     env = ActivityEnvironment()
 
-    async def scenario() -> float:
+    def held() -> float | None:
+        return metrics.registry.get_sample_value("scadbuddy_print_follows_running")
+
+    async def scenario() -> float | None:
         attempt = asyncio.ensure_future(
             env.run(activities.follow_print, FollowInput(output_id=OUTPUT))
         )
         await asyncio.sleep(0.05)
-        held = gauge._value.get()
+        during = held()
         env.worker_shutdown()
         with pytest.raises(ApplicationError):
             await asyncio.wait_for(attempt, 2)
-        return held
+        return during
 
     with caplog.at_level(logging.WARNING, logger=follow_module.__name__):
-        held = asyncio.run(scenario())
-    assert held == 1
-    assert gauge._value.get() == 0
+        during = asyncio.run(scenario())
+    assert during == 1
+    assert held() == 0
     assert any("every follow slot" in r.message for r in caplog.records)
