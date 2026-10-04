@@ -754,9 +754,12 @@ async def test_a_check_that_ends_after_every_client_stopped_waiting_records_noth
     """Review #1061 (2) 2: the check started inside `CLIENT_ACCEPTING` but ended past
     it. The workflow refuses before `print_insert`, so nothing prints unwatched. The
     budget runs from the execution's start (review #1061 3), so the route sends no
-    time of its own; unsandboxed, so a test can shorten it."""
-    monkeypatch.setattr(printing, "CLIENT_ACCEPTING", timedelta(seconds=1))
-    fake.check_gate = asyncio.Event()
+    time of its own; unsandboxed, so a test can shorten it. Both ends are the server's
+    wall clock, which on a loaded host jumps seconds against this test's sleeps (+8 s
+    and -0.5 s within 10 s, measured), so no hold is timed against a short budget: the
+    shortest one is past at any clock reading, and the fake check, which never reads it,
+    stands for one that started inside it."""
+    monkeypatch.setattr(printing, "CLIENT_ACCEPTING", timedelta.min)
     arg = run_input()
     assert arg.accepted_at is None
     queue = f"print-{uuid.uuid4().hex[:8]}"
@@ -767,19 +770,11 @@ async def test_a_check_that_ends_after_every_client_stopped_waiting_records_noth
         activities=fake.all(),
         workflow_runner=UnsandboxedWorkflowRunner(),
     ):
-        accepting = asyncio.create_task(start(client, queue, arg))
-        try:
-            while "check" not in fake.calls:
-                await asyncio.sleep(0.05)
-            await asyncio.sleep(1.5)
-            fake.check_gate.set()
-            answer = await accepting
-            assert answer.run is None and answer.refusal == UNWAITED
-            with pytest.raises(WorkflowFailureError):
-                await ended(client, arg)
-            assert fake.calls == ["check"]
-        finally:
-            fake.check_gate.set()
+        answer = await start(client, queue, arg)
+        assert answer.run is None and answer.refusal == UNWAITED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
 
 
 async def test_a_cancel_during_the_insert_answers_the_run_recorded_as_cancelled(
