@@ -417,8 +417,9 @@ async function stop(): Promise<void> {
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted
   // turns' pending approvals stay pending (approvals/service.ts).
-  // The agent-tools worker at the same time: it stops polling, and its running
-  // activities get its 10 s grace, inside the turns' budget.
+  // The agent-tools worker at the same time: it stops polling, its running
+  // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
+  // and at 15 s it stops regardless: inside the turns' 17 s budget.
   await Promise.all([
     temporalWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),

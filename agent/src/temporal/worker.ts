@@ -10,7 +10,9 @@ import { TASK_QUEUE } from './names.js'
 // Temporal that is down at start-up delays the worker, never the pod; /healthz says
 // which. Unversioned: it pins nothing that a drain would wait for (plan ruling 9).
 // `stop()` is the service's first shutdown step: the worker stops polling and its
-// running activities get `shutdownGraceMs` to finish before they are cancelled.
+// running activities get `shutdownGraceMs` to finish before they are cancelled; one
+// that ignores the cancel is abandoned at `shutdownForceMs`, so stop() ends within the
+// pod's 30 s whatever an activity does (the SDK's `shutdownForceTime`).
 
 export type TemporalHealth = 'connecting' | 'ok' | 'unavailable'
 
@@ -23,6 +25,8 @@ export type AgentWorkerOptions = {
   workflows?: Pick<WorkerOptions, 'workflowBundle' | 'workflowsPath'>
   dataConverter?: DataConverter
   shutdownGraceMs?: number
+  /** When the SDK gives up on running activities and the worker stops regardless. */
+  shutdownForceMs?: number
   /** The wait between connection attempts. */
   retryMs?: number
   /**
@@ -95,6 +99,7 @@ export class AgentWorker {
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
+          shutdownForceTime: options.shutdownForceMs ?? 15_000,
         })
         this.#worker = worker
         if (this.#stopping) break
@@ -102,6 +107,13 @@ export class AgentWorker {
         this.#state = 'ok'
         await run
       } catch (err) {
+        // Past shutdownForceTime the SDK gives up on the activities still running
+        // (GracefulShutdownPeriodExpiredError, then the native worker refusing to close
+        // under them): stopped all the same.
+        if (this.#stopping) {
+          log(`agent-tools worker: stopped with activities still running past their cancel (${(err as Error).message})`)
+          break
+        }
         this.#state = 'unavailable'
         log(`agent-tools worker: ${(err as Error).message}; retrying`)
       } finally {

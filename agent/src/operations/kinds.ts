@@ -11,7 +11,8 @@ export type OperationKind = {
   subject(request: Record<string, unknown>): string
   /** The route's refusals; its result is handed to `run`. */
   check(request: Record<string, unknown>): Promise<unknown>
-  run(request: Record<string, unknown>, checked: unknown): Promise<unknown>
+  /** `signal` is the activity's cancellation: a cancel, or the worker's shutdown past its grace. */
+  run(request: Record<string, unknown>, checked: unknown, signal?: AbortSignal): Promise<unknown>
   /** 1 unless the effect dedupes itself (§4.2: a repeat never repeats the effect). */
   runAttempts: number
   runTimeoutS: number

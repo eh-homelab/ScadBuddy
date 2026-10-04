@@ -24,6 +24,7 @@ const HISTORY = fileURLToPath(new URL('./fixtures/agent_operation_histories/succ
 
 let runs = 0
 let release: (() => void) | undefined
+let aborted = false
 const kinds: OperationKind[] = [
   {
     name: 'ok',
@@ -71,6 +72,32 @@ const kinds: OperationKind[] = [
     runTimeoutS: 60,
   },
   {
+    // Ends only when cancelled, through the signal its run is given.
+    name: 'abortable',
+    subject: () => 's',
+    check: async () => null,
+    run: async (_request, _checked, signal) => {
+      runs++
+      await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      aborted = true
+      throw signal?.reason
+    },
+    runAttempts: 1,
+    runTimeoutS: 60,
+  },
+  {
+    // Ignores cancellation, as a fetch that takes no signal would.
+    name: 'stuck',
+    subject: () => 's',
+    check: async () => null,
+    run: async () => {
+      runs++
+      await new Promise<void>((resolve) => (release = resolve))
+    },
+    runAttempts: 1,
+    runTimeoutS: 60,
+  },
+  {
     name: 'slow',
     subject: () => 's',
     check: async () => null,
@@ -107,6 +134,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
     store = new OperationStore(db.sql)
     runs = 0
     release = undefined
+    aborted = false
     agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -151,9 +179,12 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
   it("records a run's failure in its own words, and an unexpected one without its text", async () => {
     const failed = await startCommand(env.client, `op-fail-${randomUUID()}`, input('fail'), 30_000)
     expect(failed.operation).toMatchObject({ status: 'failed', error: { status: 409, detail: 'already installed' } })
-    const boom = await startCommand(env.client, `op-boom-${randomUUID()}`, input('boom'), 30_000)
+    const boomId = `op-boom-${randomUUID()}`
+    const boom = await startCommand(env.client, boomId, input('boom'), 30_000)
     expect(boom.operation).toMatchObject({ status: 'failed', error: { status: 500 } })
     expect(JSON.stringify(boom.operation)).not.toContain('/var/x')
+    // Nor in the activity's failure in history (git's stderr, a path).
+    expect(historyToJSON(await env.client.workflow.getHandle(boomId).fetchHistory())).not.toContain('/var/x')
   }, 60_000)
 
   it('attaches a second request to the running execution: one effect, both answered', async () => {
@@ -188,6 +219,53 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
     // The same press answers from the record.
     expect(await commands.run('slow', {}, 'lost-key')).toMatchObject({ status: 'problem', problem: { status: 500 } })
   }, 60_000)
+
+  describe('stopping', () => {
+    const stopWithin = (worker: AgentWorker, ms: number) =>
+      Promise.race([
+        worker.stop().then(() => 'stopped'),
+        new Promise((resolve) => setTimeout(() => resolve('still stopping'), ms)),
+      ])
+
+    it("cancels a running activity's signal at the end of its grace", async () => {
+      await agent.stop()
+      agent = AgentWorker.start({
+        address: env.address,
+        namespace: 'default',
+        activities: operationActivities(kinds, store),
+        workflows: { workflowsPath: WORKFLOWS },
+        shutdownGraceMs: 200,
+      })
+      await agent.running(60_000)
+      void startCommand(env.client, `op-abortable-${randomUUID()}`, input('abortable'), 1_000).catch(() => undefined)
+      await expect.poll(() => runs, { timeout: 20_000 }).toBe(1)
+      expect(await stopWithin(agent, 10_000)).toBe('stopped')
+      expect(aborted).toBe(true)
+    }, 60_000)
+
+    it('stops at its force time when a running activity ignores cancellation', async () => {
+      const logs: string[] = []
+      await agent.stop()
+      agent = AgentWorker.start({
+        address: env.address,
+        namespace: 'default',
+        activities: operationActivities(kinds, store),
+        workflows: { workflowsPath: WORKFLOWS },
+        shutdownGraceMs: 200,
+        shutdownForceMs: 1_000,
+        log: (message) => logs.push(message),
+      })
+      await agent.running(60_000)
+      void startCommand(env.client, `op-stuck-${randomUUID()}`, input('stuck'), 1_000).catch(() => undefined)
+      await expect.poll(() => runs, { timeout: 20_000 }).toBe(1)
+      try {
+        expect(await stopWithin(agent, 10_000)).toBe('stopped')
+        expect(logs).toEqual([expect.stringMatching(/^agent-tools worker: stopped with activities still running past their cancel/)])
+      } finally {
+        release?.()
+      }
+    }, 60_000)
+  })
 
   it('replays its recorded history', async () => {
     const history = JSON.parse(await readFile(HISTORY, 'utf8')) as unknown

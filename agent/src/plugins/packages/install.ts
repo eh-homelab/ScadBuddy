@@ -171,9 +171,9 @@ export class PackageInstaller {
     return problems
   }
 
-  private async checkout(url: string, ref: string, into: string): Promise<Checkout> {
+  private async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
     try {
-      return await this.fetcher.checkout(url, ref, into)
+      return await this.fetcher.checkout(url, ref, into, signal)
     } catch (err) {
       if (err instanceof FetchError) throw new PluginError(err.message, 502)
       throw err
@@ -212,13 +212,14 @@ export class PackageInstaller {
   /**
    * Fetches `source`, pins its commit, and vets and hashes the plugin. Nothing
    * is stored: the caller stores the result (unapproved) for the admin to
-   * review. The fetched copy is kept in the cache for the first run.
+   * review. The fetched copy is kept in the cache for the first run. `signal` stops
+   * the fetch (an AgentOperation run that is cancelled).
    */
-  async prepare(source: PackageSource): Promise<PreparedPackage> {
+  async prepare(source: PackageSource, signal?: AbortSignal): Promise<PreparedPackage> {
     await this.egress(source.url, 'source url')
     const tmp = await this.tempDir()
     try {
-      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'))
+      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal)
       let checkout = repo
       let fetchUrl = source.url
       let fetchPath = source.kind === 'git' ? source.path : ''
@@ -236,7 +237,7 @@ export class PackageInstaller {
         fetchPath = target.path
         if (!target.sameRepo) {
           await this.egress(target.url, `marketplace entry "${source.entry}"`)
-          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'))
+          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal)
         }
         fallbackName = source.entry
       } else {
