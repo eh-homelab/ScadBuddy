@@ -671,7 +671,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
-        await state.print_follows.aclose()
         stop_printing.set()
         await _stop_print_worker(printing)
         if worker is not None:

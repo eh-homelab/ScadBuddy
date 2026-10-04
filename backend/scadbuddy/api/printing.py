@@ -30,7 +30,6 @@ from scadbuddy.api.deps import (
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
-    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
@@ -77,6 +76,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     start_command,
 )
+from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
     PRINT_RUN_WORKFLOW,
@@ -505,7 +505,7 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
-    state: StateDep,
+    follows: FollowsDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
@@ -525,7 +525,7 @@ async def get_progress(
     # there was one. In the background: a Temporal that does not answer never holds this
     # read up. It needs only the client and queue, never the print runs' store.
     if progress is not None and not progress.settled:
-        state.print_follows.ensure(meta.id)
+        follows.ensure(meta.id)
     return progress
 
 
