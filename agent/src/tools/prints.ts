@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { command } from './command.js'
+import { command, isRunning } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
@@ -90,14 +90,14 @@ export const printHistoryTools: Tool[] = [
     routes: ['POST /api/v1/prints/{archive_id}/timelapse/pull'],
     summarize: ({ archive_id, filename }) => `Pull timelapse ${filename} from the printer onto print ${archive_id}`,
     handler: async ({ archive_id, filename }, ctx) => {
-      await command(ctx, `pull timelapse ${filename} onto print ${archive_id}`, (headers) =>
+      const pulled = await command(ctx, `pull timelapse ${filename} onto print ${archive_id}`, (headers) =>
         ctx.backend.POST('/api/v1/prints/{archive_id}/timelapse/pull', {
           params: { path: { archive_id } },
           body: { filename },
           headers,
         }),
       )
-      return json({ attached: filename })
+      return json(isRunning(pulled) ? pulled : { attached: filename })
     },
   }),
 

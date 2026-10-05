@@ -38,8 +38,12 @@ class Operation(BaseModel):
     error: PrintRunError | None = None
     created_at: datetime
     finished_at: datetime | None = None
-    #: Only on an answer to a route: an earlier command with the same key, so this
-    #: request ran nothing.
+
+
+class OperationAccepted(Operation):
+    """A route's 202: the operation to follow, and whether this request started it."""
+
+    #: An earlier command with the same key, so this request ran nothing.
     repeated: bool = False
 
 

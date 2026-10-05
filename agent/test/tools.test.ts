@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { ACCEPTING_MS } from '../src/tools/command.js'
+import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -1272,7 +1272,7 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(JSON.stringify(result.content)).toContain('51')
   })
 
-  it('follows a 202 past renderWaitMs, to the operation follow window (review #1063 3)', async () => {
+  it('follows a 202 past renderWaitMs, within the command follow window (review #1063 3)', async () => {
     let reads = 0
     server.use(
       http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
@@ -1282,14 +1282,29 @@ describe('Bambuddy writes as operations (#1053)', () => {
         return HttpResponse.json(reads < 4 ? op : { ...op, status: 'succeeded', result: again })
       }),
     )
-    const result = await runTool(
-      { ...tool('print_again'), gated: false },
-      { archive_id: 35 },
-      ctx({ renderWaitMs: 20, operationFollowMs: 5000 }),
-    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ renderWaitMs: 20 }))
     expect(result.isError).toBeFalsy()
     expect(reads).toBe(4)
     expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('hands back a still-running operation after a short follow, for get_operation (review #1063 r6 3)', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json(op)),
+    )
+    const started = Date.now()
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ commandFollowMs: 50 }))
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(result.isError).toBeFalsy()
+    const body = firstText(result)
+    expect(body).toMatchObject({ status: 'running', operation_id: 'op-1' })
+    expect(JSON.stringify(body)).toContain('get_operation')
+  })
+
+  it('the default follow is the backend deadline plus a margin, not the browser window', () => {
+    expect(COMMAND_FOLLOW_MS).toBeLessThanOrEqual(30_000)
+    expect(COMMAND_FOLLOW_MS).toBeGreaterThan(10_000)
   })
 
   it('a failed operation is the tool error, in the backend words', async () => {

@@ -25,7 +25,7 @@ from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
-from scadbuddy.operations.store import Operation
+from scadbuddy.operations.store import Operation, OperationAccepted
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
@@ -74,7 +74,9 @@ def temporal_unavailable(what: str) -> ApiError:
     )
 
 
-def _answer(op: Operation, response: Response, *, repeated: bool) -> dict[str, Any] | Operation:
+def _answer(
+    op: Operation, response: Response, *, repeated: bool
+) -> dict[str, Any] | OperationAccepted:
     """The route's answer for a recorded operation: its body, its problem, or a 202."""
     if op.status == "succeeded":
         return op.result or {}
@@ -85,7 +87,7 @@ def _answer(op: Operation, response: Response, *, repeated: bool) -> dict[str, A
             error.status, error.detail, title=error.title, type_=error.type, **error.extensions
         )
     response.status_code = status.HTTP_202_ACCEPTED
-    return op.model_copy(update={"repeated": repeated})
+    return OperationAccepted(**op.model_dump(), repeated=repeated)
 
 
 async def run_operation(
@@ -96,8 +98,8 @@ async def run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
-) -> dict[str, Any] | Operation:
-    """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
+) -> dict[str, Any] | OperationAccepted:
+    """Run ``kind`` as an operation; its result body, or 202 with the operation.
     A refusal or a recorded failure is raised as the problem the route answers with."""
     body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
     key = operation_key(kind.name, subject, body, idempotency_key or uuid.uuid4().hex)
@@ -162,17 +164,17 @@ async def run_operation(
 
 
 def operation_answer[M: BaseModel](
-    result: dict[str, Any] | Operation, model: type[M]
+    result: dict[str, Any] | OperationAccepted, model: type[M]
 ) -> M | JSONResponse:
     """The route's own body, or 202 with the operation to follow."""
-    if isinstance(result, Operation):
+    if isinstance(result, OperationAccepted):
         return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return model.model_validate(result)
 
 
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
-    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"}
+    202: {"model": OperationAccepted, "description": "Still running: follow GET /operations/{id}"}
 }
 
 

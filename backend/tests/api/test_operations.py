@@ -195,8 +195,17 @@ def test_a_slow_done_command_answers_202_and_is_followed(
         assert time.monotonic() < resend_until, started.text
         started = post(client, {"delay": 20}, key=PRESS_4)
     assert started.status_code == 202, started.text
+    assert started.json()["repeated"] is False
     op = follow(client, started.json()["id"], timeout=60)
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
+    # Review #1063 r6 4: `repeated` belongs to a route's 202, never to the record.
+    assert "repeated" not in op
+
+
+def test_only_the_202_documents_repeated(app: FastAPI) -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    assert "repeated" not in schemas["Operation"]["properties"]
+    assert "repeated" in schemas["OperationAccepted"]["properties"]
 
 
 def test_get_operation_404s_an_unknown_id(client: TestClient) -> None:
