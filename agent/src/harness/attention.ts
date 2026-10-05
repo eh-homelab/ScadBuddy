@@ -185,9 +185,9 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
 /** The tool's description, as the model reads it. */
 export const ATTENTION_DESCRIPTION =
   'Get the user\'s attention and wait for their reply: shown in the ScadBuddy panel and counted on the Assistant ' +
-  'badge. Use it when you cannot go on without them (`blocked`, `tab_disconnected` after a browser_* call ' +
-  'found no tab, a `question` that has no fixed choices), or to tell them you are `done` with long work. ' +
+  'badge. Use it when you cannot go on without them (`blocked`, a `question` that has no fixed choices), or to ' +
+  'tell them you are `done` with long work. Do not use it after a browser_* call finds no tab: that call ' +
+  'already waits for the tab and asks the user itself, and its result says what they chose. ' +
   '`options` are up to four quick replies; the user may also type their own. After `timeout_s` (default 300) ' +
   '`on_timeout` decides: `proceed` (default) returns timed_out and you carry on with work that needs no ' +
-  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything. ' +
-  'One request per reason is open at a time: a new one replaces the last.'
+  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything.'
