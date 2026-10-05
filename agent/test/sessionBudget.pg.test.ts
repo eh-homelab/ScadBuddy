@@ -258,10 +258,31 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       await transcript(session.id)
       expect(await m.get(session.id, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
 
-      expect((await m.fork(session.id, browser)).budgetUsd).toBe(0.6)
-      const marked = await fork(session.id, { ...UI, [AGENT_ACTOR_HEADER]: session.id })
+      const child = await m.fork(session.id, browser)
+      expect(child.budgetUsd).toBe(0.6)
+      // Moved, not copied: the parent has nothing left to give a second fork.
+      expect(await m.get(session.id, browser)).toMatchObject({ budgetUsd: 0.4, costUsd: 0.4 })
+      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
+      // A fork of the fork shares the child's $0.60 the same way; a session that has spent
+      // nothing keeps a cent, as a budget must stay above zero.
+      await transcript(child.id)
+      const marked = await fork(child.id, { ...UI, [AGENT_ACTOR_HEADER]: child.id })
       expect(marked.status).toBe(201)
-      expect(((await marked.json()) as { session: { budget_usd: number } }).session.budget_usd).toBe(0.6)
+      expect(((await marked.json()) as { session: { budget_usd: number } }).session.budget_usd).toBe(0.59)
+      expect((await m.get(child.id, browser)).budgetUsd).toBe(0.01)
+    })
+
+    it('splits what is left between concurrent forks, never giving it twice', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      await transcript(session.id)
+      const results = await Promise.allSettled([m.fork(session.id, browser), m.fork(session.id, browser)])
+      const given = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value.budgetUsd] : []))
+      expect(given).toEqual([0.6])
+      expect(results.filter((r) => r.status === 'rejected')).toEqual([
+        expect.objectContaining({ reason: expect.objectContaining({ code: 'budget_exhausted' }) }),
+      ])
+      expect((await m.get(session.id, browser)).budgetUsd).toBe(0.4)
     })
 
     it('rounds what is left down, so a fork never gets more than the parent has, and under a cent is spent', async () => {
@@ -270,7 +291,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       await transcript(session.id)
       await db.sql`UPDATE ai_sessions SET cost_usd = 0.346 WHERE id = ${session.id}`
       expect((await m.fork(session.id, browser)).budgetUsd).toBe(0.65)
-      await db.sql`UPDATE ai_sessions SET cost_usd = 0.995 WHERE id = ${session.id}`
+      await db.sql`UPDATE ai_sessions SET budget_usd = 1, cost_usd = 0.995 WHERE id = ${session.id}`
       await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
     })
 

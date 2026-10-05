@@ -1657,8 +1657,8 @@ export class SessionManager {
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a fresh budget. Any other fork, `sessions_fork`
-   * above all, carries over what the parent has left, so forking cannot
-   * stand in for the user-only `raiseBudget` (#823).
+   * above all, moves what the parent has left to the child (`takeForFork`),
+   * so forking cannot stand in for the user-only `raiseBudget` (#823).
    */
   async fork(
     id: string,
@@ -1690,13 +1690,26 @@ export class SessionManager {
       dir: sessionWorkDir(this.deps.paths, id),
       title,
     })
-    const child = await this.insert(childId, principal, {
-      origin: options.origin ?? parent.origin,
-      title,
-      tags: parent.tags,
-      scope: parent.scope,
-      parentId: parent.id,
-    }, { rateLimited: options.rateLimited ?? true, ...(options.freshBudget ? {} : { budgetUsd: left }) })
+    // Not the user's: the child's budget is taken off the parent, in one statement, so two
+    // forks (or a fork of a fork) share what was left rather than each getting all of it.
+    const given = options.freshBudget ? undefined : await this.takeForFork(id)
+    let child: SessionRecord
+    try {
+      child = await this.insert(childId, principal, {
+        origin: options.origin ?? parent.origin,
+        title,
+        tags: parent.tags,
+        scope: parent.scope,
+        parentId: parent.id,
+      }, { rateLimited: options.rateLimited ?? true, ...(given === undefined ? {} : { budgetUsd: given }) })
+    } catch (err) {
+      if (given !== undefined) {
+        await this.deps.sql`
+          UPDATE ai_sessions SET budget_usd = round((budget_usd + ${given})::numeric, 2)::double precision
+           WHERE id = ${id}`
+      }
+      throw err
+    }
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []
@@ -1729,6 +1742,39 @@ export class SessionManager {
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
     return child
+  }
+
+  /**
+   * Moves what a session has left, rounded down to the cent and at most the default
+   * budget, off it for a fork's child (#823). A session that has spent nothing keeps a
+   * cent, since a budget must stay above zero (`ai_sessions_budget_usd_check`). One statement under the row lock, so a
+   * concurrent fork reads what this one left behind.
+   */
+  private async takeForFork(id: string): Promise<number> {
+    const { budgetUsd: cap } = await this.limits()
+    const [row] = await this.deps.sql.unsafe<{ given: number; budget_usd: number; cost_usd: number }[]>(
+      `WITH left_over AS (
+         SELECT id, least($2::double precision, floor((budget_usd - greatest(cost_usd, 0.01)) * 100 + 1e-9) / 100) AS given
+           FROM ai_sessions WHERE id = $1 FOR UPDATE
+       )
+       UPDATE ai_sessions s SET budget_usd = round((s.budget_usd - l.given)::numeric, 2)::double precision,
+                                updated_at = now()
+         FROM left_over l
+        WHERE s.id = l.id AND l.given > 0
+        RETURNING l.given AS given, s.budget_usd, s.cost_usd`,
+      [id, cap],
+    )
+    if (!row) {
+      const now = await this.row(id)
+      throw new SessionError(
+        'budget_exhausted',
+        `session ${id} has spent its budget` +
+          (now ? ` (${usd(now.costUsd)} of ${usd(now.budgetUsd)})` : '') +
+          '; only you can continue it in a new chat or raise its budget, in the ScadBuddy UI',
+        now ? { costUsd: now.costUsd, budgetUsd: now.budgetUsd } : undefined,
+      )
+    }
+    return Number(row.given)
   }
 
   /**
