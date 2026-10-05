@@ -160,6 +160,11 @@ async def start_command[T](
         # The SDK reports the outer bound's cancellation as this error too.
         if bound.expired():
             raise await _late(client, id) from error
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            # A caller's cancel (its own deadline): never swallowed, or its
+            # `asyncio.timeout` cannot tell that it expired.
+            raise asyncio.CancelledError from error
         raise CommandStillAcceptingError(id) from error
     except WorkflowAlreadyStartedError as error:
         raise AlreadyClosedError(id) from error

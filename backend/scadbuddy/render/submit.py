@@ -106,8 +106,10 @@ CLOSING_WAIT = 5.0
 #: Update, and the SDK polls again (review #1066 (8) 1).
 RELEASE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
 #: Every Temporal call a submit makes (both starts, the wait between them, the release)
-#: answers within this, below Envoy's 15 s route timeout; past it the request is still
-#: accepting, and the client sends it again with the same key (review #1066 (8) 1).
+#: answers within this; past it one describe (`DESCRIBE_SECONDS`) says whether the
+#: request is still accepting or Temporal unavailable, and the two stay below Envoy's
+#: 15 s route timeout. Either way the client sends it again with the same key (review
+#: #1066 (8) 1).
 SUBMIT_DEADLINE = COMMAND_ANSWER_DEADLINE.total_seconds() + CONNECT_MARGIN_SECONDS
 #: The codes gRPC itself ends a call with: they say nothing of whether the start
 #: reached Temporal (review #1066 (8) 2).
@@ -285,7 +287,10 @@ class RenderService:
     async def _started(
         self, start: RenderStart, previous: Job | None, request_id: str | None
     ) -> RenderAnswer:
-        """`_accepted`, then the supersede, under one `SUBMIT_DEADLINE`."""
+        """`_accepted`, then the supersede, under one `SUBMIT_DEADLINE`. Past it the
+        request is still accepting if the execution exists; if Temporal cannot say (a
+        client that never connected, say), it is unavailable, as `start_command` answers
+        a call that outlived its own bound."""
         bound = asyncio.timeout(SUBMIT_DEADLINE)
         try:
             async with bound:
@@ -296,7 +301,7 @@ class RenderService:
         except TimeoutError as error:
             if not bound.expired():
                 raise
-            raise CommandStillAcceptingError(workflow_id_for_key(start.render_key)) from error
+            raise await _late(self.client, workflow_id_for_key(start.render_key)) from error
         return answer
 
     async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:

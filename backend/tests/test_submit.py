@@ -361,27 +361,6 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
     assert took < 5
 
 
-async def test_a_submit_is_answered_still_accepting_within_one_bound(
-    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One deadline covers every Temporal call a submit makes (review #1066 (8) 1)."""
-
-    async def hanging(*_: object, **__: Any) -> RenderAnswer:
-        await asyncio.Event().wait()
-        raise AssertionError("never answered")
-
-    monkeypatch.setattr(submit_module, "start_command", hanging)
-    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 0.5)
-    async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        async with asyncio.timeout(30):
-            with pytest.raises(CommandStillAcceptingError):
-                await service.submit(SLUG, {"width": _w()})
-        await service.aclose()
-
-    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
-
-
 class _Described:
     """A client whose `describe` finds the execution, or answers NOT_FOUND."""
 
@@ -394,6 +373,44 @@ class _Described:
     async def describe(self, **__: object) -> None:
         if not self.exists:
             raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+
+@pytest.mark.parametrize(
+    ("exists", "raised", "counted"),
+    [
+        (True, CommandStillAcceptingError, "scadbuddy_render_accept_pending_total"),
+        (False, TemporalUnavailableError, "scadbuddy_render_store_errors_total"),
+    ],
+)
+async def test_a_submit_is_answered_within_one_bound(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    exists: bool,
+    raised: type[Exception],
+    counted: str,
+) -> None:
+    """One deadline covers every Temporal call a submit makes (review #1066 (8) 1).
+    Past it the request is still accepting when its execution exists, and Temporal
+    unavailable when it cannot say: a client that never connected queued nothing."""
+
+    async def hanging(*_: object, **__: Any) -> RenderAnswer:
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+    monkeypatch.setattr(submit_module, "start_command", hanging)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 0.5)
+    service = make_service(_Described(exists=exists), f"t-{uuid.uuid4().hex[:8]}")
+    async with asyncio.timeout(30):
+        with pytest.raises(raised):
+            await service.submit(SLUG, {"width": _w()})
+    await service.aclose()
+
+    assert (
+        service.metrics.registry.get_sample_value(
+            counted, {"operation": "start_workflow"} if not exists else None
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize("code", [RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.CANCELLED])
