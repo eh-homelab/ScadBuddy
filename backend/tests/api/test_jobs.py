@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
@@ -355,11 +357,26 @@ def test_a_value_outside_the_customizer_is_rejected_by_name(
     assert response.headers["content-type"] == "application/problem+json"
 
 
+def _render_followed(client: TestClient, slug: str, body: dict[str, Any]) -> Response:
+    """POST a render as the browser and the agent do: with an `Idempotency-Key`, sent
+    again with it while the answer is `command-still-accepting` (a render whose first
+    activity outlives the submit's deadline, as on a loaded machine). Any other answer
+    is returned as it is."""
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    for _ in range(10):
+        response: Response = client.post(
+            f"/api/v1/models/{slug}/render", json=body, headers=headers
+        )
+        if response.status_code != 503 or response.json()["type"] != STILL_ACCEPTING_PROBLEM:
+            return response
+    return response
+
+
 def test_the_customizer_bounds_and_a_retired_option_are_accepted(
     client: TestClient, ranged: str
 ) -> None:
     for params in ({"width": 1}, {"width": 100}, {"shape": "square"}, {"shape": "circle"}):
-        response = client.post(f"/api/v1/models/{ranged}/render", json={"params": params})
+        response = _render_followed(client, ranged, {"params": params})
         assert response.status_code == 202, (params, response.text)
 
 
