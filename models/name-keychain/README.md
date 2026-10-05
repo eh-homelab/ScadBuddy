@@ -5,7 +5,7 @@
 A name in a bold connected script, raised on a base plate cut to the outline of
 the word, with a keyring hole at the left. Two colours, no painting: the base
 and border are one part, the letters are another. A strip along the middle of
-the line joins the base from the first letter to the last, so a space between
+the line joins the base from the keyring tab to the last letter, so a space between
 words, or a character the font has no glyph for (an emoji, say, which renders
 nothing), never splits the keychain into pieces.
 
@@ -92,10 +92,11 @@ and checks the result against the reference keychain that printed on
 the bounding box within ±1.5 mm in X and Y and exactly 6.8 mm tall, the base
 0–4 mm and the letters 4–6.8 mm, and the letters one connected piece.
 
-It then renders eight edge cases — a 20-character script name and 20 `W`s in
+It then renders ten edge cases — a 20-character script name and 20 `W`s in
 DejaVu Sans Bold at the 40 mm maximum, a tiny name without a hole, the largest
 keyring tab with the thickest base, an empty name, two words, two words four
-spaces apart, and a name with an emoji the font lacks — and checks each renders
+spaces apart, a name with an emoji the font lacks, and two names that start
+with a gap (leading spaces, a leading emoji) — and checks each renders
 without OpenSCAD warnings, has two colour parts (one for the empty name) and
 nothing on `Default`, fits the 300 × 320 mm bed, sits on z = 0 and has its top
 at `base_thickness + letter_height` and prints as one connected piece. Output

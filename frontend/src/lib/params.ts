@@ -103,12 +103,6 @@ const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 const ASSET_ID = /^[0-9a-f]{64}$/
 
 /**
- * #254 — whether `value` is one the parameter's own widget could produce, and the value
- * as that widget would hand it to `onChange` (a select's option in its own type, a
- * colour normalised). An agent's value goes through this before the same `onChange`
- * a keystroke does, so it cannot put a value on screen no field would have.
- */
-/**
  * A string parameter's length as OpenSCAD's `len()` counts it: in code points, so an
  * emoji is one character, not the two UTF-16 units `String.length` counts (#920).
  */
@@ -116,6 +110,12 @@ export function textLength(value: string): number {
   return Array.from(value).length
 }
 
+/**
+ * #254 — whether `value` is one the parameter's own widget could produce, and the value
+ * as that widget would hand it to `onChange` (a select's option in its own type, a
+ * colour normalised). An agent's value goes through this before the same `onChange`
+ * a keystroke does, so it cannot put a value on screen no field would have.
+ */
 export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
   const label = `"${param.name}"`
   switch (param.type) {

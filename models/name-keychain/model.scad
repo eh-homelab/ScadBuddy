@@ -113,14 +113,20 @@ module ring_tab_2d() {
     }
 }
 
-// A strip along the line's vertical centre from the first glyph to the last
+// A strip along the line's vertical centre from the text origin to the last glyph
 // (the word's hull, cut to a band `outline` tall). Without it, a space, a gap
 // left by a glyph the font lacks, or two script runs that do not meet splits
 // the base into islands, and every piece but the first falls off the keyring
 // (#920).
 module spine_2d() {
     intersection() {
-        hull() glyphs_2d();
+        // From the text origin, where the keyring tab's neck ends, not the
+        // first glyph: leading spaces or a leading missing glyph would
+        // otherwise leave the tab on its own island.
+        hull() {
+            glyphs_2d();
+            translate([0, -outline / 2]) square([0.01, outline]);
+        }
         square([2 * bed_x, outline], center = true);
     }
 }

@@ -56,6 +56,8 @@ EDGE=(
     "two-words|name=\"Ann Lee\""
     "wide-gap|name=\"Ann    Lee\""
     "missing-glyph|name=\"Zoë 🦄 ß\""
+    "leading-gap|name=\"   Ann\""
+    "leading-missing-glyph|name=\"🦄 Zoë\""
 )
 : > "$OUT/edge.txt"
 for c in "${EDGE[@]}"; do
