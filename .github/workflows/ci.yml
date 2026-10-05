@@ -671,9 +671,6 @@ jobs:
       # step's vitest list when it lands.
       - name: Agent secret vectors
         working-directory: agent
-        env:
-          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile

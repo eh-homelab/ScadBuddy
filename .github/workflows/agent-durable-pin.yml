@@ -5,7 +5,7 @@ name: agent-durable pin watch
 # (PR #33's head, spec 2026-10-01 §6.2). A force-push or a deleted branch upstream
 # would make that commit unfetchable, so this resolves the lock weekly and files an
 # issue when it no longer does. On a pull_request that touches the pin it is a plain
-# check (no issue).
+# check (no issue; only the schedule-only `report` job holds `issues: write`).
 
 on:
   schedule:
@@ -18,14 +18,13 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  pin:
+  check:
     name: Pinned ai-integrations commit resolves
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -34,23 +33,43 @@ jobs:
         with:
           fetch-depth: 1
 
+      # No cache: setup-uv's default restores uv's git db, which would hold the
+      # pinned commit even after it vanished upstream and hide the failure.
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: false
 
-      # --check resolves the project again and fails if the lock is stale or a
-      # pinned source cannot be fetched.
-      - name: Check the lock resolves
+      # Validates the lock against pyproject.toml. It does NOT fetch the locked
+      # git rev, so the next step is the one that detects a gone commit.
+      - name: Check the lock is current
         working-directory: agent-durable
         run: uv lock --check
 
-      # Scheduled runs only: a PR's failure is its own red check. `gh issue list
-      # --search` is fuzzy, so the exact title is matched on the JSON.
-      - name: Open an issue when the pin no longer resolves
-        if: ${{ failure() && github.event_name == 'schedule' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: "agent-durable: the pinned ai-integrations commit no longer resolves"
+      # Really fetches the pinned commit from GitHub (--no-cache), and installs
+      # the locked dependencies without the project (package = false).
+      - name: Fetch the pinned commit
+        working-directory: agent-durable
+        run: uv sync --frozen --no-cache --no-install-project --no-dev
+
+  # Scheduled runs only: a PR's failure is its own red check. A separate job so
+  # that PR runs never hold an issues-writable token.
+  report:
+    name: Open an issue when the pin no longer resolves
+    needs: check
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TITLE: "agent-durable: the pinned ai-integrations commit no longer resolves"
+    steps:
+      # `gh issue list --search` is fuzzy, so the exact title is matched on the JSON.
+      - name: Create the issue unless one is open
         run: |
           set -euo pipefail
           existing="$(gh issue list --state open --limit 200 --json title \
