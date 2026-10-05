@@ -387,6 +387,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const done = (await m.questions.listPending()).filter((q) => q.attentionReason === 'done')
     expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done1', 'toolu_done0'])
     expect(done[1]!.summary).toContain('created preset `unattended`')
+    expect(await db.sql`SELECT unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`).toEqual([{ unattended: true }])
   })
 
   it("one turn's repeated done posts keep only its latest, unattended record or not", async () => {
@@ -405,6 +406,56 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await turn!.done
     expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
       { tool_use_id: 'toolu_done2' },
+    ])
+  })
+
+  it("a later turn's done replaces one whose unattended window recorded nothing", async () => {
+    let n = 0
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        if (n === 0) {
+          // A request times out, but nothing is touched while nobody answers.
+          await touch(run.sessionId ?? run.resume!, 'before')
+          verdicts.push(
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          )
+        }
+        verdicts.push(await postDone(run, `toolu_done${n++}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    const [first] = await db.sql<{ summary: string; unattended: boolean }[]>`
+      SELECT summary, unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`
+    expect(first).toMatchObject({ unattended: false, summary: expect.stringContaining('While nobody answered') })
+    await (await m.send(session.id, browser, 'two')).done
+    const pendingDone = (await m.questions.listPending()).filter((q) => q.attentionReason === 'done')
+    expect(pendingDone.map((q) => q.toolUseId)).toEqual(['toolu_done1'])
+  })
+
+  it('whether an earlier done is kept follows its unattended flag, never its summary text', async () => {
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run, 'toolu_new'))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    // One reads like an unattended record but is not flagged; the other is flagged under any heading.
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, unattended, created_at)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_text', '[]', 'attention', 'done',
+              '**While nobody answered (attention request 01234567 timed out)**\n- created preset x', false, now() - interval '2 minutes'),
+             (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_flag', '[]', 'attention', 'done',
+              '**Some other heading**\n- created preset y', true, now() - interval '1 minute')`
+    await (await m.send(session.id, browser, 'go')).done
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY created_at`).toEqual([
+      { tool_use_id: 'toolu_text', outcome: 'cancelled' },
+      { tool_use_id: 'toolu_flag', outcome: null },
+      { tool_use_id: 'toolu_new', outcome: null },
     ])
   })
 

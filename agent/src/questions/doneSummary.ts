@@ -32,9 +32,6 @@ export type DoneTouch = {
 /** The span in which nobody answered: from the timed-out request until the user's next reply, if any. */
 export type AwayWindow = { requestId: string; from: Date; until: Date | null }
 
-/** How a summary with an unattended section starts (questions/service.ts keeps such a summary). */
-export const UNATTENDED_HEADING = '**While nobody answered'
-
 /** Lines one section shows before it says how many more there are. */
 export const SECTION_MAX = 20
 
@@ -86,18 +83,23 @@ function section(title: string, touches: readonly DoneTouch[]): string {
   return [`**${title}**`, ...shown].join('\n')
 }
 
+/** The touch was made inside one of the away windows: while nobody answered. */
+export function inAway(t: DoneTouch, away: readonly AwayWindow[]): boolean {
+  return away.some((w) => t.at >= w.from && (w.until === null || t.at < w.until))
+}
+
 /** The summary as the card shows it (Markdown). `touches` in the order they happened, `away` in the order asked. */
 export function doneSummary(touches: readonly DoneTouch[], away: readonly AwayWindow[]): string {
   if (touches.length === 0) return 'ScadBuddy recorded nothing created, changed or deleted in this turn.'
   const first = away[0]
   if (!first) return section('What this turn changed', touches)
-  const unattended = (t: DoneTouch) => away.some((w) => t.at >= w.from && (w.until === null || t.at < w.until))
+  const unattended = (t: DoneTouch) => inAway(t, away)
   const before = touches.filter((t) => t.at < first.from)
   const during = touches.filter(unattended)
   const after = touches.filter((t) => t.at >= first.from && !unattended(t))
   const ids = away.map((w) => plain(w.requestId.slice(0, 8))).join(', ')
   const parts = [
-    section(`${UNATTENDED_HEADING.slice(2)} (attention request${away.length > 1 ? 's' : ''} ${ids} timed out)`, during),
+    section(`While nobody answered (attention request${away.length > 1 ? 's' : ''} ${ids} timed out)`, during),
     ...(after.length ? [section('After you replied', after)] : []),
     ...(before.length ? [section('Before you were asked', before)] : []),
   ]
@@ -108,9 +110,16 @@ export function doneSummary(touches: readonly DoneTouch[], away: readonly AwayWi
  * The summary of turn `turnId` of `sessionId`, which started at `since` by the
  * database's clock (the one `ai_session_resources.at` is stamped by): read in
  * the transaction that posts the done request, so it covers every touch
- * committed before it.
+ * committed before it. `unattended`: some touch was made while nobody answered
+ * (the first section lists something), which keeps the summary from being
+ * replaced by a later turn's (questions/service.ts).
  */
-export async function loadDoneSummary(tx: TransactionSql, sessionId: string, turnId: string, since: Date): Promise<string> {
+export async function loadDoneSummary(
+  tx: TransactionSql,
+  sessionId: string,
+  turnId: string,
+  since: Date,
+): Promise<{ summary: string; unattended: boolean }> {
   const rows = await tx<
     { at: Date; tool: string; resource_type: string; resource_id: string | null; action: string; model_slug: string | null }[]
   >`
@@ -131,15 +140,14 @@ export async function loadDoneSummary(tx: TransactionSql, sessionId: string, tur
     ) reply
     WHERE q.session_id = ${sessionId} AND q.turn_id = ${turnId} AND q.kind = 'attention' AND q.outcome = 'timed_out'
     ORDER BY q.created_at, q.id`
-  return doneSummary(
-    rows.map((r) => ({
-      at: r.at,
-      tool: r.tool,
-      resourceType: r.resource_type,
-      resourceId: r.resource_id,
-      action: r.action,
-      model: r.model_slug,
-    })),
-    away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until })),
-  )
+  const touches = rows.map((r) => ({
+    at: r.at,
+    tool: r.tool,
+    resourceType: r.resource_type,
+    resourceId: r.resource_id,
+    action: r.action,
+    model: r.model_slug,
+  }))
+  const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
+  return { summary: doneSummary(touches, windows), unattended: touches.some((t) => inAway(t, windows)) }
 }

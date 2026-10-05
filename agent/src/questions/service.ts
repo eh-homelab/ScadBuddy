@@ -4,7 +4,7 @@ import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_A
 import type { AttentionReason, OnTimeout } from '../harness/attention.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { loadDoneSummary, UNATTENDED_HEADING } from './doneSummary.js'
+import { loadDoneSummary } from './doneSummary.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -517,7 +517,7 @@ export class QuestionService {
           if (attention.reason !== 'done' && (recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
             return { value: { ...none, limited: true }, events: [] }
           }
-          // A done summary that recorded unattended actions is not replaced by a later
+          // A done summary that recorded unattended actions (`unattended`) is not replaced by a later
           // turn's: that record is the user's check on what ran while nobody answered,
           // and the later summary covers only its own turn. It stays until dismissed.
           // The same turn's earlier summary is replaced as usual: the newer one covers
@@ -527,17 +527,19 @@ export class QuestionService {
           superseded = await tx<Resolved[]>`
             UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
-              AND outcome IS NULL AND ((summary LIKE ${`${UNATTENDED_HEADING}%`}) IS NOT TRUE OR turn_id = ${turnId})
+              AND outcome IS NULL AND (NOT unattended OR turn_id = ${turnId})
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
           }
           if (attention.reason === 'done') {
-            summary = redact(await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt), context.secrets())
+            const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt)
+            summary = redact(done.summary, context.secrets())
             await tx`
-              INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
+              INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary,
+                                        unattended)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                      'attention', 'done', ${summary})`
+                      'attention', 'done', ${summary}, ${done.unattended})`
           } else {
             const [inserted] = await tx<{ expires_at: Date }[]>`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
