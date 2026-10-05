@@ -608,16 +608,24 @@ export class QuestionService {
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
       const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
-      // A failed check (the hub, the database) must not leave the row with
-      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
-      // A check that hangs (a pool or lock wait) is raced against the timer and
-      // the abort, which are armed first, so it cannot stall the call (#1352).
+      // The check runs beside the wait, never before it: an answer, a reconnect
+      // (wake), the timer or the abort ends the wait however long the check
+      // takes, and a hung check (a pool or lock wait) cannot stall the call
+      // (#1352). A failed check leaves the wait going on for the hub or the
+      // timer to end. A settled check wakes the wait, which re-reads its row.
+      const parked = new AbortController()
       if (attention?.onParked) {
-        const parked = new AbortController()
-        await settledOrDone(attention.onParked(parked.signal), signal, deadline)
+        attention.onParked(parked.signal).then(
+          () => this.wake(id),
+          () => this.wake(id),
+        )
+      }
+      let waited: Row | 'due' | undefined
+      try {
+        waited = await this.waitFor(id, signal, deadline)
+      } finally {
         parked.abort()
       }
-      const waited = await this.waitFor(id, signal, deadline)
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay
@@ -648,19 +656,4 @@ export class QuestionService {
       return { answered: true, answers }
     }
   }
-}
-
-/** Resolves when `work` settles (either way), `signal` aborts, or `deadline` (epoch ms) passes, whichever is first. */
-function settledOrDone(work: Promise<unknown>, signal: AbortSignal, deadline: number | undefined): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const timer = deadline === undefined ? undefined : setTimeout(done, Math.max(0, deadline - Date.now()))
-    function done() {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', done)
-      resolve()
-    }
-    if (signal.aborted) return done()
-    signal.addEventListener('abort', done, { once: true })
-    work.then(done, done)
-  })
 }

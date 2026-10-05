@@ -176,6 +176,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
   })
 
+  // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
+  it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const started = Date.now()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: raising({ spec: spec({ onParked: hangs }) }, { spec: spec({ onParked: hangs }) }),
+      approvalPollMs: 5_000,
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const first = await pending(session.id)
+    await m.questions.answer(browser, answer(session.id, first, ['Done']))
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`).length).toBe(1)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: true, answers: { [attentionCard(input()).question]: 'Done' } },
+      { answered: false, reconnected: true, message: expect.any(String) },
+    ])
+    // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
+    expect(Date.now() - started).toBeLessThan(5_000)
+  })
+
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
