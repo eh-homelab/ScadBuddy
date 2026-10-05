@@ -36,8 +36,9 @@ __all__ = [
 RenderOutcome = Literal["done", "failed", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
-#: queue gauges, a render's start (its `accepted` Update unanswered or refused), or
-#: releasing or cancelling a superseded job.
+#: queue gauges, a render's start (Temporal unavailable, or the start refused or
+#: unstartable; one still accepting is `render_accept_pending`), or releasing or
+#: cancelling a superseded job.
 StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
@@ -74,6 +75,12 @@ class Metrics:
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
             "Render requests answered with an identical job already waiting.",
+            registry=r,
+        )
+        self.render_accept_pending = Counter(
+            "scadbuddy_render_accept_pending",
+            "Render requests answered 503 command-still-accepting: their job was not"
+            " answered in time, and the client sends the same request again.",
             registry=r,
         )
         self.store_info = Gauge(

@@ -22,6 +22,7 @@ from scadbuddy.render.job_models import (
     render_key,
 )
 from scadbuddy.render.projection import (
+    CLOSED_ERROR,
     LEGACY_RUNNING_ERROR,
     LEGACY_UNSTARTED_ERROR,
     ORPHANED_ERROR,
@@ -411,34 +412,38 @@ def test_set_claims_moves_only_an_unfinished_row(projection: JobProjection) -> N
     assert projection.read(job.id).claims == 3
 
 
-def test_legacy_pending_and_fail_legacy(pg_conninfo: str, announcing: JobProjection) -> None:
-    legacy, named = _job(width=45), _job(width=48)
-    _row(announcing, legacy)
-    _row(announcing, named)
+def test_legacy_unsettled_and_fail_legacy(pg_conninfo: str, announcing: JobProjection) -> None:
+    legacy, named, stalled, unnamed = _job(width=45), _job(width=48), _job(width=47), _job(width=49)
+    for job in (legacy, named, stalled, unnamed):
+        _row(announcing, job)
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
-            "UPDATE render_jobs SET workflow_id = NULL, created_at = now() - interval '1 hour'"
-            " WHERE id = %s",
-            (legacy.id,),
+            "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = ANY(%s)",
+            ([legacy.id, named.id, stalled.id, unnamed.id],),
         )
+        conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (legacy.id,))
+        conn.execute("UPDATE render_jobs SET state = 'running' WHERE id = %s", (stalled.id,))
+        # A pre-Temporal running row is `fail_legacy_running`'s.
         conn.execute(
-            "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = %s",
-            (named.id,),
+            "UPDATE render_jobs SET state = 'running', workflow_id = NULL WHERE id = %s",
+            (unnamed.id,),
         )
     ours = _accept(announcing, "run-1", width=46)
-    stale = announcing.legacy_pending(timedelta(minutes=1))
-    assert {job.id for job in stale} == {legacy.id, named.id}
-    assert announcing.legacy_pending(timedelta(hours=2)) == []
+    stale = announcing.legacy_unsettled(timedelta(minutes=1))
+    assert {job.id for job in stale} == {legacy.id, named.id, stalled.id}
+    assert announcing.legacy_unsettled(timedelta(hours=2)) == []
 
-    failed = announcing.fail_legacy([legacy.id, ours.id], LEGACY_UNSTARTED_ERROR)
+    failed = announcing.fail_legacy([legacy.id, stalled.id, unnamed.id, ours.id])
 
-    assert [job.id for job in failed] == [legacy.id]
-    assert announcing.read(legacy.id).state == "failed"
+    assert {job.id for job in failed} == {legacy.id, stalled.id}
     assert announcing.read(legacy.id).error == LEGACY_UNSTARTED_ERROR
+    assert announcing.read(stalled.id).state == "failed"
+    assert announcing.read(stalled.id).error == CLOSED_ERROR
+    assert announcing.read(unnamed.id).state == "running"
     assert announcing.read(ours.id).state == "pending"
     assert announcing.read(named.id).state == "pending"
-    assert [job.id for job in announcing.legacy_pending(timedelta(minutes=1))] == [named.id]
-    assert _kinds(pg_conninfo) == ["job.pending", "job.pending", "job.pending", "job.failed"]
+    assert [job.id for job in announcing.legacy_unsettled(timedelta(minutes=1))] == [named.id]
+    assert _kinds(pg_conninfo)[-2:] == ["job.failed", "job.failed"]
 
 
 def test_accept_writes_the_first_callers_traceparent(projection: JobProjection) -> None:

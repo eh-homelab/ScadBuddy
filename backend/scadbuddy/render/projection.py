@@ -57,9 +57,9 @@ class LegacyPendingError(Exception):
 
 
 async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
-    """Whether no workflow will run ``job``, a pending row an older build inserted past
-    `LEGACY_GRACE`: it names none, or Temporal has none running. Raises the RPC error
-    when Temporal cannot say."""
+    """Whether no workflow will settle ``job``, a pending or running row an older build
+    inserted past `LEGACY_GRACE`: it names none, or Temporal has none running. Raises the
+    RPC error when Temporal cannot say."""
     if now() - job.created_at < LEGACY_GRACE:
         return False
     if job.workflow_id is None:
@@ -274,25 +274,31 @@ class JobProjection:
                 (claims, job_id),
             )
 
-    def legacy_pending(self, older_than: timedelta) -> list[Job]:
-        """Pending rows an older release inserted over ``older_than`` ago: past its
-        insert-then-start, so one whose workflow is not running is orphaned."""
+    def legacy_unsettled(self, older_than: timedelta) -> list[Job]:
+        """Rows an older release inserted over ``older_than`` ago: pending ones past its
+        insert-then-start, and ones its worker moved to running (a pre-Temporal running
+        row, with no workflow, is `fail_legacy_running`'s). One whose workflow is not
+        running is orphaned (review #1066 (5) 2.1)."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM render_jobs WHERE state = 'pending' AND workflow_run_id IS NULL"
+                "SELECT * FROM render_jobs WHERE workflow_run_id IS NULL"
+                " AND (state = 'pending' OR (state = 'running' AND workflow_id IS NOT NULL))"
                 " AND created_at < now() - %s ORDER BY created_at, id",
                 (older_than,),
             ).fetchall()
         return [_job(row) for row in rows]
 
-    def fail_legacy(self, job_ids: list[str], error: str) -> list[Job]:
-        """Fail legacy pending rows nothing will run; any other row is left alone."""
+    def fail_legacy(self, job_ids: list[str]) -> list[Job]:
+        """Fail legacy rows nothing will settle: a pending one never started, a running
+        one's workflow closed. Any other row is left alone."""
         with self._pool.connection() as conn, conn.transaction():
             rows = conn.execute(
-                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
-                " WHERE id = ANY(%s) AND state = 'pending' AND workflow_run_id IS NULL"
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
+                " error = CASE state WHEN 'pending' THEN %s ELSE %s END"
+                " WHERE id = ANY(%s) AND workflow_run_id IS NULL"
+                " AND (state = 'pending' OR (state = 'running' AND workflow_id IS NOT NULL))"
                 " RETURNING *",
-                (error, job_ids),
+                (LEGACY_UNSTARTED_ERROR, CLOSED_ERROR, job_ids),
             ).fetchall()
             for row in rows:
                 self._announce(conn, row["id"], row["slug"], "job.failed")

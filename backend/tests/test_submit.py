@@ -59,7 +59,11 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+)
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
@@ -904,14 +908,16 @@ async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
 ) -> None:
     """Past `LEGACY_GRACE`, a row naming no workflow, or one Temporal does not have
     running, is orphaned. A younger row may be between the older API's insert and its
-    start (review #1066 1.2), and a running one is that build's."""
+    start (review #1066 1.2), and a running one is that build's. A row that build moved
+    to running and whose workflow then closed is failed too (review #1066 (5) 2.1)."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        orphan, draining, ancient, fresh = (_legacy(projection) for _ in range(4))
+        orphan, draining, ancient, fresh, stalled = (_legacy(projection) for _ in range(5))
         with psycopg.connect(projection.conninfo) as conn:
             conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (ancient.id,))
-        _aged(projection, orphan.id, draining.id, ancient.id)
+            conn.execute("UPDATE render_jobs SET state = 'running' WHERE id = %s", (stalled.id,))
+        _aged(projection, orphan.id, draining.id, ancient.id, stalled.id)
         # The old build's execution of `draining`: no worker here, so it stays running.
         await client.start_workflow(
             "TemplatePipeline", id=workflow_id_for(draining.id), task_queue=queue
@@ -922,10 +928,12 @@ async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
             await client.get_workflow_handle(workflow_id_for(draining.id)).terminate()
         await service.aclose()
 
-    assert sorted(failed) == sorted([orphan.id, ancient.id])
+    assert sorted(failed) == sorted([orphan.id, ancient.id, stalled.id])
     for job_id in (orphan.id, ancient.id):
         stored = await asyncio.to_thread(projection.read, job_id)
         assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    stored = await asyncio.to_thread(projection.read, stalled.id)
+    assert (stored.state, stored.error) == ("failed", CLOSED_ERROR)
     for job_id in (draining.id, fresh.id):
         assert (await asyncio.to_thread(projection.read, job_id)).state == "pending"
 
@@ -1345,7 +1353,6 @@ async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
     "refusal",
     [
         TemporalUnavailableError("render-x"),
-        CommandStillAcceptingError("render-x"),
         RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
     ],
 )
@@ -1368,3 +1375,27 @@ async def test_a_render_start_that_fails_counts_as_a_start_workflow_error(
         "scadbuddy_render_store_errors_total", {"operation": "start_workflow"}
     )
     assert errors == 1
+
+
+@pytest.mark.parametrize(
+    "pending", [CommandStillAcceptingError("render-x"), CommandClosedError("render-x")]
+)
+async def test_a_start_still_accepting_counts_as_pending_not_as_an_error(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, pending: Exception
+) -> None:
+    """The client sends the same request again: nothing failed, so the start_workflow
+    errors stay an alert on Temporal itself (review #1066 (5) 3.1)."""
+
+    async def accepting(*_: object, **__: Any) -> RenderAnswer:
+        raise pending
+
+    monkeypatch.setattr(submit_module, "start_command", accepting)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(type(pending)):
+            await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    sample = service.metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_store_errors_total", {"operation": "start_workflow"}) == 0
+    assert sample("scadbuddy_render_accept_pending_total") == 1

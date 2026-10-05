@@ -53,7 +53,6 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.projection import (
     LEGACY_GRACE,
-    LEGACY_UNSTARTED_ERROR,
     JobProjection,
     legacy_unrun,
     run_closed,
@@ -64,6 +63,7 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.commands import (
     CONNECT_MARGIN_SECONDS,
+    CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     start_command,
@@ -228,6 +228,11 @@ class RenderService:
             return previous, True
         try:
             answer = await self._accepted(start, request_id)
+        except (CommandStillAcceptingError, CommandClosedError):
+            # Re-sent by the client with the same key: pending, not an error (review
+            # #1066 (5) 3.1).
+            self.metrics.render_accept_pending.inc()
+            raise
         except Exception:
             # Answered as a 503 or 500, and counted (review #1066 4.1).
             self.metrics.store_errors.labels("start_workflow").inc()
@@ -368,11 +373,12 @@ class RenderService:
         return closed
 
     async def settle_legacy(self) -> list[str]:
-        """Fail the pending rows an older release inserted that no workflow will run.
-        Only a row past `LEGACY_GRACE` is judged: a younger one may be between the older
-        API's insert and its start (review #1066 1.2)."""
+        """Fail the rows an older release inserted that no workflow will settle: pending
+        and never run, or running when its workflow closed. Only a row past
+        `LEGACY_GRACE` is judged: a younger one may be between the older API's insert
+        and its start (review #1066 1.2)."""
         failed: list[str] = []
-        for job in await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE):
+        for job in await asyncio.to_thread(self.store.legacy_unsettled, LEGACY_GRACE):
             try:
                 async with asyncio.timeout(DESCRIBE_BOUND):
                     if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
@@ -380,17 +386,15 @@ class RenderService:
             except (RPCError, TimeoutError) as error:
                 logger.warning(
                     "could not ask Temporal about the renders an older release left"
-                    " pending; the next pass tries again",
+                    " unsettled; the next pass tries again",
                     extra={"error_type": type(error).__name__},
                 )
                 break
             failed.append(job.id)
         if failed:
-            settled = await asyncio.to_thread(
-                self.store.fail_legacy, failed, LEGACY_UNSTARTED_ERROR
-            )
+            settled = await asyncio.to_thread(self.store.fail_legacy, failed)
             logger.warning(
-                "failed the renders an older release left pending with no workflow",
+                "failed the renders an older release left with no workflow to settle them",
                 extra={"job_ids": [job.id for job in settled]},
             )
         return failed
