@@ -321,10 +321,20 @@ async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
     assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
 
 
-def _insert_pre_1052(jobs: JobProjection, run_id: str, beaten: str) -> None:
+def _insert_pre_1052(
+    jobs: JobProjection, run_id: str, beaten: str | None, created: str = "now()"
+) -> None:
     """A row as a pre-#1052 pod inserts it during the rolling update: no execution, and
-    a heartbeat its own task keeps moving."""
+    a heartbeat its own task keeps moving. ``beaten`` ``None`` is a row its pod never
+    beat: its insert names no ``heartbeat_at``, so it takes the column's default."""
     with jobs.pool.connection() as conn:
+        if beaten is None:
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status, created_at)"
+                f" VALUES (%s, %s, %s, 'running', {created})",
+                (run_id, OUTPUT, run_id),
+            )
+            return
         conn.execute(
             "INSERT INTO print_runs (id, output_id, idempotency_key, status, heartbeat_at)"
             f" VALUES (%s, %s, %s, 'running', {beaten})",
@@ -341,6 +351,17 @@ async def test_stale_pre_1052_runs_are_the_unowned_rows_nothing_beats(
     await accept(store, "owned", run_id="owned")
 
     assert await store.stale_pre_1052_runs() == ["dead"]
+
+
+async def test_a_pre_1052_row_never_beaten_is_stale_once_it_is_old(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1316 3: the old pod's first beat comes 10 s after its insert, so one
+    killed sooner leaves the column's default, ``'infinity'``, which never goes stale."""
+    _insert_pre_1052(jobs, "died-early", None, "now() - interval '1 day'")
+    _insert_pre_1052(jobs, "just-started", None)
+
+    assert await store.stale_pre_1052_runs() == ["died-early"]
 
 
 async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(

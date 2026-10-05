@@ -337,8 +337,12 @@ class PrintRunStore:
         with self._require().connection() as conn:
             rows = conn.execute(
                 "SELECT id FROM print_runs WHERE status = 'running' AND workflow_id IS NULL"
-                " AND heartbeat_at < now() - %s ORDER BY created_at",
-                (PRE_1052_LOST_AFTER,),
+                " AND (heartbeat_at < now() - %s"
+                # Never beaten: the old pod died before its first beat, so the row kept
+                # the column's default (review #1316 3).
+                " OR (heartbeat_at = 'infinity' AND created_at < now() - %s))"
+                " ORDER BY created_at",
+                (PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
             ).fetchall()
         return [row["id"] for row in rows]
 
