@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from datetime import timedelta
@@ -21,6 +22,11 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.commands import (
+    CONNECT_MARGIN_SECONDS,
+    DESCRIBE_SECONDS,
+    TemporalUnavailableError,
+)
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 from scadbuddy.workflows.printing import PrintRunWorkflow
@@ -183,13 +189,28 @@ LOST_RUN_GRACE = timedelta(minutes=1)
 
 
 async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool:
-    """Whether that run (or, with no run id, the workflow's latest) is running."""
+    """Whether that run (or, with no run id, the workflow's latest) is running. Raises
+    ``TemporalUnavailableError`` when Temporal does not answer within the bound, as
+    ``namespace_retention`` does: a lazy client's first connect retries for minutes on
+    its own (review #1316 (10) 1)."""
     try:
-        described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe()
+        async with asyncio.timeout(DESCRIBE_SECONDS + CONNECT_MARGIN_SECONDS):
+            described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe(
+                rpc_timeout=timedelta(seconds=DESCRIBE_SECONDS)
+            )
+    except TimeoutError as error:
+        raise TemporalUnavailableError(workflow_id) from error
     except RPCError as error:
-        if error.status != RPCStatusCode.NOT_FOUND:
-            raise
-        return False
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return False
+        if error.status in (RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED):
+            raise TemporalUnavailableError(workflow_id) from error
+        raise
+    except RuntimeError as error:
+        # How a lazy client's first connect fails (temporalio 1.33).
+        if str(error).startswith("Failed client connect"):
+            raise TemporalUnavailableError(workflow_id) from error
+        raise
     return described.status == WorkflowExecutionStatus.RUNNING
 
 
@@ -205,7 +226,14 @@ async def reconcile_lost_runs(
     ended."""
     ended = 0
     # One row that cannot be ended is logged and left for the next pass; the rest are
-    # still ended (review #1316 (9) 3a).
+    # still ended (review #1316 (9) 3a). The pre-#1052 rows need only Postgres, so a
+    # Temporal that does not answer never holds them up (review #1316 (10) 1).
+    for run_id in await store.stale_pre_1052_runs():
+        try:
+            if (await store.fail_pre_1052(run_id)).status == "failed":
+                ended += 1
+        except Exception:
+            logger.exception("could not end a pre-#1052 print run", extra={"run_id": run_id})
     for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
         try:
             if await _running(client, workflow_id, workflow_run_id) or await _running(
@@ -214,14 +242,12 @@ async def reconcile_lost_runs(
                 continue
             if (await store.fail_lost(run_id)).status == "failed":
                 ended += 1
+        except TemporalUnavailableError:
+            # Temporal, not this row: every other row would fail the same way.
+            logger.warning("Temporal did not answer; lost print runs wait", exc_info=True)
+            break
         except Exception:
             logger.exception("could not end a lost print run", extra={"run_id": run_id})
-    for run_id in await store.stale_pre_1052_runs():
-        try:
-            if (await store.fail_pre_1052(run_id)).status == "failed":
-                ended += 1
-        except Exception:
-            logger.exception("could not end a pre-#1052 print run", extra={"run_id": run_id})
     return ended
 
 

@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from psycopg import Connection
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.runs import (
@@ -24,6 +26,7 @@ from scadbuddy.bambuddy.runs import (
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_runs
 from tests.support.temporal import temporal_client
 
@@ -427,3 +430,57 @@ async def test_one_failing_row_does_not_stop_the_reconcile(
     assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
     assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
+
+
+class _DownClient:
+    """A client whose every describe fails as Temporal down does (``describe`` given),
+    counting the calls and the ``rpc_timeout`` each was given."""
+
+    def __init__(self, describe: Any) -> None:
+        self.describe = describe
+        self.timeouts: list[timedelta | None] = []
+
+    def get_workflow_handle(self, workflow_id: str, *, run_id: str | None = None) -> Any:
+        client = self
+
+        class Handle:
+            async def describe(self, *, rpc_timeout: timedelta | None = None) -> Any:
+                client.timeouts.append(rpc_timeout)
+                return await client.describe()
+
+        return Handle()
+
+
+async def _unavailable() -> Any:
+    raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def _hangs() -> Any:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("describe", [_unavailable, _hangs], ids=["unavailable", "hangs"])
+async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
+    store: PrintRunStore,
+    jobs: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    describe: Any,
+) -> None:
+    """Review #1316 (10) 1: the pre-#1052 sweep needs only Postgres, so it runs first;
+    a Temporal that does not answer stops the pass at the first describe, logged once,
+    and each describe is bounded."""
+    monkeypatch.setattr(client_module, "DESCRIBE_SECONDS", 0.05)
+    monkeypatch.setattr(client_module, "CONNECT_MARGIN_SECONDS", 0.05)
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    for run_id in ("one", "two", "three"):
+        await accept(store, run_id, run_id=run_id, wf_run=str(uuid.uuid4()))
+    client = _DownClient(describe)
+
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        ended = await reconcile_lost_runs(cast(Any, client), store, older_than=timedelta(0))
+
+    assert ended == 1
+    assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
+    assert len(client.timeouts) == 1 and client.timeouts[0] is not None
+    assert len([r for r in caplog.records if r.name == client_module.__name__]) == 1
