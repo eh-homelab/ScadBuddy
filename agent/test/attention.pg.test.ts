@@ -818,19 +818,20 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toBe(TAB_WAITS_PER_TURN)
     expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true, why: 'reconnected' }))
     expect(results.slice(TAB_WAITS_PER_TURN)).toEqual([
-      { back: false, message: expect.stringMatching(/waited for 3 times this turn; it reconnected 3 times.*another agent replica/s) },
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) },
       { back: false, message: expect.stringMatching(/waited for 3 times this turn/) },
     ])
   })
 
-  // #1393: the cap counts every wait of the turn, not only reconnects, so it blames a replica only when one came back.
-  it('words the per-turn cap by how the earlier waits ended: no replica story when none reconnected', async () => {
+  // #1393: the cap counts every wait of the turn however it ended, and this replica cannot tell whether a reconnect
+  // was to it or to another, so the cap names no cause: never a replica story.
+  it('words the per-turn cap neutrally, whatever ended the earlier waits', async () => {
     const wait = waitForTab(() => Promise.resolve({ answered: false, message: 'The user did not answer: the turn stopped first.' }), never, noop)
     for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
       expect(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: gone })).toMatchObject({ back: false })
     }
     const capped = await wait({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
-    expect(capped).toEqual({ back: false, message: expect.stringMatching(/waited for 3 times this turn and none of those waits brought it back/) })
+    expect(capped).toEqual({ back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) })
     expect(capped).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
 
     let n = 0
@@ -839,9 +840,9 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       return Promise.resolve(n === 2 ? { answered: false, reconnected: true, message: 'x' } : { answered: false, message: 'x' })
     }, never, noop)
     for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await mixed({ tool: 'browser_snapshot', toolUseId: `m${i}`, signal: never, isBack: gone })
-    expect(await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })).toEqual({
+    expect(await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })).not.toEqual({
       back: false,
-      message: expect.stringMatching(/it reconnected once but is still not reachable from here \(it may be connected to another agent replica\)/),
+      message: expect.stringMatching(/replica/),
     })
   })
 

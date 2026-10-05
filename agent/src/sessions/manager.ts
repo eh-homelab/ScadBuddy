@@ -194,21 +194,17 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   // finds no tab fails at once. The latch lasts until the turn ends, never less.
   let gaveUp: string | undefined
   let started = 0
-  // How many of the turn's waits ended with the tab reconnected: only those say
-  // a tab may be on another replica (the cap's wording).
-  let reconnects = 0
   return ({ tool, toolUseId, signal, isBack }) => {
     // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
     if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
     if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
     if (!open && started >= TAB_WAITS_PER_TURN) {
+      // Neutral on purpose (#1393): the waits counted here may have ended any
+      // way (a reconnect to this replica or another, a withdrawn call), and this
+      // replica cannot tell which, so the message names no cause.
       gaveUp =
-        reconnects > 0
-          ? `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn; it reconnected ${reconnects === 1 ? 'once' : `${reconnects} times`} ` +
-            'but is still not reachable from here (it may be connected to another agent replica). Carry on without the ' +
-            'tab for the rest of this turn.'
-          : `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and none of those waits brought it back. Carry ` +
-            'on without the tab for the rest of this turn.'
+        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now. Carry on without ` +
+        'the tab for the rest of this turn.'
       return Promise.resolve({ back: false, message: gaveUp })
     }
     if (!open) started += 1
@@ -266,10 +262,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           },
         },
       })
-      if ('reconnected' in verdict && verdict.reconnected) {
-        reconnects += 1
-        return { back: true, why: 'reconnected' }
-      }
+      if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
       // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
       // other reply is the user's own words, which the model must read, so the
       // call is not run and its error carries them. It ends the turn's tab waits
