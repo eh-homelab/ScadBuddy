@@ -412,3 +412,25 @@ async def test_text_that_looks_like_events_is_not_read_as_them(pool: AsyncConnec
         await until(status_is(pool, sid, "idle"))
     events = await logged(pool, sid)
     assert resolutions(events) == [f"durable:{sid}:{call}"]
+
+
+async def test_a_nul_in_model_text_does_not_break_the_takeover(pool: AsyncConnectionPool, rig: Rig) -> None:
+    sid = await make_session(pool)
+    wid, inp = rig.new(sid=sid)
+    first = Projector(pool, rig.client, holder="first", lease_s=1, renew_s=0.3, poll_s=0.2)
+    crashed = asyncio.create_task(first.run(asyncio.Event()))
+    await rig.send(wid, inp, "print 1")
+    call = (await rig.pending(wid))["id"]
+    await until(status_is(pool, sid, "waiting_approval"))
+    crashed.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await crashed
+    # json.dumps (like JSON.stringify) writes it as \u0000, which Postgres json/jsonb refuse.
+    nul = {"v": 1, "type": "assistant.text.delta", "sessionId": sid, "messageId": "m", "delta": "a\x00b"}
+    await log_event(pool, sid, nul)
+    assert "\\u0000" in json.dumps(nul)
+    async with projecting(pool, rig.client, "second", lease_s=1, renew_s=0.3) as (second, _):
+        await until(lambda: asyncio.sleep(0, sid in second.following or None))
+        await rig.handle(wid).cancel()
+        await until(status_is(pool, sid, "idle"))
+    assert resolutions(await logged(pool, sid)) == [f"durable:{sid}:{call}"]

@@ -121,6 +121,45 @@ async def _with_totals(
     return [{**e, **totals} if e.get("type") == "session.result" else e for e in events]
 
 
+_SCAN_PAGE = 200
+_SETTLED = ("idle", "done", "failed")
+_APPROVAL_TYPES = ("approval.required", "approval.resolved", "tool.result")
+
+
+async def _turn_events(conn: AsyncConnection[Any], session_id: str) -> list[dict[str, Any]]:
+    """The current turn's approval events (after the last settled `session.status`), oldest first.
+
+    Decided in Python on each event's parsed `type` and `status` only: the text inside an
+    event (a delta, a tool input, a user turn) is model- or user-controlled and may spell out
+    anything, and Postgres's json and jsonb both refuse the `\\u0000` it may contain. Scans
+    back from the end a page at a time, so it reads the current turn and at most a page more.
+    """
+    found: list[dict[str, Any]] = []
+    before: int | None = None
+    while True:
+        cur = await conn.execute(
+            "SELECT seq, event FROM ai_session_events WHERE session_id = %s"
+            " AND (%s::bigint IS NULL OR seq < %s) ORDER BY seq DESC LIMIT %s",
+            (session_id, before, before, _SCAN_PAGE),
+        )
+        rows = await cur.fetchall()
+        for seq, text in rows:
+            try:
+                event = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            if kind == "session.status" and event.get("status") in _SETTLED:
+                return found[::-1]
+            if kind in _APPROVAL_TYPES:
+                found.append(event)
+            before = int(seq)
+        if len(rows) < _SCAN_PAGE:
+            return found[::-1]
+
+
 class Projector:
     def __init__(
         self,
@@ -205,28 +244,11 @@ class Projector:
         route's after a decision, or a stop's) means nobody owes it again on `cancelled`.
         """
         prefix = f"durable:{session_id}:"
-        # Decided on the parsed `type` and `status` only: text inside an event (a delta, a
-        # tool input, a user turn) is model- or user-controlled and may spell out anything.
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT seq FROM ai_session_events WHERE session_id = %s"
-                " AND event::jsonb ->> 'type' = 'session.status'"
-                " AND event::jsonb ->> 'status' IN ('idle', 'done', 'failed')"
-                " ORDER BY seq DESC LIMIT 1",
-                (session_id,),
-            )
-            boundary = await cur.fetchone()
-            cur = await conn.execute(
-                "SELECT event FROM ai_session_events WHERE session_id = %s AND seq > %s"
-                " AND event::jsonb ->> 'type' IN ('approval.required', 'approval.resolved', 'tool.result')"
-                " ORDER BY seq",
-                (session_id, boundary[0] if boundary else 0),
-            )
-            rows = await cur.fetchall()
+            turn = await _turn_events(conn, session_id)
         open_ids: list[str] = []
         resolved: set[str] = set()
-        for (text,) in rows:
-            event = json.loads(text)
+        for event in turn:
             kind = event.get("type")
             if kind == "approval.required":
                 open_ids.append(str(event["tool"]))
