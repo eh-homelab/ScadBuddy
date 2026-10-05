@@ -290,7 +290,9 @@ class TemplatePipeline:
         )
         if self._queue_full is not None:
             return RenderAnswer(queue_full=self._queue_full)
-        if self._released is not None:
+        if self._released is not None or self._raised():
+            # Closing: the request waits for the close and starts a fresh run, rather
+            # than joining a job that has failed (review #1066 (6) 1).
             return RenderAnswer(closing=True)
         assert self._job is not None
         info = workflow.current_update_info()
@@ -364,6 +366,13 @@ class TemplatePipeline:
             retry_policy=PROJECT_RETRY,
         )
         self._cancelled = True
+
+    def _raised(self) -> bool:
+        """The render ended in an error, and the run waits for its handlers to fail."""
+        work = self._work
+        return (
+            work is not None and work.done() and (work.cancelled() or work.exception() is not None)
+        )
 
     def _released_by(self, error: BaseException) -> bool:
         return self._released is not None and is_cancelled_exception(error)

@@ -562,6 +562,50 @@ async def test_a_request_coalesced_into_a_render_that_raises_gets_its_job() -> N
         assert answer.job is not None and answer.coalesced and answer.job.claims == 2
 
 
+async def test_accepted_after_the_render_raised_answers_closing() -> None:
+    """A request that reaches the run once its render has failed, while it waits for
+    its handlers, starts a fresh render rather than joining the failure (review #1066
+    (6) 1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        claims, fail = asyncio.Event(), asyncio.Event()
+        acts = FakeActivities(block_claims=claims, fail_running=fail)
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            # A coalesced request in its claims write holds the failed run open.
+            second = asyncio.create_task(start_render(client, queue, start_of(job), id=wid))
+            while not acts.claiming:
+                await asyncio.sleep(0.05)
+            fail.set()
+            handle = client.get_workflow_handle(wid)
+            while not await _decided_after_an_activity(handle):
+                await asyncio.sleep(0.05)
+            late = asyncio.create_task(
+                handle.execute_update(ACCEPTED_UPDATE, result_type=RenderAnswer)
+            )
+            # Its Update reached the run (the first two are the start's and `second`'s).
+            while (
+                len(
+                    [
+                        e
+                        async for e in handle.fetch_history_events()
+                        if e.HasField("workflow_execution_update_accepted_event_attributes")
+                    ]
+                )
+                < 3
+            ):
+                await asyncio.sleep(0.05)
+            claims.set()
+            answer = await asyncio.wait_for(late, timeout=30)
+            await asyncio.wait_for(second, timeout=30)
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), timeout=30)
+        assert answer.closing and answer.job is None
+        assert acts.claims == [2]
+
+
 async def test_release_of_one_of_two_claims_keeps_rendering() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
