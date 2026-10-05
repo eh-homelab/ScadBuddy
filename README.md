@@ -389,7 +389,8 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
 
 - **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
   activities to that queue, and this release **must** roll out with `Recreate` (or the
-  old replicas scaled to 0 before the new ones start). A replica still on the old build
+  old replicas scaled to 0 before the new ones start). The homelab deployment sets
+  `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
   takes those tasks and fails them as unregistered. A workflow task is retried, so an
   `Operation` there only stalls. An activity task's failure counts against its retry
   policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
@@ -397,9 +398,13 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   done" although nothing reached Bambuddy, and a check whose three attempts all land
   there is refused with a 500.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
-  should be at least the Temporal namespace's retention. A retry of an operation whose
-  record was deleted while Temporal still holds its closed execution answers 409 "may
-  have been done" instead of its outcome.
+  must be at least the Temporal namespace's retention (`DescribeNamespace`'s
+  `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
+  field, and while Temporal cannot be reached a changed value is refused with the
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  A retry of an operation whose record was deleted while Temporal still holds its closed
+  execution would answer 409 "may have been done" instead of its outcome. Raising the
+  namespace's retention after the save is not re-checked.
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
   a rolling update stays safe; a release that adds a workflow or activity type to the
   queue says so here and needs the same `Recreate` rollout.
