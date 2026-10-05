@@ -34,11 +34,13 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.mypy]
-files = ["scadbuddy_durable", "tests"]
+files = ["scadbuddy_durable", "scripts", "tests"]
+mypy_path = "scripts"
 strict = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["scripts"]
 markers = [
   "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL",
   "requires_temporal: needs a Temporal CLI or SCADBUDDY_TEST_TEMPORAL_DEV_SERVER",

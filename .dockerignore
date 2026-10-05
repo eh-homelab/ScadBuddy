@@ -23,6 +23,10 @@ frontend/test-results
 frontend/coverage
 agent/dist
 agent/node_modules
+agent-durable/.venv
+agent-durable/.pytest_cache
+agent-durable/.mypy_cache
+agent-durable/.ruff_cache
 agent/coverage
 node_modules
 

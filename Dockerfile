@@ -12,14 +12,21 @@
 # the only place `pytest -m requires_openscad` can run, since a real `openscad`
 # binary only exists inside this image.
 #
-# The one exception is `--target agent`: the AI agent service, a separate
-# Node image deployed as a sidecar container beside this one (see its stage).
+# The exceptions are `--target agent`: the AI agent service, a separate Node image
+# deployed as a sidecar container beside this one (see its stage), and
+# `--target agent-durable`, its durable-sessions twin on Python.
 
 # The library pins the `libraries` stage bakes in (#169), global so that stage and
 # the `app` stage's catalogue check read one value. See that stage.
 # Moving BOSL2_REF/BOSL2_COMMIT or baking in another library: update THIRD_PARTY_NOTICES.md.
 ARG BOSL2_REF=v2.0.761
 ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
+
+# The Claude Code the two agent images bundle (`agent` through the TypeScript SDK,
+# `agent-durable` through the Python one), global so both stages assert one value.
+# Bump with @anthropic-ai/claude-agent-sdk in agent/package.json and claude-agent-sdk
+# in agent-durable/pyproject.toml, in the same commit.
+ARG CLAUDE_CODE_VERSION=2.1.283
 
 # ── uv ────────────────────────────────────────────────────────────────────────
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
@@ -265,7 +272,7 @@ COPY --from=agent-build /src/agent/plugins ./plugins
 # SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
 # from the pin. Bump it together with the SDK version in agent/package.json.
 # It runs against the node_modules that ship, for the platform being built.
-ARG CLAUDE_CODE_VERSION=2.1.283
+ARG CLAUDE_CODE_VERSION
 RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
     NODE_ENV=production \
@@ -282,6 +289,60 @@ CMD ["node", "dist/main.js"]
 # backend's, so the exit status is the signal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+# ── agent-durable: durable agent sessions on Temporal (spec 2026-10-01 §6.2, #1056) ──
+# A sidecar in the ScadBuddy pod, trusted like `agent` (#1030). Python on its own
+# slim base: the "no Python in the base image" rule is about the OpenSCAD image.
+FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS agent-durable
+# git: uv fetches the pinned ai-integrations commit (spec §6.2). libpq5: psycopg's
+# libpq (the dev group's psycopg[binary] is not installed here). tini reaps the
+# Claude Code processes the plugin spawns per segment.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini ca-certificates git libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/uv
+# Numeric uid 10001 as in `agent`. The state directory is the only writable tree:
+# `claude/` is CLAUDE_CONFIG_DIR. Mount an emptyDir there and the root filesystem can
+# be read-only; a mount hides the directories made here, which is fine: Claude Code
+# creates a missing CLAUDE_CONFIG_DIR itself (measured on 2.1.283). /srv/agent is
+# the segments' cwd and is never written.
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/scadbuddy-agent-durable --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o 10001 -g 10001 /var/lib/scadbuddy-agent-durable /var/lib/scadbuddy-agent-durable/claude /srv/agent
+WORKDIR /app/agent-durable
+ENV UV_PROJECT_ENVIRONMENT=/app/agent-durable/.venv UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
+COPY agent-durable/pyproject.toml agent-durable/uv.lock agent-durable/.python-version ./
+RUN uv sync --frozen --no-dev
+COPY agent-durable/scadbuddy_durable ./scadbuddy_durable
+COPY agent-durable/scripts ./scripts
+# The tool manifest and the prompt policy from the agent build (phase 4).
+COPY --from=agent-build /src/agent/dist/tools.json ./tools.json
+COPY --from=agent-build /src/agent/dist/durable-prompt.txt ./durable-prompt.txt
+# Skills only (§6.3b): no agents/, no .mcp.json. The skills are copied from
+# plugins/scadbuddy/skills, not agent-durable/plugin/skills (a symlink to them), so
+# no link reaches the image.
+COPY agent-durable/plugin/.claude-plugin ./plugin/.claude-plugin
+COPY plugins/scadbuddy/skills ./plugin/skills
+RUN chmod -R a+rX ./plugin && test -f plugin/skills/customize/SKILL.md && test -z "$(find plugin -type l)"
+# The Claude Code the Python SDK bundles, asserted like the agent stage's.
+ARG CLAUDE_CODE_VERSION
+RUN .venv/bin/python scripts/check_cli_version.py "$CLAUDE_CODE_VERSION"
+# PYTHONPATH: the package is not installed (`package = false`) and the cwd is /srv/agent.
+ENV PATH=/app/agent-durable/.venv/bin:$PATH \
+    PYTHONPATH=/app/agent-durable \
+    CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    HOME=/var/lib/scadbuddy-agent-durable \
+    CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent-durable/claude \
+    SCADBUDDY_AGENT_TOOLS_MANIFEST=/app/agent-durable/tools.json
+USER 10001:10001
+WORKDIR /srv/agent
+EXPOSE 8082
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python", "-m", "scadbuddy_durable.worker"]
+# No curl in this image; the stdlib is the probe. Exec form, so the exit status is the signal.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=4).status == 200 else 1)"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
