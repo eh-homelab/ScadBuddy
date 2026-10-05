@@ -388,10 +388,14 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
 **not** versioned: any replica polling the queue may take any task on it.
 
 - **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
-  activities to that queue. A replica still on the old build takes those tasks and
-  fails them as unregistered; nothing is corrupted (the task is retried), but each
-  Bambuddy write that lands there stalls until the old pod is gone. Roll this release
-  out with `Recreate`, or scale the old replicas to 0 before the new ones start.
+  activities to that queue, and this release **must** roll out with `Recreate` (or the
+  old replicas scaled to 0 before the new ones start). A replica still on the old build
+  takes those tasks and fails them as unregistered. A workflow task is retried, so an
+  `Operation` there only stalls. An activity task's failure counts against its retry
+  policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
+  so one such task on an old replica records the operation `failed` as "may have been
+  done" although nothing reached Bambuddy, and a check whose three attempts all land
+  there is refused with a 500.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   should be at least the Temporal namespace's retention. A retry of an operation whose
   record was deleted while Temporal still holds its closed execution answers 409 "may
