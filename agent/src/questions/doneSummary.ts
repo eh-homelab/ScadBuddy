@@ -63,9 +63,14 @@ function plain(text: string): string {
     .trim()
 }
 
-/** Inside a code span: no backtick can close it early. */
+/**
+ * Inside a code span: no backtick can close it early. An empty or blank name
+ * would make an empty span, which the renderer pairs with the next backtick on
+ * the line, so it reads as plain `(unnamed)` instead.
+ */
 function code(text: string): string {
-  return `\`${flat(text).replace(/`/g, "'")}\``
+  const inner = flat(text).replace(/`/g, "'")
+  return inner.trim() === '' ? '(unnamed)' : `\`${inner}\``
 }
 
 /** `mcp__scadbuddy__apply_patch` reads as `apply_patch`. */

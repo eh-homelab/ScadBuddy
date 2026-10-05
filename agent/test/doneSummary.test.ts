@@ -96,6 +96,17 @@ describe('doneSummary', () => {
     expect(text).not.toContain('\\')
   })
 
+  it('an empty or blank name makes no empty code span that could pair with a later backtick', () => {
+    const text = doneSummary(
+      [touch(1, { resourceId: '', model: ' \n ', tool: 'mcp__s__' })],
+      [],
+    )
+    expect(text).toContain('- created preset (unnamed) of (unnamed) ((unnamed))')
+    expect(text).not.toContain('``')
+    // Every remaining backtick still opens and closes its own span.
+    expect((text.match(/`/g) ?? []).length % 2).toBe(0)
+  })
+
   it('keeps ScadBuddy\'s own words plain, with any inline syntax dropped', () => {
     const text = doneSummary([touch(1, { action: 'made *[x](http://e)*', resourceType: 'a_b&c' })], [])
     expect(text).toBe('**What this turn changed**\n- made x http: e a b c `preset-1` of `molly-rocket-sign` (`save_preset`)')
