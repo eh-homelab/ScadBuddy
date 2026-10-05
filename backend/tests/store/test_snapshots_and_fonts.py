@@ -383,6 +383,25 @@ async def test_concurrent_ensures_of_a_new_revision_store_it_once(
     assert calls == 1
 
 
+def _gated(content: ContentStore) -> asyncio.Event:
+    """Hold every `put` until the returned event is set: a Bambuddy taking its time."""
+    put = content.put
+    gate = asyncio.Event()
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    return gate
+
+
+def _export(paths: DataPaths, rev: str) -> None:
+    export = paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+
+
 async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
     tmp_path: Path, content: ContentStore
 ) -> None:
@@ -392,29 +411,59 @@ async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
     retry finds the snapshot stored."""
     api_paths = DataPaths(tmp_path / "api")
     rev = "7" * 40
-    export = api_paths.model_revision_dir("demo", rev)
-    export.mkdir(parents=True)
-    (export / "model.scad").write_text("cube(7);")
-    put = content.put
-    uploading = asyncio.Event()
-
-    async def slow(*args: object, **kwargs: object) -> object:
-        await uploading.wait()  # a Bambuddy that takes its time
-        return await put(*args, **kwargs)  # type: ignore[arg-type]
-
-    content.put = slow  # type: ignore[method-assign,assignment]
+    _export(api_paths, rev)
+    gate = _gated(content)
     api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
     with pytest.raises(SnapshotPendingError) as raised:
         await asyncio.wait_for(api.pin("demo", rev), 5)
     assert raised.value.retry_after >= 1
     assert content.index.get(snapshot_key("demo", rev)) is None
-    uploading.set()
-    for _ in range(250):
-        if content.index.get(snapshot_key("demo", rev)) is not None:
-            break
-        await asyncio.sleep(0.02)
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert not api._storing  # the done-callback let it go
     assert content.index.get(snapshot_key("demo", rev)) is not None
     assert await asyncio.wait_for(api.pin("demo", rev), 5) == rev
+
+
+async def test_a_caller_gone_mid_pin_leaves_the_store_running(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: a client that disconnects cancels its request; the shielded store carries
+    on, so the next submit finds the snapshot."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "8" * 40
+    _export(api_paths, rev)
+    gate = _gated(content)
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=30)
+    request = asyncio.create_task(api.pin("demo", rev))
+    await asyncio.sleep(0.1)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+
+
+async def test_shutdown_cancels_a_store_still_running_past_its_grace(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686 review: a store no request waits for is not left pending on a closed loop."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "9" * 40
+    _export(api_paths, rev)
+    _gated(content)  # never opens
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.05)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", rev)
+    behind = set(api._storing)
+    await asyncio.wait_for(api.aclose(grace=0.05), 5)
+    assert all(task.cancelled() for task in behind)
+    assert not api._storing
 
 
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:

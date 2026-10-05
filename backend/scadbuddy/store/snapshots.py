@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 #: with Retry-After rather than hanging on the upload's own 180 s, and the store
 #: carries on behind it.
 PIN_TIMEOUT = 30.0
+#: How long shutdown lets a store `pin` stopped waiting for finish before cancelling it.
+SHUTDOWN_GRACE = 10.0
 
 
 def snapshot_key(slug: str, revision: str) -> str:
@@ -94,6 +96,16 @@ class SnapshotStore:
             self._behind(storing)
             raise
         return revision
+
+    async def aclose(self, *, grace: float = SHUTDOWN_GRACE) -> None:
+        """At shutdown: let the stores no request waits for any more finish within
+        ``grace``, then cancel the rest, so none is left pending on a closed loop."""
+        if not self._storing:
+            return
+        _, pending = await asyncio.wait(set(self._storing), timeout=grace)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _behind(self, storing: asyncio.Task[str]) -> None:
         """Keep a store no caller waits for any more, and log how it ends."""

@@ -205,12 +205,22 @@ def require_job(render: RenderService, job_id: str) -> Job:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "the Bambuddy blob store has no commit of the template to snapshot for the render"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); retry after `Retry-After` seconds"
+                "limit is set), or, on the Bambuddy blob store, the revision's first "
+                "snapshot is still uploading (problem `code` `snapshot_pending`); retry "
+                "after `Retry-After` seconds"
             )
-        }
+        },
+        status.HTTP_507_INSUFFICIENT_STORAGE: {
+            "description": "the blob store has no room for the template's source snapshot"
+        },
     },
 )
 async def render_model(
@@ -286,6 +296,7 @@ async def render_model(
             str(error),
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
+            code="snapshot_pending",
         ) from None
     return RenderAccepted(
         job_id=job.id,
