@@ -23,7 +23,7 @@ from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, status
 from fastapi.responses import FileResponse, Response
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -393,10 +393,12 @@ def _thumbnail_of(path: FilePath) -> bytes | None:
             if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
                 return None
             image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
-            image.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)
-            out = io.BytesIO()
-            image.save(out, "WEBP", quality=80)
-            return out.getvalue()
+            # Upright, as a browser shows the original: the WebP carries no EXIF.
+            with ImageOps.exif_transpose(image) as upright:
+                upright.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)
+                out = io.BytesIO()
+                upright.save(out, "WEBP", quality=80)
+                return out.getvalue()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
         return None
 

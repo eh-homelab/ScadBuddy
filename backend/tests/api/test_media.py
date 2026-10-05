@@ -230,6 +230,21 @@ def test_a_videos_thumbnail_is_its_poster_shrunk(client: TestClient, model: str)
         assert small.size == (192, 144)
 
 
+def test_a_thumbnail_is_turned_upright_by_its_exif_orientation(
+    client: TestClient, model: str
+) -> None:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to view.
+    out = io.BytesIO()
+    Image.new("RGB", (400, 200), (200, 40, 40)).save(out, "JPEG", exif=exif.tobytes())
+    item = _upload(client, model, out.getvalue()).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (96, 192)
+
+
 def test_a_video_with_no_poster_has_no_thumbnail(client: TestClient, model: str) -> None:
     item = _upload(client, model, WEBM).json()["media"][0]
 
