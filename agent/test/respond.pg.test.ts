@@ -144,13 +144,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
 
   it("says a cancelled or timed-out entry's own reason in its 409, not that it was answered (#1400)", async () => {
     const { m, ids, post, session, turn } = await setUp()
-    const attentionId = ids.attention.slice('question:'.length)
-    await db.sql`UPDATE ai_questions SET outcome = 'timed_out', reason = 'nobody replied in time (on_timeout: proceed)', resolved_at = now()
-                 WHERE id = ${attentionId}`
-    const timedOut = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
-    expect(timedOut.status).toBe(409)
-    expect(await timedOut.json()).toMatchObject({ reason: 'nobody replied in time (on_timeout: proceed)' })
-
     await m.interrupt(session.id, browser)
     await turn.done
     const [row] = await db.sql<{ reason: string }[]>`SELECT reason FROM ai_questions WHERE id = ${ids.question.slice('question:'.length)}`
@@ -165,6 +158,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const cancelledApproval = await post(ids.approval, { kind: 'approval', decision: 'approve' })
     expect(cancelledApproval.status).toBe(409)
     expect(await cancelledApproval.json()).toMatchObject({ reason: approvalRow!.reason })
+
+    // A timed-out one says so (the row is rewritten once nothing is parked on it).
+    await db.sql`UPDATE ai_questions SET outcome = 'timed_out', reason = 'nobody replied in time (on_timeout: proceed)'
+                 WHERE id = ${ids.attention.slice('question:'.length)}`
+    const timedOut = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
+    expect(timedOut.status).toBe(409)
+    expect(await timedOut.json()).toMatchObject({ reason: 'nobody replied in time (on_timeout: proceed)' })
   })
 
   it("refuses a response that is not the entry's kind, or does not fit it, and leaves the entry pending", async () => {

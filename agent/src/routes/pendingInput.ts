@@ -250,7 +250,8 @@ export async function respond(
   } catch (err) {
     if (err instanceof QuestionError && err.code === 'conflict') {
       // It ended between the read above and the answer: say how.
-      const now = await sessions.questions.entry(rowId)
+      // A failed re-read must not turn the 409 into a 500: fall through without a reason.
+      const now = await sessions.questions.entry(rowId).catch(() => undefined)
       if (now && !now.pending) throw ended(now)
     }
     if (err instanceof QuestionError) throw new RespondError(QUESTION_STATUS[err.code], err.message)
