@@ -11,7 +11,7 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowUpdateFailedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -28,7 +28,11 @@ from scadbuddy.api.deps import (
     StateDep,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.operations import IdempotencyKey, still_accepting, temporal_unavailable
+from scadbuddy.api.operations import (
+    TEMPORAL_UNAVAILABLE_PROBLEM,
+    IdempotencyKey,
+    still_accepting,
+)
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
@@ -76,8 +80,29 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["jobs"])
 
-#: A render whose `accepted` Update failed for a reason a re-send would not change.
+#: A render whose `accepted` Update failed, or whose start Temporal refused, for a
+#: reason a re-send would not change.
 RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
+
+#: The `RPCError`s worth sending the same request again for; any other is a 500
+#: (review #1066 (8) 2). The codes Temporal's own client retries (`RETRYABLE_ERROR_CODES`
+#: in the sdk-core temporalio 1.33.0 bundles, `crates/client/src/retry.rs`), so one
+#: reaching us outlived those retries, and the two gRPC ends an unanswered call with.
+#: The rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
+#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are configuration.
+TRANSIENT_RPC = frozenset(
+    {
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.CANCELLED,
+    }
+)
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -227,8 +252,9 @@ def require_job(render: RenderService, job_id: str) -> Job:
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); or Temporal, where renders run, is unreachable or refused "
-                "the start (`temporal-unavailable`, nothing was queued); or the render is "
+                "limit is set); or Temporal, where renders run, is unreachable or could not "
+                "take the start now (`temporal-unavailable`: send the same request again; "
+                "the detail says whether a start may exist); or the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
                 "again, with the same `Idempotency-Key`, to follow it as one request; "
                 "without a key, each send is one more claim on the job). "
@@ -236,7 +262,10 @@ def require_job(render: RenderService, job_id: str) -> Job:
             )
         },
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
-            "description": "The render's execution refused it (`render-unstartable`)"
+            "description": (
+                "The render's execution, or Temporal, refused it (`render-unstartable`: "
+                "a configuration error, see the logs)"
+            )
         },
     },
 )
@@ -310,9 +339,8 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError):
-        # Any refusal of the start, as the print and operation routes answer it.
-        raise temporal_unavailable("renders") from None
+    except (RPCError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
     except WorkflowUpdateFailedError as error:
         # The worker's failure text is for the log, not the client (review #1066 5.1).
         logger.error("the render could not be started: %s", error.cause, exc_info=True)
@@ -334,6 +362,45 @@ async def render_model(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,
         inputs=inputs,
+    )
+
+
+def _temporal_problem(error: RPCError | TemporalUnavailableError) -> ApiError:
+    """What the route answers when Temporal did not take the render's start, as the
+    print route does: only a failed connect wrote nothing; any other may follow a start
+    Temporal persisted, which the same request sent again follows (review #1066 (8) 2)."""
+    if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
+        # A wrong namespace or a denied permission: no re-send fixes it. Temporal's
+        # message stays in the log.
+        logger.error("Temporal refused to start a render", exc_info=error)
+        return ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Temporal refused to start this render; see ScadBuddy's logs. Send the same"
+            " request again to follow it if it started.",
+            type_=RENDER_UNSTARTABLE_PROBLEM,
+        )
+    logger.warning("could not start a render on Temporal", exc_info=error)
+    if isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError):
+        # The lazy client's first connect failed (`start_command`): nothing was sent.
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
+            " again shortly."
+        )
+    elif isinstance(error, TemporalUnavailableError):
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
+            " again shortly to follow it if it started."
+        )
+    else:
+        detail = (
+            "Temporal could not start this render right now. Send the same request again"
+            " shortly to follow it if it started."
+        )
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail,
+        type_=TEMPORAL_UNAVAILABLE_PROBLEM,
+        headers={"Retry-After": "5"},
     )
 
 

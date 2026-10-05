@@ -29,7 +29,7 @@ from temporalio.client import (
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -67,10 +67,12 @@ from scadbuddy.render.projection import (
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.commands import (
+    COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
     CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
+    _late,
     start_command,
 )
 from scadbuddy.workflows.models import (
@@ -94,6 +96,16 @@ DESCRIBE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
 #: How long a submit that reached an execution closing on its last release waits for it
 #: to close before it starts again (ruling 10 of the phase 2b plan).
 CLOSING_WAIT = 5.0
+#: How long a release waits on its Update: `rpc_timeout` bounds each poll, not the
+#: Update, and the SDK polls again (review #1066 (8) 1).
+RELEASE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
+#: Every Temporal call a submit makes (both starts, the wait between them, the release)
+#: answers within this, below Envoy's 15 s route timeout; past it the request is still
+#: accepting, and the client sends it again with the same key (review #1066 (8) 1).
+SUBMIT_DEADLINE = COMMAND_ANSWER_DEADLINE.total_seconds() + CONNECT_MARGIN_SECONDS
+#: The codes gRPC itself ends a call with: they say nothing of whether the start
+#: reached Temporal (review #1066 (8) 2).
+ENDED_RPC = frozenset({RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.CANCELLED})
 
 #: The largest request a submit sends as a workflow input. Temporal refuses a payload
 #: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
@@ -234,7 +246,7 @@ class RenderService:
             self.metrics.render_coalesced.inc()
             return previous, True
         try:
-            answer = await self._accepted(start, request_id)
+            answer = await self._started(start, previous, request_id)
         except (CommandStillAcceptingError, CommandClosedError):
             # Re-sent by the client with the same key: pending, not an error (review
             # #1066 (5) 3.1).
@@ -248,9 +260,6 @@ class RenderService:
             self.metrics.render_rejected.inc()
             raise QueueFullError(answer.queue_full, self.retry_after())
         assert answer.job is not None
-        # Started first, so a refused submit supersedes nothing.
-        if previous is not None:
-            await self._supersede(previous, request_id)
         if answer.coalesced:
             self.metrics.render_coalesced.inc()
         else:
@@ -265,6 +274,23 @@ class RenderService:
         if job.slug != slug or job.state not in ("pending", "running"):
             return None
         return job
+
+    async def _started(
+        self, start: RenderStart, previous: Job | None, request_id: str | None
+    ) -> RenderAnswer:
+        """`_accepted`, then the supersede, under one `SUBMIT_DEADLINE`."""
+        bound = asyncio.timeout(SUBMIT_DEADLINE)
+        try:
+            async with bound:
+                answer = await self._accepted(start, request_id)
+                # Started first, so a refused submit supersedes nothing.
+                if answer.job is not None and previous is not None:
+                    await self._supersede(previous, request_id)
+        except TimeoutError as error:
+            if not bound.expired():
+                raise
+            raise CommandStillAcceptingError(workflow_id_for_key(start.render_key)) from error
+        return answer
 
     async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:
         """The `accepted` answer of ``render-<render_key>``, started or joined. An
@@ -287,6 +313,10 @@ class RenderService:
                     update_id=request_id,
                 )
             except RPCError as error:
+                if error.status in ENDED_RPC:
+                    # The start may have reached Temporal: still accepting if the
+                    # execution exists (review #1066 (8) 2).
+                    raise await _late(self.client, workflow_id) from error
                 # An Update that reached the execution as it completed is aborted. A
                 # missing namespace is NOT_FOUND too: configuration, raised at once.
                 if not execution_gone(error) or attempt:
@@ -334,20 +364,22 @@ class RenderService:
         assert job.workflow_id is not None
         handle = self.client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
         try:
-            answer: ReleaseAnswer = await handle.execute_update(
-                RELEASE_UPDATE,
-                "superseded",
-                id=f"{request_id}:release:{job.id}" if request_id is not None else None,
-                result_type=ReleaseAnswer,
-                rpc_timeout=RPC_TIMEOUT,
-            )
+            async with asyncio.timeout(RELEASE_BOUND):
+                answer: ReleaseAnswer = await handle.execute_update(
+                    RELEASE_UPDATE,
+                    "superseded",
+                    id=f"{request_id}:release:{job.id}" if request_id is not None else None,
+                    result_type=ReleaseAnswer,
+                    rpc_timeout=RPC_TIMEOUT,
+                )
         except RPCError as error:
             if execution_gone(error):
                 return None  # it has closed: settled, nothing to release
             self.metrics.store_errors.labels("cancel_workflow").inc()
             raise TemporalUnavailableError(job.workflow_id) from error
-        except WorkflowUpdateRPCTimeoutOrCancelledError as error:
-            # The Update reached the execution and may still release the claim.
+        except (WorkflowUpdateRPCTimeoutOrCancelledError, TimeoutError) as error:
+            # Past its bound: the Update may have reached the execution, and may still
+            # release the claim.
             self.metrics.store_errors.labels("cancel_workflow").inc()
             raise CommandStillAcceptingError(job.workflow_id) from error
         if answer.cancelled is not None:

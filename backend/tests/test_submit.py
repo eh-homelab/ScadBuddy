@@ -306,6 +306,106 @@ async def test_a_resent_supersede_releases_the_old_job_once(
     assert kept.state in ("pending", "running") and kept.claims == 1
 
 
+async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last release waits in the workflow for the cancelled job's projection. Held
+    there, the submit still answers with the new job inside its bound, below Envoy's 15 s
+    route timeout (review #1066 (8) 1). `rpc_timeout` bounds each poll, not the Update
+    (the SDK polls again), so a long one stands in for a server that keeps answering
+    polls with no outcome."""
+    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    monkeypatch.setattr(submit_module, "RELEASE_BOUND", 1.0, raising=False)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate, held = asyncio.Event(), asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=held)
+        async with _worker(client, queue, acts):
+            old = await service.submit(SLUG, {"width": _w()})
+            began = time.monotonic()
+            async with asyncio.timeout(30):
+                new = await service.submit(
+                    SLUG, {"width": _w()}, supersedes=old.id, request_id=uuid.uuid4().hex
+                )
+            took = time.monotonic() - began
+            held.set()
+            gate.set()
+            await _settled(projection, old.id)
+            await _settled(projection, new.id)
+        await service.aclose()
+
+    assert new.id != old.id
+    print("TOOK", took)
+    assert took < 5
+
+
+async def test_a_submit_is_answered_still_accepting_within_one_bound(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One deadline covers every Temporal call a submit makes (review #1066 (8) 1)."""
+
+    async def hanging(*_: object, **__: Any) -> RenderAnswer:
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+    monkeypatch.setattr(submit_module, "start_command", hanging)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 0.5)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        async with asyncio.timeout(30):
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+
+
+class _Described:
+    """A client whose `describe` finds the execution, or answers NOT_FOUND."""
+
+    def __init__(self, *, exists: bool) -> None:
+        self.exists = exists
+
+    def get_workflow_handle(self, *_: object, **__: object) -> _Described:
+        return self
+
+    async def describe(self, **__: object) -> None:
+        if not self.exists:
+            raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+
+@pytest.mark.parametrize("code", [RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.CANCELLED])
+@pytest.mark.parametrize(
+    ("exists", "raised"),
+    [(True, CommandStillAcceptingError), (False, TemporalUnavailableError)],
+)
+async def test_a_start_that_grpc_ended_is_answered_as_a_late_one(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    code: RPCStatusCode,
+    exists: bool,
+    raised: type[Exception],
+) -> None:
+    """gRPC ending the call says nothing of the start, which may have reached Temporal:
+    still accepting when the execution exists, never "nothing was done" (review #1066
+    (8) 2)."""
+
+    async def ended(*_: object, **__: Any) -> RenderAnswer:
+        raise RPCError("ended", code, b"")
+
+    monkeypatch.setattr(submit_module, "start_command", ended)
+    service = make_service(_Described(exists=exists), "unused")
+    with pytest.raises(raised) as error:
+        await service.submit(SLUG, {"width": _w()})
+    await service.aclose()
+
+    assert isinstance(error.value.__cause__, RPCError)
+
+
 async def test_superseding_the_same_render_answers_it_without_a_claim(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:

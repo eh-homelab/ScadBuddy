@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -180,14 +181,34 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     assert "queue is full" in body["detail"]
 
 
-def test_a_render_when_temporal_is_unreachable_is_a_503_naming_it(
-    client: TestClient, model: str
+def _unreachable() -> TemporalUnavailableError:
+    """What `start_command` raises when a lazy client's first connect fails."""
+    try:
+        raise TemporalUnavailableError("render-x") from RuntimeError("Failed client connect: x")
+    except TemporalUnavailableError as error:
+        return error
+
+
+@pytest.mark.parametrize(
+    ("error", "says"),
+    [
+        # Only a failed connect wrote nothing (review #1066 (8) 2).
+        (_unreachable(), "Nothing was queued"),
+        # The rest may follow a start Temporal persisted: the same request follows it.
+        (TemporalUnavailableError("render-x"), "to follow it if it started"),
+        (RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""), "to follow it if it started"),
+        (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started"),
+    ],
+)
+def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
+    client: TestClient, model: str, error: Exception, says: str
 ) -> None:
-    down = mock.AsyncMock(side_effect=TemporalUnavailableError("render-x"))
+    down = mock.AsyncMock(side_effect=error)
     with mock.patch.object(RenderService, "submit", down):
         response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert response.status_code == 503
     assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert says in response.json()["detail"]
     assert response.headers["retry-after"] == "5"
 
 
@@ -195,19 +216,24 @@ def test_a_render_when_temporal_is_unreachable_is_a_503_naming_it(
     "refusal",
     [
         RPCError("Namespace nope is not found.", RPCStatusCode.NOT_FOUND, b""),
-        RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
+        RPCError("denied for nope", RPCStatusCode.PERMISSION_DENIED, b""),
+        RPCError("nope is invalid", RPCStatusCode.INVALID_ARGUMENT, b""),
     ],
 )
-def test_a_render_temporal_refuses_is_a_503_naming_it(
-    client: TestClient, model: str, refusal: RPCError
+def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
+    client: TestClient, model: str, refusal: RPCError, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Any RPC refusal of the start, as the print and operation routes answer it
-    (review #1066 3.1): never an unhandled 500."""
+    """A wrong namespace or a denied permission is configuration, never "cannot reach
+    Temporal, try again shortly"; Temporal's message stays in the log (review #1066 (8)
+    2)."""
     refused = mock.AsyncMock(side_effect=refusal)
     with mock.patch.object(RenderService, "submit", refused):
         response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
-    assert response.status_code == 503
-    assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert response.status_code == 500
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    assert "nope" not in response.json()["detail"]
+    assert "retry-after" not in response.headers
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
 
 
 def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, model: str) -> None:
