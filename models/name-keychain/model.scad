@@ -113,12 +113,27 @@ module ring_tab_2d() {
     }
 }
 
-// Base plate: the word's footprint grown outwards by `outline`, plus the
-// keyring tab, less the hole.
+// A strip along the line's vertical centre from the first glyph to the last
+// (the word's hull, cut to a band `outline` tall). Without it, a space, a gap
+// left by a glyph the font lacks, or two script runs that do not meet splits
+// the base into islands, and every piece but the first falls off the keyring
+// (#920).
+module spine_2d() {
+    intersection() {
+        hull() glyphs_2d();
+        square([2 * bed_x, outline], center = true);
+    }
+}
+
+// Base plate: the word's footprint and the spine grown outwards by `outline`,
+// plus the keyring tab, less the hole.
 module base_2d() {
     difference() {
         union() {
-            offset(r = outline) name_2d();
+            offset(r = outline) union() {
+                name_2d();
+                spine_2d();
+            }
             if (hole) ring_tab_2d();
         }
         if (hole) translate(ring_centre()) circle(d = hole_diameter);

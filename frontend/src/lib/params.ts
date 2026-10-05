@@ -108,6 +108,14 @@ const ASSET_ID = /^[0-9a-f]{64}$/
  * colour normalised). An agent's value goes through this before the same `onChange`
  * a keystroke does, so it cannot put a value on screen no field would have.
  */
+/**
+ * A string parameter's length as OpenSCAD's `len()` counts it: in code points, so an
+ * emoji is one character, not the two UTF-16 units `String.length` counts (#920).
+ */
+export function textLength(value: string): number {
+  return Array.from(value).length
+}
+
 export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
   const label = `"${param.name}"`
   switch (param.type) {
@@ -160,7 +168,7 @@ export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
     case 'font':
     case 'string': {
       if (typeof value !== 'string') return { ok: false, message: `${label} takes text.` }
-      if (param.max_length != null && value.length > param.max_length) {
+      if (param.max_length != null && textLength(value) > param.max_length) {
         return { ok: false, message: `${label} is at most ${param.max_length} characters.` }
       }
       return { ok: true, value }
