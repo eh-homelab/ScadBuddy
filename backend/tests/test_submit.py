@@ -990,6 +990,11 @@ async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_clos
         async with _worker(client, queue, acts):
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, params)
+            # The 1 s deadline can lapse before a loaded worker runs the first
+            # `render_accept`; wait for that attempt rather than racing it.
+            async with asyncio.timeout(60):
+                while acts.accepts < 1:
+                    await asyncio.sleep(0.1)
             waiting = await asyncio.to_thread(projection.read, old.id)
             tries = acts.accepts
             await legacy.terminate()
