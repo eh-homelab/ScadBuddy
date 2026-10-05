@@ -86,6 +86,10 @@ class SnapshotStore:
         try:
             await asyncio.wait_for(asyncio.shield(storing), self.pin_timeout)
         except TimeoutError:
+            if storing.done():
+                # It finished as the wait ran out: its own outcome, not "pending".
+                storing.result()
+                return revision
             self._behind(storing)
             raise SnapshotPendingError(
                 f"the snapshot of {slug}@{revision[:12]} is still being stored; try again"
@@ -93,6 +97,10 @@ class SnapshotStore:
                 retry_after=max(1, math.ceil(self.pin_timeout)),
             ) from None
         except asyncio.CancelledError:
+            if storing.done() and not storing.cancelled() and storing.exception() is not None:
+                logger.warning(
+                    "storing a snapshot failed as its caller went", exc_info=storing.exception()
+                )
             self._behind(storing)
             raise
         return revision

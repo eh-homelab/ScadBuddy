@@ -7,7 +7,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -26,7 +26,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import snapshots as snapshots_module
-from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content import ContentStore, StoreFullError
 from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
@@ -425,6 +425,34 @@ async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
     assert not api._storing  # the done-callback let it go
     assert content.index.get(snapshot_key("demo", rev)) is not None
     assert await asyncio.wait_for(api.pin("demo", rev), 5) == rev
+
+
+async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1419 review: `wait_for` can time out after the store finished. A store that
+    succeeded is the revision, not a 503; one that failed is its own error (a full
+    store's 507), not a retryable "pending"."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "a1" * 20
+    _export(api_paths, rev)
+    real_wait_for = asyncio.wait_for
+
+    async def late(awaitable: Any, timeout: float | None) -> Any:
+        await real_wait_for(awaitable, 5)  # the store finishes...
+        raise TimeoutError  # ...and the wait reports a timeout anyway
+
+    monkeypatch.setattr(asyncio, "wait_for", late)
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
+    assert await api.pin("demo", rev) == rev
+
+    async def full(*args: object, **kwargs: object) -> object:
+        raise StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (1)")
+
+    content.put = full  # type: ignore[method-assign,assignment]
+    _export(api_paths, "b2" * 20)
+    with pytest.raises(StoreFullError):
+        await api.pin("demo", "b2" * 20)
 
 
 async def test_a_caller_gone_mid_pin_leaves_the_store_running(
