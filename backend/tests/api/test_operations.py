@@ -32,7 +32,7 @@ from scadbuddy.workflows.commands import (
 )
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -123,6 +123,26 @@ def test_without_a_key_each_request_is_its_own_operation(
     post(client, {"a": 1})
     post(client, {"a": 1})
     assert counts.runs == 2
+
+
+def test_only_a_request_with_a_key_reads_the_record_first(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
+    match it; reading one would only spend the answer's deadline."""
+    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
+    real = type(store).find
+    reads: list[str] = []
+
+    async def find(self: Any, key: str) -> Any:
+        reads.append(key)
+        return await real(self, key)
+
+    monkeypatch.setattr(type(store), "find", find)
+    assert post(client, {"a": 1}).status_code == 200
+    assert reads == []
+    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
+    assert len(reads) == 1
 
 
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(

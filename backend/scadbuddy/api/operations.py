@@ -101,7 +101,8 @@ async def run_operation(
     A refusal or a recorded failure is raised as the problem the route answers with."""
     body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
     key = operation_key(kind.name, subject, body, idempotency_key or uuid.uuid4().hex)
-    recorded = await ops.store.find(key)
+    # Without a key, the key is new: no record can match it.
+    recorded = None if idempotency_key is None else await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
     arg = OperationInput(
