@@ -4,7 +4,7 @@ import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_A
 import type { AttentionReason, OnTimeout } from '../harness/attention.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { loadDoneSummary } from './doneSummary.js'
+import { loadDoneSummary, UNATTENDED_HEADING } from './doneSummary.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -60,9 +60,13 @@ import {
 
 export const DEFAULT_QUESTION_POLL_MS = 1000
 
-/** #815 §5's per-user rate limit on attention requests: this many per window. */
 /** How many rows listPending returns per group: waiting rows, then `done` summaries. */
 export const PENDING_CAP = 500
+/**
+ * #815 §5's per-user rate limit on attention requests: this many per window. A
+ * `done` summary neither counts nor is limited: a timeout tells the model to
+ * post one, so a turn that timed out often must still be able to.
+ */
 export const ATTENTION_RATE_LIMIT = 10
 export const ATTENTION_RATE_WINDOW_S = 600
 /** The advisory lock the rate limit's count and insert are taken under. */
@@ -508,13 +512,19 @@ export class QuestionService {
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
           const [recent] = await tx<{ n: number }[]>`
             SELECT count(*)::int AS n FROM ai_questions
-            WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
-          if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
+            WHERE kind = 'attention' AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
+              AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
+          if (attention.reason !== 'done' && (recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
+            return { value: { ...none, limited: true }, events: [] }
+          }
+          // A done summary that recorded unattended actions is not replaced by a later
+          // turn's: that record is the user's check on what ran while nobody answered,
+          // and the later summary covers only its own turn. It stays until dismissed.
           const why = 'replaced by a newer request for the same reason'
           superseded = await tx<Resolved[]>`
             UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
-              AND outcome IS NULL
+              AND outcome IS NULL AND (summary LIKE ${`${UNATTENDED_HEADING}%`}) IS NOT TRUE
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))

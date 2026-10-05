@@ -366,6 +366,51 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     ])
   })
 
+  it("a later turn's done summary does not replace one that recorded unattended actions", async () => {
+    let n = 0
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        if (n === 0) {
+          verdicts.push(
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          )
+          await touch(run.sessionId ?? run.resume!, 'unattended')
+        }
+        verdicts.push(await postDone(run, `toolu_done${n++}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    await (await m.send(session.id, browser, 'two')).done
+    const done = (await m.questions.listPending()).filter((q) => q.attentionReason === 'done')
+    expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done1', 'toolu_done0'])
+    expect(done[1]!.summary).toContain('created preset `unattended`')
+  })
+
+  it('a done summary is neither refused by nor counted in the attention rate limit', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at,
+                                outcome, reason, resolved_at)
+      SELECT gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_t' || i, '[]', 'attention', 'blocked', 'proceed', now(),
+             'timed_out', 'old', now()
+      FROM generate_series(1, ${ATTENTION_RATE_LIMIT}) AS i`
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const p = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await p.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`).toEqual([{ outcome: null }])
+  })
+
   it("a later turn's done summary replaces the earlier one; neither is cancelled by its turn ending", async () => {
     let n = 0
     const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>

@@ -32,6 +32,9 @@ export type DoneTouch = {
 /** The span in which nobody answered: from the timed-out request until the user's next reply, if any. */
 export type AwayWindow = { requestId: string; from: Date; until: Date | null }
 
+/** How a summary with an unattended section starts (questions/service.ts keeps such a summary). */
+export const UNATTENDED_HEADING = '**While nobody answered'
+
 /** Lines one section shows before it says how many more there are. */
 export const SECTION_MAX = 20
 
@@ -94,7 +97,7 @@ export function doneSummary(touches: readonly DoneTouch[], away: readonly AwayWi
   const after = touches.filter((t) => t.at >= first.from && !unattended(t))
   const ids = away.map((w) => plain(w.requestId.slice(0, 8))).join(', ')
   const parts = [
-    section(`While nobody answered (attention request${away.length > 1 ? 's' : ''} ${ids} timed out)`, during),
+    section(`${UNATTENDED_HEADING.slice(2)} (attention request${away.length > 1 ? 's' : ''} ${ids} timed out)`, during),
     ...(after.length ? [section('After you replied', after)] : []),
     ...(before.length ? [section('Before you were asked', before)] : []),
   ]
