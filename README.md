@@ -395,7 +395,8 @@ workers restart.
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
-  instance's folder ids (#683).
+  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
+  trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as

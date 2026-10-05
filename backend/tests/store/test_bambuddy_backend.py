@@ -29,6 +29,7 @@ from scadbuddy.store.bambuddy import (
     RenderSettingsSource,
     folder_lock_key,
     folder_name,
+    instance_key,
 )
 from scadbuddy.store.content import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
@@ -380,6 +381,53 @@ def test_a_slot_recorded_by_another_process_mid_settle_is_not_a_unique_violation
             other.commit()
             settling.result(10)
     assert _instances(pool) == {40: BASE_URL, 99: BASE_URL}
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("http://Host:80/", "http://host"),
+        ("HTTPS://bambuddy.lan:443", "https://bambuddy.lan/"),
+        ("http://host/bambuddy//", "http://host/bambuddy"),
+        ("http://[::1]:80/", "http://[::1]"),
+    ],
+)
+def test_respellings_of_one_url_are_one_instance(a: str, b: str) -> None:
+    """#1431: a cosmetic change to `bambuddy_url` must not orphan the Work files."""
+    assert instance_key(a) == instance_key(b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("http://host", "https://host"),
+        ("http://host", "http://host:8000"),
+        ("http://host/a", "http://host/b"),
+        ("http://host", "http://other"),
+    ],
+)
+def test_another_scheme_port_path_or_host_is_another_instance(a: str, b: str) -> None:
+    assert instance_key(a) != instance_key(b)
+
+
+@respx.mock
+async def test_a_respelled_url_keeps_its_work_folders_deletable(pool: Pool) -> None:
+    """#1431: folders recorded under `https://bambuddy.test` stay ScadBuddy's when
+    Settings names the same Bambuddy as `HTTPS://Bambuddy.TEST:443`."""
+    _record_folders(pool, instance_key(BASE_URL), ("old", "work", 42))
+
+    async def respelled() -> BambuddyTarget:
+        return BambuddyTarget(
+            config=BambuddyConfig(base_url="HTTPS://Bambuddy.TEST:443", api_key="narrow"),
+            inbox_id=INBOX,
+        )
+
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(respelled, pool)
+    await backend.remove("78")
+    assert delete.called
+    await backend.aclose()
 
 
 @respx.mock

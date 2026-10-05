@@ -30,6 +30,7 @@ from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from psycopg import AsyncConnection, Connection
@@ -65,8 +66,26 @@ class BambuddyTarget:
 
     @property
     def instance(self) -> str:
-        """Which Bambuddy a recorded folder id belongs to: its base URL (#683)."""
-        return self.config.base_url.rstrip("/")
+        """Which Bambuddy a recorded folder id belongs to: its base URL (#683),
+        normalised (`instance_key`) so a respelling of the same URL keeps its folders."""
+        return instance_key(self.config.base_url)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def instance_key(url: str) -> str:
+    """A Bambuddy base URL as `store_folders` keys it (#1431): scheme and host
+    lowercased, a default port dropped, trailing slashes stripped. `HTTP://Host:80/`
+    and `http://host` are one instance; another host, port or path is another."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal keeps its brackets
+    port = parts.port
+    netloc = host if port is None or port == _DEFAULT_PORTS.get(scheme) else f"{host}:{port}"
+    return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
 
 
 @dataclass(frozen=True)
