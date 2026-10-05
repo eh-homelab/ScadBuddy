@@ -162,8 +162,8 @@ export async function loadDoneSummary(
   secrets: readonly string[],
 ): Promise<{ summary: string; unattended: boolean }> {
   // Each window closes at the user's first reply in that request's own turn: an
-  // answer there, or a browser decision on an approval that turn parked on or
-  // was resumed for. Another turn's approval is not a reply to this request.
+  // answer there, or a browser decision on an approval that turn parked on.
+  // Another turn's approval is not a reply to this request.
   const away = await tx<{ id: string; away_from: Date; away_until: Date | null }[]>`
     WITH RECURSIVE turns (id) AS (
       SELECT ${turnId}::uuid
@@ -178,7 +178,7 @@ export async function loadDoneSummary(
         WHERE session_id = ${sessionId} AND turn_id = q.turn_id AND outcome = 'answered' AND resolved_at > q.created_at
         UNION ALL
         SELECT decided_at FROM ai_approvals
-        WHERE session_id = ${sessionId} AND (turn_id = q.turn_id OR resume_turn_id = q.turn_id)
+        WHERE session_id = ${sessionId} AND turn_id = q.turn_id
           AND decision IN ('approved', 'denied') AND decided_by_kind = 'browser' AND decided_at > q.created_at
       ) replies
     ) reply
