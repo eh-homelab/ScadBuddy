@@ -112,6 +112,12 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       } catch {
         body = undefined
       }
+      if (req.method === 'GET' && path === '/__requests') {
+        // For a test in another process (fakeAnthropicServer.ts); not recorded itself.
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(requests))
+        return
+      }
       const recorded: RecordedRequest = { method: req.method ?? 'GET', path, headers: req.headers, body }
       requests.push(recorded)
 

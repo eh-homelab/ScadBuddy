@@ -23,10 +23,10 @@ _SESSION_ID = re.compile(r"session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 
 def session_of(workflow_id: str) -> str:
-    """The session id a workflow id names; anything but `session-<uuid>` is refused."""
+    """The `ai_sessions.id` a workflow id names; anything but `session-<uuid>` is refused."""
     if not _SESSION_ID.fullmatch(workflow_id):
         raise ApplicationError(f"workflow id {workflow_id!r} is not a session", non_retryable=True)
-    return workflow_id
+    return workflow_id.removeprefix("session-")
 
 
 def extra_options(plugin_dir: str, prompt_append: str) -> dict[str, Any]:

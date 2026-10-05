@@ -1,4 +1,5 @@
 [
+  {"name": "get_settings", "description": "Read the settings.", "input_schema": {"type": "object", "properties": {}}, "tier": "read"},
   {"name": "get_model", "description": "Read a model.", "input_schema": {"type": "object", "properties": {"slug": {"type": "string"}}}, "tier": "read"},
   {"name": "update_source", "description": "Write a model's source.", "input_schema": {"type": "object", "properties": {"slug": {"type": "string"}}}, "tier": "write"},
   {"name": "print_output", "description": "Start a print.", "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}}, "tier": "outward"}

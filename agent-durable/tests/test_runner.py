@@ -16,7 +16,8 @@ from scadbuddy_durable.runner import CWD, SessionRunner, extra_options, session_
 from scadbuddy_durable.segments import SessionLimits
 
 SECRET = "sk-ant-very-secret"
-SESSION = f"session-{uuid.uuid4()}"
+SID = str(uuid.uuid4())
+SESSION = f"session-{SID}"
 PLUGIN = "/srv/plugin"
 
 
@@ -109,8 +110,8 @@ async def test_builds_runner_with_credential_and_remaining_budget() -> None:
         "plugins": [{"type": "local", "path": PLUGIN}],
         "system_prompt": {"type": "preset", "preset": "claude_code", "append": "APPEND"},
     }
-    assert segments.asked == [SESSION]
-    assert segments.recorded == [(SESSION, 3, 2, "claude-1", 0.25)]
+    assert segments.asked == [SID]
+    assert segments.recorded == [(SID, 3, 2, "claude-1", 0.25)]
 
 
 async def test_spent_budget_builds_no_runner() -> None:
@@ -142,7 +143,7 @@ async def test_foreign_workflow_id_is_refused(workflow_id: str) -> None:
 
 
 def test_session_of() -> None:
-    assert session_of(SESSION) == SESSION
+    assert session_of(SESSION) == SID
     with pytest.raises(ApplicationError):
         session_of("x")
 

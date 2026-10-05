@@ -59,9 +59,9 @@ def tiers(entries: list[ManifestEntry]) -> dict[str, str]:
     return {e.name: e.tier for e in entries}
 
 
-_PATH = os.environ.get(TOOLS_MANIFEST_ENV, "/app/agent-durable/tools.json")
+MANIFEST_PATH = os.environ.get(TOOLS_MANIFEST_ENV, "/app/agent-durable/tools.json")
 # Loaded once per process (the workflow imports it passed through the sandbox). A
 # missing manifest leaves no tools; worker.main() refuses to start with none.
-_ENTRIES = load_manifest(_PATH) if os.path.exists(_PATH) else []
+_ENTRIES = load_manifest(MANIFEST_PATH) if os.path.exists(MANIFEST_PATH) else []
 TOOLS = durable_tools(_ENTRIES)
 TIERS = tiers(_ENTRIES)
