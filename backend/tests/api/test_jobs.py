@@ -138,11 +138,26 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
     second = client.post(
         f"/api/v1/models/{model}/render",
         json={"params": {"width": 12}, "supersedes": first.json()["job_id"]},
+        headers={"Idempotency-Key": "b" * 32},
     )
     assert second.status_code == 202
     # The first is cancelled unless its render finished first; the newer one renders.
     assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
     assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
+
+
+def test_a_supersede_without_an_idempotency_key_is_refused(client: TestClient, model: str) -> None:
+    """Without a key a re-send would release the job a second time, and with it another
+    claimant's: refused before anything starts (review #1066 2.1)."""
+    submit = mock.AsyncMock()
+    with mock.patch.object(RenderService, "submit", submit):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}, "supersedes": "0" * 32},
+        )
+    assert response.status_code == 422
+    assert "Idempotency-Key" in response.json()["detail"]
+    submit.assert_not_awaited()
 
 
 def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:

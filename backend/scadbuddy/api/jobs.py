@@ -99,8 +99,13 @@ class RenderRequest(BaseModel):
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
     # The job this render replaces -- the preview's previous submit. Dropped unrendered
     # if no worker has taken it yet, so a slider drag does not queue every stop on
-    # the way. Harmless when it has already started or finished.
-    supersedes: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
+    # the way. Harmless when it has already started or finished. Needs an
+    # `Idempotency-Key`: a re-send without one would release the job again (#1053).
+    supersedes: str | None = Field(
+        default=None,
+        pattern=JOB_ID_PATTERN,
+        description="The job this render replaces; needs an `Idempotency-Key` header (422 without)",
+    )
 
 
 class RenderAccepted(BaseModel):
@@ -222,7 +227,8 @@ def require_job(render: RenderService, job_id: str) -> Job:
                 "limit is set); or Temporal, where renders run, is unreachable or refused "
                 "the start (`temporal-unavailable`, nothing was queued); or the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
-                "again, with the same `Idempotency-Key`, to follow it as one request). "
+                "again, with the same `Idempotency-Key`, to follow it as one request; "
+                "without a key, each send is one more claim on the job). "
                 "Retry after `Retry-After` seconds"
             )
         },
@@ -245,6 +251,13 @@ async def render_model(
     fonts: FontsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted:
+    if body.supersedes is not None and idempotency_key is None:
+        # A re-send without a key would release the job once more, and with it another
+        # request's claim (review #1066 2.1).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a render that supersedes another needs an Idempotency-Key header",
+        )
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
