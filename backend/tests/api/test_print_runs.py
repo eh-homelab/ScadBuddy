@@ -551,7 +551,7 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Review #1061 (3) 3: a wrong namespace is a misconfiguration, not a blip, so it is
-    never "try again shortly"."""
+    never "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
     output_id = prepared(client, model)
 
     async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
@@ -565,7 +565,7 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
         )
 
     assert response.status_code == 500, response.text
-    assert "temporal-unavailable" not in response.json()["type"]
+    assert response.json()["type"].endswith("/temporal-refused")
     assert "namespace not found" not in response.text
     # Some refusals come after the start was persisted (review #1316 4).
     assert "Nothing was queued" not in response.text

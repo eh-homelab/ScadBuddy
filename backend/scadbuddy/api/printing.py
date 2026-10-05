@@ -83,6 +83,9 @@ logger = logging.getLogger(__name__)
 #: Problem ``type``s for a print the route could not hand to Temporal (#1052).
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
+#: Temporal answered and refused (a wrong namespace, a denied permission): sending the
+#: same request again will not help until it is fixed (review #1316 (2) 7).
+TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
 #: The `RPCError`s that answer `temporal-unavailable`; any other is a 500.
 #: `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a busy server (review #1316 4).
 TRANSIENT_RPC = frozenset(
@@ -384,6 +387,7 @@ async def accept_run(
                 # persisted, and the same request sent again follows it (review #1316 4).
                 "Temporal refused to start this print; see ScadBuddy's logs. Send the same"
                 " request again to follow it if it started.",
+                type_=TEMPORAL_REFUSED_PROBLEM,
             ) from None
         logger.warning("could not start a print run on Temporal", exc_info=True)
         raise ApiError(
