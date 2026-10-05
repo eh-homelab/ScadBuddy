@@ -371,6 +371,56 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await expect(db.sql`UPDATE ai_questions SET outcome = 'reconnected' WHERE tool_use_id = 'toolu_blk'`).rejects.toThrow(/ai_questions_outcome_check/)
   })
 
+  // #815 §2: reloading the tab and clicking "I'm back" race; whichever loses, the user sees no error.
+  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op, before or after its check", async () => {
+    let racing: (() => Promise<unknown>) | undefined
+    // reconnected() lands between answer()'s check and its update: the check saw the row open.
+    const sql = new Proxy(db.sql, {
+      apply(target, thisArg, args: unknown[]) {
+        const query = Reflect.apply(target, thisArg, args) as Promise<unknown>
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join('') : ''
+        const race = racing
+        if (!race || !text.includes('SELECT questions, outcome FROM ai_questions')) return query
+        racing = undefined
+        return query.then(async (rows) => {
+          await race()
+          return rows
+        })
+      },
+    })
+    const m = manager({ sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+
+    const first = await pending(session.id)
+    racing = () => m.questions.reconnected(session.id)
+    await expect(m.questions.answer(browser, answer(session.id, first, ["I'm back"]))).resolves.toBeUndefined()
+    expect(racing).toBeUndefined()
+
+    // reconnected() won outright: the check itself sees the row resolved.
+    let second: string | undefined
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`
+      second = row?.id
+      return second
+    }).toBeDefined()
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await expect(m.questions.answer(browser, answer(session.id, second!, ["I'm back"]))).resolves.toBeUndefined()
+
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: false, reconnected: true, message: expect.any(String) },
+      { answered: false, reconnected: true, message: expect.any(String) },
+    ])
+    expect(await db.sql`SELECT outcome, answers FROM ai_questions WHERE session_id = ${session.id}`).toEqual([
+      { outcome: 'reconnected', answers: null },
+      { outcome: 'reconnected', answers: null },
+    ])
+    expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved' && e.answered)).toEqual([])
+    // Any other resolved row is still a conflict.
+    await db.sql`UPDATE ai_questions SET outcome = 'cancelled' WHERE id = ${first}`
+    await expect(m.questions.answer(browser, answer(session.id, first, ['late']))).rejects.toMatchObject({ code: 'conflict' })
+  })
+
   it("a turn's browser_* calls that find no tab wait on one tab_disconnected request, and both go on when the tab is back", async () => {
     let wait: WaitForTab | undefined
     const results: TabWait[] = []

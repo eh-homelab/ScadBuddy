@@ -243,6 +243,8 @@ export class QuestionService {
     const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Row['outcome'] }[]>`
       SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
     if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
+    // #815 §2: the tab came back first, so "I'm back" already happened; not an error to the user who clicked it.
+    if (asked.outcome === 'reconnected') return
     if (asked.outcome !== null) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     if (answers.length !== asked.questions.length || answers.some((a) => !a.trim())) {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
@@ -258,7 +260,12 @@ export class QuestionService {
         ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
         : { value: undefined, events: [] }
     })
-    if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
+    if (!answered) {
+      // Lost the race to reconnected() between the check above and the update: the same no-op.
+      const [now] = await this.deps.sql<{ outcome: Row['outcome'] }[]>`SELECT outcome FROM ai_questions WHERE id = ${id}`
+      if (now?.outcome === 'reconnected') return
+      throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
+    }
     this.wake(id)
     try {
       await this.refreshStatus(sessionId)
