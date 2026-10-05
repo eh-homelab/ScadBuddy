@@ -396,7 +396,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   })
 
   // #815 §2: reloading the tab and clicking "I'm back" race; whichever loses, the user sees no error.
-  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op, before or after its check", async () => {
+  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op, before or after its check; other replies do not", async () => {
     let racing: (() => Promise<unknown>) | undefined
     // reconnected() lands between answer()'s check and its update: the check saw the row open.
     const sql = new Proxy(db.sql, {
@@ -412,8 +412,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         })
       },
     })
-    const m = manager({ sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const next = async (...seen: string[]) => {
+      let id: string | undefined
+      await expect.poll(async () => {
+        const [row] = await db.sql<{ id: string }[]>`
+          SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND NOT (id = ANY(${seen}::uuid[]))`
+        id = row?.id
+        return id
+      }).toBeDefined()
+      return id!
+    }
 
     const first = await pending(session.id)
     racing = () => m.questions.reconnected(session.id)
@@ -421,21 +431,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(racing).toBeUndefined()
 
     // reconnected() won outright: the check itself sees the row resolved.
-    let second: string | undefined
-    await expect.poll(async () => {
-      const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`
-      second = row?.id
-      return second
-    }).toBeDefined()
+    const second = await next(first)
     expect(await m.questions.reconnected(session.id)).toBe(1)
-    await expect(m.questions.answer(browser, answer(session.id, second!, ["I'm back"]))).resolves.toBeUndefined()
+    await expect(m.questions.answer(browser, answer(session.id, second, ["I'm back"]))).resolves.toBeUndefined()
+
+    // Typed words that lose the race would be dropped unread: the user is told, not quietly ignored.
+    const third = await next(first, second)
+    racing = () => m.questions.reconnected(session.id)
+    await expect(m.questions.answer(browser, answer(session.id, third, ["never mind, don't print it"]))).rejects.toMatchObject({ code: 'conflict' })
+    await expect(m.questions.answer(browser, answer(session.id, third, ['Carry on without me']))).rejects.toMatchObject({ code: 'conflict' })
 
     await turn!.done
     expect(verdicts).toEqual([
       { answered: false, reconnected: true, message: expect.any(String) },
       { answered: false, reconnected: true, message: expect.any(String) },
+      { answered: false, reconnected: true, message: expect.any(String) },
     ])
     expect(await db.sql`SELECT outcome, answers FROM ai_questions WHERE session_id = ${session.id}`).toEqual([
+      { outcome: 'reconnected', answers: null },
       { outcome: 'reconnected', answers: null },
       { outcome: 'reconnected', answers: null },
     ])

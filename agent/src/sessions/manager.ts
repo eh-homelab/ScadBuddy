@@ -55,7 +55,7 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { attentionCard, attentionSpec, parseAttention, timedOutText } from '../harness/attention.js'
+import { attentionCard, attentionSpec, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
@@ -186,7 +186,6 @@ export const TAB_WAIT_S = 300
  */
 export const TAB_WAITS_PER_TURN = 3
 const CARRY_ON = 'Carry on without the tab'
-const IM_BACK = "I'm back"
 
 export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
   let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined

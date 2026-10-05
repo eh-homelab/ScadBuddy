@@ -40,6 +40,14 @@ export const MESSAGE_MAX = 2_000
 
 /** The quick replies the card offers when the agent names none. */
 export const DEFAULT_REPLIES = ["I'm here", 'Carry on without me'] as const
+/** A tab wait's reply that means the tab is back (sessions/manager.ts waitForTab). */
+export const IM_BACK = "I'm back"
+/**
+ * Replies that say only "the tab is back": a reconnect that resolved the row first
+ * already did what they ask (questions/service.ts answer). Any other reply is words
+ * the model would never read, so it is not one of these.
+ */
+export const BACK_REPLIES: readonly string[] = [IM_BACK, DEFAULT_REPLIES[0]]
 
 /** What the card's header says for each reason. */
 const HEADERS: Record<AttentionReason, string> = {
