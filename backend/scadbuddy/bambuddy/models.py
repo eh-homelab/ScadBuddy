@@ -296,6 +296,8 @@ Tier = Literal["fine", "standard", "draft"]
 #: in ``scadbuddy/rack`` so the settings store can remember it per printer without
 #: importing the ranking (which reaches the client, which imports the store).
 RackAlgorithm = Literal["least_used", "oldest_first", "newest_first", "bambuddy"]
+#: A printer with no remembered algorithm ranks by this (spec 2026-10-01 §4).
+DEFAULT_ALGORITHM: RackAlgorithm = "least_used"
 
 
 class NozzleChoice(BaseModel):

@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { RUN_REATTEMPTS } from '../src/tools/print.js'
+import { ACCEPTING_MS, RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
@@ -50,6 +50,12 @@ const SCHEMA = {
     { name: 'logo', type: 'file', initial: 'default-logo.svg', accept: ['svg'], samples: ['default-logo.svg', 'star.svg'] },
   ],
 }
+
+describe('print_output still-accepting budget (#1061)', () => {
+  it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
+    expect(ACCEPTING_MS).toBe(240_000)
+  })
+})
 
 describe('validateParams', () => {
   it('accepts values the customizer could produce and reports effective values', () => {
@@ -455,6 +461,52 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBeFalsy()
       expect(ids).toHaveLength(2)
       expect(ids[1]).toBe(ids[0])
+    })
+
+    // No Retry-After unless a test sets one: a real one is whole seconds (review #1061 4a).
+    const accepting = (retryAfter?: string) => () =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/command-still-accepting',
+          title: 'Service Unavailable',
+          status: 503,
+          detail: 'ScadBuddy is still checking this print.',
+        },
+        { status: 503, headers: retryAfter ? { 'Retry-After': retryAfter } : {} },
+      )
+
+    it('re-sends while the backend is still accepting the same request (#1052)', async () => {
+      const { ids, handler } = posts([accepting(), () => HttpResponse.json(running, { status: 202 })])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
+      const sent: number[] = []
+      const { ids, handler } = posts([
+        () => (sent.push(Date.now()), accepting('0.2')()),
+        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    })
+
+    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
+      const { ids, handler } = posts([
+        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting()),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(RUN_REATTEMPTS + 4)
+      expect(new Set(ids).size).toBe(1)
     })
 
     it("never re-sends a problem the backend wrote, even a 503", async () => {
