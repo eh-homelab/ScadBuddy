@@ -72,8 +72,12 @@ FROM s, unnest(%(texts)s::text[]) WITH ORDINALITY AS e(event, ord)
 RETURNING seq
 """
 
-# What a settled session's open approvals resolve with.
+# What a settled session's open approvals resolve with, unless a Stop ended its run.
 RUN_ENDED = "the session's run ended"
+
+# The agent service's update-with-start deadline, D (agent/src/durable/client.ts
+# DURABLE_SEND_DEADLINE_MS): a send's mark unchanged for 2 x D is from a send that is gone.
+SEND_DEADLINE_S = 30.0
 
 _APPEND = """
 WITH s AS (
@@ -99,7 +103,25 @@ class LatestRun:
     run_id: str
     #: The first run's id: Continue-As-New keeps it, a new start does not.
     chain: str
-    running: bool
+    status: WorkflowExecutionStatus | None
+
+    @property
+    def running(self) -> bool:
+        return self.status == WorkflowExecutionStatus.RUNNING
+
+    @property
+    def stopped(self) -> bool:
+        """Closed by a Stop: the workflow returns its state on cancellation (deviation 4)."""
+        return self.status in (WorkflowExecutionStatus.COMPLETED, WorkflowExecutionStatus.CANCELED)
+
+
+@dataclass(frozen=True)
+class StreamRow:
+    """What the settle compares against, read before the run is described."""
+
+    status: str
+    event_seq: int
+    sending: str | None
 
 
 class LeaseLost(Exception):
@@ -291,7 +313,7 @@ class Projector:
         lease_s: float = 20,
         renew_s: float = 5,
         poll_s: float = 0.5,
-        settle_polls: int = 20,
+        send_deadline_s: float = SEND_DEADLINE_S,
         tiers: Mapping[str, str] = TIERS,
     ) -> None:
         self._pool = pool
@@ -302,10 +324,11 @@ class Projector:
         self._poll_s = poll_s
         self._tiers = tiers
         self._followers: dict[str, asyncio.Task[None]] = {}
-        # A session that says it runs, with no run running: how many claims in a row saw
-        # the same (run, event_seq, sending). See `_settle_if_stale`.
-        self._settle_polls = settle_polls
-        self._stale: dict[str, tuple[tuple[Any, ...], int]] = {}
+        # A session that says it runs with no run running, and a send's mark on it: what the
+        # claims saw, and since when (the event loop's clock, which is monotonic). See
+        # `_settle_if_stale`.
+        self._send_deadline_s = send_deadline_s
+        self._stale: dict[str, tuple[tuple[Any, ...], float]] = {}
 
     @property
     def following(self) -> set[str]:
@@ -401,11 +424,14 @@ class Projector:
         wid = f"session-{session_id}"
         try:
             while True:
+                # Read before the describe: a start that lands, and clears its mark, after
+                # this read then fails the settle's compare-and-set on these values.
+                row = await self._stream_row(session_id)
                 latest = await self._latest(wid)
                 if latest is None or not latest.running:
                     # No run runs: nothing of a closed one is ours to log. A new run may be
                     # about to start (a send in flight), or none will (a terminate, a crash).
-                    await self._settle_if_stale(session_id, latest)
+                    await self._settle_if_stale(session_id, wid, latest, row)
                     await self._release(session_id)
                     return
                 self._stale.pop(session_id, None)
@@ -444,25 +470,9 @@ class Projector:
                 raise
             return None
         info = desc.raw_description.workflow_execution_info
-        return LatestRun(
-            run_id=desc.run_id,
-            chain=info.first_run_id or desc.run_id,
-            running=desc.status == WorkflowExecutionStatus.RUNNING,
-        )
+        return LatestRun(run_id=desc.run_id, chain=info.first_run_id or desc.run_id, status=desc.status)
 
-    async def _settle_if_stale(self, session_id: str, latest: LatestRun | None) -> None:
-        """A session that says `running` or `waiting_approval` with no run running goes idle.
-
-        Its run was terminated or failed, or the agent service died between its claim and
-        its start. The stream's `sending` (set by the agent service's claim, cleared once its
-        update-with-start answered) tells a send still in flight: while it is set, the run it
-        starts may simply not exist yet, so the session settles only after `settle_polls`
-        claims in a row saw the same run, `event_seq` and `sending` (polls, not clock time:
-        a live send clears `sending` or logs within one). With `sending` clear, no send is
-        in flight, and the session settles at once. Either way the settle is conditional on
-        both still being what was seen (`settle_idle`). Open approvals of the turn resolve
-        as not approved (RUN_ENDED).
-        """
+    async def _stream_row(self, session_id: str) -> StreamRow | None:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT s.status, s.event_seq, d.sending FROM ai_sessions s"
@@ -470,35 +480,67 @@ class Projector:
                 (session_id,),
             )
             row = await cur.fetchone()
-        if row is None or row[0] not in ("running", "waiting_approval"):
+        if row is None:
+            return None
+        return StreamRow(str(row[0]), int(row[1]), None if row[2] is None else str(row[2]))
+
+    async def _settle_if_stale(
+        self, session_id: str, wid: str, latest: LatestRun | None, row: StreamRow | None
+    ) -> None:
+        """A session that says `running` or `waiting_approval` with no run running goes idle.
+
+        Its run was stopped, terminated or failed, or the agent service died between its
+        claim and its start. `row` was read BEFORE `latest` was described, and the settle is
+        a compare-and-set on it (`settle_idle`), so a start that lands after the read (and
+        clears the mark) makes the settle refuse.
+
+        The stream's `sending` is the agent service's mark of a send in flight: set by its
+        claim, cleared once its update-with-start answered (manager.ts `clearSending`), and
+        kept when that RPC hit its deadline D (`DURABLE_SEND_DEADLINE_MS`), because the
+        start may still land. While it is set, the run it starts may simply not exist yet.
+        The RPC never outlives D, so a mark that claims saw unchanged (same run, event_seq,
+        sending) for more than 2 x D (`send_deadline_s`, by the event loop's monotonic
+        clock, so the host's wall-clock jumps do not count) is from a send that is gone.
+        With `sending` clear, no send is in flight, and the session settles at once.
+
+        A run a Stop closed resolves its open approvals as a stop does (the `cancelled`
+        event's translation, decisions from DECISIONS_QUERY or the log); any other end, or no
+        run at all, as RUN_ENDED.
+        """
+        if row is None or row.status not in ("running", "waiting_approval"):
             self._stale.pop(session_id, None)
             return
-        event_seq, sending = int(row[1]), None if row[2] is None else str(row[2])
-        if sending is not None:
-            seen = (None if latest is None else latest.run_id, event_seq, sending)
+        if row.sending is not None:
+            seen = (None if latest is None else latest.run_id, row.event_seq, row.sending)
+            now = asyncio.get_running_loop().time()
             previous = self._stale.get(session_id)
-            count = previous[1] + 1 if previous and previous[0] == seen else 1
-            self._stale[session_id] = (seen, count)
-            if count < self._settle_polls:
+            since = previous[1] if previous and previous[0] == seen else now
+            self._stale[session_id] = (seen, since)
+            if now - since <= 2 * self._send_deadline_s:
                 return
         self._stale.pop(session_id, None)
         open_ids, resolved = await self._open_approvals(session_id)
-        events: list[dict[str, Any]] = [
-            {
-                "v": 1,
-                "type": "approval.resolved",
-                "sessionId": session_id,
-                "id": durable_approval_id(session_id, call_id),
-                "approved": False,
-                "reason": RUN_ENDED,
-            }
-            for call_id in open_ids
-            if call_id not in resolved
-        ]
-        events.append({"v": 1, "type": "session.status", "sessionId": session_id, "status": "idle"})
+        if latest is not None and latest.stopped:
+            translator = Translator(session_id, self._tiers, open_ids, resolved)
+            translator.mark_resolved(await self._resolved_now(session_id, wid))
+            events = translator.feed({"type": "cancelled", "offset": 0}).events
+        else:
+            events = [
+                {
+                    "v": 1,
+                    "type": "approval.resolved",
+                    "sessionId": session_id,
+                    "id": durable_approval_id(session_id, call_id),
+                    "approved": False,
+                    "reason": RUN_ENDED,
+                }
+                for call_id in open_ids
+                if call_id not in resolved
+            ]
+            events.append({"v": 1, "type": "session.status", "sessionId": session_id, "status": "idle"})
         async with self._pool.connection() as conn:
             settled = await settle_idle(
-                conn, session_id, events, holder=self._holder, event_seq=event_seq, sending=sending
+                conn, session_id, events, holder=self._holder, event_seq=row.event_seq, sending=row.sending
             )
         if settled is not None:
             log.info("projector %s: settled %s, whose run is gone, to idle", self._holder, session_id)

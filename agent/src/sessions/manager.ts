@@ -1076,10 +1076,13 @@ export class SessionManager {
     ])
     clearTimeout(timer)
     const report = (e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)
-    // Once the update-with-start answered, whatever it answered, no start is in flight.
+    // Once the update-with-start answered, no start is in flight, except when its RPC timed
+    // out or was aborted: the start may still land, so the mark stays (the projector counts
+    // it stale only after 2 x DURABLE_SEND_DEADLINE_MS).
     sending.then(
       () => this.clearSending(id, turnId).catch(report),
-      () => this.clearSending(id, turnId).catch(report),
+      (err: unknown) =>
+        err instanceof WorkflowUpdateRPCTimeoutOrCancelledError ? undefined : this.clearSending(id, turnId).catch(report),
     )
     if (first === late) {
       // Nobody waits for the answer any more: the log says what becomes of the message.
@@ -1148,14 +1151,16 @@ export class SessionManager {
       // `sending` marks the update-with-start in flight until it answers (clearSending):
       // until then a closed run may be the new one not started yet, which the projector
       // must not settle idle on (projector.py `_settle_if_stale`).
+      // A new run's reset writes the turn id as the chain, never NULL: a follower still on
+      // the previous chain cannot compare-and-set against a reset it did not see (ABA).
       if (result.started === 'attached') {
         await tx`
           INSERT INTO ai_durable_streams (session_id, sending) VALUES (${id}, ${turnId})
           ON CONFLICT (session_id) DO UPDATE SET sending = excluded.sending`
       } else {
         await tx`
-          INSERT INTO ai_durable_streams (session_id, sending) VALUES (${id}, ${turnId})
-          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0, chain = NULL, sending = excluded.sending`
+          INSERT INTO ai_durable_streams (session_id, chain, sending) VALUES (${id}, ${turnId}, ${turnId})
+          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0, chain = excluded.chain, sending = excluded.sending`
       }
       return this.events.append(id, events, tx)
     })

@@ -1,9 +1,14 @@
-import { WithStartWorkflowOperation, WorkflowUpdateFailedError } from '@temporalio/client'
+import {
+  WithStartWorkflowOperation,
+  WorkflowUpdateFailedError,
+  WorkflowUpdateRPCTimeoutOrCancelledError,
+} from '@temporalio/client'
 import { ApplicationFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import {
   DURABLE_APPROVAL_PREFIX,
+  DURABLE_SEND_DEADLINE_MS,
   DURABLE_TASK_QUEUE,
   DURABLE_WORKFLOW,
   durableApprovalId,
@@ -81,6 +86,17 @@ describe('TemporalDurableSessions', () => {
       started: 'attached',
       resumedFresh: false,
     })
+  })
+
+  it('gives the update-with-start a deadline: an RPC that hangs is aborted after it', async () => {
+    const { client, signals } = fakeClient({ status: 'RUNNING', hangUpdate: true })
+    const durable = new TemporalDurableSessions(client, noRows, { sendDeadlineMs: 50 })
+    await expect(durable.send(input, { text: 'hi', context: 'page' })).rejects.toBeInstanceOf(
+      WorkflowUpdateRPCTimeoutOrCancelledError,
+    )
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(DURABLE_SEND_DEADLINE_MS).toBe(30_000)
   })
 
   it('starts an unknown ID with no state, and says it is fresh rather than resumed', async () => {

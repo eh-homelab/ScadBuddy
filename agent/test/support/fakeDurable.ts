@@ -1,4 +1,4 @@
-import type { Client, WithStartWorkflowOperation } from '@temporalio/client'
+import { type Client, type WithStartWorkflowOperation, WorkflowUpdateRPCTimeoutOrCancelledError } from '@temporalio/client'
 import type {
   DurableMessage,
   DurableSendOptions,
@@ -82,14 +82,23 @@ export function fakeTemporalClient(options: {
   chainAfterUpdate?: string
   /** `describe` calls (1-based) that fail as an unreachable Temporal would. */
   failDescribes?: number[]
+  /** The update-with-start never answers by itself: only its abort signal ends it, as gRPC does. */
+  hangUpdate?: boolean
 }) {
   const updates: FakeUpdate[] = []
   const reviews: { id: string; name: string; args: unknown[] }[] = []
   const cancelled: string[] = []
   let described = 0
+  const signals: AbortSignal[] = []
   const notFound = () => Object.assign(new Error('workflow not found'), { name: 'WorkflowNotFoundError' })
   const client = {
-    connection: { withDeadline: <T>(_deadline: number, fn: () => Promise<T>) => fn() },
+    connection: {
+      withDeadline: <T>(_deadline: number, fn: () => Promise<T>) => fn(),
+      withAbortSignal: <T>(signal: AbortSignal, fn: () => Promise<T>) => {
+        signals.push(signal)
+        return fn()
+      },
+    },
     workflow: {
       getHandle: (id: string) => ({
         describe: async () => {
@@ -113,8 +122,13 @@ export function fakeTemporalClient(options: {
         updates.push({ name, options: update })
         await options.onUpdate?.({ name, options: update })
         if (options.updateError) throw options.updateError
+        const signal = signals.at(-1)
+        if (options.hangUpdate && signal) {
+          await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+          throw new WorkflowUpdateRPCTimeoutOrCancelledError('Workflow update call timeout or cancelled')
+        }
       },
     },
   }
-  return { client: client as unknown as Client, updates, reviews, cancelled }
+  return { client: client as unknown as Client, updates, reviews, cancelled, signals }
 }

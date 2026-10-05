@@ -97,6 +97,13 @@ export interface DurableSessions {
 /** How long a describe or a query may take before Temporal counts as unreachable. */
 const ASK_MS = 10_000
 
+/**
+ * D: the longest an update-with-start may take before it is aborted (it then rejects with
+ * WorkflowUpdateRPCTimeoutOrCancelledError, and the start may still land). agent-durable's
+ * projector counts a send's mark unchanged for 2 x D as stale (projector.py SEND_DEADLINE_S).
+ */
+export const DURABLE_SEND_DEADLINE_MS = 30_000
+
 /** The model-only line for calls whose results a snapshot restore lost (deviation 4, point 3). */
 export function lostResultsLine(calls: { id: string; name: string }[]): string | undefined {
   if (calls.length === 0) return undefined
@@ -119,11 +126,13 @@ function unreachable(err: unknown): boolean {
 export class TemporalDurableSessions implements DurableSessions {
   readonly #client: Client
   readonly #sql: Sql
+  readonly #sendDeadlineMs: number
 
   /** `sql` reads ai_durable_snapshots and the audit's tool calls for a restore. */
-  constructor(client: Client, sql: Sql) {
+  constructor(client: Client, sql: Sql, options: { sendDeadlineMs?: number } = {}) {
     this.#client = client
     this.#sql = sql
+    this.#sendDeadlineMs = options.sendDeadlineMs ?? DURABLE_SEND_DEADLINE_MS
   }
 
   async #ask<T>(work: () => Promise<T>): Promise<T> {
@@ -188,13 +197,21 @@ export class TemporalDurableSessions implements DurableSessions {
       workflowIdConflictPolicy: 'USE_EXISTING',
       workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
+    // Aborted after D (a timer, not a wall-clock deadline): a hung RPC ends, and the
+    // projector can then tell a send that is gone from one still starting its run.
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), this.#sendDeadlineMs)
     try {
-      await this.#client.workflow.executeUpdateWithStart(SEND_UPDATE, {
-        args: [{ text: message.text, context }],
-        startWorkflowOperation: operation,
-      })
+      await this.#client.connection.withAbortSignal(abort.signal, () =>
+        this.#client.workflow.executeUpdateWithStart(SEND_UPDATE, {
+          args: [{ text: message.text, context }],
+          startWorkflowOperation: operation,
+        }),
+      )
     } catch (err) {
       throw this.#mapped(err)
+    } finally {
+      clearTimeout(timer)
     }
     if (result.started !== 'attached') return result
     // Attached as far as `describe` knew: a new chain means the run closed in between and

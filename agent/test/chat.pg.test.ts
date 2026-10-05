@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { WorkflowUpdateFailedError } from '@temporalio/client'
+import { WorkflowUpdateFailedError, WorkflowUpdateRPCTimeoutOrCancelledError } from '@temporalio/client'
 import { ApplicationFailure } from '@temporalio/common'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SETTING_APPROVAL_EXPIRY_SECONDS } from '../src/approvals/service.js'
@@ -544,9 +544,26 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
       expect(marks).toEqual([turn.turnId])
       await expect.poll(() => sending(sid)).toBeNull()
       // A new run: the offset and its chain were reset with the claim.
+      // The chain is a sentinel no run has (the turn id), never NULL: a follower that read
+      // (0, NULL) before its first commit cannot match the reset row (projector.py append_batch).
       expect(await db.sql`SELECT next_offset::int AS n, chain FROM ai_durable_streams WHERE session_id = ${sid}`).toEqual([
-        { n: 0, chain: null },
+        { n: 0, chain: turn.turnId },
       ])
+    })
+
+    it('keeps the mark when the start RPC timed out, since the start may still land', async () => {
+      const fake = fakeTemporalClient({
+        status: 'RUNNING',
+        updateError: new WorkflowUpdateRPCTimeoutOrCancelledError('Workflow update call timeout or cancelled'),
+      })
+      const m = await durableManager(new TemporalDurableSessions(fake.client, db.sql))
+      const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+      const turn = await m.send(session.id, browser, 'hi')
+      // Whatever the manager does after the answer has run by the time the log is read twice.
+      await m.events.read(session.id)
+      await m.events.read(session.id)
+      expect(await sending(session.id)).toBe(turn.turnId)
+      expect(await status(session.id)).toBe('running')
     })
 
     it('clears the mark when the start fails too', async () => {
