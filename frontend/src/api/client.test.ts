@@ -5,6 +5,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  OPERATION_UNFINISHED,
   UNANSWERED,
   api,
   mayHaveRun,
@@ -837,6 +838,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     const caught = await api.reprint(35).catch((e: unknown) => e)
     expect(caught).toBeInstanceOf(ApiError)
     expect((caught as ApiError).status).toBe(504)
+    expect((caught as ApiError).problem.type).toBe(OPERATION_UNFINISHED)
     expect((caught as ApiError).problem.detail).toContain('op-1')
     expect((caught as ApiError).problem.detail).toContain('check before trying again')
   })
