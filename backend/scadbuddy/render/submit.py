@@ -163,7 +163,10 @@ class RenderService:
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
         and answer the row its first activity wrote. ``request_id`` (the request's
-        `Idempotency-Key`) makes a re-sent request the same claim, not another."""
+        `Idempotency-Key`) makes a re-sent request the same claim, not another: it is
+        the `accepted` Update's id, which Temporal answers with its first outcome on
+        the open run and, once that run has closed, on the closed one (until another
+        run of the key starts)."""
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
             job, coalesced = await self._submit(
                 slug,

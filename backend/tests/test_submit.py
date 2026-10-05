@@ -881,6 +881,32 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
     assert (dropped.state, dropped.error) == ("cancelled", SUPERSEDED_ERROR)
 
 
+async def test_a_request_resent_after_its_render_closed_is_answered_with_its_job(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """The key is the `accepted` Update's id. Sent again once ``render-<key>`` has
+    closed, update-with-start answers it with the closed run's outcome rather than a
+    new run: the same job, not a second one (review #1066 (6) 2)."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            request = uuid.uuid4().hex
+            first = await service.submit(SLUG, {"width": width}, request_id=request)
+            await _settled(projection, first.id)
+            assert first.workflow_id is not None
+            await asyncio.wait_for(
+                client.get_workflow_handle(first.workflow_id).result(), timeout=30
+            )
+            again = await service.submit(SLUG, {"width": width}, request_id=request)
+        await service.aclose()
+
+    assert (again.id, again.workflow_run_id) == (first.id, first.workflow_run_id)
+    assert acts.accepts == 1
+
+
 class _SlowAccept(ProjectingActivities):
     """`render_accept` waits for ``accepting``: an Update that outlives its deadline."""
 
