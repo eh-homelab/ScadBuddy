@@ -17,7 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api import outputs as outputs_api
+from scadbuddy.bambuddy import project_file
 from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import META_NAME
@@ -240,7 +240,7 @@ def test_naming_the_file_never_fails_the_print(
     def broken(*args: object) -> str:
         raise RuntimeError("the library checkout is gone")
 
-    monkeypatch.setattr(outputs_api, "_output_stem", broken)
+    monkeypatch.setattr(project_file, "_output_stem", broken)
     ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert uploaded_name(uploaded) == f"{project_stem(model, {}, {}, name='Elan')}.3mf"
