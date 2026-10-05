@@ -55,9 +55,19 @@ jobs:
   #
   # The `if:` below is a cheap STRUCTURAL filter only (is this event even a
   # candidate) — never the trust check.
+  #
+  # pr-feedback issues go through intake too, whoever filed them. They
+  # used to be excluded here, as in clusters, on the grounds that they arrive
+  # labelled and linked to their PR. But linked to a PR is not grouped: with
+  # no intake, none was ever checked against its siblings for duplicates or
+  # wired to its epic, and 257 piled up that way. They get a lighter intake
+  # (MODE below): the duplicate check and epic wiring only.
   gate:
     if: |
       (
+        github.event.action == 'opened' &&
+        contains(github.event.issue.labels.*.name, 'pr-feedback')
+      ) || (
         github.event.action == 'opened' &&
         !contains(fromJSON('["claude[bot]", "eh-homelab-org-runners[bot]", "dependabot[bot]"]'), github.event.issue.user.login) &&
         !contains(github.event.issue.labels.*.name, 'pr-feedback')
@@ -96,6 +106,7 @@ jobs:
           ACTOR: ${{ github.event.sender.login }}
           ACTION: ${{ github.event.action }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_FEEDBACK: ${{ contains(github.event.issue.labels.*.name, 'pr-feedback') }}
         run: |
           # NOTE: Actions runs every `run:` block as `bash -e {0}`; `set -uo
           # pipefail` only ADDS flags and cannot remove that -e. Any command
@@ -103,6 +114,22 @@ jobs:
           set -uo pipefail
 
           echo "action=${ACTION} issue=#${ISSUE_NUMBER} actor=${ACTOR}"
+
+          # pr-feedback issues are mostly filed by pr-follow-up-issues.yml as
+          # claude[bot], and a bot is never a collaborator, so the permission
+          # check below would skip every one of them. Those two bots only
+          # write here from this repo's own workflows, so their pr-feedback
+          # issues are trusted on the `opened` path. Re-triage (`labeled`)
+          # still needs a human with triage-or-better.
+          if [ "$ACTION" = "opened" ] && [ "$PR_FEEDBACK" = "true" ]; then
+            case "$ACTOR" in
+              "claude[bot]"|"eh-homelab-org-runners[bot]")
+                echo "allowed=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::Intake accepted for a pr-feedback issue filed by ${ACTOR}."
+                exit 0
+                ;;
+            esac
+          fi
 
           # `var="$(cmd)"` is a simple command: under `bash -e` a non-zero
           # exit aborts the STEP before the next line can read `$?`. forge's
@@ -270,6 +297,11 @@ jobs:
           # NO mcp__github__create_issue either — that is what makes "never
           # invent an epic" a capability boundary rather than a prompt request.
           #
+          # A pr-feedback intake (MODE: pr-feedback in the prompt) skips labels
+          # and does two analyses, so it gets half the turns: it shares
+          # CLAUDE_CODE_OAUTH_TOKEN with the merge-gate review, and one PR's
+          # follow-up batch files several issues at once.
+          #
           # --max-turns is well above the default 20 (a full intake does not
           # fit), but below forge's 100 since the six board fields are gone.
           # `Read,Glob,Grep` are granted (the clusters original has none):
@@ -282,7 +314,7 @@ jobs:
           # reading a linked PR). Leaving them out got each such run denied and
           # stamped failed:issue-intake despite a completed intake.
           claude_args: |
-            --allowedTools "Read,Glob,Grep,Bash(gh:*),mcp__github__get_issue,mcp__github__search_issues,mcp__github__update_issue,mcp__github__add_issue_comment,mcp__github__get_issue_comments,mcp__github__list_sub_issues,mcp__github__get_pull_request" --model "claude-sonnet-5" --max-turns 60
+            --allowedTools "Read,Glob,Grep,Bash(gh:*),mcp__github__get_issue,mcp__github__search_issues,mcp__github__update_issue,mcp__github__add_issue_comment,mcp__github__get_issue_comments,mcp__github__list_sub_issues,mcp__github__get_pull_request" --model "claude-sonnet-5" --max-turns ${{ contains(github.event.issue.labels.*.name, 'pr-feedback') && '30' || '60' }}
           prompt: |
             You are the issue intake agent for eh-homelab/ScadBuddy — a self-hosted OpenSCAD customizer that reproduces MakerWorld's Parametric Model Maker inside Bambuddy (Python/FastAPI backend that shells out to `openscad`, React 19 + Vite frontend, `.scad` models, one container). The approved design spec is `docs/superpowers/specs/2026-09-22-scadbuddy-design.md`; read it when an issue's area is unclear. Your job is to triage one GitHub issue: check for duplicates, apply labels, wire it to an existing epic if one fits, and note blockers.
 
@@ -292,6 +324,16 @@ jobs:
             - ISSUE_NUMBER: ${{ github.event.issue.number }}
             - EVENT: ${{ github.event_name }}.${{ github.event.action }} - Label (if a labeled event): ${{ github.event.label.name }}
             - RUN_URL: ${{ steps.run-link.outputs.job_url }}
+            - MODE: ${{ contains(github.event.issue.labels.*.name, 'pr-feedback') && 'pr-feedback' || 'full' }}
+
+            ## MODE: pr-feedback
+
+            If MODE above is `pr-feedback`, this issue is a review finding filed against a PR, already labelled and linked to it. Do a lighter intake, and override the steps below as follows:
+
+            - **Step 2, Analysis A (duplicates) is the main job.** Search open `label:pr-feedback` issues AND other open issues. A finding that the same or another PR's review already filed (same file and same root problem, even worded differently) is a duplicate; so is a finding an ordinary open issue already covers. Name the overlap precisely (file, function, the claim) so a human can merge them.
+            - **Skip Analysis B and Step 4 entirely.** Apply no labels other than `duplicate` (Step 3). Still remove `needs-triage` if it is present.
+            - **Analysis C / Step 5:** a pr-feedback body usually names its epic (e.g. "Part of epic #84"). Wire the issue as a sub-issue of that epic if it is open and is an epic; otherwise run Analysis C as written.
+            - **Step 6:** skip the blocker search. Keep the summary to a few lines: duplicates found or rejected, and the epic.
 
             EVERY comment you post on this issue must START with this exact
             line, followed by a blank line, before any other content:

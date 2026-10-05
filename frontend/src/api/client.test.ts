@@ -5,6 +5,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  OPERATION_UNFINISHED,
   UNANSWERED,
   api,
   mayHaveRun,
@@ -773,6 +774,106 @@ describe('render and createOutput (spec 2026-09-27 §4.3)', () => {
     expect(api.uiFileUrl('name-keychain', 'abc', 'a b.js')).toBe(
       '/api/v1/models/name-keychain/versions/abc/ui/a%20b.js',
     )
+  })
+})
+
+describe('command() sends a key and follows an operation (#1053)', () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+    printRunPoll.reattempts = 3
+    printRunPoll.operationFollowMs = 1_260_000
+  })
+
+  const operation = {
+    id: 'op-1',
+    kind: 'reprint',
+    subject: 'archive:35',
+    status: 'running',
+    created_at: '2026-10-03T00:00:00Z',
+  }
+  const again = { queue_item_id: 51, printer_id: 3, bambuddy_url: 'http://b/queue' }
+
+  it('sends one Idempotency-Key and re-sends it after an unanswered answer', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2
+          ? new HttpResponse('<html>upstream timed out</html>', { status: 504 })
+          : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it("follows a 202 to the operation's result", async () => {
+    printRunPoll.intervalMs = 1
+    let reads = 0
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () => {
+        reads += 1
+        return HttpResponse.json(
+          reads < 2 ? operation : { ...operation, status: 'succeeded', result: again },
+        )
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+  })
+
+  it('stops following an operation that never ends, naming it (review #1063)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.operationFollowMs = 20
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () => HttpResponse.json(operation)),
+    )
+
+    const caught = await api.reprint(35).catch((e: unknown) => e)
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).status).toBe(504)
+    expect((caught as ApiError).problem.type).toBe(OPERATION_UNFINISHED)
+    expect((caught as ApiError).problem.detail).toContain('op-1')
+    expect((caught as ApiError).problem.detail).toContain('check before trying again')
+  })
+
+  it("turns a failed operation into the route's ApiError", async () => {
+    printRunPoll.intervalMs = 1
+    const error = { type: 'about:blank', status: 502, title: 'Bad Gateway', detail: 'Bambuddy said no', extensions: {} }
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () => HttpResponse.json({ ...operation, status: 'failed', error })),
+    )
+
+    const caught = await api.reprint(35).catch((e: unknown) => e)
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).status).toBe(502)
+    expect((caught as ApiError).problem.detail).toBe('Bambuddy said no')
+  })
+
+  it.each([
+    ['sendOutput', () => api.sendOutput('out-1', { mode: 'library' }), '/api/v1/outputs/out-1/send'],
+    ['createProject', () => api.createProject({ name: 'P' }), '/api/v1/print/projects'],
+    ['fileIntoProject', () => api.fileIntoProject('out-1', 7), '/api/v1/outputs/out-1/project-file'],
+    ['attachToProject', () => api.attachToProject('out-1', {}), '/api/v1/print/outputs/out-1/project'],
+    ['pullTimelapse', () => api.pullTimelapse(35, 'a.mp4'), '/api/v1/prints/35/timelapse/pull'],
+    ['registerSidebar', () => api.registerSidebar(), '/api/v1/settings/register-sidebar'],
+  ])('%s sends an Idempotency-Key', async (_name, call, path) => {
+    let key: string | null = null
+    server.use(
+      http.post(path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({}, { status: 200 })
+      }),
+    )
+    await call()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
 })
 

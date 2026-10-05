@@ -14,11 +14,15 @@ from contextlib import suppress
 from datetime import timedelta
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Query, Response, status
+from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
@@ -32,32 +36,38 @@ from scadbuddy.api.deps import (
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.outputs import require_output
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    STILL_ACCEPTING_PROBLEM,
+    TEMPORAL_UNAVAILABLE_PROBLEM,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
-from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
     check_for_output,
-    chosen_project,
     filament_options_for_output,
 )
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
+    ProjectAttach,
     ProjectChoices,
     ProjectRequest,
     ProjectView,
-    attach_results,
     describe_projects,
-    ensure_project,
 )
 from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
@@ -81,9 +91,6 @@ from scadbuddy.workflows.print_models import (
 
 logger = logging.getLogger(__name__)
 
-#: Problem ``type``s for a print the route could not hand to Temporal (#1052).
-STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
-TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
 #: Temporal answered and refused (a wrong namespace, a denied permission): sending the
 #: same request again will not help until it is fixed (review #1316 (2) 7).
 TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
@@ -141,18 +148,6 @@ class PrinterRackAlgorithm(BaseModel):
     algorithm: RackAlgorithm
 
 
-class ProjectAttach(BaseModel):
-    """Which of this output's queue entries to file under the project.
-
-    The ids come from the progress read (#89): a plate's queue item only exists once it
-    has sliced, so the caller learns them by polling.
-    """
-
-    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
-    project_id: int | None = None
-    queue_item_ids: list[int] = Field(default_factory=list)
-
-
 @router.put(
     "/models/{slug}/choices",
     response_model=ModelPrintChoices,
@@ -194,16 +189,42 @@ def put_printer_bed_type(
     "/printers/{printer_id}/rack-algorithm",
     response_model=PrinterRackAlgorithm,
     summary="Remember how this printer's rack nozzle is picked",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "The database did not answer within the save's bound, so it was probably not saved "
+                "(#1129). Whether resending is safe is #1216."
+            )
+        }
+    },
 )
 def put_printer_rack_algorithm(
     printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
     Bambuddy, like the printer's remembered plate."""
-    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
-    return PrinterRackAlgorithm(
-        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
-    )
+    try:
+        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    except DATABASE_ERRORS as error:
+        # The store gives up on purpose rather than commit after the dialog has (#1129).
+        # Only a pool wait or a cancelled statement is known to have saved nothing; any
+        # other lost connection may have dropped after the commit.
+        logger.warning(
+            "rack-algorithm save gave up on the database",
+            extra={"printer_id": printer_id, "error": type(error).__name__},
+        )
+        rolled_back = isinstance(error, PoolTimeout | psycopg.errors.QueryCanceled)
+        outcome = (
+            "nothing was saved"
+            if rolled_back
+            else "could not confirm the save; check the setting before resending"
+        )
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{outcome}: the database did not answer in time ({type(error).__name__})",
+            type_=DATABASE_UNAVAILABLE_PROBLEM,
+        ) from None
+    return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
 
 
 @router.get(
@@ -627,8 +648,18 @@ def put_last_project(body: LastProject, store: SettingsStoreDep) -> LastProject:
     return LastProject(project_id=settings.last_project_id)
 
 
-@router.post("/projects", response_model=ProjectView, summary="Create or link a project")
-async def post_project(body: ProjectRequest, store: SettingsStoreDep) -> ProjectView:
+@router.post(
+    "/projects",
+    response_model=ProjectView,
+    summary="Create or link a project",
+    responses=OPERATION_RESPONSES,
+)
+async def post_project(
+    body: ProjectRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ProjectView | JSONResponse:
     """``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with
     ``project_id``, which is the pairing Bambuddy's own UI makes.
 
@@ -636,22 +667,31 @@ async def post_project(body: ProjectRequest, store: SettingsStoreDep) -> Project
     is left alone if it already has one — linking twice must not leave Bambuddy with two
     folders of the same name.
     """
-    async with client_for(store.load()) as client:
-        return await ensure_project(client, body)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["create_project"],
+        subject="project",
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ProjectView)
 
 
 @router.post(
     "/outputs/{output_id}/project",
     response_model=AttachResult,
     summary="File this output's queue entries under its project",
+    responses=OPERATION_RESPONSES,
 )
 async def post_attach_project(
     output_id: OutputIdPath,
     body: ProjectAttach,
+    response: Response,
     outputs: OutputsDep,
-    links: PrintLinksDep,
-    store: SettingsStoreDep,
-) -> AttachResult:
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> AttachResult | JSONResponse:
     """``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
 
     Separate from the run because neither id exists when a print starts: a plate's
@@ -659,27 +699,14 @@ async def post_attach_project(
     has finished. Calling this again later is how the archives eventually land on the
     project's page, and attaching the same id twice is Bambuddy's to dedupe.
     """
-    meta = require_output(outputs, output_id)
-    settings = store.load()
-    project_id = chosen_project(body, settings)
-    if project_id is None:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            "this output has no project, so there is nothing to file it under",
-        )
-    ids = body.queue_item_ids or (
-        [plate.queue_item_id for plate in meta.plates]
-        or ([meta.queue_item_id] if meta.queue_item_id else [])
+    require_output(outputs, output_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["attach_project"],
+        subject=output_id,
+        # Unset fields stay unset: an omitted project_id is the remembered one (#317).
+        request={"output_id": output_id, "body": body.model_dump(mode="json", exclude_unset=True)},
+        idempotency_key=idempotency_key,
     )
-    async with client_for(settings) as client:
-        # The body's ids are filed under the project as asked, but only the output's own
-        # items are linked to it: a caller-named item would open its archive's media.
-        linkable = await owned_queue_items(client, meta, links, ids) if links.available else set()
-        return await attach_results(
-            client,
-            project_id,
-            queue_item_ids=ids,
-            output_id=meta.id,
-            links=links if links.available else None,
-            linkable=linkable,
-        )
+    return operation_answer(result, AttachResult)

@@ -36,11 +36,10 @@ from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
-    from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
+    from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
-        FAILED,
         PRINT_RUN_WORKFLOW,
         REFUSED,
         AcceptAnswer,
@@ -57,6 +56,7 @@ with workflow.unsafe.imports_passed_through():
         SliceStartInput,
         SucceedInput,
     )
+    from scadbuddy.workflows.problems import problem_of
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -129,16 +129,6 @@ UNWAITED = PrintRunError(
 )
 
 
-def _problem(error: BaseException) -> PrintRunError:
-    """The problem an activity reported (``REFUSED``/``FAILED`` details), else the
-    unexpected failure's: never the exception's own text, which may say anything."""
-    cause = error.cause if isinstance(error, ActivityError) else error
-    if isinstance(cause, ApplicationError) and cause.type in (REFUSED, FAILED) and cause.details:
-        detail: Any = cause.details[0]
-        return detail if isinstance(detail, PrintRunError) else PrintRunError.model_validate(detail)
-    return PrintRunError(status=500, title="Internal Server Error", detail=UNEXPECTED_DETAIL)
-
-
 #: ``workflow.patched`` id for review #1316's cancel handling: from the last plate's
 #: ``print_enqueue`` on, a cancel waits for the last activities, and a cancel the run
 #: absorbed ends its repeat window. A history from before it (#1061) replays with
@@ -195,7 +185,7 @@ class PrintRunWorkflow:
             # Nothing was written: the execution fails, and a retry may start again. A
             # cancel answers the Update too, so it is never outlived by its execution.
             cancelled = is_cancelled_exception(error)
-            refusal = CANCELLED if cancelled else _problem(error)
+            refusal = CANCELLED if cancelled else problem_of(error)
             await self._refuse(refusal)
             if cancelled:
                 raise
@@ -233,7 +223,7 @@ class PrintRunWorkflow:
                 # The record exists: whatever happened is recorded, and the execution
                 # completes. A cancel is recorded as one (review #1061 (3) 1).
                 if not is_cancelled_exception(error):
-                    problem = _problem(error)
+                    problem = problem_of(error)
                 else:
                     self.cancel_absorbed = True
                     # The row exists and a plate may be sliced: never "before it

@@ -25,7 +25,7 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
@@ -272,11 +272,21 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
     HOME=/var/lib/scadbuddy-agent \
     CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
 
+# Build provenance for the trace resource (service.version, scadbuddy.revision;
+# agent/src/telemetry/setup.ts), passed by build-image.yml like the runtime
+# image's.
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
 USER 10001:10001
 EXPOSE 8081
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/main.js"]
+# --import loads OpenTelemetry before the app (agent/src/telemetry.ts, #988):
+# the ESM loader hook must be registered before node:http is imported.
+CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 
 # No curl in this image; node's fetch is the probe. Exec form, like the
 # backend's, so the exit status is the signal.

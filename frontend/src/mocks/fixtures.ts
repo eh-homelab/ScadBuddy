@@ -776,6 +776,7 @@ export const settings: Settings = {
   default_plate: null,
   display_unit: 'mm',
   print_run_retention_seconds: null,
+  operation_retention_seconds: null,
   last_project_id: null,
   render_timeout: 300,
   job_ttl: 3600,

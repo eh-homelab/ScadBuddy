@@ -36,6 +36,7 @@ import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents
 import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
+import { shutdownTelemetry, traceListener } from './telemetry/setup.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -342,6 +343,7 @@ const app = createApp({
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
 const stopHeartbeat = startHeartbeat(wss)
 
+traceListener(PORT)
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
@@ -407,5 +409,8 @@ async function stop(): Promise<void> {
     timeoutMs: 10_000,
   })
   if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
+  // The last spans (this shutdown's turns among them), within 2 s of the
+  // pod's grace period. Without --import no SDK started and this is a no-op.
+  await shutdownTelemetry()
   process.exit(result === 'clean' ? 0 : 1)
 }

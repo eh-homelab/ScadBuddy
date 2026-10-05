@@ -47,6 +47,8 @@ export type ToolServices = {
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
   renderWaitMs: number
+  /** How long a command follows a 202 (tools/command.ts); `COMMAND_FOLLOW_MS` when unset. */
+  commandFollowMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */

@@ -113,8 +113,9 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"library_file_id", "filename", "bambuddy_url", "edit_url"}
+    assert set(body) == {"library_file_id", "filename", "bambuddy_url", "edit_url", "created"}
     assert body["library_file_id"] == 41
+    assert body["created"] is True
     assert body["bambuddy_url"] == f"{BASE}/library"
 
     request = route.calls.last.request
@@ -153,6 +154,8 @@ def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
 
     assert body["library_file_id"] == 41
+    # Reused, not uploaded: the agent records it as changed rather than new (#931).
+    assert body["created"] is False
     # The name is the one the existence read returned, not the one uploaded.
     assert body["filename"] == "renamed-in-bambuddy.3mf"
     assert upload.call_count == 1
