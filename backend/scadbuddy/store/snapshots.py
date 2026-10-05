@@ -13,11 +13,16 @@ than on the API's volume.
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import re
 from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.render.jobs import (
+    SnapshotPendingError as SnapshotPendingError,
+)
 from scadbuddy.render.jobs import (
     SnapshotUnavailableError as SnapshotUnavailableError,  # defined beside resolve_source
 )
@@ -32,6 +37,14 @@ from scadbuddy.store.content import (
 )
 from scadbuddy.store.locks import KeyLocks
 
+logger = logging.getLogger(__name__)
+
+#: How long a submit or preview waits for a revision's snapshot to be stored (#686).
+#: Only a revision's first pin exports and uploads; past this the caller gets a 503
+#: with Retry-After rather than hanging on the upload's own 180 s, and the store
+#: carries on behind it.
+PIN_TIMEOUT = 30.0
+
 
 def snapshot_key(slug: str, revision: str) -> str:
     return f"src-{re.sub(r'[^A-Za-z0-9._-]', '_', slug)}-{revision}"
@@ -45,12 +58,16 @@ class SnapshotStore:
         history: ModelHistory | None,
         *,
         locks: KeyLocks | None = None,
+        pin_timeout: float = PIN_TIMEOUT,
     ) -> None:
         self.content = content
         self.paths = paths
         self.history = history
         #: Shared with the worker's `FontMirror` (Task 8 passes one `KeyLocks`).
         self.locks = locks or KeyLocks()
+        self.pin_timeout = pin_timeout
+        #: The stores `pin` stopped waiting for, held so they run to the end.
+        self._storing: set[asyncio.Task[str]] = set()
 
     async def pin(self, slug: str, revision: str | None) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
@@ -61,8 +78,35 @@ class SnapshotStore:
             revision = await asyncio.to_thread(self.history.last_commit, model_path(slug))
             if revision is None:
                 return None
-        await self.ensure(slug, revision)
+        # Shielded: a caller that stops waiting (the timeout, or a client gone) leaves
+        # the store running, so the retry finds it done or joins it under the key's lock.
+        storing = asyncio.create_task(self.ensure(slug, revision))
+        try:
+            await asyncio.wait_for(asyncio.shield(storing), self.pin_timeout)
+        except TimeoutError:
+            self._behind(storing)
+            raise SnapshotPendingError(
+                f"the snapshot of {slug}@{revision[:12]} is still being stored; try again"
+                f" in {math.ceil(self.pin_timeout)} s",
+                retry_after=max(1, math.ceil(self.pin_timeout)),
+            ) from None
+        except asyncio.CancelledError:
+            self._behind(storing)
+            raise
         return revision
+
+    def _behind(self, storing: asyncio.Task[str]) -> None:
+        """Keep a store no caller waits for any more, and log how it ends."""
+        if storing.done():
+            return
+        self._storing.add(storing)
+
+        def settled(task: asyncio.Task[str]) -> None:
+            self._storing.discard(task)
+            if not task.cancelled() and (error := task.exception()) is not None:
+                logger.warning("storing a snapshot no request waited for failed", exc_info=error)
+
+        storing.add_done_callback(settled)
 
     async def ensure(self, slug: str, revision: str) -> str:
         key = snapshot_key(slug, revision)

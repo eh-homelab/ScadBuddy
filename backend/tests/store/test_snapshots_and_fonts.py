@@ -31,7 +31,12 @@ from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_famili
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError, snapshot_key
+from scadbuddy.store.snapshots import (
+    SnapshotPendingError,
+    SnapshotStore,
+    SnapshotUnavailableError,
+    snapshot_key,
+)
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import write_openscad_3mf
@@ -376,6 +381,40 @@ async def test_concurrent_ensures_of_a_new_revision_store_it_once(
     keys = await asyncio.gather(*(api.ensure("demo", rev) for _ in range(5)))
     assert keys == [snapshot_key("demo", rev)] * 5
     assert calls == 1
+
+
+async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: a revision's first pin exports, packs and uploads inside the submit. Past
+    `pin_timeout` the request stops waiting (a 503 with Retry-After) instead of hanging
+    for the upload's own 180 s, and the store it started finishes behind it, so the
+    retry finds the snapshot stored."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "7" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    put = content.put
+    uploading = asyncio.Event()
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        await uploading.wait()  # a Bambuddy that takes its time
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
+    with pytest.raises(SnapshotPendingError) as raised:
+        await asyncio.wait_for(api.pin("demo", rev), 5)
+    assert raised.value.retry_after >= 1
+    assert content.index.get(snapshot_key("demo", rev)) is None
+    uploading.set()
+    for _ in range(250):
+        if content.index.get(snapshot_key("demo", rev)) is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+    assert await asyncio.wait_for(api.pin("demo", rev), 5) == rev
 
 
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
