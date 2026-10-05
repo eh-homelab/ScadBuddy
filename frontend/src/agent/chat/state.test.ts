@@ -141,6 +141,20 @@ describe('chatReducer', () => {
     )
     expect(answered.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'], by: you })
 
+    // A replay while the answer is still on its way rebuilds the card as sent, so the
+    // route's 2xx still lands on it; once resolved, a later replay starts it pending (#1395).
+    const replayed = run(
+      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
+      sent,
+    )
+    expect(replayed.sessions.s1?.items).toEqual([expect.objectContaining({ id: 'q1', state: 'sent' })])
+    const took = run([{ type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you }], replayed)
+    expect(took.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'] })
+    expect(
+      run([{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })], took)
+        .sessions.s1?.items[0],
+    ).toMatchObject({ state: 'pending' })
+
     const cancelled = run(
       [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'interrupted by You' })],
       waiting,

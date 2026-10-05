@@ -109,6 +109,39 @@ describe('useAgentChat', () => {
     expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
   })
 
+  it('keeps a card sending across a reconnect replay while its response is in flight, and applies the 200 when it lands (#1395)', async () => {
+    let release!: () => void
+    const landed = new Promise<void>((r) => (release = r))
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', async () => {
+        await landed
+        return HttpResponse.json({ id: 'approval:a1', kind: 'approval', outcome: 'approved' })
+      }),
+    )
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'chat', owner, status: 'waiting_approval' }] }))
+    })
+    act(() => result.current.select('s1'))
+    act(() => parked(t.h()))
+    act(() => result.current.decide('s1', 'a1', true))
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+
+    // The socket drops and comes back before the POST returns: the feed is cleared and replayed.
+    act(() => {
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+      t.h().onOpen?.()
+    })
+    expect(result.current.state.sessions.s1?.items).toEqual([])
+    act(() => parked(t.h()))
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+
+    release()
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved', by: owner }))
+  })
+
   it('decides while the socket is down: the route does not need it, and the card does not wait for it', async () => {
     const posted = capture()
     const t = scripted(() => 'queued')

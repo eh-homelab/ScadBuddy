@@ -92,6 +92,12 @@ export interface SessionState {
    * panel shows one message and its actions instead of the agent's two errors.
    */
   budgetSpent?: boolean
+  /**
+   * #815 — approvals and questions whose response was still on its way (`sent`) when the
+   * feed was cleared for a replay. The replayed card shows `sent`, not live buttons, so
+   * the respond route's answer (`responded`/`respond-failed`) still finds it (#1395).
+   */
+  sending?: string[]
 }
 
 export interface ChatState {
@@ -295,7 +301,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: 'pending',
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -316,7 +322,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           tool: event.tool,
           questions: event.questions,
           ...(event.attention ? { attention: event.attention } : {}),
-          state: 'pending',
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -446,6 +452,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             items: [],
             // Replayed from the log; the numbers stay for a log that has none.
             budgetSpent: false,
+            sending: s.items.flatMap((i) => ((i.kind === 'approval' || i.kind === 'question') && i.state === 'sent' ? [i.id] : [])),
           }))
         : next
     }
