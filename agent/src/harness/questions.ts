@@ -103,9 +103,11 @@ export type QuestionVerdict =
   /** Keyed by question text; a multi-select answer is its labels joined by ", ". */
   | { answered: true; answers: Record<string, string> }
   /** Not answered; `message` is what the model reads as the tool's error. */
-  | { answered: false; message: string; timedOut?: false }
+  | { answered: false; message: string; timedOut?: false; posted?: false }
   /** #815: an attention request's `proceed` timer fired. Never an answer, and never an approval. */
-  | { answered: false; timedOut: true; message: string }
+  | { answered: false; timedOut: true; message: string; posted?: false }
+  /** #815: a `done` summary was posted. Nothing waits on it, so it has no answer. */
+  | { answered: false; posted: true; message: string; timedOut?: false }
 
 /** Parks a question until it is answered or the turn ends; a rejection counts as unanswered. */
 export type QuestionGate = (request: QuestionRequest) => Promise<QuestionVerdict>

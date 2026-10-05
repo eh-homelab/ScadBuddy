@@ -5,11 +5,14 @@ import { query, type SDKMessage, type SDKResultMessage, type SDKSystemMessage } 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   answeredText,
+  attentionCard,
   attentionHandler,
   attentionSpec,
   DEFAULT_REPLIES,
   DEFAULT_TIMEOUT_S,
+  DONE_REPLIES,
   parseAttention,
+  POSTED_TEXT,
   timedOutText,
   WAIT_CEILING_S,
 } from '../src/harness/attention.js'
@@ -66,11 +69,25 @@ describe('parseAttention', () => {
     const at = (on_timeout: string) => {
       const parsed = parseAttention({ reason: 'blocked', message: MESSAGE, timeout_s: 60, on_timeout })
       if (!parsed.ok) throw new Error(parsed.error)
-      return attentionSpec(parsed.input).timeoutS
+      const spec = attentionSpec(parsed.input)
+      if (spec.reason === 'done') throw new Error('a blocked request has a timer')
+      return spec.timeoutS
     }
     expect(at('wait')).toBe(WAIT_CEILING_S)
     expect(at('proceed')).toBe(60)
     expect(at('stop')).toBe(60)
+  })
+
+  // #815 §4: a done summary is posted, never waited on.
+  it("'done' has no timer and Dismiss replies, and refuses what only a wait would use", () => {
+    const parsed = parseAttention({ reason: 'done', message: MESSAGE })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(attentionSpec(parsed.input)).toEqual({ reason: 'done' })
+    expect(attentionCard(parsed.input)).toMatchObject({ header: 'Done', options: DONE_REPLIES.map((label) => ({ label })) })
+    for (const extra of [{ options: ['a', 'b'] }, { timeout_s: 60 }, { on_timeout: 'wait' }]) {
+      const refused = parseAttention({ reason: 'done', message: MESSAGE, ...extra })
+      expect(refused, JSON.stringify(extra)).toMatchObject({ ok: false, error: expect.stringMatching(/does not wait for a reply/) })
+    }
   })
 })
 
@@ -107,6 +124,14 @@ describe('request_user_attention handler', () => {
     const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'blocked', message: MESSAGE, timeout_s: 30 }, extra())
     expect(result).toEqual({ content: [{ type: 'text', text: timedOutText(30) }] })
     expect(timedOutText(30)).toMatch(/^timed_out: .*never approves anything/)
+  })
+
+  it('a posted done summary is a result, not an error, and tells the model nobody waits on it', async () => {
+    const { asked, gate } = recording(() => Promise.resolve({ answered: false, posted: true, message: 'posted' }))
+    const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'done', message: MESSAGE }, extra())
+    expect(asked).toMatchObject([{ attention: { reason: 'done' }, questions: [{ header: 'Done' }] }])
+    expect(result).toEqual({ content: [{ type: 'text', text: POSTED_TEXT }] })
+    expect(POSTED_TEXT).toMatch(/^posted: .*no reply will reach you/)
   })
 
   it('anything else is the error the model reads, and malformed input parks nothing', async () => {

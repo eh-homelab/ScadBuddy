@@ -4,6 +4,7 @@ import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_A
 import type { AttentionReason, OnTimeout } from '../harness/attention.js'
 import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
+import { loadDoneSummary } from './doneSummary.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -42,6 +43,13 @@ import {
 // turn). And they are throttled (#815 §5): one open request per session per
 // reason (a new one supersedes the last), and at most ATTENTION_RATE_LIMIT
 // created per ATTENTION_RATE_WINDOW_S across the user's sessions.
+//
+// A `done` ATTENTION REQUEST (#815 §4) is the exception to both rules above: it
+// is posted, never waited on. The call returns at once, the session never shows
+// `waiting_input` for it, and it OUTLIVES ITS TURN: it stays pending, and on the
+// badge, until the user dismisses it on its card (`answer`) or the session posts
+// a newer one. Its row carries `summary`, ScadBuddy's record of what the turn
+// touched (doneSummary.ts).
 //
 // WHO ANSWERS. Only the user in the ScadBuddy panel (the browser principal):
 // the question is the agent's own call, and an answer is a human's. No tool
@@ -109,7 +117,10 @@ export type PendingQuestion = {
   toolUseId: string
   questions: QuestionView[]
   attentionReason: AttentionReason | null
+  /** Null for a question, and for a `done` request, which has no timer. */
   onTimeout: OnTimeout | null
+  /** A `done` request's record of what its turn touched (doneSummary.ts); null otherwise. */
+  summary: string | null
   createdAt: string
   expiresAt: string | null
 }
@@ -179,11 +190,12 @@ export class QuestionService {
         questions: QuestionView[]
         attention_reason: AttentionReason | null
         on_timeout: OnTimeout | null
+        summary: string | null
         created_at: Date
         expires_at: Date | null
       }[]
     >`
-      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, created_at, expires_at
+      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
       FROM ai_questions WHERE outcome IS NULL ORDER BY created_at, id LIMIT 500`
     return rows.map((r) => ({
       id: r.id,
@@ -194,6 +206,7 @@ export class QuestionService {
       questions: r.questions,
       attentionReason: r.attention_reason,
       onTimeout: r.on_timeout,
+      summary: r.summary,
       createdAt: r.created_at.toISOString(),
       expiresAt: r.expires_at?.toISOString() ?? null,
     }))
@@ -216,7 +229,8 @@ export class QuestionService {
           END,
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_input'
-        AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
+                        AND attention_reason IS DISTINCT FROM 'done')
       RETURNING status`
       return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
     })
@@ -291,6 +305,8 @@ export class QuestionService {
    * how many. `turnId`: only that turn's, so a turn that lost its claim never
    * cancels the newer turn's. A parked call is refused with `reason`.
    * `refresh: false`: the caller (a finishing turn) sets the status itself.
+   * A `done` request is left alone unless named by `questionId`: nothing waits
+   * on it, and it is meant to outlive its turn.
    */
   async cancelPending(
     sessionId: string,
@@ -305,6 +321,7 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
+          AND (${questionId}::uuid IS NOT NULL OR attention_reason IS DISTINCT FROM 'done')
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
@@ -435,6 +452,8 @@ export class QuestionService {
 
   /** The canUseTool question gate for one turn (harness/questions.ts QuestionGate). */
   gate(context: QuestionGateContext): QuestionGate {
+    // A `done` summary covers the touches since the turn started; the gate is built as it starts.
+    const turnStartedAt = new Date()
     return async (request: QuestionRequest): Promise<QuestionVerdict> => {
       if (context.signal.aborted) return { answered: false, message: 'The turn is stopping; the question was not asked.' }
       const id = randomUUID()
@@ -460,6 +479,7 @@ export class QuestionService {
         const tail: ServerEvent[] = []
         let superseded: Resolved[] = []
         let expiresAt: Date | null = null
+        let summary: string | null = null
         if (attention) {
           // #815 §5: a per-user rate limit (every session is the browser user's,
           // or the request was refused above), then one open request per reason.
@@ -479,14 +499,22 @@ export class QuestionService {
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
           }
-          const [inserted] = await tx<{ expires_at: Date }[]>`
-            INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
-                                      kind, attention_reason, on_timeout, expires_at)
-            VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                    'attention', ${attention.reason}, ${attention.onTimeout},
-                    now() + make_interval(secs => ${attention.timeoutS}))
-            RETURNING expires_at`
-          expiresAt = inserted?.expires_at ?? null
+          if (attention.reason === 'done') {
+            summary = redact(await loadDoneSummary(tx, sessionId, turnId, turnStartedAt), context.secrets())
+            await tx`
+              INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
+              VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
+                      'attention', 'done', ${summary})`
+          } else {
+            const [inserted] = await tx<{ expires_at: Date }[]>`
+              INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
+                                        kind, attention_reason, on_timeout, expires_at)
+              VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
+                      'attention', ${attention.reason}, ${attention.onTimeout},
+                      now() + make_interval(secs => ${attention.timeoutS}))
+              RETURNING expires_at`
+            expiresAt = inserted?.expires_at ?? null
+          }
         } else {
           await tx`
             INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
@@ -499,11 +527,15 @@ export class QuestionService {
             id,
             tool: request.toolUseId,
             questions,
-            ...(attention && expiresAt
-              ? { attention: { reason: attention.reason, onTimeout: attention.onTimeout, expiresAt: expiresAt.toISOString() } }
-              : {}),
+            ...(attention?.reason === 'done'
+              ? { attention: { reason: 'done' as const, summary: summary ?? '' } }
+              : attention && expiresAt
+                ? { attention: { reason: attention.reason, onTimeout: attention.onTimeout, expiresAt: expiresAt.toISOString() } }
+                : {}),
           }),
         )
+        // A done summary waits for nobody: the session goes on as it was.
+        if (attention?.reason === 'done') return { value: { asked: true, superseded }, events: tail }
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
         // shown; each refreshStatus hands back to whichever is still pending).
@@ -541,6 +573,7 @@ export class QuestionService {
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
+      if (attention?.reason === 'done') return { answered: false, posted: true, message: 'posted' }
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
