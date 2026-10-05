@@ -222,9 +222,19 @@ class PrintRunStore:
             self._finish, run_id, slug, "succeeded", "result", result.model_dump(mode="json")
         )
 
-    async def fail(self, run_id: str, slug: str, error: PrintRunError) -> PrintRun:
+    async def fail(
+        self, run_id: str, slug: str, error: PrintRunError, *, unqueued: bool = False
+    ) -> PrintRun:
+        """End the run failed; ``unqueued``, it stopped before any ``POST /queue/``
+        although it had called :meth:`start_enqueue`, so it may not have queued."""
         return await asyncio.to_thread(
-            self._finish, run_id, slug, "failed", "error", error.model_dump(mode="json")
+            self._finish,
+            run_id,
+            slug,
+            "failed",
+            "error",
+            error.model_dump(mode="json"),
+            unqueued,
         )
 
     async def fail_lost(self, run_id: str) -> PrintRun:
@@ -384,14 +394,21 @@ class PrintRunStore:
             )
 
     def _finish(
-        self, run_id: str, slug: str, state: RunStatus, column: str, value: dict[str, Any]
+        self,
+        run_id: str,
+        slug: str,
+        state: RunStatus,
+        column: str,
+        value: dict[str, Any],
+        unqueued: bool = False,
     ) -> PrintRun:
         # Only a run still `running`: a retried end finds it ended and changes nothing.
         with self._require().connection() as conn, conn.transaction():
             row = conn.execute(
-                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now()"
+                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now(),"
+                " enqueue_attempted = enqueue_attempted AND NOT %s"
                 f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}",
-                (state, Jsonb(value), run_id),
+                (state, Jsonb(value), unqueued, run_id),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)

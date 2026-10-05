@@ -34,7 +34,8 @@ cancels the activity: ``cancelled_during_first_enqueue_1061`` (a cancel while th
 of two plates' ``print_enqueue`` runs) and ``cancelled_during_start_enqueue_1061`` (a
 cancel while ``print_start_enqueue`` runs). Recorded by the patched one, which waits:
 ``cancelled_during_first_enqueue`` (plate 1 is recorded, plate 2 never sliced) and
-``cancelled_during_start_enqueue`` (no ``POST /queue/``).
+``cancelled_during_start_enqueue`` (no ``POST /queue/``, so recorded as queueing nothing;
+re-recorded for review #1316 (8) 2, before any deploy).
 """
 
 from __future__ import annotations

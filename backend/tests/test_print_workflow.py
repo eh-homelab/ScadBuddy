@@ -218,8 +218,14 @@ class Fake:
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
-        self.calls.append(f"fail:{input.error.status}:{input.error.detail}")
-        return self._run("failed", error=input.error, may_have_queued=self.enqueue_attempted)
+        self.calls.append(
+            f"fail:{input.error.status}:{input.error.detail}" + (":unqueued" * input.unqueued)
+        )
+        return self._run(
+            "failed",
+            error=input.error,
+            may_have_queued=self.enqueue_attempted and not input.unqueued,
+        )
 
     def all(self) -> list[Callable[..., Any]]:
         return [
@@ -816,11 +822,13 @@ async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the
     client: Client, worker: str, fake: Fake
 ) -> None:
     """Review #1316 (3) 2: ``print_start_enqueue`` writes the row's ``enqueue_attempted``;
-    the run waits for it, so its message and the row's ``may_have_queued`` agree, and it
-    stops before any ``POST /queue/``."""
+    the run waits for it, then stops before any ``POST /queue/``, so it records that
+    nothing was queued, and its message and the row's ``may_have_queued`` agree (review
+    #1316 (8) 2)."""
     # Its write lands well after the cancel: a run that did not wait records first.
     fake.start_enqueue_delay = 2.0
     finished = await cancel_during(client, worker, fake, "start_enqueue", window=600)
     assert not any(call.startswith("enqueue") for call in fake.calls)
-    assert finished.status == "failed" and finished.may_have_queued
-    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
+    assert fake.enqueue_attempted  # the write finished before the run failed
+    assert finished.status == "failed" and not finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED.detail}:unqueued"

@@ -117,6 +117,15 @@ async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: Pri
     assert failed.may_have_queued
 
 
+async def test_an_unqueued_failure_clears_the_started_enqueue(store: PrintRunStore) -> None:
+    """A run cancelled once ``start_enqueue`` wrote, before any ``POST /queue/``, records
+    that nothing was queued (review #1316 (8) 2)."""
+    run = await accept(store)
+    await store.start_enqueue(run.id)
+    failed = await store.fail(run.id, "demo", REFUSED, unqueued=True)
+    assert failed.status == "failed" and not failed.may_have_queued
+
+
 async def test_a_failure_before_any_enqueue_may_not_have_queued(store: PrintRunStore) -> None:
     run = await accept(store)
     failed = await store.fail(run.id, "demo", REFUSED)

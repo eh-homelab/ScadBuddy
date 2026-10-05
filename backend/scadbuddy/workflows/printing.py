@@ -152,6 +152,9 @@ class PrintRunWorkflow:
         self.search_attributes = False
         #: Whether ``_print`` has reached the first ``POST /queue/``.
         self.enqueue_attempted = False
+        #: Whether ``print_start_enqueue`` wrote the row's column and the run then
+        #: stopped before that POST: its record clears the column (review #1316 (8) 2).
+        self.enqueue_unstarted = False
         #: Whether the run caught a cancel and carried on; it then holds no repeat
         #: window, since Temporal drops a second cancel request (review #1316 2).
         self.cancel_absorbed = False
@@ -265,7 +268,12 @@ class PrintRunWorkflow:
     ) -> PrintRun:
         failed: PrintRun = await workflow.execute_activity(
             "print_fail",
-            FailInput(run_id=accepted.run.id, slug=input.slug, error=error),
+            FailInput(
+                run_id=accepted.run.id,
+                slug=input.slug,
+                error=error,
+                unqueued=self.enqueue_unstarted,
+            ),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
@@ -313,7 +321,9 @@ class PrintRunWorkflow:
             )
             if not self.enqueue_attempted:
                 # Before the first POST /queue/: from here a failure may have queued. The
-                # flag follows the row's column, so a cancel's message agrees with it.
+                # flag follows the row's column, so a cancel's message agrees with it. A
+                # cancel it absorbed stops the run before that POST, so it is recorded
+                # as queueing nothing, and the column is cleared (review #1316 (8) 2).
                 await self._shielded(
                     workflow.start_activity(
                         "print_start_enqueue",
@@ -323,8 +333,9 @@ class PrintRunWorkflow:
                     ),
                     PLATES_PATCH,
                 )
-                self.enqueue_attempted = True
+                self.enqueue_unstarted = self.cancel_absorbed
                 self._stop_if_cancelled()
+                self.enqueue_attempted = True
             enqueue = workflow.start_activity(
                 "print_enqueue",
                 EnqueueInput(
