@@ -105,6 +105,14 @@ CANCELLED = PrintRunError(
     title="Conflict",
     detail="This print was cancelled before it started. Nothing was queued; print again.",
 )
+#: What a run cancelled after its record and before its first ``POST /queue/`` records:
+#: Bambuddy may have sliced a plate, but nothing was queued (review #1316 (9) 2a).
+CANCELLED_UNQUEUED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This print was cancelled before it was queued. Bambuddy may have sliced it,"
+    " but nothing was queued; print again.",
+)
 #: What a run cancelled after it began queueing records: a plate may be queued.
 CANCELLED_QUEUEING = PrintRunError(
     status=409,
@@ -228,7 +236,9 @@ class PrintRunWorkflow:
                     problem = _problem(error)
                 else:
                     self.cancel_absorbed = True
-                    problem = CANCELLED_QUEUEING if self.enqueue_attempted else CANCELLED
+                    # The row exists and a plate may be sliced: never "before it
+                    # started" (review #1316 (9) 2a).
+                    problem = CANCELLED_QUEUEING if self.enqueue_attempted else CANCELLED_UNQUEUED
                 self.row = await self._fail(input, accepted, problem)
         self._upsert(status=self.row.status, may_have_queued=self.row.may_have_queued)
         if (self.row.status == "succeeded" or self.row.may_have_queued) and not (
@@ -324,15 +334,22 @@ class PrintRunWorkflow:
                 # flag follows the row's column, so a cancel's message agrees with it. A
                 # cancel it absorbed stops the run before that POST, so it is recorded
                 # as queueing nothing, and the column is cleared (review #1316 (8) 2).
-                await self._shielded(
-                    workflow.start_activity(
-                        "print_start_enqueue",
-                        accepted.run.id,
-                        start_to_close_timeout=SHORT,
-                        retry_policy=RECORD_RETRY,
-                    ),
-                    PLATES_PATCH,
-                )
+                try:
+                    await self._shielded(
+                        workflow.start_activity(
+                            "print_start_enqueue",
+                            accepted.run.id,
+                            start_to_close_timeout=SHORT,
+                            retry_policy=RECORD_RETRY,
+                        ),
+                        PLATES_PATCH,
+                    )
+                except (ActivityError, asyncio.CancelledError):
+                    # As #1061 did, which counted the run as queueing from here on. A
+                    # cancel reaches here only on its histories, whose `print_fail` it
+                    # replays (review #1316 (9) 2b).
+                    self.enqueue_attempted = True
+                    raise
                 self.enqueue_unstarted = self.cancel_absorbed
                 self._stop_if_cancelled()
                 self.enqueue_attempted = True

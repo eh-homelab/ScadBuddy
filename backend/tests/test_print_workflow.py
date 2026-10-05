@@ -59,6 +59,7 @@ from scadbuddy.workflows.printing import (
     ACCEPT_TIMEOUT,
     CANCELLED,
     CANCELLED_QUEUEING,
+    CANCELLED_UNQUEUED,
     CLIENT_ACCEPTING,
     READ_RETRY,
     UNWAITED,
@@ -169,6 +170,7 @@ class Fake:
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
         self.calls.append("slice_wait")
+        await self._gate("slice_wait")
         return 52
 
     @activity.defn(name="print_start_enqueue")
@@ -783,13 +785,18 @@ async def test_a_cancel_once_every_plate_is_queued_still_ends_succeeded(
     assert not any(call.startswith("fail") for call in fake.calls)
 
 
+@pytest.mark.parametrize("activity_name", ["plan", "slice_wait"])
 async def test_a_cancel_before_any_enqueue_is_recorded_cancelled(
-    client: Client, worker: str, fake: Fake
+    client: Client, worker: str, fake: Fake, activity_name: str
 ) -> None:
-    """Review #1061 (3) 1: a cancel, never "failed unexpectedly while preparing"."""
-    finished = await cancel_during(client, worker, fake, "plan")
-    assert finished.status == "failed"
-    assert fake.calls[-1] == f"fail:409:{CANCELLED.detail}"
+    """Review #1061 (3) 1: a cancel, never "failed unexpectedly while preparing". The
+    row exists and Bambuddy may have sliced a plate, so not "before it started" either
+    (review #1316 (9) 2a)."""
+    finished = await cancel_during(client, worker, fake, activity_name)
+    assert finished.status == "failed" and not finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}"
+    assert "nothing was queued" in CANCELLED_UNQUEUED.detail
+    assert "before it started" not in CANCELLED_UNQUEUED.detail
 
 
 async def test_a_cancel_after_the_enqueue_says_the_print_may_be_queued(
@@ -831,4 +838,4 @@ async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the
     assert not any(call.startswith("enqueue") for call in fake.calls)
     assert fake.enqueue_attempted  # the write finished before the run failed
     assert finished.status == "failed" and not finished.may_have_queued
-    assert fake.calls[-1] == f"fail:409:{CANCELLED.detail}:unqueued"
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}:unqueued"
