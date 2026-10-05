@@ -20,7 +20,10 @@ to the commands: ``cancelled_during_print`` still carries the 500 that #1061's
 merged it: ``cancelled_during_finish_1061`` (a cancel while ``print_finish`` runs
 cancels it, records the run failed and holds the repeat window) and
 ``cancelled_during_enqueue_1061`` (the same while the only plate's ``print_enqueue``
-runs). Recorded by the patched one: ``cancelled_once_queued`` (the cancel during
+runs), ``cancelled_during_last_record_1061`` (the same while the only plate's
+``print_record`` runs) and ``cancelled_during_succeed_1061`` (the same while
+``print_succeed`` runs): one for each activity the patch shields (review #1316 3a).
+Recorded by the patched one: ``cancelled_once_queued`` (the cancel during
 ``print_finish`` waits for the run, which succeeds and closes),
 ``cancelled_during_last_enqueue`` (the same during the last ``print_enqueue``) and
 ``cancelled_while_queueing`` (a cancel while the first of two plates is recorded: may be
@@ -58,6 +61,8 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "cancelled_during_insert",
         "cancelled_during_finish_1061",
         "cancelled_during_enqueue_1061",
+        "cancelled_during_last_record_1061",
+        "cancelled_during_succeed_1061",
         "cancelled_once_queued",
         "cancelled_during_last_enqueue",
         "cancelled_while_queueing",
