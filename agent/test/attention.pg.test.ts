@@ -389,6 +389,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(done[1]!.summary).toContain('created preset `unattended`')
   })
 
+  it("one turn's repeated done posts keep only its latest, unattended record or not", async () => {
+    const repeat = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(
+          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+        )
+        await touch(run.sessionId ?? run.resume!, 'unattended')
+        for (let i = 0; i < 3; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: repeat, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
+      { tool_use_id: 'toolu_done2' },
+    ])
+  })
+
   it('a done summary is neither refused by nor counted in the attention rate limit', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })

@@ -520,11 +520,14 @@ export class QuestionService {
           // A done summary that recorded unattended actions is not replaced by a later
           // turn's: that record is the user's check on what ran while nobody answered,
           // and the later summary covers only its own turn. It stays until dismissed.
+          // The same turn's earlier summary is replaced as usual: the newer one covers
+          // the same windows, and keeping it would let one turn post done rows unbounded
+          // (done is outside the rate limit).
           const why = 'replaced by a newer request for the same reason'
           superseded = await tx<Resolved[]>`
             UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
-              AND outcome IS NULL AND (summary LIKE ${`${UNATTENDED_HEADING}%`}) IS NOT TRUE
+              AND outcome IS NULL AND ((summary LIKE ${`${UNATTENDED_HEADING}%`}) IS NOT TRUE OR turn_id = ${turnId})
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
