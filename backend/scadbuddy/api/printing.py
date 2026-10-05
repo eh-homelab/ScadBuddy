@@ -86,13 +86,28 @@ TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavaila
 #: Temporal answered and refused (a wrong namespace, a denied permission): sending the
 #: same request again will not help until it is fixed (review #1316 (2) 7).
 TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
-#: The `RPCError`s that answer `temporal-unavailable`; any other is a 500.
-#: `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a busy server (review #1316 4).
+#: The `RPCError`s that answer `temporal-unavailable`; any other is a 500 (review #1316
+#: 1a). First the codes Temporal's own client retries, `RETRYABLE_ERROR_CODES` in the
+#: sdk-core this SDK bundles (temporalio 1.33.0's `temporalio/bridge/sdk-core` at
+#: temporalio/sdk-rust@85b71d7e, `crates/client/src/retry.rs`): one reaching us
+#: outlived those retries. `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a
+#: busy server (review #1316 4); `ABORTED` is gRPC's "retry at a higher level"
+#: (google.rpc.Code). Then the two gRPC itself raises on a call that never answered
+#: (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): `DEADLINE_EXCEEDED`,
+#: and `CANCELLED`, which sdk-core also retries when the transport cancelled it. The rest (`NOT_FOUND`,
+#: `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `FAILED_PRECONDITION`,
+#: `UNIMPLEMENTED`, `ALREADY_EXISTS`) are what neither retries.
 TRANSIENT_RPC = frozenset(
     {
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.OUT_OF_RANGE,
         RPCStatusCode.UNAVAILABLE,
         RPCStatusCode.DEADLINE_EXCEEDED,
-        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.CANCELLED,
     }
 )
 
@@ -376,8 +391,9 @@ async def accept_run(
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
     except (RPCError, TemporalUnavailableError) as error:
-        # Only an unreachable or slow frontend is worth retrying; a wrong namespace or
-        # a refused permission is a misconfiguration (review #1061 (3) 3). Its gRPC
+        # Only what Temporal's client would retry is worth retrying (`TRANSIENT_RPC`); a
+        # wrong namespace or a refused permission is a misconfiguration (review #1061
+        # (3) 3). Its gRPC
         # message stays in the log, out of the response.
         if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
             logger.error("Temporal refused to start a print run", exc_info=True)

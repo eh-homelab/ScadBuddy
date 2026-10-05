@@ -523,6 +523,14 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
         RPCStatusCode.DEADLINE_EXCEEDED,
         # A namespace past its rate limit, or a busy server (review #1316 4).
         RPCStatusCode.RESOURCE_EXHAUSTED,
+        # The rest of the codes Temporal's own client retries, and a cancelled call
+        # (review #1316 1a).
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.CANCELLED,
     ],
 )
 @respx.mock
@@ -542,6 +550,17 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     assert response.json()["type"].endswith("/temporal-unavailable")
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.NOT_FOUND,
+        RPCStatusCode.PERMISSION_DENIED,
+        RPCStatusCode.UNAUTHENTICATED,
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.FAILED_PRECONDITION,
+        RPCStatusCode.UNIMPLEMENTED,
+    ],
+)
 @respx.mock
 def test_a_permanent_rpc_error_is_a_500_logged_at_error(
     client: TestClient,
@@ -549,13 +568,14 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    code: RPCStatusCode,
 ) -> None:
     """Review #1061 (3) 3: a wrong namespace is a misconfiguration, not a blip, so it is
     never "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
     output_id = prepared(client, model)
 
     async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
-        raise RPCError("namespace not found", RPCStatusCode.NOT_FOUND, b"")
+        raise RPCError("namespace not found", code, b"")
 
     monkeypatch.setattr(printing_api, "start_command", failing_start)
 
