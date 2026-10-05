@@ -273,7 +273,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               Finding the sessions that changed {filterBy}…
             </p>
           ) : touchingIds && listed.length === 0 ? (
-            <p className="px-3 py-2 text-[12.5px] text-muted">No session changed {filterBy}.</p>
+            <p className="px-3 py-2 text-[12.5px] text-muted">
+              {touchingIds.size === 0
+                ? `No session changed ${filterBy}.`
+                : // The ones that did are older than the sessions this panel has loaded.
+                  `None of the loaded sessions changed ${filterBy}.`}
+            </p>
           ) : (
             <ul className="max-h-56 overflow-y-auto py-1">
               {listed.map((s) => (

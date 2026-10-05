@@ -419,6 +419,19 @@ describe('assistant panel', () => {
     expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
   })
 
+  it("doesn't say no session changed the model when the ones that did aren't loaded here (#931)", async () => {
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', () => HttpResponse.json({ sessions: [{ id: 'older-session' }] })),
+    )
+    const view = renderShell('/m/name-keychain')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText('None of the loaded sessions changed name-keychain.')).toBeInTheDocument()
+    expect(within(picker).queryByText('No session changed name-keychain.')).not.toBeInTheDocument()
+  })
+
   it('shows a loading state, not the full list, while the model filter loads (#931)', async () => {
     let release: () => void = () => {}
     const held = new Promise<void>((resolve) => (release = resolve))
