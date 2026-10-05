@@ -226,7 +226,8 @@ Stacked on PR #1063 (`feat/1053-operations`).
     2. Run `execute_local_activity(ACCEPT_ACTIVITY, AcceptRender(...), result_type=Job,
        start_to_close_timeout=SHORT, retry_policy=PROJECT_RETRY)`.
     3. If its `ApplicationError` has `type == QUEUE_FULL`, set `self.queue_full`, wait for
-       `all_handlers_finished`, and raise `ApplicationError(type=REFUSED, non_retryable=True)`.
+       `all_handlers_finished`, and return: the run completes, since a refusal is
+       back-pressure and must not read as a failed workflow (review #1066 3.1).
     4. Set `self.job`, `self.claims = 1`, and `self.work = asyncio.create_task(self._render(job))`,
        then await it. If `self.released` is set, swallow the `CancelledError`.
     5. Wait for `all_handlers_finished`.

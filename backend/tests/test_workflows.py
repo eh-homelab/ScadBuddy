@@ -584,7 +584,9 @@ async def test_accepted_after_the_last_release_answers_closing() -> None:
         assert last.failure is not None and last.failure.error == CANCELLED_ERROR
 
 
-async def test_a_full_queue_answers_queue_full_and_fails_the_execution() -> None:
+async def test_a_full_queue_answers_queue_full_and_completes_the_execution() -> None:
+    """Back-pressure, not a defect: the refused run closes completed, so it never
+    counts as a failed workflow (review #1066 3.1)."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         acts = FakeActivities(queue_full=3)
@@ -592,8 +594,10 @@ async def test_a_full_queue_answers_queue_full_and_fails_the_execution() -> None
             job = _job(width=54)
             wid = f"render-{job.id}"
             answer = await start_render(client, queue, start_of(job), id=wid)
-            with pytest.raises(WorkflowFailureError):
-                await client.get_workflow_handle(wid).result()
+            handle = client.get_workflow_handle(wid)
+            await handle.result()
+            described = await handle.describe()
+        assert described.status == WorkflowExecutionStatus.COMPLETED
         assert answer.queue_full == 3 and answer.job is None
         assert acts.projections == [] and acts.calls == []
 

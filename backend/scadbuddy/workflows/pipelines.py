@@ -40,7 +40,7 @@ with workflow.unsafe.imports_passed_through():
         input_problem,
         piece_key,
     )
-    from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
+    from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
@@ -400,11 +400,12 @@ class TemplatePipeline:
             cause = error.cause if isinstance(error, ActivityError) else error
             if not (isinstance(cause, ApplicationError) and cause.type == QUEUE_FULL):
                 raise
-            # Nothing was written: the refusal answers the Update and fails the run.
+            # Nothing was written: the refusal answers the Update, and the run completes.
+            # Back-pressure, so never a failed workflow (review #1066 3.1).
             self._queue_full = int(cause.details[0]) if cause.details else 0
             self._upsert(STATUS.value_set("refused"))
             await workflow.wait_condition(workflow.all_handlers_finished)
-            raise ApplicationError(str(cause), type=REFUSED, non_retryable=True) from None
+            return
         self._job, self._claims = job, 1
         self._work = asyncio.create_task(self._render(job))
         try:
