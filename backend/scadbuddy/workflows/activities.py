@@ -501,6 +501,7 @@ class RenderActivities:
                     workflow_id=accept.workflow_id,
                     run_id=accept.run_id,
                     max_pending=start.max_pending,
+                    supersedes=start.supersedes,
                 )
             except LegacyPendingError as waiting:
                 # An older build's row holds the key: retried until that build runs it,
@@ -520,6 +521,7 @@ class RenderActivities:
                 workflow_id=accept.workflow_id,
                 run_id=accept.run_id,
                 max_pending=start.max_pending,
+                supersedes=start.supersedes,
                 orphaned=orphaned,
             )
         except QueueFullError as error:

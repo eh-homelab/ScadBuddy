@@ -29,6 +29,7 @@ __all__ = [
     "Metrics",
     "RenderOutcome",
     "RenderStage",
+    "SettlePass",
     "TraceRelayOutcome",
 ]
 
@@ -40,6 +41,10 @@ RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
 #: cancelling a superseded job.
 StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
+#: Which settle pass failed a row nothing would settle: ``closed``, a row whose
+#: ``render-<render_key>`` run closed without settling it (terminated, timed out);
+#: ``legacy``, a row an older release inserted that no workflow will run.
+SettlePass = Literal["closed", "legacy"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]
@@ -100,6 +105,20 @@ class Metrics:
             "scadbuddy_render_store_errors",
             "render_jobs calls that failed, by what they were doing.",
             ["operation"],
+            registry=r,
+        )
+        self.settle_failed = Counter(
+            "scadbuddy_render_settle_failed",
+            "Render jobs a settle pass failed because nothing would settle them, by pass."
+            " Each one also counts as a failed job.",
+            ["pass"],
+            registry=r,
+        )
+        self.settle_errors = Counter(
+            "scadbuddy_render_settle_errors",
+            "Settle passes that stopped before judging every row (Temporal did not"
+            " answer, or the pass raised), by pass: their rows wait for the next one.",
+            ["pass"],
             registry=r,
         )
         self.listener_connected = Gauge(
@@ -327,6 +346,9 @@ class Metrics:
             self.stage_duration.labels(stage)
         for operation in get_args(StoreOperation):
             self.store_errors.labels(operation)
+        for settle_pass in get_args(SettlePass):
+            self.settle_failed.labels(settle_pass)
+            self.settle_errors.labels(settle_pass)
         for reason in get_args(EventDropReason):
             self.events_dropped.labels(reason)
         for outcome in get_args(TraceRelayOutcome):

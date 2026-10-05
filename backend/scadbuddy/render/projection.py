@@ -46,6 +46,12 @@ CLOSED_ERROR = "failed: its workflow closed without settling it"
 #: older API inserts its row, then starts its workflow, within its own 5 s start
 #: timeout; this is six of those.
 LEGACY_GRACE = timedelta(seconds=30)
+#: How old an unsettled row must be before a settle pass asks about its run: Visibility,
+#: which `open_runs` reads, can list a run a moment after it started.
+VISIBILITY_GRACE = timedelta(seconds=30)
+#: The executions whose rows a settle pass leaves alone: every open render run, of
+#: this build (`render-<render_key>`) or an older one (`render-<job id>`).
+OPEN_RENDERS = "WorkflowType = 'TemplatePipeline' AND ExecutionStatus = 'Running'"
 
 
 class LegacyPendingError(Exception):
@@ -83,6 +89,17 @@ async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> b
         raise
     # A closed run (terminated, failed) that retention still keeps never settles it.
     return described.status != WorkflowExecutionStatus.RUNNING
+
+
+async def open_runs(client: Client, *, rpc_timeout: timedelta) -> set[tuple[str, str]]:
+    """The workflow and run ids of every open render run, from one Visibility listing
+    (paged) rather than one describe per row (review #1066 (9) 4). Visibility trails
+    the executions, so a row missing from it is only a candidate: `run_closed` or
+    `legacy_unrun` decides."""
+    return {
+        (execution.id, execution.run_id)
+        async for execution in client.list_workflows(OPEN_RENDERS, rpc_timeout=rpc_timeout)
+    }
 
 
 async def run_closed(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
@@ -212,11 +229,14 @@ class JobProjection:
         run_id: str,
         max_pending: int = 0,
         orphaned: str | None = None,
+        supersedes: str | None = None,
     ) -> Job:
         """The first activity of `render-<render_key>` (#1053): the execution's row, or
         `QueueFullError` with nothing written. A retried activity finds its row.
         ``orphaned`` names the older build's row on the key that the caller found no
-        workflow will run (`LegacyPendingError`): it is failed, and this row goes in."""
+        workflow will run (`LegacyPendingError`): it is failed, and this row goes in.
+        ``supersedes``, a pending job of the same slug the request replaces, is not
+        counted against ``max_pending``: its release follows the accept."""
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT * FROM render_jobs WHERE workflow_id = %s AND workflow_run_id = %s",
@@ -244,6 +264,8 @@ class JobProjection:
             if max_pending:
                 counted = conn.execute(
                     "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
+                    " AND (id, slug) IS DISTINCT FROM (%s, %s)",
+                    (supersedes, job.slug),
                 ).fetchone()
                 assert counted is not None
                 if counted["pending"] >= max_pending:
@@ -313,12 +335,15 @@ class JobProjection:
                 self._announce(conn, row["id"], row["slug"], "job.failed")
         return [_job(row) for row in rows]
 
-    def unsettled(self) -> list[Job]:
-        """The pending and running rows of ``render-<render_key>`` runs (#1053)."""
+    def unsettled(self, older_than: timedelta) -> list[Job]:
+        """The pending and running rows of ``render-<render_key>`` runs (#1053)
+        inserted over ``older_than`` ago."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM render_jobs WHERE state IN ('pending', 'running')"
-                " AND workflow_run_id IS NOT NULL ORDER BY created_at, id"
+                " AND workflow_run_id IS NOT NULL AND created_at < now() - %s"
+                " ORDER BY created_at, id",
+                (older_than,),
             ).fetchall()
         return [_job(row) for row in rows]
 

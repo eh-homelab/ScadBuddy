@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import timedelta
 from typing import Any
@@ -32,7 +32,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
-from scadbuddy.core.metrics import Metrics, RenderOutcome
+from scadbuddy.core.metrics import Metrics, RenderOutcome, SettlePass
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import (
@@ -57,9 +57,11 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.projection import (
     LEGACY_GRACE,
+    VISIBILITY_GRACE,
     JobProjection,
     execution_gone,
     legacy_unrun,
+    open_runs,
     run_closed,
     workflow_id_for,
     workflow_id_for_key,
@@ -93,6 +95,10 @@ RPC_TIMEOUT = timedelta(seconds=5)
 #: What a settle pass waits on one describe: `rpc_timeout` does not bound a lazy
 #: client's first connect, which retries for minutes on its own (review #1066 1.1).
 DESCRIBE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
+#: The most describes one settle pass makes. A row is described only when the listing
+#: of open runs leaves its run out (closed, or Visibility behind), which is rare; any
+#: past this wait for the next pass.
+SETTLE_DESCRIBES = 50
 #: How long a submit that reached an execution closing on its last release waits for it
 #: to close before it starts again (ruling 10 of the phase 2b plan).
 CLOSING_WAIT = 5.0
@@ -223,6 +229,7 @@ class RenderService:
                     f"no commit of {slug} to snapshot for its render: the API has no git"
                     " history, or the template was never committed"
                 )
+        previous = await self._superseded(supersedes, slug) if supersedes else None
         start = RenderStart(
             slug=slug,
             params=dict(params),
@@ -232,6 +239,7 @@ class RenderService:
             max_pending=self.config.render_queue_max,
             search_attributes=self.search_attributes,
             traceparent=current_traceparent(),
+            supersedes=previous.id if previous is not None else None,
         )
         size = len(pydantic_data_converter.payload_converter.to_payload(start).data)
         if size > MAX_WORKFLOW_INPUT_BYTES:
@@ -240,7 +248,6 @@ class RenderService:
                 f"these parameters make a render request of {size} bytes; the most a render"
                 f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
             )
-        previous = await self._superseded(supersedes, slug) if supersedes else None
         if previous is not None and previous.workflow_id == workflow_id_for_key(start.render_key):
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.inc()
@@ -389,31 +396,41 @@ class RenderService:
     async def settle(self) -> None:
         """In the background at start and on every prune: fail the rows nothing will
         settle, which would otherwise hold their render key and count towards the queue
-        (review #1066 1.2). A failed pass is logged; the next one tries again."""
-        for settle in (self.settle_legacy, self.settle_closed):
+        (review #1066 1.2). A failed pass is logged and counted; the next one tries
+        again."""
+        passes: tuple[tuple[SettlePass, Callable[[], Awaitable[list[str]]]], ...] = (
+            ("legacy", self.settle_legacy),
+            ("closed", self.settle_closed),
+        )
+        for settle_pass, settle in passes:
             try:
                 await settle()
             except Exception:
+                self.metrics.settle_errors.labels(settle_pass).inc()
                 logger.exception("could not settle the renders nothing will run")
 
     async def settle_closed(self) -> list[str]:
         """Fail the unsettled rows whose run closed without settling them (terminated
-        by hand, or timed out)."""
+        by hand, or timed out). Only a row past `VISIBILITY_GRACE` whose run the
+        listing of open runs leaves out is described (review #1066 (9) 4)."""
+        jobs = await asyncio.to_thread(self.store.unsettled, VISIBILITY_GRACE)
+        running = await self._open_runs("closed") if jobs else None
+        if running is None:
+            return []
+        candidates = [job for job in jobs if (job.workflow_id, job.workflow_run_id) not in running]
         closed: list[str] = []
-        for job in await asyncio.to_thread(self.store.unsettled):
+        for job in candidates[:SETTLE_DESCRIBES]:
             try:
                 async with asyncio.timeout(DESCRIBE_BOUND):
                     if not await run_closed(self.client, job, rpc_timeout=RPC_TIMEOUT):
                         continue
             except (RPCError, TimeoutError) as error:
-                logger.warning(
-                    "could not ask Temporal about the unsettled renders; the next pass tries again",
-                    extra={"error_type": type(error).__name__},
-                )
+                self._unanswered("closed", error)
                 break
             closed.append(job.id)
         if closed:
             settled = await asyncio.to_thread(self.store.fail_closed, closed)
+            self._settle_failed("closed", settled)
             logger.warning(
                 "failed the renders whose workflow closed without settling them",
                 extra={"job_ids": [job.id for job in settled]},
@@ -424,28 +441,53 @@ class RenderService:
         """Fail the rows an older release inserted that no workflow will settle: pending
         and never run, or running when its workflow closed. Only a row past
         `LEGACY_GRACE` is judged: a younger one may be between the older API's insert
-        and its start (review #1066 1.2)."""
+        and its start (review #1066 1.2). A row whose workflow the listing of open runs
+        has is left alone without a describe (review #1066 (9) 4)."""
+        jobs = await asyncio.to_thread(self.store.legacy_unsettled, LEGACY_GRACE)
+        running = await self._open_runs("legacy") if jobs else None
+        if running is None:
+            return []
+        open_ids = {workflow_id for workflow_id, _ in running}
+        candidates = [job for job in jobs if job.workflow_id not in open_ids]
         failed: list[str] = []
-        for job in await asyncio.to_thread(self.store.legacy_unsettled, LEGACY_GRACE):
+        for job in candidates[:SETTLE_DESCRIBES]:
             try:
                 async with asyncio.timeout(DESCRIBE_BOUND):
                     if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
                         continue
             except (RPCError, TimeoutError) as error:
-                logger.warning(
-                    "could not ask Temporal about the renders an older release left"
-                    " unsettled; the next pass tries again",
-                    extra={"error_type": type(error).__name__},
-                )
+                self._unanswered("legacy", error)
                 break
             failed.append(job.id)
         if failed:
             settled = await asyncio.to_thread(self.store.fail_legacy, failed)
+            self._settle_failed("legacy", settled)
             logger.warning(
                 "failed the renders an older release left with no workflow to settle them",
                 extra={"job_ids": [job.id for job in settled]},
             )
         return failed
+
+    async def _open_runs(self, settle_pass: SettlePass) -> set[tuple[str, str]] | None:
+        """The open render runs, or None when Temporal does not answer in time."""
+        try:
+            async with asyncio.timeout(DESCRIBE_BOUND):
+                return await open_runs(self.client, rpc_timeout=RPC_TIMEOUT)
+        except (RPCError, TimeoutError) as error:
+            self._unanswered(settle_pass, error)
+            return None
+
+    def _unanswered(self, settle_pass: SettlePass, error: Exception) -> None:
+        logger.warning(
+            "could not ask Temporal about the unsettled renders; the next pass tries again",
+            extra={"settle_pass": settle_pass, "error_type": type(error).__name__},
+        )
+        self.metrics.settle_errors.labels(settle_pass).inc()
+
+    def _settle_failed(self, settle_pass: SettlePass, jobs: list[Job]) -> None:
+        self.metrics.settle_failed.labels(settle_pass).inc(len(jobs))
+        for job in jobs:
+            self._settled(job, "failed")
 
     async def prune(self) -> None:
         """Settled jobs past `job_ttl` (and their blob refs), and revision exports."""

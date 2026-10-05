@@ -155,6 +155,9 @@ class RenderStart(BaseModel):
     #: The first caller's ``traceparent`` (#988), written on the row `render_accept`
     #: inserts: what a coalesced request links to.
     traceparent: str | None = None
+    #: The pending job of the slug this request replaces: its slot is not counted
+    #: against `max_pending`, so a supersede never needs a free one (review #1066 (9) 3).
+    supersedes: str | None = None
 
 
 class AcceptRender(BaseModel):

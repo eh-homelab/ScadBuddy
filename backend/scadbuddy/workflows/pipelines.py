@@ -445,7 +445,9 @@ class TemplatePipeline:
             self._upsert(STATUS.value_set("failed"))
             await workflow.wait_condition(workflow.all_handlers_finished)
             raise
-        self._upsert(STATUS.value_set("settled" if self._released is None else "cancelled"))
+        # `_cancelled`, not `_released`: a release whose cancel lost to the job's `done`
+        # clears `_released` only after this resumes (review #1066 (9) 2).
+        self._upsert(STATUS.value_set("cancelled" if self._cancelled else "settled"))
         await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _render(self, job: Job) -> None:
