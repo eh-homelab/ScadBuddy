@@ -2,9 +2,11 @@ import { screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import type { ClientMessage } from '../../agent/chat/protocol'
+import { HttpResponse, http } from 'msw'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AssistantChat } from './AssistantChat'
-import { MODE_KEY } from './ModePicker'
+import { MODE_KEY } from '../../agent/chat/modePreference'
 
 let agent: MockAgentTransport
 const factory = () => {
@@ -46,7 +48,9 @@ describe('ModePicker in a new chat (#1056)', () => {
   it('takes the server default when nothing is stored, and sends no mode of its own', async () => {
     const { user } = renderChat()
     const select = await openPicker(user)
-    await waitFor(() => expect(select).toHaveValue('durable'))
+    // No selection of its own: the option names the server's default, and nothing is sent.
+    expect(await screen.findByRole('option', { name: 'Default (Durable)' })).toBeInTheDocument()
+    expect(select).toHaveValue('')
     await send(user)
     await waitFor(() => expect(userMessages()).toHaveLength(1))
     expect(userMessages()[0]).not.toHaveProperty('mode')
@@ -78,7 +82,7 @@ describe('ModePicker in a new chat (#1056)', () => {
     })
     const { user } = renderChat()
     const select = await openPicker(user)
-    await waitFor(() => expect(select).toHaveValue('durable'))
+    await screen.findByRole('option', { name: 'Default (Durable)' })
     await user.selectOptions(select, 'classic')
     await send(user)
     await waitFor(() => expect(userMessages()).toHaveLength(1))
@@ -99,6 +103,15 @@ describe('ModePicker in a new chat (#1056)', () => {
     expect(userMessages()[1]).toHaveProperty('sessionId')
     expect(userMessages()[1]).not.toHaveProperty('mode')
   })
+})
+
+it('does not pretend a default when the server default cannot be read', async () => {
+  server.use(http.get('/api/v1/ai/settings/session-mode', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+  const { user } = renderChat()
+  const select = await openPicker(user)
+  expect(await screen.findByRole('option', { name: 'Server default' })).toBeInTheDocument()
+  expect(select).toHaveValue('')
+  expect(screen.getByText('Uses the default set in Settings.')).toBeInTheDocument()
 })
 
 describe('a durable session in the panel (#1056)', () => {

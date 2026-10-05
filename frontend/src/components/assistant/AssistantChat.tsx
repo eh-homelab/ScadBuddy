@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type K
 import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
+import { readMode, writeMode } from '../../agent/chat/modePreference'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import type { SessionMode } from '../../agent/chat/protocol'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
@@ -13,7 +14,7 @@ import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { DurableBadge, OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
-import { ModePicker, readMode, writeMode } from './ModePicker'
+import { ModePicker } from './ModePicker'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -84,7 +85,6 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   // #1056 — the mode a new chat starts in: this browser's last choice, else the server's default.
   const [chosenMode, setChosenMode] = useState<SessionMode | null>(readMode)
   const serverMode = useAsync(() => api.getSessionMode(), [])
-  const mode: SessionMode = chosenMode ?? serverMode.data?.mode ?? 'classic'
   function chooseMode(next: SessionMode) {
     setChosenMode(next)
     writeMode(next)
@@ -424,7 +424,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           </Button>
         </div>
         <VoiceDisclosure id={voiceNoteId} />
-        {!state.activeId && !state.awaitingStart && <ModePicker value={mode} onChange={chooseMode} />}
+        {!state.activeId && !state.awaitingStart && <ModePicker value={chosenMode} defaultMode={serverMode.data?.mode ?? null} onChange={chooseMode} />}
       </form>
     </div>
   )

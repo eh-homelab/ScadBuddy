@@ -397,13 +397,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
   }
 }
 
+/** agent `sessions/manager.ts` DURABLE_WAITING_CODE. */
+const WORKER_PENDING = 'worker_pending'
+
 /**
  * The two ways the agent says a session's budget ran out: a turn stopped at it (the
  * SDK's result subtype), or a send was refused because of it (agent `manager.ts`).
  */
-/** agent `sessions/manager.ts` DURABLE_WAITING_CODE. */
-const WORKER_PENDING = 'worker_pending'
-
 const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
 
 /** New budget numbers; the session is spent exactly when they say so. */

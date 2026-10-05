@@ -1,25 +1,7 @@
 import { useId } from 'react'
 import type { SessionMode } from '../../agent/chat/protocol'
 
-/** The browser's last choice of session mode, per browser (like the panel's Advanced switch). */
-export const MODE_KEY = 'scadbuddy.assistant.mode'
-
-export function readMode(): SessionMode | null {
-  try {
-    const stored = window.localStorage.getItem(MODE_KEY)
-    return stored === 'classic' || stored === 'durable' ? stored : null
-  } catch {
-    return null
-  }
-}
-
-export function writeMode(mode: SessionMode): void {
-  try {
-    window.localStorage.setItem(MODE_KEY, mode)
-  } catch {
-    // Private mode or blocked storage: the choice still holds for this page.
-  }
-}
+const LABEL: Record<SessionMode, string> = { classic: 'Classic', durable: 'Durable' }
 
 const DESCRIPTION: Record<SessionMode, string> = {
   classic: 'Runs in the assistant service and ends if it restarts. Plugins are available.',
@@ -27,7 +9,10 @@ const DESCRIPTION: Record<SessionMode, string> = {
 }
 
 interface Props {
-  value: SessionMode
+  /** This browser's choice; null while it has made none, so the server's default applies. */
+  value: SessionMode | null
+  /** The server's default, once known (null while loading or when it could not be read). */
+  defaultMode: SessionMode | null
   onChange: (mode: SessionMode) => void
 }
 
@@ -35,7 +20,7 @@ interface Props {
  * #1056 — how a new chat runs, chosen before its first message (a session's mode is
  * fixed when it starts). Tucked under "Advanced" so the usual chat is one box.
  */
-export function ModePicker({ value, onChange }: Props) {
+export function ModePicker({ value, defaultMode, onChange }: Props) {
   const selectId = useId()
   const helpId = useId()
   return (
@@ -47,16 +32,21 @@ export function ModePicker({ value, onChange }: Props) {
         </label>
         <select
           id={selectId}
-          value={value}
+          value={value ?? ''}
           aria-describedby={helpId}
           onChange={(event) => onChange(event.target.value as SessionMode)}
           className="sb-field w-40"
         >
+          {value === null && (
+            <option value="">
+              {defaultMode ? `Default (${LABEL[defaultMode]})` : 'Server default'}
+            </option>
+          )}
           <option value="classic">Classic</option>
           <option value="durable">Durable</option>
         </select>
         <p id={helpId} className="text-faint">
-          {DESCRIPTION[value]}
+          {value ? DESCRIPTION[value] : defaultMode ? DESCRIPTION[defaultMode] : 'Uses the default set in Settings.'}
         </p>
       </div>
     </details>
