@@ -84,7 +84,14 @@ logger = logging.getLogger(__name__)
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
 #: The `RPCError`s that answer `temporal-unavailable`; any other is a 500.
-TRANSIENT_RPC = frozenset({RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED})
+#: `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a busy server (review #1316 4).
+TRANSIENT_RPC = frozenset(
+    {
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+    }
+)
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -373,7 +380,10 @@ async def accept_run(
             logger.error("Temporal refused to start a print run", exc_info=True)
             raise ApiError(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-                "Temporal refused to start this print; see ScadBuddy's logs. Nothing was queued.",
+                # Not "nothing was queued": some refusals come after the start was
+                # persisted, and the same request sent again follows it (review #1316 4).
+                "Temporal refused to start this print; see ScadBuddy's logs. Send the same"
+                " request again to follow it if it started.",
             ) from None
         logger.warning("could not start a print run on Temporal", exc_info=True)
         raise ApiError(

@@ -516,7 +516,15 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("code", [RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED])
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        # A namespace past its rate limit, or a busy server (review #1316 4).
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+    ],
+)
 @respx.mock
 def test_a_transient_rpc_error_is_temporal_unavailable(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, code: RPCStatusCode
@@ -559,6 +567,8 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
     assert response.status_code == 500, response.text
     assert "temporal-unavailable" not in response.json()["type"]
     assert "namespace not found" not in response.text
+    # Some refusals come after the start was persisted (review #1316 4).
+    assert "Nothing was queued" not in response.text
     assert any(record.levelname == "ERROR" for record in caplog.records)
 
 
