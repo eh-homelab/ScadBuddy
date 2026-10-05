@@ -334,9 +334,9 @@ class RenderService:
         return answer.cancelled
 
     async def settle(self) -> None:
-        """In the background at start and on every prune: fail the rows nothing will settle, which would
-        otherwise hold their render key and count towards the queue (review #1066 1.2).
-        A failed pass is logged; the next one tries again."""
+        """In the background at start and on every prune: fail the rows nothing will
+        settle, which would otherwise hold their render key and count towards the queue
+        (review #1066 1.2). A failed pass is logged; the next one tries again."""
         for settle in (self.settle_legacy, self.settle_closed):
             try:
                 await settle()

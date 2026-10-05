@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,8 @@ from scadbuddy.workflows.commands import (
     CommandStillAcceptingError,
     TemporalUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["jobs"])
 
@@ -311,9 +314,11 @@ async def render_model(
         # Any refusal of the start, as the print and operation routes answer it.
         raise temporal_unavailable("renders") from None
     except WorkflowUpdateFailedError as error:
+        # The worker's failure text is for the log, not the client (review #1066 5.1).
+        logger.error("the render could not be started: %s", error.cause, exc_info=True)
         raise ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
-            f"the render could not be started: {error.cause}",
+            "the render could not be started",
             type_=RENDER_UNSTARTABLE_PROBLEM,
         ) from None
     except StoreFullError as error:

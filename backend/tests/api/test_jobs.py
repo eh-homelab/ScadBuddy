@@ -212,12 +212,16 @@ def test_a_render_temporal_refuses_is_a_503_naming_it(
 
 def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, model: str) -> None:
     """An Update failure other than an execution that closed first (review #1066 3.1)."""
-    failed = mock.AsyncMock(side_effect=WorkflowUpdateFailedError(ApplicationError("boom")))
+    failed = mock.AsyncMock(
+        side_effect=WorkflowUpdateFailedError(ApplicationError("boom at /srv/internal"))
+    )
     with mock.patch.object(RenderService, "submit", failed):
         response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert response.status_code == 500
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    # The worker's failure text stays in the log (review #1066 5.1).
+    assert "/srv/internal" not in response.json()["detail"]
 
 
 def test_a_render_still_being_accepted_is_a_503_to_send_again(
