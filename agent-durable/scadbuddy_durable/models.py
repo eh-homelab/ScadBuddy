@@ -61,13 +61,21 @@ def render_prompt(m: Message) -> str:
 
 
 def _outcome(status: str) -> ToolOutcome:
-    """`DurableClaudeAgent._outcome_after_stop`'s text for a call in this status."""
+    """What Claude learns about an unanswered call in this status (`_outcome_after_stop`'s
+    texts, and the plugin's rejection text, for a run that stopped unexpectedly)."""
     if status in ("started", "cancelled"):
         text = (
             f"This tool call was interrupted ({RESTORE_REASON}); whether it took "
             "effect is unknown. Check before running it again."
         )
-    else:
+    elif status in ("done", "failed"):
+        text = (
+            f"This tool call ran, but its result was lost when {RESTORE_REASON}. "
+            "Check its effect before running it again."
+        )
+    elif status == "rejected":
+        text = "A human reviewer rejected this action. Do not retry it."
+    else:  # waiting for approval, unknown tool
         text = f"This tool call did not run: {RESTORE_REASON}."
     return ToolOutcome(content=text, is_error=True)
 

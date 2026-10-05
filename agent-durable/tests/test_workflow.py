@@ -59,6 +59,10 @@ INTERRUPTED = (
 )
 CANCELLED_WAITING = "This tool call did not run: the Workflow was cancelled."
 REJECTED = "A human reviewer rejected this action. Do not retry it."
+LOST = (
+    f"This tool call ran, but its result was lost when {STOPPED}. Check its effect before running it again."
+)
+DID_NOT_RUN = f"This tool call did not run: {STOPPED}."
 WAIT = 60.0
 
 temporal = pytest.mark.requires_temporal
@@ -147,8 +151,8 @@ class Snaps:
 
         self.activity = save_snapshot
 
-    def latest(self, workflow_session: str) -> SnapshotInput:
-        return [s for s in self.saved if s.session_id == workflow_session][-1]
+    def latest(self, session_id: str) -> SnapshotInput:
+        return [s for s in self.saved if s.session_id == session_id][-1]
 
 
 @dataclass
@@ -317,6 +321,23 @@ def test_restore_state_owes_each_in_flight_call_its_outcome() -> None:
     assert after.recent_call_ids == ["a", "b", "c1", "c2"]
     assert after.task_prompt is None and after.task_segments == 0 and after.fork_next is True
     assert after.session_id == "s1" and after.checkpoint == "cp_1"
+
+
+def test_restore_state_owes_every_status_of_the_unanswered_batch() -> None:
+    statuses = ["started", "cancelled", "waiting for approval", "done", "failed", "rejected", "unknown tool"]
+    after = restore_state(_state(), [InFlight(f"c{i}", "t", st) for i, st in enumerate(statuses)])
+    contents = [after.pending[f"c{i}"].content for i in range(len(statuses))]
+    assert contents == [
+        INTERRUPTED.format(STOPPED),
+        INTERRUPTED.format(STOPPED),
+        DID_NOT_RUN,
+        LOST,
+        LOST,
+        REJECTED,
+        DID_NOT_RUN,
+    ]
+    assert all(after.pending[f"c{i}"].is_error for i in range(len(statuses)))
+    assert after.recent_call_ids == ["a", "b", *(f"c{i}" for i in range(len(statuses)))]
 
 
 def test_restore_state_caps_recent_call_ids_keeping_the_newest() -> None:
@@ -596,6 +617,35 @@ async def test_restore_after_termination_during_a_tool(rig: Rig) -> None:
     latest = rig.snaps.latest(inp.session_id)
     assert call_id in latest.state.recent_call_ids
     assert rig.stubs.ids("get_model").count(call_id) == 1
+
+
+@temporal
+async def test_restore_never_reruns_a_finished_sibling(rig: Rig) -> None:
+    """Review finding: a call done before its batch committed is owed "ran, but lost"."""
+    rig.stubs.gate("update_source")
+    wid, inp = rig.new()
+    await rig.send(wid, inp, "both 1")
+    await rig.started("update_source")
+    snap = await rig.snapshot_where(
+        inp.session_id, lambda s: {c.status for c in s.in_flight} == {"done", "started"}
+    )
+    [read_id] = rig.stubs.ids("get_model")
+    [write_id] = rig.stubs.ids("update_source")
+    assert sorted((c.id, c.status) for c in snap.in_flight) == sorted(
+        [(read_id, "done"), (write_id, "started")]
+    )
+    await rig.handle(wid).terminate("gone")
+    rig.stubs.release()
+    restored = SessionInput(
+        inp.session_id, inp.max_turns, inp.approval_expiry_seconds, restored=Restored(snap.in_flight)
+    )
+    await rig.send(wid, restored, "after", snap.state)
+    await rig.event(wid, "done")
+    owed = {h.id: h.content for h in rig.seen.first_for("after")}
+    assert owed == {read_id: LOST, write_id: INTERRUPTED.format(STOPPED)}
+    latest = rig.snaps.latest(inp.session_id)
+    assert {read_id, write_id} <= set(latest.state.recent_call_ids)
+    assert rig.stubs.ids("get_model") == [read_id]
 
 
 @temporal

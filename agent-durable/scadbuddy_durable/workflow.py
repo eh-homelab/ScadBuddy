@@ -30,8 +30,6 @@ from .models import (
     restore_state,
 )
 
-_IN_FLIGHT = ("started", "waiting for approval")
-
 
 @workflow.defn(name=WORKFLOW_NAME)
 class DurableSession:
@@ -144,16 +142,20 @@ class DurableSession:
         while True:
             await workflow.wait_condition(lambda: self._mark() != self._saved)
             self._saved = self._mark()
+            state = self.agent.state()
+            # The whole unanswered batch, whatever its status: a call that finished joins
+            # recent_call_ids only when the next segment commits.
+            answered = set(state.recent_call_ids)
             in_flight = [
                 InFlight(c["id"], c["name"], c["status"])
                 for c in self.agent.tool_calls
-                if c["status"] in _IN_FLIGHT
+                if c["id"] not in answered
             ]
             await workflow.execute_local_activity(
                 SAVE_SNAPSHOT,
                 SnapshotInput(
                     self._inp.session_id,
-                    self.agent.state(),
+                    state,
                     in_flight,
                     self.agent.segments + self.agent.total_tool_calls,
                 ),
