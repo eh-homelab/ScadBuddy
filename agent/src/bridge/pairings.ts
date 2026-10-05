@@ -85,8 +85,8 @@ export interface PairingStore {
   deny(id: string): Promise<boolean>
   /** The user disconnected pairing `id` from tab `tabId`. True when a live one was. */
   end(id: string, tabId: string): Promise<boolean>
-  /** The tab `principal` is paired with now, if any. */
-  pairedTab(principal: Pick<Principal, 'kind' | 'id'>): Promise<(PairingView & { tabId: string }) | undefined>
+  /** The tab `principal` is paired with now, if any. `signal` cancels the query. */
+  pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined>
   /** Every request still waiting for a user, oldest first. */
   pending(): Promise<PairingView[]>
   /** The live pairings of these tabs, by tab id. */
@@ -231,11 +231,17 @@ export class PostgresPairingStore implements PairingStore {
     return rows.length > 0
   }
 
-  async pairedTab(principal: Pick<Principal, 'kind' | 'id'>): Promise<(PairingView & { tabId: string }) | undefined> {
-    const [row] = await this.#sql<(Row & { tab_id: string })[]>`
+  async pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined> {
+    signal?.throwIfAborted()
+    const query = this.#sql<(Row & { tab_id: string })[]>`
       SELECT id, principal_label, expires_at, tab_id FROM ai_browser_pairings
        WHERE principal_kind = ${principal.kind} AND principal_id = ${principal.id}
          AND status = 'paired' AND expires_at > now()`
+    // A cancelled query rejects and gives its pool slot (or queue place) back.
+    // (postgres.js answers cancel() with a promise its types omit; a failed cancel request is not this read's error.)
+    const cancel = () => void Promise.resolve(query.cancel() as unknown).catch(() => undefined)
+    signal?.addEventListener('abort', cancel, { once: true })
+    const [row] = await query.finally(() => signal?.removeEventListener('abort', cancel))
     return row ? { ...viewOf(row), tabId: row.tab_id } : undefined
   }
 

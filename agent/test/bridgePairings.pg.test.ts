@@ -58,6 +58,16 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
     expect(await store.pairedTab(agent)).toBeUndefined()
   })
 
+  // #1394: a tab check that is abandoned cancels its lookup rather than holding a pool slot.
+  it('cancels a pairedTab lookup whose signal aborts', async () => {
+    await expect(store.pairedTab(agent, AbortSignal.abort())).rejects.toThrow()
+    const stop = new AbortController()
+    const lookup = store.pairedTab(agent, stop.signal)
+    stop.abort()
+    await expect(lookup).rejects.toThrow()
+    expect(await store.pairedTab(agent)).toBeUndefined()
+  })
+
   it('pairs the principal with the tab the code was typed into, once', async () => {
     const request = await store.request(agent)
     // Typed loosely: lower case, without the dash.

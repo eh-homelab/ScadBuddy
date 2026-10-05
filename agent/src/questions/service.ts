@@ -412,36 +412,51 @@ export class QuestionService {
     for (const wake of this.waiters.get(id) ?? []) wake()
   }
 
-  private pause(id: string, signal: AbortSignal, ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      const set = this.waiters.get(id) ?? new Set()
-      this.waiters.set(id, set)
-      const done = () => {
-        clearTimeout(timer)
-        set.delete(done)
-        if (set.size === 0 && this.waiters.get(id) === set) this.waiters.delete(id)
-        signal.removeEventListener('abort', done)
-        resolve()
-      }
-      const timer = setTimeout(done, ms)
-      set.add(done)
-      signal.addEventListener('abort', done, { once: true })
-    })
-  }
-
   /**
    * Waits until the question is resolved; undefined once `signal` aborts first,
    * 'due' once `deadline` (epoch ms, an attention request's timer) passes first.
+   *
+   * The waiter is registered before the first read and stays for the whole
+   * wait, so a wake() that lands while a read is in flight is kept, not lost:
+   * that read may have seen the row before the commit that resolved it, and
+   * the wait re-reads at once rather than sleeping a full `pollMs` (#1394).
    */
   private async waitFor(id: string, signal: AbortSignal, deadline?: number): Promise<Row | 'due' | undefined> {
-    for (;;) {
-      if (signal.aborted) return undefined
-      const row = await this.row(id)
-      if (!row) throw new Error(`question ${id} no longer exists`)
-      if (row.outcome !== null) return row
-      const left = deadline === undefined ? this.pollMs : deadline - Date.now()
-      if (left <= 0) return 'due'
-      await this.pause(id, signal, Math.min(this.pollMs, left))
+    let woken: boolean
+    let resume: (() => void) | undefined
+    const waiter = () => {
+      woken = true
+      resume?.()
+    }
+    const set = this.waiters.get(id) ?? new Set()
+    this.waiters.set(id, set)
+    set.add(waiter)
+    try {
+      for (;;) {
+        if (signal.aborted) return undefined
+        woken = false
+        const row = await this.row(id)
+        if (!row) throw new Error(`question ${id} no longer exists`)
+        if (row.outcome !== null) return row
+        const left = deadline === undefined ? this.pollMs : deadline - Date.now()
+        if (left <= 0) return 'due'
+        if (woken) continue
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer)
+            resume = undefined
+            signal.removeEventListener('abort', done)
+            resolve()
+          }
+          const timer = setTimeout(done, Math.min(this.pollMs, left))
+          resume = done
+          if (signal.aborted) return done()
+          signal.addEventListener('abort', done, { once: true })
+        })
+      }
+    } finally {
+      set.delete(waiter)
+      if (set.size === 0 && this.waiters.get(id) === set) this.waiters.delete(id)
     }
   }
 

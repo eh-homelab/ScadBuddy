@@ -42,13 +42,14 @@ export type TabWait =
 /**
  * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
  * `isBack`: whether the call's tab is connected now, checked once the wait is
- * recorded, so a tab that came back in between is not waited for.
+ * recorded, so a tab that came back in between is not waited for; `signal`
+ * aborts once the wait no longer needs the answer, and the check stops then.
  */
 export type WaitForTab = (request: {
   tool: string
   toolUseId: string | undefined
   signal: AbortSignal
-  isBack: () => Promise<boolean>
+  isBack: (signal: AbortSignal) => Promise<boolean>
 }) => Promise<TabWait>
 
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
