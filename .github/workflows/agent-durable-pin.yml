@@ -1,0 +1,63 @@
+---
+name: agent-durable pin watch
+
+# agent-durable depends on temporalio's ai-integrations, git-pinned to one commit
+# (PR #33's head, spec 2026-10-01 §6.2). A force-push or a deleted branch upstream
+# would make that commit unfetchable, so this resolves the lock weekly and files an
+# issue when it no longer does. On a pull_request that touches the pin it is a plain
+# check (no issue).
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - agent-durable/uv.lock
+      - agent-durable/pyproject.toml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    name: Pinned ai-integrations commit resolves
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.2.0
+
+      # --check resolves the project again and fails if the lock is stale or a
+      # pinned source cannot be fetched.
+      - name: Check the lock resolves
+        working-directory: agent-durable
+        run: uv lock --check
+
+      # Scheduled runs only: a PR's failure is its own red check. `gh issue list
+      # --search` is fuzzy, so the exact title is matched on the JSON.
+      - name: Open an issue when the pin no longer resolves
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "agent-durable: the pinned ai-integrations commit no longer resolves"
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --state open --limit 200 --json title \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .title')"
+          if [ -n "$existing" ]; then
+            echo "An open issue already exists: $TITLE"
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --label bug \
+            --body "${RUN_URL}; remedy: a reviewed bump to PR #33's new head or the PyPI release (spec §6.2)"

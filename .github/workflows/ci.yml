@@ -100,6 +100,7 @@ jobs:
       backend: ${{ steps.detect.outputs.backend }}
       frontend: ${{ steps.detect.outputs.frontend }}
       agent: ${{ steps.detect.outputs.agent }}
+      agent_durable: ${{ steps.detect.outputs.agent_durable }}
       e2e: ${{ steps.detect.outputs.e2e }}
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
@@ -126,6 +127,8 @@ jobs:
           if [ -f frontend/package.json ]; then frontend=true; fi
           agent=false
           if [ -f agent/package.json ]; then agent=true; fi
+          agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then agent_durable=true; fi
           e2e=false
           if [ -d frontend/e2e ]; then e2e=true; fi
           models=false
@@ -158,6 +161,7 @@ jobs:
             echo "backend=$backend"
             echo "frontend=$frontend"
             echo "agent=$agent"
+            echo "agent_durable=$agent_durable"
             echo "e2e=$e2e"
             echo "models=$models"
             echo "image=$image"
@@ -569,6 +573,160 @@ jobs:
       - name: Tear down
         if: always()
         run: docker rm -f scadbuddy-agent-ci || true
+
+  # ── Durable agent sessions (#1056): the Python worker in agent-durable/ ──────
+  #
+  # Gated on the TREE (the `layout` output), not on paths: it runs on every PR
+  # and push once agent-durable/ exists, so a change to agent/src/secrets.ts or
+  # agent/src/credentials.ts is always checked against the shared vectors
+  # (test/secretVectors.test.ts, spec §6.2) without a path list to keep in step.
+  #
+  # The Postgres service is for the Python tests (the durable tables the agent's
+  # migrations create) and the end-to-end test that drives the built agent.
+  # Temporal runs from the CLI's dev server, as in `agent`. No test here calls
+  # Anthropic. The image is built and smoke-tested here, as `agent`'s is.
+  agent-durable:
+    name: Agent durable lint, typecheck, test, image
+    needs: layout
+    if: ${{ needs.layout.outputs.agent_durable == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # uv resolves agent-durable's lock (it fetches the git-pinned plugin) and,
+      # for the agent build below, exports the backend's spec (`pnpm gen:api`).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            agent-durable/uv.lock
+            backend/uv.lock
+
+      # The fake Anthropic endpoint and the agent build (the tool manifest and
+      # the durable prompt) are Node. Pinned with the `agent` job.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        run: corepack enable
+
+      # The same version and amd64 digest as the `agent` job and the Dockerfile's
+      # `test` stage; bump together.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      - name: Install dependencies
+        working-directory: agent-durable
+        run: uv sync --frozen
+
+      - name: Ruff check
+        working-directory: agent-durable
+        run: uv run --frozen ruff check .
+
+      - name: Ruff format check
+        working-directory: agent-durable
+        run: uv run --frozen ruff format --check .
+
+      - name: Mypy
+        working-directory: agent-durable
+        run: uv run --frozen mypy
+
+      - name: Tests
+        working-directory: agent-durable
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+          SCADBUDDY_AGENT_TOOLS_MANIFEST: tests/fixtures/tools.json
+        run: uv run --frozen pytest
+
+      # The shared secret vectors (agent/test/secretVectors.test.ts, spec §6.2)
+      # need the agent built. The durable end-to-end test (#1056) joins this
+      # step's vitest list when it lands.
+      - name: Agent secret vectors
+        working-directory: agent
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec vitest run test/secretVectors.test.ts
+
+      - uses: docker/setup-buildx-action@v4
+
+      # `type=gha` only because this is a GitHub-hosted runner. Its own `scope`
+      # and `mode=min` (the Actions cache is full, see CLAUDE.md); build-image.yml
+      # writes the same scope from main, which warms it for PRs.
+      - name: Build the agent-durable image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: agent-durable
+          load: true
+          tags: scadbuddy-agent-durable:ci
+          cache-from: type=gha,scope=agent-durable
+          cache-to: type=gha,scope=agent-durable,mode=min
+
+      # No database exists here, so /healthz must say durable sessions are
+      # disabled rather than fail: the degraded mode (spec §6.2).
+      - name: Start the agent-durable container and check /healthz
+        run: |
+          set -euo pipefail
+          docker run -d --name scadbuddy-agent-durable-ci --read-only \
+            --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent-durable:uid=10001,gid=10001 \
+            -p 18082:8082 scadbuddy-agent-durable:ci
+          status=""
+          for _ in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' scadbuddy-agent-durable-ci 2>/dev/null || true)"
+            case "$status" in
+              healthy) break ;;
+              unhealthy) break ;;
+            esac
+            sleep 2
+          done
+          if [ "$status" != "healthy" ]; then
+            echo "::error::agent-durable container never became healthy (last status: ${status:-<none>})"
+            docker logs scadbuddy-agent-durable-ci
+            exit 1
+          fi
+          body="$(curl --fail --silent --show-error http://127.0.0.1:18082/healthz)"
+          echo "$body"
+          if ! jq -e '.status == "ok" and .durable == "disabled (no database)"' <<<"$body" >/dev/null; then
+            echo "::error::unexpected /healthz body from the agent-durable container"
+            exit 1
+          fi
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f scadbuddy-agent-durable-ci || true
 
   # ── Image build + everything that needs a real openscad ─────────────────────
   #
@@ -1285,7 +1443,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, image, models, freshness]
+    needs: [layout, lint, frontend, agent, agent-durable, image, models, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1312,6 +1470,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
+          AGENT_DURABLE_RESULT: ${{ needs.agent-durable.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
           MODELS_RESULT: ${{ needs.models.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
@@ -1346,6 +1505,8 @@ jobs:
           if [ -f frontend/package.json ]; then has_frontend=true; fi
           has_agent=false
           if [ -f agent/package.json ]; then has_agent=true; fi
+          has_agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then has_agent_durable=true; fi
           has_models=false
           if [ -d models ]; then has_models=true; fi
           has_image=false
@@ -1358,13 +1519,14 @@ jobs:
           has_app=false
           if [ -f backend/scadbuddy/main.py ]; then has_app=true; fi
 
-          echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} agent=${has_agent} models=${has_models} image=${has_image}"
+          echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} agent=${has_agent} agent_durable=${has_agent_durable} models=${has_models} image=${has_image}"
           echo "Container smoke gated on the API entrypoint: app=${has_app}"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
+          assert "Agent durable lint, typecheck, test, image" "$AGENT_DURABLE_RESULT" "$has_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
 
@@ -1398,7 +1560,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, models, summary]
+    needs: [lint, frontend, agent, agent-durable, image, models, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

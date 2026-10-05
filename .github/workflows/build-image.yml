@@ -2,7 +2,10 @@
 name: Build Image
 
 # Publishes ghcr.io/eh-homelab/scadbuddy for the cluster to pull, and the AI
-# agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below).
+# agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below), and
+# its durable-sessions twin as ghcr.io/eh-homelab/scadbuddy-agent-durable (the
+# `agent-durable` job). Every one of these packages must be made public, like the
+# first (see below): a new package starts private.
 #
 # THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
 # an ANONYMOUS Nexus proxy (`ghcr-proxy`), so a per-pod imagePullSecret
@@ -286,6 +289,90 @@ jobs:
           set -euo pipefail
           {
             echo "### Published \`ghcr.io/eh-homelab/scadbuddy-agent\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Durable agent sessions (#1056): the Dockerfile's `agent-durable` target,
+  # published as ghcr.io/eh-homelab/scadbuddy-agent-durable, a sidecar like
+  # `agent`. THE PACKAGE MUST BE MADE PUBLIC after its first publish (a new
+  # package starts private), as for the others. `continue-on-error` for the same
+  # reason as `agent`: until the cluster manifest runs it, a first publish must
+  # not hold back a backend deploy. Drop it in the change that pins this image
+  # in eh-homelab/clusters.
+  agent-durable:
+    name: Build and push agent-durable (amd64 + arm64)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy-agent-durable
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy agent-durable
+            org.opencontainers.image.description=Durable agent sessions worker (Temporal) for ScadBuddy
+
+      # The build runs the Dockerfile's CLAUDE_CODE_VERSION assertion once per
+      # platform, against that platform's bundled binary (arm64 under QEMU).
+      # `scope=agent-durable` is the scope ci.yml's `agent-durable` job reads;
+      # `mode=min` because the Actions cache is full (CLAUDE.md).
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: agent-durable
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha,scope=agent-durable
+          cache-to: type=gha,scope=agent-durable,mode=min
+
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy-agent-durable\`"
             echo
             echo "**Digest:** \`${DIGEST}\`"
             echo
