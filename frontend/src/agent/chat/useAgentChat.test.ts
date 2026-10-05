@@ -139,24 +139,31 @@ describe('useAgentChat', () => {
     })
   })
 
-  it('keeps the buttons gone when the entry was already decided or expired (409/410)', async () => {
-    capture(409, 'approval a1 was already denied')
-    const t = scripted()
-    const { result } = renderHook(() => useAgentChat(t.factory))
-    act(() => {
-      t.h().onOpen?.()
-      parked(t.h())
-    })
-    act(() => result.current.decide('s1', 'a1', true))
-    await waitFor(() =>
-      expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
-        kind: 'error',
-        message: 'Your decision was not taken: approval a1 was already denied',
-      }),
-    )
-    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
-    act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: owner })))
-    expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
+  it('ends the card with the reason when the entry was already decided or expired (409/410), without waiting on the socket (#1385)', async () => {
+    for (const [status, reason] of [
+      [409, 'Your decision was not taken: it was already resolved elsewhere.'],
+      [410, 'Your decision was not taken: it expired before your response arrived.'],
+    ] as const) {
+      capture(status, 'approval a1 is no longer waiting')
+      const t = scripted(() => 'queued')
+      const { result, unmount } = renderHook(() => useAgentChat(t.factory))
+      act(() => {
+        t.h().onOpen?.()
+        parked(t.h())
+        // No resolve frame can arrive while the socket is down.
+        t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+      })
+      const before = result.current.state.sessions.s1?.items.length
+      act(() => result.current.decide('s1', 'a1', true))
+      await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'closed' }))
+      expect(`Your decision was not taken: ${(approval(result.current.state) as { reason?: string }).reason}.`).toBe(reason)
+      // The card says it; no separate error row.
+      expect(result.current.state.sessions.s1?.items.length).toBe(before)
+      // A resolve frame that still arrives says how it really ended.
+      act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: owner })))
+      expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
+      unmount()
+    }
   })
 
   it('sends a question\'s answers keyed by question, and an attention request\'s as its choice or text (#815)', async () => {

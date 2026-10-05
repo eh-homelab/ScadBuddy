@@ -31,14 +31,19 @@ export type FeedItem =
       /**
        * `pending` until the user decides; `sent` while the decision is on its way
        * (`POST /api/v1/ai/pending-input/{id}`, #815), back to `pending` if it was
-       * refused; `approved`/`denied` from `approval.resolved`, the server's confirmation.
+       * refused; `closed` (with `reason`) when it was refused because the entry was
+       * already resolved or expired, so no resolve frame need arrive for the card to
+       * end; `approved`/`denied` from `approval.resolved`, the server's confirmation,
+       * which also replaces `closed` when it does arrive.
        */
-      state: 'pending' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'sent' | 'approved' | 'denied' | 'closed'
       by?: Owner
+      reason?: string
     }
   /**
    * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
-   * `sent` while the answer is on its way, back to `pending` if it was refused;
+   * `sent` while the answer is on its way, back to `pending` if it was refused,
+   * `closed` (`reason`) if it was refused as already resolved or expired;
    * `answered` or `cancelled` (its turn ended first, `reason`) from
    * `question.resolved`, the server's confirmation.
    */
@@ -50,7 +55,7 @@ export type FeedItem =
       questions: Question[]
       /** #815 — set when this is an attention request rather than a question. */
       attention?: Attention
-      state: 'pending' | 'sent' | 'answered' | 'cancelled'
+      state: 'pending' | 'sent' | 'answered' | 'cancelled' | 'closed'
       answers?: string[]
       by?: Owner
       reason?: string
@@ -119,10 +124,11 @@ export type ChatAction =
   | { type: 'responded'; sessionId: string; id: string; outcome: 'approved' | 'denied' | 'answered'; answers?: string[]; by: Owner }
   /**
    * #815 — the respond route refused a decision or an answer. The card is live again,
-   * unless `settled`: the entry was already resolved or expired, so its buttons stay
-   * gone and the resolve frame says how it ended.
+   * with `message` beside it, unless `closed` is set: the entry was already resolved
+   * or expired, so the card ends there with that reason (a resolve frame, if one
+   * still arrives, replaces it with the real outcome).
    */
-  | { type: 'respond-failed'; sessionId: string; id: string; message: string; settled?: boolean }
+  | { type: 'respond-failed'; sessionId: string; id: string; message: string; closed?: string }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -471,17 +477,26 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           return i
         }),
       )
-    case 'respond-failed':
+    case 'respond-failed': {
+      const { closed } = action
+      if (closed !== undefined) {
+        return patchSession(state, action.sessionId, (s) =>
+          mapItems(s, (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
+              ? { ...i, state: 'closed', reason: closed }
+              : i,
+          ),
+        )
+      }
       return patchSession(state, action.sessionId, (s) =>
         push(
           mapItems(s, (i) =>
-            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' && !action.settled
-              ? { ...i, state: 'pending' }
-              : i,
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' ? { ...i, state: 'pending' } : i,
           ),
           { kind: 'error', id: `error-${s.items.length}`, message: action.message },
         ),
       )
+    }
   }
 }
 

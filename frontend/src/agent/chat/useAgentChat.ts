@@ -9,6 +9,15 @@ import type { ChatTransport, ChatTransportFactory } from './transport'
 /** The respond route acts as the browser user (agent `routes/approvals.ts` BROWSER_USER). */
 const YOU = { kind: 'browser', id: 'browser', label: 'You' } as const
 
+/**
+ * A settled refusal (#815: 409 already resolved, 410 expired) ends the card with its
+ * reason rather than leaving it at "Sending…" until a resolve frame that may not come.
+ */
+function closed(err: RespondError): { closed?: string } {
+  if (!err.settled) return {}
+  return { closed: err.status === 410 ? 'it expired before your response arrived' : 'it was already resolved elsewhere' }
+}
+
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
 const QUEUED_STOP = 'The assistant is unreachable; your stop goes first when it reconnects.'
@@ -119,7 +128,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     respond(`approval:${approvalId}`, decisionBody(approve)).then(
       (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
       (err: RespondError) =>
-        dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, settled: err.settled }),
+        dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, ...closed(err) }),
     )
   }, [])
 
@@ -130,7 +139,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).then(
       (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
       (err: RespondError) =>
-        dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, settled: err.settled }),
+        dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, ...closed(err) }),
     )
   }, [])
 
