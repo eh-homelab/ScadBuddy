@@ -34,7 +34,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, LiteralString, Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -116,8 +116,19 @@ LOST_UNQUEUED_DETAIL = (
 PRE_1052_LOST_AFTER = timedelta(seconds=60)
 #: A run whose execution closed, or is gone, while its row still said ``running``: one
 #: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
+#: Never a pre-#1052 pod's row, which had no execution: that is ``UPGRADE_INTERRUPTED``.
 LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
 LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
+#: A pre-#1052 pod's run that stopped beating, in the words the migration
+#: (``20261003T0223Z_print_runs_on_temporal.sql``) gives the rows it ended. A late beat
+#: does not show the pod is dead, and one only stalled may yet queue the print, so such a
+#: run may have queued however far it got (review #1316 2a, 2b).
+UPGRADE_INTERRUPTED = LOST.model_copy(
+    update={
+        "detail": "ScadBuddy was upgraded while it was preparing this print, so it cannot"
+        " tell whether the print was queued; check Bambuddy's queue before printing again."
+    }
+)
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
@@ -221,6 +232,11 @@ class PrintRunStore:
         ``LOST_UNQUEUED`` before. A run that has ended is left as it is."""
         return await asyncio.to_thread(self._fail_lost, run_id)
 
+    async def fail_pre_1052(self, run_id: str) -> PrintRun:
+        """End a :meth:`stale_pre_1052_runs` row with ``UPGRADE_INTERRUPTED``, as one that
+        may have queued. A run that has ended is left as it is."""
+        return await asyncio.to_thread(self._fail_pre_1052, run_id)
+
     async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
         """``(run id, workflow id, workflow run id)`` of each run still ``running`` that
         was accepted more than ``older_than`` ago."""
@@ -228,8 +244,8 @@ class PrintRunStore:
 
     async def stale_pre_1052_runs(self) -> list[str]:
         """Ids of the ``running`` rows a pre-#1052 pod inserted during the rolling update
-        and stopped beating: it died mid-run, and no execution will end them (review
-        #1061 (3) 2). Goes with ``heartbeat_at`` (review #1061 3a)."""
+        and stopped beating: it died mid-run, or stalled, and no execution will end them
+        (review #1061 (3) 2). Goes with ``heartbeat_at`` (review #1061 3a)."""
         return await asyncio.to_thread(self._stale_pre_1052_runs)
 
     # The blocking bodies, run in a worker thread by the coroutines above.
@@ -301,16 +317,29 @@ class PrintRunStore:
         return PrintRun.model_validate(existing)
 
     def _fail_lost(self, run_id: str) -> PrintRun:
+        return self._end_running(
+            run_id,
+            "error = CASE WHEN enqueue_attempted THEN %s ELSE %s END",
+            (Jsonb(LOST.model_dump(mode="json")), Jsonb(LOST_UNQUEUED.model_dump(mode="json"))),
+        )
+
+    def _fail_pre_1052(self, run_id: str) -> PrintRun:
+        return self._end_running(
+            run_id,
+            "enqueue_attempted = true, error = %s",
+            (Jsonb(UPGRADE_INTERRUPTED.model_dump(mode="json")),),
+        )
+
+    def _end_running(
+        self, run_id: str, assignments: LiteralString, params: tuple[Jsonb, ...]
+    ) -> PrintRun:
+        """Fail a ``running`` run with ``assignments`` and announce it; one that has
+        ended is answered as it is."""
         with self._require().connection() as conn, conn.transaction():
             row = conn.execute(
-                "UPDATE print_runs SET status = 'failed', finished_at = now(),"
-                " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
+                f"UPDATE print_runs SET status = 'failed', finished_at = now(), {assignments}"
                 f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}, slug",
-                (
-                    Jsonb(LOST.model_dump(mode="json")),
-                    Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
-                    run_id,
-                ),
+                (*params, run_id),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)

@@ -185,11 +185,12 @@ async def reconcile_lost_runs(
     #1061): terminated in the Temporal UI, it never runs ``print_fail``. One still
     running is left to end its row itself, and so is one whose workflow still runs
     under a later run id: a reset continues the same row there. A row a pre-#1052 pod
-    inserted and stopped beating is ended too (review #1061 (3) 2). Returns how many it
+    inserted and stopped beating is ended too (review #1061 (3) 2), as one that may
+    have queued: a stalled pod may yet queue it (review #1316 2a). Returns how many it
     ended."""
     ended = 0
     for run_id in await store.stale_pre_1052_runs():
-        if (await store.fail_lost(run_id)).status == "failed":
+        if (await store.fail_pre_1052(run_id)).status == "failed":
             ended += 1
     for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
         if await _running(client, workflow_id, workflow_run_id) or await _running(

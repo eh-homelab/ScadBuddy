@@ -13,7 +13,14 @@ import pytest
 from psycopg import Connection
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.runs import LOST, LOST_UNQUEUED, PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.runs import (
+    LOST,
+    LOST_UNQUEUED,
+    UPGRADE_INTERRUPTED,
+    PrintRun,
+    PrintRunError,
+    PrintRunStore,
+)
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
@@ -327,7 +334,11 @@ def _insert_pre_1052(
     """A row as a pre-#1052 pod inserts it during the rolling update: no execution, and
     a heartbeat its own task keeps moving, ``beaten`` ago (negative: ahead). ``beaten``
     ``None`` is a row its pod never beat: its insert names no ``heartbeat_at``, so it
-    takes the column's default. ``age`` is how long ago it was inserted."""
+    takes the column's default. ``age`` is how long ago it was inserted. The pre-#1052
+    insert is ``PrintRunStore._claim`` in ``backend/scadbuddy/bambuddy/runs.py`` at
+    30adee1b (#1061's parent): ``INSERT INTO print_runs (id, output_id,
+    idempotency_key, status)``; ``PrintRuns._beat`` sleeps
+    ``HEARTBEAT_INTERVAL`` (10 s) before its first beat (review #1316 3b)."""
     with jobs.pool.connection() as conn:
         if beaten is None:
             conn.execute(
@@ -358,7 +369,8 @@ async def test_a_pre_1052_row_never_beaten_is_stale_once_it_is_old(
     store: PrintRunStore, jobs: JobProjection
 ) -> None:
     """Review #1316 3: the old pod's first beat comes 10 s after its insert, so one
-    killed sooner leaves the column's default, ``'infinity'``, which never goes stale."""
+    killed sooner leaves the column's default, ``'infinity'``, which never goes stale.
+    That insert and beat are cited at :func:`_insert_pre_1052` (review #1316 3b)."""
     _insert_pre_1052(jobs, "died-early", None, timedelta(days=1))
     _insert_pre_1052(jobs, "just-started", None)
 
@@ -369,11 +381,15 @@ async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
     store: PrintRunStore, jobs: JobProjection
 ) -> None:
     """Review #1061 (3) 2: otherwise the row is ``running`` for good, and every repeat
-    of its body-only key is answered with it."""
+    of its body-only key is answered with it. A late heartbeat does not show its pod is
+    dead: one stalled past ``PRE_1052_LOST_AFTER`` may yet queue it, so the row may have
+    queued however far it got, as the migration says of such rows (review #1316 2a)."""
     _insert_pre_1052(jobs, "dead", timedelta(days=1))
     _insert_pre_1052(jobs, "alive", timedelta(days=-1))
     async with temporal_client() as client:
         ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
     assert ended == 1
-    assert (await store.get("dead")).error == LOST_UNQUEUED  # type: ignore[union-attr]
+    dead = await store.get("dead")
+    assert dead is not None
+    assert dead.error == UPGRADE_INTERRUPTED and dead.may_have_queued
     assert (await store.get("alive")).status == "running"  # type: ignore[union-attr]
