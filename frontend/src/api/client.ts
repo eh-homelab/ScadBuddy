@@ -381,6 +381,8 @@ export function newRequestId(): string {
 
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+/** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
+export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
@@ -873,11 +875,20 @@ export const api = {
    * hold a claim on a job, and that answer names the job the next render supersedes. A
    * request already sent is never aborted, for the same reason. Unanswered even then, the
    * claim is left to the render it made, which runs to its end (review #1066 1.1).
+   * `requestId` is the `Idempotency-Key`: a caller that sends the render again itself
+   * passes the same one, so the server counts every send as one claim (review #1066 (7) 3).
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string, signal?: AbortSignal) => {
+  render: (
+    slug: string,
+    inputs: JsonObject,
+    version?: string,
+    supersedes?: string,
+    signal?: AbortSignal,
+    requestId: string = newRequestId(),
+  ) => {
     // Sent again while the server is still accepting it (#1053), with one
     // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': newRequestId() }
+    const headers = { 'Idempotency-Key': requestId }
     return reattach(
       () =>
         request<RenderAccepted>(`/models/${seg(slug)}/render`, {

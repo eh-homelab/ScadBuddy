@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, api } from '../api/client'
+import { ApiError, api, newRequestId, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
 import type { Job } from '../api/types'
 import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
 import type { ParamValues } from './params'
@@ -51,6 +51,18 @@ function retryAfterSeconds(cause: unknown): number | undefined {
   if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
   const seconds = cause.problem['retry_after']
   return typeof seconds === 'number' && seconds > 0 ? seconds : undefined
+}
+
+/**
+ * Whether a refusal left no claim under its key: a full queue's. Its answer is what the
+ * key's run completed with, so sent again under that key it is answered from that run;
+ * the retry takes a new key. Any other refusal may hold a claim, which only a re-send
+ * with the same key keeps as one (review #1066 (7) 3).
+ */
+function claimedNothing(cause: unknown): boolean {
+  if (!(cause instanceof ApiError)) return false
+  const { type } = cause.problem
+  return type !== STILL_ACCEPTING && type !== TEMPORAL_UNAVAILABLE && type !== UNANSWERED
 }
 
 const STALE_CHECK_MS = 250
@@ -182,6 +194,7 @@ export function useRenderJob(
       // A full queue is transient ("about one render"): retry after the delay it
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
+      let requestId = newRequestId()
       for (;;) {
         try {
           const { job_id } = await api.render(
@@ -190,12 +203,14 @@ export function useRenderJob(
             version,
             supersedes,
             superseded.signal,
+            requestId,
           )
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
+          if (claimedNothing(cause)) requestId = newRequestId()
           setBusy(wait)
           await waitUnlessStale(wait)
           if (isStale()) throw cause

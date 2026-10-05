@@ -936,6 +936,19 @@ describe('render (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it("sends the caller's key when it passes one (review #1066 (7) 3)", async () => {
+    let key: string | null = null
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await api.render('box', { params: {} }, undefined, undefined, undefined, 'k'.repeat(32))
+    expect(key).toBe('k'.repeat(32))
+  })
+
   it('after an abort between re-sends, sends once more to learn the job it claimed (review #1066 1.1)', async () => {
     printRunPoll.intervalMs = 50
     const keys: (string | null)[] = []
