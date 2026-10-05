@@ -45,7 +45,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opentelemetry/context-async-hooks": "2.11.0",
-    "@types/node": "^24.19.0",
+    "@types/node": "^24.19.1",
     "@types/ws": "^8.18.1",
     "eslint": "^10.11.0",
     "globals": "^17.12.0",
