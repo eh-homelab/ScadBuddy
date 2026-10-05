@@ -382,17 +382,22 @@ THUMBNAIL_SIDE = 192
 #: The most pixels a thumbnail is decoded from: a 10 MB PNG can declare far more than
 #: a photo has, and every request would decode it again. Larger is served as it is.
 MAX_THUMBNAIL_SOURCE_PIXELS = 50_000_000
+#: The decoders a thumbnail may use: only the image types an item can be (`ACCEPTED`),
+#: so a mislabeled legacy file never reaches any other Pillow plugin.
+THUMBNAIL_FORMATS = ("PNG", "JPEG", "WEBP")
 
 
 def _thumbnail_of(path: FilePath) -> bytes | None:
     """``path`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
-    cannot read it or it is over `MAX_THUMBNAIL_SOURCE_PIXELS` (checked from the header,
-    before decoding). ``draft`` lets a JPEG decode at a fraction of its size."""
+    cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
+    `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
+    header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
+    so a large photo is still cheap enough to shrink."""
     try:
-        with Image.open(path) as image:
+        with Image.open(path, formats=THUMBNAIL_FORMATS) as image:
+            image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
             if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
                 return None
-            image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
             # Upright, as a browser shows the original: the WebP carries no EXIF.
             with ImageOps.exif_transpose(image) as upright:
                 upright.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)

@@ -241,6 +241,7 @@ def test_a_thumbnail_is_turned_upright_by_its_exif_orientation(
 
     response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
 
+    assert response.status_code == 200, response.text
     with Image.open(io.BytesIO(response.content)) as small:
         assert small.size == (96, 192)
 
@@ -271,6 +272,35 @@ def test_an_image_too_large_to_decode_cheaply_is_its_own_thumbnail(
 
     assert response.status_code == 200
     assert response.content == original
+
+
+def test_a_large_jpeg_that_draft_makes_cheap_is_still_shrunk(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1600x1600 is over the cap, but a JPEG drafts at 1/8 to 200x200, which is under it.
+    monkeypatch.setattr("scadbuddy.api.media.MAX_THUMBNAIL_SOURCE_PIXELS", 250 * 250)
+    item = _upload(client, model, _real_image((1600, 1600), "JPEG")).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/webp"
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (192, 192)
+
+
+def test_a_legacy_file_in_another_format_is_not_decoded(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # A GIF Pillow can read, mislabeled as the legacy thumbnail.png: only PNG, JPEG and
+    # WebP decoders may run, so it is served as it is, not shrunk.
+    gif = _real_image((400, 300), "GIF")
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(gif)
+
+    response = client.get(f"/api/v1/models/{model}/media/thumbnail/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.content == gif
 
 
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:
