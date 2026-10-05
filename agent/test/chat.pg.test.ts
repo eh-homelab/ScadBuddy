@@ -10,6 +10,8 @@ import { kekFromBase64 } from '../src/secrets.js'
 import {
   DURABLE_NEEDS_TEMPORAL,
   DURABLE_UNREACHABLE,
+  DURABLE_WAITING,
+  DURABLE_WAITING_CODE,
   SETTING_MODEL,
   SETTING_SESSION_MODE,
   type SessionManager,
@@ -270,10 +272,27 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
     const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
     await expect(m.send(session.id, browser, 'hi')).rejects.toMatchObject({ code: 'busy', message: 'the session is busy' })
     expect(await status(session.id)).toBe('idle')
-    expect((await m.events.read(session.id)).map((e) => e.event).slice(-2)).toEqual([
-      { v: 1, type: 'error', sessionId: session.id, code: 'busy', message: 'the session is busy' },
-      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
-    ])
+    // The sender is told; the log records only the release, so the error shows once.
+    const log = (await m.events.read(session.id)).map((e) => e.event)
+    expect(log.at(-1)).toEqual({ v: 1, type: 'session.status', sessionId: session.id, status: 'idle' })
+    expect(log.map((e) => e.type)).not.toContain('error')
+  })
+
+  it('shows a send refused on the socket once', async () => {
+    const durable = new FakeDurable()
+    durable.sendError = new DurableRefused('the session is busy')
+    const m = await durableManager(durable)
+    const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+    const out: { type: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(
+      JSON.stringify(clientMessage({ type: 'user.message', sessionId: session.id, text: 'hi', context: { route: '/' } })),
+    )
+    await expect.poll(() => out.some((e) => e.type === 'session.status' && (e as { status?: string }).status === 'idle')).toBe(true)
+    expect(out.filter((e) => e.type === 'error')).toHaveLength(1)
+    connection.close()
   })
 
   it('a Temporal that is away after the claim: back to idle, and the log says so', async () => {
@@ -283,13 +302,7 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
     const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
     await expect(m.send(session.id, browser, 'hi')).rejects.toMatchObject({ code: 'busy', message: DURABLE_UNREACHABLE })
     expect(await status(session.id)).toBe('idle')
-    expect((await m.events.read(session.id)).map((e) => e.event).at(-2)).toEqual({
-      v: 1,
-      type: 'error',
-      sessionId: session.id,
-      code: 'busy',
-      message: DURABLE_UNREACHABLE,
-    })
+    expect(await types(m, session.id)).not.toContain('error')
   })
 
   it('a Temporal that is away before the claim: refused, and nothing is logged', async () => {
@@ -311,17 +324,64 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
     const turn = await m.send(session.id, browser, 'hi')
     expect(turn.turnId).toBeTruthy()
     expect(await status(session.id)).toBe('running')
-    expect(await types(m, session.id)).not.toContain('error')
+    // A notice, not a failure: the turn runs when a worker starts.
+    const errors = (await m.events.read(session.id)).map((e) => e.event).filter((e) => e.type === 'error')
+    expect(errors).toEqual([
+      { v: 1, type: 'error', sessionId: session.id, code: DURABLE_WAITING_CODE, message: DURABLE_WAITING },
+    ])
   })
 
-  it('Stop cancels the running execution; with none running it answers false', async () => {
+  it('a send refused after the wait is logged, since nobody else is told', async () => {
+    const durable = new FakeDurable()
+    let accept = () => {}
+    durable.accepted = new Promise((resolve) => {
+      accept = resolve
+    })
+    const m = await durableManager(durable, { durableAcceptWaitMs: 50 })
+    const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+    const turn = await m.send(session.id, browser, 'hi')
+    durable.sendError = new DurableRefused('the session is busy')
+    accept()
+    await expect.poll(() => status(session.id)).toBe('idle')
+    const log = (await m.events.read(session.id)).map((e) => e.event)
+    expect(log.slice(-2)).toEqual([
+      { v: 1, type: 'error', sessionId: session.id, code: 'busy', message: 'the session is busy' },
+      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
+    ])
+    expect(await turn.done).toEqual({ kind: 'failed', message: 'the session is busy' })
+  })
+
+  it('Stop cancels the running execution of a running turn', async () => {
+    const durable = new FakeDurable()
+    const m = await durableManager(durable)
+    const { session } = await m.start(browser, { origin: 'chat', mode: 'durable', prompt: 'hi' })
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(durable.cancels).toEqual([session.id, session.id])
+  })
+
+  it('Stop with no turn running answers false and leaves the idle run alone, as classic does', async () => {
     const durable = new FakeDurable()
     const m = await durableManager(durable)
     const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
-    expect(await m.interrupt(session.id, browser)).toBe(true)
-    durable.running = false
     expect(await m.interrupt(session.id, browser)).toBe(false)
-    expect(durable.cancels).toEqual([session.id, session.id])
+    expect(durable.cancels).toEqual([])
+  })
+
+  it('Stop of a session that says it runs, with no run left: back to idle, never running forever', async () => {
+    const durable = new FakeDurable()
+    durable.running = false
+    const m = await durableManager(durable)
+    const { session } = await m.start(browser, { origin: 'chat', mode: 'durable', prompt: 'hi' })
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).at(-1)?.event).toEqual({
+      v: 1,
+      type: 'session.status',
+      sessionId: session.id,
+      status: 'idle',
+    })
   })
 
   it('a classic session never touches the durable workflows', async () => {
@@ -394,10 +454,10 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
       expect(at.seen).toEqual([{ offset: '41', status: 'running' }])
     })
 
-    async function snapshotSession(status: string | undefined) {
+    async function snapshotSession(status: string | undefined, chains: { chain?: string; chainAfterUpdate?: string } = {}) {
       let sid = ''
       const at = recordAtUpdate(() => sid)
-      const fake = fakeTemporalClient({ ...(status ? { status } : {}), onUpdate: at.onUpdate })
+      const fake = fakeTemporalClient({ ...(status ? { status } : {}), ...chains, onUpdate: at.onUpdate })
       const m = await durableManager(new TemporalDurableSessions(fake.client, db.sql))
       const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
       sid = session.id
@@ -446,6 +506,28 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
         expect(at.seen).toEqual([{ offset: '0', status: 'running' }])
       },
     )
+
+    it('a running execution that closed before the start: the new run gets the snapshot, and its offset 0', async () => {
+      // describe says RUNNING; by the time the start arrives a Stop or a terminate closed it,
+      // so the start makes a new run (a new chain) from the arguments it carried.
+      const { m, sid, fake, at, state, inFlight } = await snapshotSession('RUNNING', { chain: 'run-1', chainAfterUpdate: 'run-2' })
+      await auditCall(sid, 'toolu_lost', 'save_preset', '10 minutes')
+      await m.send(sid, browser, 'go on')
+      const [input, startState] = fake.updates[0]!.options.startWorkflowOperation.options.args as unknown[]
+      expect(input).toMatchObject({ restored: { in_flight: inFlight } })
+      expect(startState).toEqual(state)
+      expect(fake.updates[0]!.options.args).toEqual([{ text: 'go on', context: expect.stringContaining('save_preset (toolu_lost)') }])
+      // Claimed as an attach (the offset kept), then reset once the new run was seen.
+      expect(at.seen).toEqual([{ offset: '9', status: 'running' }])
+      expect(await offset(sid)).toBe('0')
+    })
+
+    it('a real attach carries the snapshot too, which the running execution ignores, and keeps the offset', async () => {
+      const { m, sid, fake } = await snapshotSession('RUNNING', { chain: 'run-1' })
+      await m.send(sid, browser, 'go on')
+      expect((fake.updates[0]!.options.startWorkflowOperation.options.args as unknown[])[1]).toMatchObject({ checkpoint: 'e-2' })
+      expect(await offset(sid)).toBe('9')
+    })
 
     it('a snapshot with nothing lost adds no line', async () => {
       const { m, sid, fake } = await snapshotSession('TERMINATED')

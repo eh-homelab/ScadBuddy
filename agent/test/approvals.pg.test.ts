@@ -16,7 +16,7 @@ import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableRefused, durableApprovalId } from '../src/durable/client.js'
+import { DurableRefused, DurableUnavailable, durableApprovalId } from '../src/durable/client.js'
 import { PgPayloadKeys } from '../src/temporal/payloadKeys.js'
 import { FakeDurable } from './support/fakeDurable.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -769,6 +769,68 @@ describe.skipIf(!TEST_DATABASE_URL)(`durable approvals${TEST_DATABASE_URL ? '' :
     })
     expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ id: approval.id, decision: 'denied' })
     expect(durable.reviews).toEqual([])
+  })
+
+  it("shows the expiry the run fixed at its start, from its Query", async () => {
+    const { session, id } = await waiting()
+    durable.pendingCalls.set(session.id, [
+      { id: 'toolu_1', name: 'send_to_bambuddy', input: { output: 'box.3mf' }, expires_at: '2026-10-05T12:00:00+00:00' },
+    ])
+    const [listed] = await m.approvals.list(browser, { sessionId: session.id, pending: true })
+    expect(listed).toMatchObject({ id, expiresAt: '2026-10-05T12:00:00.000Z' })
+  })
+
+  it('answers 503, never 500, when the workflow cannot be asked', async () => {
+    const { session, id } = await waiting()
+    durable.pendingError = new DurableUnavailable('14 UNAVAILABLE')
+    await expect(m.approvals.list(browser, { sessionId: session.id, pending: true })).rejects.toMatchObject({
+      code: 'unavailable',
+      status: 503,
+    })
+    await expect(m.approvals.decide(browser, id, true)).rejects.toMatchObject({ code: 'unavailable', status: 503 })
+    const read = { host: UI.host, 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+    expect((await app().request(`/api/v1/ai/approvals?session=${session.id}&pending=true`, { headers: read })).status).toBe(503)
+    // The all-pending view leaves the session out rather than failing.
+    expect(await m.approvals.list(browser, { pending: true })).toEqual([])
+    durable.pendingError = undefined
+    durable.reviewError = new DurableUnavailable('14 UNAVAILABLE')
+    await expect(m.approvals.decide(browser, id, true)).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  it('the all-pending list includes durable approvals, for the browser only', async () => {
+    const { session, id } = await waiting(agentA)
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    const read = { host: UI.host, 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+    const res = await app().request('/api/v1/ai/approvals', { headers: read })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { approvals: { id: string }[] }).approvals.map((a) => a.id)).toEqual([id])
+    // Another agent sees none of them: not in the global list, nor in the session's.
+    await expect(m.approvals.list(agentB, { pending: true })).rejects.toMatchObject({ code: 'invalid' })
+    await expect(m.approvals.list(agentB, { sessionId: session.id, pending: true })).rejects.toMatchObject({
+      code: 'not_found',
+    })
+  })
+
+  it('lists decided calls from the log when asked for all of them', async () => {
+    const { session, id } = await waiting()
+    await m.approvals.decide(browser, id, false)
+    const stopped = durableApprovalId(session.id, 'toolu_2')
+    await m.events.append(session.id, [
+      { v: 1, type: 'approval.required', sessionId: session.id, id: stopped, tool: 'toolu_2', summary: 'save_preset {"a":1}', risk: 'outward' },
+      { v: 1, type: 'approval.resolved', sessionId: session.id, id: stopped, approved: false, reason: 'the turn was stopped' },
+    ])
+    durable.pendingCalls.set(session.id, [{ id: 'toolu_3', name: 'print_output', input: {} }])
+    const all = await m.approvals.list(browser, { sessionId: session.id })
+    expect(all.map((a) => [a.id, a.tool, a.decision, a.reason])).toEqual([
+      [id, 'send_to_bambuddy', 'denied', null],
+      [stopped, 'save_preset', 'cancelled', 'the turn was stopped'],
+      [durableApprovalId(session.id, 'toolu_3'), 'print_output', null, null],
+    ])
+    expect(all[0]?.decidedBy).toEqual(browser)
+    expect(all[1]?.inputSummary).toBe('{"a":1}')
+    expect((await m.approvals.list(browser, { sessionId: session.id, pending: true })).map((a) => a.id)).toEqual([
+      durableApprovalId(session.id, 'toolu_3'),
+    ])
   })
 
   it('lists a durable session\'s waiting calls from its workflow', async () => {

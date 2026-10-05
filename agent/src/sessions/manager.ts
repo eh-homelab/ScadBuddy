@@ -179,6 +179,10 @@ export const RESUMED_FRESH =
  * and runs when one starts (plan Review Focus 1), and the socket is not held meanwhile.
  */
 export const DURABLE_ACCEPT_WAIT_MS = 5_000
+/** The notice a durable send logs when no worker accepted it within DURABLE_ACCEPT_WAIT_MS. */
+export const DURABLE_WAITING_CODE = 'worker_pending'
+export const DURABLE_WAITING =
+  'the durable worker has not picked up this message yet; it will run when a worker is available'
 
 export function isSessionMode(value: unknown): value is SessionMode {
   return value === 'classic' || value === 'durable'
@@ -1040,6 +1044,7 @@ export class SessionManager {
       model: typeof model === 'string' && model ? model : null,
     }
     let userSeq: number | undefined
+    let planned: DurableSendResult | undefined
     let claimed = () => {}
     const claim = new Promise<void>((resolve) => {
       claimed = resolve
@@ -1050,6 +1055,7 @@ export class SessionManager {
       {
         beforeStart: async (result) => {
           userSeq = await this.claimDurable(session, principal, turnId, prompt, result)
+          planned = result
           claimed()
         },
       },
@@ -1058,7 +1064,7 @@ export class SessionManager {
     const late = Symbol('late')
     const first = await Promise.race([
       sending.then(
-        () => undefined,
+        (ok) => ({ ok }),
         (err: unknown) => ({ err }),
       ),
       claim.then(
@@ -1069,13 +1075,22 @@ export class SessionManager {
       ),
     ])
     clearTimeout(timer)
+    const report = (e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)
     if (first === late) {
-      sending.catch((err: unknown) =>
-        this.failDurable(id, err).catch((e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)),
+      // Nobody waits for the answer any more: the log says what becomes of the message.
+      await this.events.append(id, [
+        event({ type: 'error', sessionId: id, code: DURABLE_WAITING_CODE, message: DURABLE_WAITING }),
+      ])
+      sending.then(
+        (ok) => this.startedDurable(id, planned!, ok).catch(report),
+        (err: unknown) => this.failDurable(id, err, { logged: true }).catch(report),
       )
-    } else if (first !== undefined) {
+    } else if ('err' in first) {
       if (userSeq === undefined) throw durableError(first.err)
-      if (await this.failDurable(id, first.err)) throw durableError(first.err)
+      // The sender is told (the thrown error), so the log only records the release.
+      if (await this.failDurable(id, first.err, { logged: false })) throw durableError(first.err)
+    } else {
+      await this.startedDurable(id, planned!, first.ok)
     }
     const after = userSeq!
     const outcome = () => this.durableOutcome(id, after)
@@ -1138,11 +1153,27 @@ export class SessionManager {
   }
 
   /**
-   * A claimed durable send that did not reach its workflow: the session goes back to
-   * `idle` and the log says why. False when the Update may still be delivered (its RPC
-   * timed out after Temporal admitted it): the turn stays `running`.
+   * A durable send that `describe` took for an attach started a new execution instead (the
+   * running one closed in between): its live output starts at offset 0 (plan ruling 9).
+   * The projector refuses to write over the reset (projector.py `append_batch`).
    */
-  private async failDurable(id: string, err: unknown): Promise<boolean> {
+  private async startedDurable(id: string, planned: DurableSendResult, actual: DurableSendResult): Promise<void> {
+    if (planned.started !== 'attached' || actual.started === 'attached') return
+    await this.deps.sql`
+      INSERT INTO ai_durable_streams (session_id) VALUES (${id})
+      ON CONFLICT (session_id) DO UPDATE SET next_offset = 0`
+    if (actual.resumedFresh) {
+      await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
+    }
+  }
+
+  /**
+   * A claimed durable send that did not reach its workflow: the session goes back to
+   * `idle`. `logged`: the log says why too, when no sender is told (the error would
+   * otherwise show twice). False when the Update may still be delivered (its RPC timed
+   * out after Temporal admitted it): the turn stays `running`.
+   */
+  private async failDurable(id: string, err: unknown, { logged }: { logged: boolean }): Promise<boolean> {
     if (err instanceof WorkflowUpdateRPCTimeoutOrCancelledError) return false
     const failure = durableError(err)
     const code = failure instanceof SessionError ? failure.code : 'internal'
@@ -1150,11 +1181,34 @@ export class SessionManager {
       UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`
     if (released.count > 0) {
       await this.events.append(id, [
-        event({ type: 'error', sessionId: id, code, message: describe(failure) }),
+        ...(logged ? [event({ type: 'error', sessionId: id, code, message: describe(failure) })] : []),
         event({ type: 'session.status', sessionId: id, status: 'idle' }),
       ])
     }
     return true
+  }
+
+  /**
+   * Stop on a durable session (deviation 4): cancels the running execution, whose
+   * projector logs the end. Like classic, false when no turn runs (an idle execution is
+   * left alone). A session that says it runs with no execution running (its run was
+   * terminated or failed) goes back to `idle`, so it never stays `running`.
+   */
+  private async interruptDurable(session: SessionRecord): Promise<boolean> {
+    const id = session.id
+    if (!this.deps.durable || (session.status !== 'running' && session.status !== 'waiting_approval')) return false
+    let cancelled: boolean
+    try {
+      cancelled = await this.deps.durable.cancel(id)
+    } catch (err) {
+      throw durableError(err)
+    }
+    if (cancelled) return true
+    const released = await this.deps.sql`
+      UPDATE ai_sessions SET status = 'idle', updated_at = now()
+      WHERE id = ${id} AND status IN ('running', 'waiting_approval')`
+    if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
+    return false
   }
 
   /** A durable turn's end, from the log after its `user.turn` to the next settled status. */
@@ -1163,7 +1217,7 @@ export class SessionManager {
     let result = false
     try {
       for await (const { event: e } of this.events.follow(id, afterSeq)) {
-        if (e.type === 'error') failed = e.message
+        if (e.type === 'error' && e.code !== DURABLE_WAITING_CODE) failed = e.message
         if (e.type === 'session.result') result = true
         if (e.type === 'session.status' && (e.status === 'idle' || e.status === 'done' || e.status === 'failed')) break
       }
@@ -1709,15 +1763,7 @@ export class SessionManager {
    */
   async interrupt(id: string, principal: Owner): Promise<boolean> {
     const session = await this.get(id, principal)
-    if (session.mode === 'durable') {
-      // Stop is cancellation of the running execution (deviation 4); its projector logs the end.
-      if (!this.deps.durable) return false
-      try {
-        return await this.deps.durable.cancel(id)
-      } catch (err) {
-        throw durableError(err)
-      }
-    }
+    if (session.mode === 'durable') return this.interruptDurable(session)
     const local = this.active.get(id)
     if (local) {
       // Accurate, not optimistic: a turn whose result is already in is

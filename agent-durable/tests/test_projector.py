@@ -18,7 +18,7 @@ from temporalio.client import Client
 
 from scadbuddy_durable import projector as projector_module
 from scadbuddy_durable.models import PENDING_QUERY
-from scadbuddy_durable.projector import Projector, append_batch
+from scadbuddy_durable.projector import STREAM_TOPIC, Projector, append_batch
 from scadbuddy_durable.translate import Batch
 from scadbuddy_durable.workflow import DurableSession
 from tests.support import WAIT, Rig, rig_on
@@ -287,7 +287,7 @@ async def test_append_batch_refuses_without_the_lease(pool: AsyncConnectionPool)
             status="idle",
             final=True,
         )
-        assert await append_batch(conn, sid, batch, 5, holder="me") is None
+        assert await append_batch(conn, sid, batch, 5, holder="me", expected_offset=0) is None
     assert await logged(pool, sid) == []
     assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
     assert await one(pool, "SELECT next_offset FROM ai_durable_streams WHERE session_id = %s", sid) == 0
@@ -455,3 +455,94 @@ async def test_a_page_of_unreadable_rows_does_not_stall_the_scan(
             )
         events = await asyncio.wait_for(projector_module._turn_events(conn, sid), WAIT)
     assert events == [required]
+
+
+def test_the_stream_topic_is_the_plugins() -> None:
+    from temporalio.claude_agent_sdk import _events
+
+    assert STREAM_TOPIC == _events.TOPIC
+
+
+async def test_append_batch_refuses_over_a_reset_offset(pool: AsyncConnectionPool) -> None:
+    """A follower of an older run cannot write over the agent service's reset (ruling 9)."""
+    sid = await make_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO ai_durable_streams (session_id, next_offset, holder, lease_until)"
+            " VALUES (%s, 0, 'me', now() + interval '1 minute')",
+            (sid,),
+        )
+        batch = Batch(
+            events=[{"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"}],
+            status="idle",
+            final=True,
+        )
+        assert await append_batch(conn, sid, batch, 9, holder="me", expected_offset=8) is None
+        assert await append_batch(conn, sid, Batch(), 3, holder="me", expected_offset=0) == 0
+    assert await logged(pool, sid) == []
+    assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
+    assert await one(pool, "SELECT next_offset FROM ai_durable_streams WHERE session_id = %s", sid) == 3
+
+
+async def test_a_terminated_run_is_never_read_into_the_next_runs_turn(
+    pool: AsyncConnectionPool, rig: Rig
+) -> None:
+    """The follower of a terminated run stops; the next run is followed from the reset offset."""
+    sid = await make_session(pool)
+    wid, inp = rig.new(sid=sid)
+    async with projecting(pool, rig.client, "a") as (projector, _):
+        await rig.send(wid, inp, "print 1")
+        first = (await rig.pending(wid))["id"]
+        await until(status_is(pool, sid, "waiting_approval"))
+        before = len(await logged(pool, sid))
+        await rig.handle(wid).terminate("operator")
+
+        async def stopped() -> bool | None:
+            return sid not in projector.following or None
+
+        await until(stopped)
+        # The session still says waiting_approval, and the run is closed: claims of it log nothing.
+        await asyncio.sleep(1)
+        assert len(await logged(pool, sid)) == before
+        assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "waiting_approval"
+
+        # The agent service's next message (ruling 9): reset, running, a new run.
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE ai_durable_streams SET next_offset = 0 WHERE session_id = %s", (sid,))
+            await conn.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        await rig.send(wid, inp, "print 2")
+        second = await approve(rig, wid)
+        await until(logged_type_after(pool, sid, "tool.result", second))
+        await until(status_is(pool, sid, "idle"))
+    events = await logged(pool, sid)
+    after = events[before:]
+    # The new run's turn, whole, from its offset 0; nothing of the terminated one.
+    assert [e["id"] for e in after if e["type"] == "approval.required"] == [f"durable:{sid}:{second}"]
+    assert first != second
+    assert not any(e.get("id") == first for e in after)
+    no_repeats(events)
+
+
+async def test_a_claim_of_a_closed_run_writes_nothing(pool: AsyncConnectionPool, rig: Rig) -> None:
+    """Running in the log, its run closed (a Stop raced the send): nothing is replayed, no idle."""
+    sid = await make_session(pool, status="idle")
+    wid, inp = rig.new(sid=sid)
+    async with projecting(pool, rig.client, "a"):
+        await rig.send(wid, inp, "print 1")
+        await rig.pending(wid)
+        await rig.handle(wid).cancel()
+        await rig.handle(wid).result()
+        # The run's whole stream (its turn, then `cancelled`) is in Temporal and never logged.
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+
+        async def claimed() -> bool | None:
+            return (
+                await one(pool, "SELECT count(*) FROM ai_durable_streams WHERE session_id = %s", sid)
+            ) or None
+
+        await until(claimed)
+        await asyncio.sleep(1)
+    assert await logged(pool, sid) == []
+    assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
+    assert await one(pool, "SELECT next_offset FROM ai_durable_streams WHERE session_id = %s", sid) == 0

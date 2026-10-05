@@ -27,6 +27,7 @@ export class FakeDurable implements DurableSessions {
   /** `send` waits for this after its claim: no worker accepts the Update until it settles. */
   accepted: Promise<void> | undefined
   reviewError: unknown
+  pendingError: unknown
   /** Whether an execution is running for `cancel`. */
   running = true
 
@@ -45,6 +46,7 @@ export class FakeDurable implements DurableSessions {
   }
 
   async pending(sessionId: string): Promise<PendingCall[]> {
+    if (this.pendingError) throw this.pendingError
     return this.pendingCalls.get(sessionId) ?? []
   }
 
@@ -70,6 +72,9 @@ export function fakeTemporalClient(options: {
   reviewError?: Error
   /** Runs as the update-with-start is sent, before it answers. */
   onUpdate?: (update: FakeUpdate) => Promise<void>
+  /** The execution chain (first run id) `describe` reports; `chainAfterUpdate` once a start was sent. */
+  chain?: string
+  chainAfterUpdate?: string
 }) {
   const updates: FakeUpdate[] = []
   const reviews: { id: string; name: string; args: unknown[] }[] = []
@@ -81,7 +86,8 @@ export function fakeTemporalClient(options: {
       getHandle: (id: string) => ({
         describe: async () => {
           if (!options.status) throw notFound()
-          return { status: { name: options.status } }
+          const chain = (updates.length > 0 && options.chainAfterUpdate) || options.chain || 'run-1'
+          return { status: { name: options.status }, runId: chain, raw: { workflowExecutionInfo: { firstRunId: chain } } }
         },
         result: async () => options.result,
         cancel: async () => {

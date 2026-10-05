@@ -6,7 +6,7 @@ import asyncio
 import dataclasses
 import os
 from collections.abc import AsyncIterator, Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +234,31 @@ async def test_review_twice_is_refused_the_second_time(rig: Rig) -> None:
     assert "already decided" in str(err.value.cause) or "is waiting" in str(err.value.cause)
     await rig.event(wid, "done")
     assert rig.stubs.ids("print_output") == [pending["id"]]
+
+
+@temporal
+async def test_pending_approvals_say_when_this_runs_expiry_denies_them(rig: Rig) -> None:
+    """The agent service shows `expires_at` from the expiry fixed at the run's start (ruling 8)."""
+
+    async def expiry_of(seconds: int) -> float:
+        wid, inp = rig.new(expiry=seconds)
+        handle = await rig.send(wid, inp, "print 1")
+        started = (await handle.describe()).start_time
+
+        async def stamped() -> str:
+            while True:
+                items: list[dict[str, Any]] = await handle.query(PENDING_QUERY)
+                if items and "expires_at" in items[0]:
+                    return str(items[0]["expires_at"])
+                await asyncio.sleep(0.1)
+
+        expires = datetime.fromisoformat(await asyncio.wait_for(stamped(), WAIT))
+        await handle.cancel()
+        return (expires - started).total_seconds()
+
+    # Margins of minutes: the timer starts after the run, and this host's clock jumps.
+    assert 300 <= await expiry_of(300) < 600
+    assert 900 <= await expiry_of(900) < 1200
 
 
 @pytest_asyncio.fixture

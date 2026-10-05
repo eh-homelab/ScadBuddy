@@ -64,10 +64,13 @@ export class DurableUnavailable extends Error {
 }
 
 /**
- * How the execution that takes the message was found: the one running (`attached`), a new
- * one from the last execution's result (`handed_over`, after a Stop), from the latest
+ * How the execution that takes the message was found: the one running (`attached`), a
+ * new one from the last execution's result (`handed_over`, after a Stop), from the latest
  * snapshot (`restored`, after a terminate or a failure), or from nothing (`fresh`).
  * `resumedFresh`: an earlier execution existed but left neither (its conversation is lost).
+ * `beforeStart` is told what `describe` showed; `send` resolves with what happened. They
+ * differ only when a running execution closed before the start reached it: then `send`
+ * says `restored` or `fresh` where `beforeStart` was told `attached`.
  */
 export type DurableSendResult = { started: 'attached' | 'handed_over' | 'restored' | 'fresh'; resumedFresh: boolean }
 
@@ -80,7 +83,8 @@ export type DurableSendOptions = {
   beforeStart?: (result: DurableSendResult) => Promise<void>
 }
 
-export type PendingCall = { id: string; name: string; input: unknown }
+/** A waiting call; `expires_at` (ISO 8601) is when the run's expiry timer denies it (workflow.py). */
+export type PendingCall = { id: string; name: string; input: unknown; expires_at?: string }
 
 export interface DurableSessions {
   send(input: DurableSessionInput, message: DurableMessage, options?: DurableSendOptions): Promise<DurableSendResult>
@@ -128,9 +132,20 @@ export class TemporalDurableSessions implements DurableSessions {
 
   /** The execution's status name, or undefined when the ID has none. */
   async #status(sessionId: string): Promise<string | undefined> {
+    return (await this.#describe(sessionId))?.status
+  }
+
+  /**
+   * The latest execution's status and its chain (the first run's id, which
+   * Continue-As-New keeps and a new start does not), or undefined when the ID has none.
+   */
+  async #describe(sessionId: string): Promise<{ status: string; chain: string } | undefined> {
     try {
       const described = await this.#ask(() => this.#client.workflow.getHandle(durableWorkflowId(sessionId)).describe())
-      return described.status.name
+      return {
+        status: described.status.name,
+        chain: described.raw.workflowExecutionInfo?.firstRunId || described.runId,
+      }
     } catch (err) {
       if (notFound(err)) return undefined
       throw new DurableUnavailable(`Temporal did not describe ${durableWorkflowId(sessionId)}: ${(err as Error).message}`)
@@ -140,14 +155,16 @@ export class TemporalDurableSessions implements DurableSessions {
   async send(input: DurableSessionInput, message: DurableMessage, options: DurableSendOptions = {}): Promise<DurableSendResult> {
     const sessionId = input.session_id
     const workflowId = durableWorkflowId(sessionId)
-    const status = await this.#status(sessionId)
+    const before = await this.#describe(sessionId)
+    const status = before?.status
     let state: unknown = null
     let start = input
     let context = message.context
     let result: DurableSendResult
-    if (status === 'RUNNING') {
-      result = { started: 'attached', resumedFresh: false }
-    } else if (status === 'COMPLETED') {
+    // Taken for a running execution too: USE_EXISTING ignores the start's arguments while
+    // it runs, and they matter only if it closed (a Stop, a terminate) since `describe`.
+    let fallback: DurableSendResult = { started: 'fresh', resumedFresh: status !== undefined }
+    if (status === 'COMPLETED') {
       // A Stop's hand-over (deviation 4): the AgentState, passed back as opaque JSON.
       state = await this.#client.workflow.getHandle(workflowId).result()
       result = { started: 'handed_over', resumedFresh: false }
@@ -158,10 +175,9 @@ export class TemporalDurableSessions implements DurableSessions {
         start = { ...input, restored: { in_flight: snapshot.inFlight } }
         const line = lostResultsLine(snapshot.lost)
         if (line) context = context ? `${context}\n\n${line}` : line
-        result = { started: 'restored', resumedFresh: false }
-      } else {
-        result = { started: 'fresh', resumedFresh: status !== undefined }
+        fallback = { started: 'restored', resumedFresh: false }
       }
+      result = status === 'RUNNING' ? { started: 'attached', resumedFresh: false } : fallback
     }
     await options.beforeStart?.(result)
     const operation = new WithStartWorkflowOperation(DURABLE_WORKFLOW, {
@@ -180,7 +196,11 @@ export class TemporalDurableSessions implements DurableSessions {
     } catch (err) {
       throw this.#mapped(err)
     }
-    return result
+    if (result.started !== 'attached') return result
+    // Attached as far as `describe` knew: a new chain means the run closed in between and
+    // this start made the next one, from the snapshot (or from nothing).
+    const after = await this.#describe(sessionId).catch(() => undefined)
+    return after && before && after.chain !== before.chain ? fallback : result
   }
 
   #mapped(err: unknown): unknown {

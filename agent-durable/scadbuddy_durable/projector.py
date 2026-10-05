@@ -8,6 +8,11 @@ agent/src/sessions/eventLog.ts `append`), so a crash replays from the last commi
 and never logs an event twice. After each commit it sends the batch's `session.*` NOTIFY
 (busEvents.ts `SessionEventPublisher`'s payload, without the throttle: batches are per
 event group, not per token).
+
+A follower is pinned to the run that was running when it started (`follow_run`), and it
+stores the offset only over the one it last committed: when the agent service starts a new
+run it resets the offset to 0 (ruling 9), and a follower of an older run can neither read
+the new run from its old offset nor write over the reset.
 """
 
 from __future__ import annotations
@@ -17,14 +22,14 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
-from temporalio.claude_agent_sdk import follow_agent
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy_durable.models import DECISIONS_QUERY
@@ -59,22 +64,54 @@ RETURNING seq
 """
 
 
+# The plugin's live-output topic (temporalio.claude_agent_sdk._events.TOPIC, not exported;
+# tests/test_projector.py checks it against the pin).
+STREAM_TOPIC = "claude"
+
+
 class LeaseLost(Exception):
-    """Another projector holds the session now."""
+    """Another projector holds the session now, or the stream was reset under this one."""
+
+
+async def follow_run(
+    client: Client, workflow_id: str, run_id: str, *, from_offset: int
+) -> AsyncIterator[dict[str, Any]]:
+    """`follow_agent`, pinned to one run (and its Continue-As-New successors).
+
+    `follow_agent` polls the latest run of the ID, so a follower left from a run that was
+    terminated would go on reading the NEXT run (a new start, ruling 9) from the old run's
+    offset. Pinned, its polls fail once that run closes, and the stream ends.
+    """
+    stream = WorkflowStreamClient(client.get_workflow_handle(workflow_id, run_id=run_id), client=client)
+    async for item in stream.subscribe(STREAM_TOPIC, from_offset=from_offset):
+        data = item.data
+        event = dict(data) if isinstance(data, dict) else {"type": "data", "data": data}
+        event["offset"] = item.offset
+        yield event
 
 
 async def append_batch(
-    conn: AsyncConnection[Any], session_id: str, batch: Batch, next_offset: int, *, holder: str
+    conn: AsyncConnection[Any],
+    session_id: str,
+    batch: Batch,
+    next_offset: int,
+    *,
+    holder: str,
+    expected_offset: int,
 ) -> int | None:
     """Appends `batch` and stores `next_offset`, in one transaction; returns the last seq.
 
-    None when `holder` no longer holds the lease: nothing is written. A `session.result`
-    takes the session's cost, turns and budget from its row, as classic fills them in.
+    None when `holder` no longer holds the lease, or the stored offset is no longer
+    `expected_offset` (the follower's last commit): the agent service reset it for a new
+    run (ruling 9), so this follower's events belong to a run that is gone. Nothing is
+    written then. A `session.result` takes the session's cost, turns and budget from its
+    row, as classic fills them in.
     """
     async with conn.transaction():
         cur = await conn.execute(
-            "UPDATE ai_durable_streams SET next_offset = %s WHERE session_id = %s AND holder = %s",
-            (next_offset, session_id, holder),
+            "UPDATE ai_durable_streams SET next_offset = %s"
+            " WHERE session_id = %s AND holder = %s AND next_offset = %s",
+            (next_offset, session_id, holder, expected_offset),
         )
         if cur.rowcount == 0:
             return None
@@ -274,16 +311,28 @@ class Projector:
         wid = f"session-{session_id}"
         try:
             while True:
+                run_id = await self._running_run(wid)
+                if run_id is None:
+                    await asyncio.sleep(self._poll_s)  # not started yet: its Update is on its way
+                    continue
+                if run_id == "":
+                    # The latest run is closed: nothing of it is ours to log (a new run is
+                    # about to start, or none will). The next claim reads the offset again.
+                    await self._release(session_id)
+                    return
                 # Rebuilt from the log each time: the stream is re-read from the committed offset.
                 open_ids, resolved = await self._open_approvals(session_id)
                 translator = Translator(session_id, self._tiers, open_ids, resolved)
                 try:
-                    offset, final = await self._drain(session_id, wid, translator, offset)
+                    offset, final = await self._drain(session_id, wid, run_id, translator, offset)
                 except RPCError as err:
                     if err.status != RPCStatusCode.NOT_FOUND:
                         raise
-                    final = False  # not started yet: the Update that starts it is on its way
-                if final:
+                    final = False
+                if final or await self._running_run(wid) != run_id:
+                    # Its turn ended, or its run closed without ending it (terminated,
+                    # failed): a later run is followed by a later claim, from the offset
+                    # the agent service set for it.
                     await self._release(session_id)
                     return
                 await asyncio.sleep(self._poll_s)
@@ -294,11 +343,23 @@ class Projector:
         except Exception:
             log.exception("projector %s: following %s failed", self._holder, session_id)
 
+    async def _running_run(self, wid: str) -> str | None:
+        """The latest run's id while it runs; "" when it is closed; None when there is none."""
+        try:
+            desc = await self._client.get_workflow_handle(wid).describe()
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return None
+        if desc.status != WorkflowExecutionStatus.RUNNING:
+            return ""
+        return desc.run_id or ""
+
     async def _drain(
-        self, session_id: str, wid: str, translator: Translator, offset: int
+        self, session_id: str, wid: str, run_id: str, translator: Translator, offset: int
     ) -> tuple[int, bool]:
-        """Follows until the turn ends (True) or the stream does; returns the next offset."""
-        events = follow_agent(self._client, wid, from_offset=offset)
+        """Follows `run_id` until the turn ends (True) or the stream does; returns the next offset."""
+        events = follow_run(self._client, wid, run_id, from_offset=offset)
         try:
             async for event in events:
                 decided_by: str | None = None
@@ -312,9 +373,12 @@ class Projector:
                 batch = translator.feed(event, decided_by=decided_by)
                 if not batch.events:
                     continue  # nothing to log; the offset moves with the next batch
-                offset = int(event["offset"]) + 1
+                committed, offset = offset, int(event["offset"]) + 1
                 async with self._pool.connection() as conn:
-                    if await append_batch(conn, session_id, batch, offset, holder=self._holder) is None:
+                    appended = await append_batch(
+                        conn, session_id, batch, offset, holder=self._holder, expected_offset=committed
+                    )
+                    if appended is None:
                         raise LeaseLost(session_id)
                 if batch.final:
                     return offset, True

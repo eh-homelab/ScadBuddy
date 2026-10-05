@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -42,7 +42,8 @@ class DurableSession:
         # Continue-As-New must not restore again.
         self._inp = dataclasses.replace(inp, restored=None)
         self._inbox: list[Message] = list(inbox or [])
-        self._timed: set[str] = set()
+        # When each waiting call's expiry timer started (ruling 8).
+        self._timed: dict[str, datetime] = {}
         self._saved: tuple[Any, ...] | None = None
         self.agent = DurableClaudeAgent(
             tools=TOOLS,
@@ -108,7 +109,13 @@ class DurableSession:
 
     @workflow.query(name=PENDING_QUERY)
     def pending_approvals(self) -> list[dict[str, Any]]:
-        return self.agent.pending_approvals()
+        """The plugin's waiting calls, each with when its expiry denies it (ISO 8601, UTC):
+        this run's `approval_expiry_seconds`, fixed at its start, from its timer's start."""
+        expiry = timedelta(seconds=self._inp.approval_expiry_seconds)
+        return [
+            {**p, "expires_at": (self._timed[p["id"]] + expiry).isoformat()} if p["id"] in self._timed else p
+            for p in self.agent.pending_approvals()
+        ]
 
     @workflow.query(name=DECISIONS_QUERY)
     def decisions(self) -> dict[str, str]:
@@ -122,7 +129,7 @@ class DurableSession:
         while True:
             await workflow.wait_condition(lambda: bool(self._untimed()))
             for call_id in self._untimed():
-                self._timed.add(call_id)
+                self._timed[call_id] = workflow.now()
                 asyncio.create_task(self._expire(call_id))
 
     async def _expire(self, call_id: str) -> None:

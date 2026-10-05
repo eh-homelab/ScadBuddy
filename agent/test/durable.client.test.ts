@@ -57,6 +57,19 @@ describe('TemporalDurableSessions', () => {
     expectStart(updates[0], null)
   })
 
+  it('reports a new run when the running one closed before the start reached it', async () => {
+    const { client, updates } = fakeClient({ status: 'RUNNING', chain: 'run-1', chainAfterUpdate: 'run-2' })
+    const seen: unknown[] = []
+    const result = await new TemporalDurableSessions(client, noRows).send(
+      input,
+      { text: 'hi', context: 'page' },
+      { beforeStart: async (r) => void seen.push(r) },
+    )
+    expect(seen).toEqual([{ started: 'attached', resumedFresh: false }])
+    expect(result).toEqual({ started: 'fresh', resumedFresh: true })
+    expectStart(updates[0], null)
+  })
+
   it('starts an unknown ID with no state, and says it is fresh rather than resumed', async () => {
     const { client, updates } = fakeClient({})
     const result = await new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: 'page' })

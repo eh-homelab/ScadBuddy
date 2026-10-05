@@ -15,7 +15,14 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
-import { DurableRefused, type DurableSessions, durableApprovalId, parseDurableApprovalId } from '../durable/client.js'
+import {
+  DurableRefused,
+  type DurableSessions,
+  DurableUnavailable,
+  durableApprovalId,
+  type PendingCall,
+  parseDurableApprovalId,
+} from '../durable/client.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
@@ -157,22 +164,31 @@ export type ApprovalRecord = {
   revokedAt: string | null
 }
 
-export type ApprovalErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'expired' | 'input_mismatch' | 'invalid'
+export type ApprovalErrorCode =
+  | 'not_found'
+  | 'forbidden'
+  | 'conflict'
+  | 'expired'
+  | 'input_mismatch'
+  | 'invalid'
+  /** A durable session's workflow could not be asked (Temporal unreachable). */
+  | 'unavailable'
 
-const STATUS_OF: Record<ApprovalErrorCode, 400 | 403 | 404 | 409 | 410> = {
+const STATUS_OF: Record<ApprovalErrorCode, 400 | 403 | 404 | 409 | 410 | 503> = {
   not_found: 404,
   forbidden: 403,
   conflict: 409,
   expired: 410,
   input_mismatch: 409,
   invalid: 400,
+  unavailable: 503,
 }
 
 /** A refused approval operation; `status` is the HTTP status a route answers with. */
 export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
-  readonly status: 400 | 403 | 404 | 409 | 410
+  readonly status: 400 | 403 | 404 | 409 | 410 | 503
   constructor(code: ApprovalErrorCode, message: string) {
     super(message)
     this.code = code
@@ -532,7 +548,7 @@ export class ApprovalService {
       if (!session || !(everything || canSee(principal, session))) {
         throw new ApprovalError('not_found', `no session ${sessionId}`)
       }
-      if (session.mode === 'durable') return this.durablePending(sessionId, session)
+      if (session.mode === 'durable') return this.durablePending(sessionId, session, { pending: pending === true })
       const rows = await this.deps.sql.unsafe<Row[]>(
         `SELECT ${COLUMNS} FROM ai_approvals WHERE session_id = $1 ${pending ? 'AND decision IS NULL' : ''}
          ORDER BY created_at, id LIMIT 500`,
@@ -544,7 +560,30 @@ export class ApprovalService {
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`,
     )
-    return rows.map(record)
+    return [...rows.map(record), ...(await this.durableWaiting())]
+  }
+
+  /**
+   * Every durable session's waiting calls, for `list` without a session (which only the
+   * browser user and grant holders may ask for, as for classic ones). A session whose
+   * workflow cannot be asked now is left out rather than failing the whole list.
+   */
+  private async durableWaiting(): Promise<ApprovalRecord[]> {
+    if (!this.deps.durable) return []
+    const sessions = await this.deps.sql<{ id: string }[]>`
+      SELECT id FROM ai_sessions WHERE mode = 'durable' AND status = 'waiting_approval'
+      ORDER BY updated_at LIMIT 100`
+    const out: ApprovalRecord[] = []
+    for (const { id } of sessions) {
+      const session = await this.session(id)
+      if (!session) continue
+      try {
+        out.push(...(await this.durablePending(id, session)))
+      } catch (err) {
+        if (!(err instanceof ApprovalError && err.code === 'unavailable')) throw err
+      }
+    }
+    return out
   }
 
   /** The latest approval a session's tool call asked for, if any (the audit log's link to it). */
@@ -839,6 +878,7 @@ export class ApprovalService {
       await durable.review(sessionId, toolUseId, approve, `${principal.kind}:${principal.id}`)
     } catch (err) {
       if (err instanceof DurableRefused) throw new ApprovalError('conflict', err.message)
+      if (err instanceof DurableUnavailable) throw new ApprovalError('unavailable', err.message)
       throw err
     }
     await this.append(sessionId, [event({ type: 'approval.resolved', sessionId, id, approved: approve, by: principal })])
@@ -856,26 +896,76 @@ export class ApprovalService {
     return decided
   }
 
-  /** A durable session's waiting calls (its `pending_approvals` Query) as approval records. */
-  private async durablePending(sessionId: string, session: SessionAccess): Promise<ApprovalRecord[]> {
-    const calls = (await this.deps.durable?.pending(sessionId)) ?? []
-    if (calls.length === 0) return []
-    // When each was asked for: its `approval.required` in the log (parsed here, not by
-    // Postgres, which refuses some text as jsonb).
-    const ids = new Set(calls.map((c) => durableApprovalId(sessionId, c.id)))
+  /**
+   * A durable session's approvals: its waiting calls (the `pending_approvals` Query), and
+   * with `pending: false` also those its log shows resolved (approved, denied, expired, or
+   * stopped). Temporal unreachable is `unavailable` (503), never a 500.
+   */
+  private async durablePending(
+    sessionId: string,
+    session: SessionAccess,
+    { pending = true }: { pending?: boolean } = {},
+  ): Promise<ApprovalRecord[]> {
+    let calls: PendingCall[]
+    try {
+      calls = (await this.deps.durable?.pending(sessionId)) ?? []
+    } catch (err) {
+      if (err instanceof DurableUnavailable) {
+        throw new ApprovalError('unavailable', `the approvals of session ${sessionId} cannot be read: ${err.message}`)
+      }
+      throw err
+    }
+    if (calls.length === 0 && pending) return []
+    // The log's approval events (parsed here, not by Postgres, which refuses some text as jsonb).
     const rows = await this.deps.sql<{ event: string; created_at: Date }[]>`
       SELECT event, created_at FROM ai_session_events
-      WHERE session_id = ${sessionId} AND strpos(event, '"approval.required"') > 0 ORDER BY seq`
-    const asked = new Map<string, Date>()
+      WHERE session_id = ${sessionId} AND strpos(event, '"approval.') > 0 ORDER BY seq`
+    const asked = new Map<string, { at: Date; tool: string; summary: string }>()
+    const resolved = new Map<string, { at: Date; approved: boolean; by?: Owner; reason?: string }>()
     for (const row of rows) {
-      const e = JSON.parse(row.event) as { type?: unknown; id?: unknown }
-      if (e.type === 'approval.required' && typeof e.id === 'string' && ids.has(e.id)) asked.set(e.id, row.created_at)
+      const e = JSON.parse(row.event) as ServerEvent
+      if (e.type === 'approval.required') asked.set(e.id, { at: row.created_at, tool: e.tool, summary: e.summary })
+      if (e.type === 'approval.resolved') {
+        resolved.set(e.id, {
+          at: row.created_at,
+          approved: e.approved,
+          ...(e.by ? { by: e.by } : {}),
+          ...(e.reason ? { reason: e.reason } : {}),
+        })
+      }
     }
     const expiry = await this.expirySeconds()
-    return calls.map((c) => {
-      const record = this.durableRecord(sessionId, session, c, asked.get(durableApprovalId(sessionId, c.id)) ?? new Date())
-      return { ...record, expiresAt: new Date(Date.parse(record.createdAt) + expiry * 1000).toISOString() }
+    const waiting = calls.map((c) => {
+      const record = this.durableRecord(sessionId, session, c, asked.get(durableApprovalId(sessionId, c.id))?.at ?? new Date())
+      // The run's own expiry (its timer's start plus the expiry fixed when it started);
+      // an older worker's Query does not say, and then the current setting stands in.
+      const expiresAt =
+        typeof c.expires_at === 'string' && !Number.isNaN(Date.parse(c.expires_at))
+          ? new Date(c.expires_at).toISOString()
+          : new Date(Date.parse(record.createdAt) + expiry * 1000).toISOString()
+      return { ...record, expiresAt }
     })
+    if (pending) return waiting
+    const open = new Set(waiting.map((a) => a.id))
+    const decided: ApprovalRecord[] = []
+    for (const [id, r] of resolved) {
+      const ask = asked.get(id)
+      if (!ask || open.has(id)) continue
+      const space = ask.summary.indexOf(' ')
+      const decision: Decision = r.approved ? 'approved' : r.by ? 'denied' : r.reason ? 'cancelled' : 'expired'
+      decided.push({
+        ...this.durableRecord(sessionId, session, { id: ask.tool, name: ask.tool, input: {} }, ask.at),
+        tool: space > 0 ? ask.summary.slice(0, space) : ask.summary,
+        inputSummary: space > 0 ? ask.summary.slice(space + 1) : '',
+        inputHash: '',
+        expiresAt: r.at.toISOString(),
+        decision,
+        decidedBy: r.by ?? null,
+        decidedAt: r.at.toISOString(),
+        reason: r.reason ?? null,
+      })
+    }
+    return [...decided, ...waiting].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
   }
 
   private durableRecord(
