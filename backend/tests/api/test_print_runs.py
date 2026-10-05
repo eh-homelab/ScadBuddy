@@ -832,3 +832,23 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/print/outputs/{output_id}/run", "/api/v1/print/library/{file_id}/run"]
+)
+def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str) -> None:
+    """Review #1316 (10) 3: the 500 and 503 problem types reach ``openapi.json``."""
+    spec = app.openapi()
+    responses = spec["paths"][path]["post"]["responses"]
+    for code, problems in (
+        ("500", [printing_api.TEMPORAL_REFUSED_PROBLEM]),
+        (
+            "503",
+            [operations_api.TEMPORAL_UNAVAILABLE_PROBLEM, operations_api.STILL_ACCEPTING_PROBLEM],
+        ),
+    ):
+        declared = responses[code]
+        assert all(problem in declared["description"] for problem in problems)
+        schema = declared["content"]["application/problem+json"]["schema"]
+        assert {"type", "status", "detail"} <= set(schema["required"])

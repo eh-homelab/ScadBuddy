@@ -12,7 +12,7 @@ import logging
 import time
 from contextlib import suppress
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import APIRouter, Query, Response, status
@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import PrintRun, run_key
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
@@ -122,6 +122,25 @@ TRANSIENT_RPC = frozenset(
         RPCStatusCode.CANCELLED,
     }
 )
+
+#: Inline: a ``model`` would be documented as ``application/json``, the route's own type.
+PROBLEM_SCHEMA = Problem.model_json_schema()
+#: The problems a print run's routes answer when Temporal did not take the run, beside
+#: the 200 and 202 (review #1316 (10) 3).
+PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = {
+    status.HTTP_500_INTERNAL_SERVER_ERROR: {
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+        "description": f"`{TEMPORAL_REFUSED_PROBLEM}`: Temporal refused to start the run (a "
+        "wrong namespace, a denied permission). Sending it again will not help until that "
+        "is fixed.",
+    },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+        "description": f"`{TEMPORAL_UNAVAILABLE_PROBLEM}`: Temporal did not answer; or "
+        f"`{STILL_ACCEPTING_PROBLEM}`: the run is still being checked. Send the same "
+        "request again after `Retry-After` to follow it.",
+    },
+}
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -259,6 +278,7 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
             "description": "A repeat of a run in flight, or one that succeeded (or failed "
             "after it tried to queue) within the last ten minutes: that run, and no new print.",
         },
+        **PRINT_RUN_PROBLEMS,
     },
     summary="Slice this output with the dialog's choices and queue it, in the background",
 )

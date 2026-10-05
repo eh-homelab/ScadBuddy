@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
@@ -26,6 +27,19 @@ _TITLES = {
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
+
+
+class Problem(BaseModel):
+    """An RFC 9457 problem document, as every error response carries it. Its `type`
+    names the problem a client tells apart."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    title: str
+    status: int
+    detail: str
+    instance: str
 
 
 class ApiError(Exception):
