@@ -810,8 +810,8 @@ revision), by hand and merging does exactly what the pipeline does. Do not
 
 ### Tracing (#988)
 
-The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+The API, the render worker and the agent sidecar export OpenTelemetry traces over
+OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
 cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
 exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
 `otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
@@ -823,6 +823,12 @@ variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
 database queries and Bambuddy calls from background loops; it keeps everything that
 starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
+
+The agent starts as `node --import ./dist/telemetry.js dist/main.js` (the image's
+`CMD` and `pnpm start`): the import registers the ESM loader hook and the SDK before
+the app loads. A chat turn is one trace; an approval ends the turn's spans when the
+call parks, and the decision is a trace of its own linked to it
+(`ai_approvals.traceparent`).
 
 **Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
 `POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay

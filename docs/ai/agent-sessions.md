@@ -249,7 +249,9 @@ however often it touched the resource. A model's page shows **Changed by assista
 output (`/edit/{id}`); picking a session opens it in the assistant panel
 (`frontend/src/components/assistant/ResourceSessions.tsx`, through `AppShell`'s
 `AssistantOpener`). It shows nothing when no session touched the resource, or the
-assistant is off.
+assistant is off. On a model's page the assistant panel's session picker offers
+**Only sessions that changed {slug}**, which narrows its list to the sessions the same
+route returns for that model, read again each time the picker opens.
 
 ## 5. Not built yet
 
@@ -259,5 +261,5 @@ assistant is off.
 - **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
   access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).
-- **The rest of #931**: a backfill from `ai_audit`, a resource filter in the panel's own
-  session picker, and "restore to before this session".
+- **The rest of #931**: a backfill from `ai_audit`, and "restore to before this
+  session".

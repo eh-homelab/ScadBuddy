@@ -198,11 +198,18 @@ export type HarnessRun = {
    * `createMemoryHooks`), added beside the permission seam's `PreToolUse`.
    */
   memoryHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
+  /**
+   * SDK callback hooks for the turn's trace (telemetry/turn.ts
+   * `TurnTrace.hooks`): every tool's start and end, after the permission
+   * seam's `PreToolUse` and the memory hooks. In-process callbacks, like the
+   * memory hooks, so not the command hooks plugins.ts refuses.
+   */
+  traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
 }
 
-/** The permission seam's PreToolUse hook first, then the memory hooks, by event. */
+/** The permission seam's PreToolUse hook first, then the memory hooks, then the trace hooks, by event. */
 function mergeHooks(
   base: Partial<Record<HookEvent, HookCallbackMatcher[]>>,
   extra: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined,
@@ -428,13 +435,16 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     abortController: linkedController(run.signal),
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
-      {
-        PreToolUse: [
-          makePreToolUseHook(tierOf, run.onDecision, gate, guard),
-          ...(questions ? [QUESTION_PROMPT_HOOK] : []),
-        ],
-      },
-      run.memoryHooks,
+      mergeHooks(
+        {
+          PreToolUse: [
+            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+            ...(questions ? [QUESTION_PROMPT_HOOK] : []),
+          ],
+        },
+        run.memoryHooks,
+      ),
+      run.traceHooks,
     ),
     permissionMode: 'default',
   }
