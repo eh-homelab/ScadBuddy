@@ -393,6 +393,9 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
+  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
+  instance's folder ids (#683).
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
