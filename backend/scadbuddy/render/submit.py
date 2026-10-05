@@ -226,7 +226,12 @@ class RenderService:
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.inc()
             return previous, True
-        answer = await self._accepted(start, request_id)
+        try:
+            answer = await self._accepted(start, request_id)
+        except Exception:
+            # Answered as a 503 or 500, and counted (review #1066 4.1).
+            self.metrics.store_errors.labels("start_workflow").inc()
+            raise
         if answer.queue_full is not None:
             self.metrics.render_rejected.inc()
             raise QueueFullError(answer.queue_full, self.retry_after())

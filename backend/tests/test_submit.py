@@ -59,7 +59,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.commands import CommandStillAcceptingError
+from scadbuddy.workflows.commands import CommandStillAcceptingError, TemporalUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
@@ -1339,3 +1339,32 @@ async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
         await service.settle()
     assert time.monotonic() - began < 30
     assert all(job.state == "pending" for job in await asyncio.to_thread(projection.list_jobs))
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        TemporalUnavailableError("render-x"),
+        CommandStillAcceptingError("render-x"),
+        RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
+    ],
+)
+async def test_a_render_start_that_fails_counts_as_a_start_workflow_error(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, refusal: Exception
+) -> None:
+    """Every refused start is counted, not only logged (review #1066 4.1)."""
+
+    async def refusing(*_: object, **__: Any) -> RenderAnswer:
+        raise refusal
+
+    monkeypatch.setattr(submit_module, "start_command", refusing)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(type(refusal)):
+            await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    errors = service.metrics.registry.get_sample_value(
+        "scadbuddy_render_store_errors_total", {"operation": "start_workflow"}
+    )
+    assert errors == 1

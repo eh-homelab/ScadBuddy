@@ -37,7 +37,8 @@ __all__ = [
 RenderOutcome = Literal["done", "failed", "superseded", "cancelled"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
-#: queue gauges, or starting a submitted job's workflow or cancelling a superseded one.
+#: queue gauges, a render's start (its `accepted` Update unanswered or refused), or
+#: releasing or cancelling a superseded job.
 StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
