@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
-import type { AttentionReason, OnTimeout } from '../harness/attention.js'
+import { type AttentionReason, BACK_REPLIES, type OnTimeout } from '../harness/attention.js'
 import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
@@ -244,7 +244,9 @@ export class QuestionService {
       SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
     if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
     // #815 §2: the tab came back first, so "I'm back" already happened; not an error to the user who clicked it.
-    if (asked.outcome === 'reconnected') return
+    // Any other reply (typed words, "Carry on") is a conflict: it would be dropped unread.
+    const saysBack = answers.length === 1 && BACK_REPLIES.includes(answers[0]!)
+    if (asked.outcome === 'reconnected' && saysBack) return
     if (asked.outcome !== null) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     if (answers.length !== asked.questions.length || answers.some((a) => !a.trim())) {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
@@ -263,7 +265,7 @@ export class QuestionService {
     if (!answered) {
       // Lost the race to reconnected() between the check above and the update: the same no-op.
       const [now] = await this.deps.sql<{ outcome: Row['outcome'] }[]>`SELECT outcome FROM ai_questions WHERE id = ${id}`
-      if (now?.outcome === 'reconnected') return
+      if (now?.outcome === 'reconnected' && saysBack) return
       throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     }
     this.wake(id)
