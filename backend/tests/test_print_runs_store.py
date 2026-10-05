@@ -402,3 +402,28 @@ async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
     assert dead is not None
     assert dead.error == UPGRADE_INTERRUPTED and dead.may_have_queued
     assert (await store.get("alive")).status == "running"  # type: ignore[union-attr]
+
+
+async def test_one_failing_row_does_not_stop_the_reconcile(
+    store: PrintRunStore, jobs: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (9) 3a: a pre-#1052 row that cannot be ended (an old-shaped row, a
+    database blip) is logged and left for the next pass; the other pre-#1052 rows and
+    the rows whose execution is gone are still ended."""
+    _insert_pre_1052(jobs, "bad", timedelta(days=2))
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    await accept(store, "gone", run_id="gone", wf_run=str(uuid.uuid4()))
+    fail_pre_1052 = store.fail_pre_1052
+
+    async def failing(run_id: str) -> PrintRun:
+        if run_id == "bad":
+            raise RuntimeError("an old-shaped row")
+        return await fail_pre_1052(run_id)
+
+    monkeypatch.setattr(store, "fail_pre_1052", failing)
+    async with temporal_client() as client:
+        ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+    assert ended == 2
+    assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]

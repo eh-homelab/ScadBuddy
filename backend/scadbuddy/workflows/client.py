@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Any
@@ -25,6 +26,8 @@ from scadbuddy.workflows.printing import PrintRunWorkflow
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
 RPC_TIMEOUT = timedelta(seconds=10)
+
+logger = logging.getLogger(__name__)
 
 
 async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
@@ -189,14 +192,22 @@ async def reconcile_lost_runs(
     have queued: a stalled pod may yet queue it (review #1316 2a). Returns how many it
     ended."""
     ended = 0
-    for run_id in await store.stale_pre_1052_runs():
-        if (await store.fail_pre_1052(run_id)).status == "failed":
-            ended += 1
+    # One row that cannot be ended is logged and left for the next pass; the rest are
+    # still ended (review #1316 (9) 3a).
     for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
-        if await _running(client, workflow_id, workflow_run_id) or await _running(
-            client, workflow_id, None
-        ):
-            continue
-        if (await store.fail_lost(run_id)).status == "failed":
-            ended += 1
+        try:
+            if await _running(client, workflow_id, workflow_run_id) or await _running(
+                client, workflow_id, None
+            ):
+                continue
+            if (await store.fail_lost(run_id)).status == "failed":
+                ended += 1
+        except Exception:
+            logger.exception("could not end a lost print run", extra={"run_id": run_id})
+    for run_id in await store.stale_pre_1052_runs():
+        try:
+            if (await store.fail_pre_1052(run_id)).status == "failed":
+                ended += 1
+        except Exception:
+            logger.exception("could not end a pre-#1052 print run", extra={"run_id": run_id})
     return ended
