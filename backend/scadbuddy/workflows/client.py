@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
     DescribeWorkerDeploymentRequest,
@@ -188,11 +189,21 @@ __all__ = [
 LOST_RUN_GRACE = timedelta(minutes=1)
 
 
+def _execution_gone(error: RPCError) -> bool:
+    """A NOT_FOUND about the execution, not about the namespace: a mistyped or
+    unregistered namespace answers NOT_FOUND too, and must never end a live row (as
+    #1066's `execution_gone`)."""
+    return error.status == RPCStatusCode.NOT_FOUND and not any(
+        detail.Is(NamespaceNotFoundFailure.DESCRIPTOR) for detail in error.grpc_status.details
+    )
+
+
 async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool:
     """Whether that run (or, with no run id, the workflow's latest) is running. Raises
     ``TemporalUnavailableError`` when Temporal does not answer within the bound, as
     ``namespace_retention`` does: a lazy client's first connect retries for minutes on
-    its own (review #1316 (10) 1)."""
+    its own (review #1316 (10) 1). A missing namespace raises it too: it is about
+    Temporal, not the run."""
     try:
         async with asyncio.timeout(DESCRIBE_SECONDS + CONNECT_MARGIN_SECONDS):
             described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe(
@@ -201,9 +212,13 @@ async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool
     except TimeoutError as error:
         raise TemporalUnavailableError(workflow_id) from error
     except RPCError as error:
-        if error.status == RPCStatusCode.NOT_FOUND:
+        if _execution_gone(error):
             return False
-        if error.status in (RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED):
+        if error.status in (
+            RPCStatusCode.NOT_FOUND,
+            RPCStatusCode.UNAVAILABLE,
+            RPCStatusCode.DEADLINE_EXCEEDED,
+        ):
             raise TemporalUnavailableError(workflow_id) from error
         raise
     except RuntimeError as error:

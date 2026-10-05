@@ -11,7 +11,10 @@ from datetime import timedelta
 from typing import Any, cast
 
 import pytest
+from google.protobuf.any_pb2 import Any as Any_
 from psycopg import Connection
+from temporalio.api.common.v1 import GrpcStatus
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -459,7 +462,22 @@ async def _hangs() -> Any:
     await asyncio.Event().wait()
 
 
-@pytest.mark.parametrize("describe", [_unavailable, _hangs], ids=["unavailable", "hangs"])
+async def _no_namespace() -> Any:
+    """What Temporal answers a call to a namespace it does not have: NOT_FOUND, with a
+    `NamespaceNotFoundFailure` in its details (as #1066's `namespace_not_found`)."""
+    status = GrpcStatus(
+        code=RPCStatusCode.NOT_FOUND,
+        message="Namespace nope is not found.",
+        details=[
+            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
+        ],
+    )
+    raise RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())
+
+
+@pytest.mark.parametrize(
+    "describe", [_unavailable, _hangs, _no_namespace], ids=["unavailable", "hangs", "namespace"]
+)
 async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
     store: PrintRunStore,
     jobs: JobProjection,
@@ -469,7 +487,8 @@ async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
 ) -> None:
     """Review #1316 (10) 1: the pre-#1052 sweep needs only Postgres, so it runs first;
     a Temporal that does not answer stops the pass at the first describe, logged once,
-    and each describe is bounded."""
+    and each describe is bounded. A missing namespace's NOT_FOUND is about Temporal,
+    not the execution: it never ends a live row."""
     monkeypatch.setattr(client_module, "DESCRIBE_SECONDS", 0.05)
     monkeypatch.setattr(client_module, "CONNECT_MARGIN_SECONDS", 0.05)
     _insert_pre_1052(jobs, "dead", timedelta(days=1))
@@ -482,5 +501,6 @@ async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
 
     assert ended == 1
     assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
+    assert (await store.get("one")).status == "running"  # type: ignore[union-attr]
     assert len(client.timeouts) == 1 and client.timeouts[0] is not None
     assert len([r for r in caplog.records if r.name == client_module.__name__]) == 1
