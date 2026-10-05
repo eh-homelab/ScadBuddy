@@ -43,6 +43,9 @@ import { redact } from '../secrets.js'
 //               tied to the call by `tool_use_id`, `input_hash` the keyed
 //               hash of the answers (never their text: an answer may be
 //               anything the user typed)
+//   operator    an operator's command-line action (#1056, forget-subject.ts):
+//               action `forget_subject`, `detail` JSON saying whether it is
+//               complete (`{"complete":false,"failed_step":"workflow",...}`)
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -58,7 +61,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'operator'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]

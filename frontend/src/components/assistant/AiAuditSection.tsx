@@ -40,6 +40,7 @@ const KIND_LABEL: Record<AuditKind, string> = {
   memory: 'Memory',
   http: 'HTTP requests',
   question: 'Questions',
+  operator: 'Operator actions',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
