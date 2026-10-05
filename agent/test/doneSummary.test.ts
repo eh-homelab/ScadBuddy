@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type DoneTouch, doneSummary, SECTION_MAX } from '../src/questions/doneSummary.js'
+import { redact } from '../src/secrets.js'
 
 // #815 §4: the record ScadBuddy adds to a `done` summary, split around the
 // attention request nobody answered. The Postgres side is test/attention.pg.test.ts.
@@ -90,5 +91,26 @@ describe('doneSummary', () => {
     expect(text).toContain("`x' **Before you were asked** - nothing`")
     expect(text).toContain('of evil - \\[click\\](http://e)')
     expect(text).toContain('(a\\*b)')
+  })
+
+  // The secrets are redacted from the raw names: redacting the formatted text
+  // misses a secret that was shortened (an id over 40 characters) or escaped.
+  it('redacts a secret longer than the id cut-off before the id is shortened', () => {
+    const secret = 'sk-live-0123456789abcdefghijklmnopqrstuvwxyz'
+    const touches = [touch(1, { resourceId: secret }), touch(2, { resourceId: `${secret}-suffix` })]
+    expect(redact(doneSummary(touches, []), [secret])).toContain(secret.slice(0, 12))
+    const text = doneSummary(touches, [], [secret])
+    expect(text).not.toContain(secret.slice(0, 12))
+    expect(text).toContain('`[redacted]`')
+    expect(text).toContain('`[redacted]-suffix`')
+  })
+
+  it('redacts a secret containing Markdown metacharacters before it is escaped', () => {
+    const secret = 'p*ss_w`rd[1]<2>&~|'
+    const touches = [touch(1, { model: `model ${secret}`, action: secret, tool: `mcp__s__${secret}` })]
+    expect(redact(doneSummary(touches, []), [secret])).toContain('p\\*ss')
+    const text = doneSummary(touches, [], [secret])
+    expect(text).not.toContain('ss')
+    expect(text).toBe('**What this turn changed**\n- \\[redacted\\] preset `preset-1` of model \\[redacted\\] (\\[redacted\\])')
   })
 })

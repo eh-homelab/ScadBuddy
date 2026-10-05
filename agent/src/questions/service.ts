@@ -533,8 +533,8 @@ export class QuestionService {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
           }
           if (attention.reason === 'done') {
-            const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt)
-            summary = redact(done.summary, context.secrets())
+            const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt, context.secrets())
+            summary = done.summary
             await tx`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary,
                                         unattended)

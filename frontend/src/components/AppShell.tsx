@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { attentionCount, attentionDetail, attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import { attentionCount, attentionDetail, attentionLabel, summaryLabel, useAttention, useAttentionTitle } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -91,6 +91,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const refreshAttention = attention.refresh
   const waitingLabel = attentionLabel(attention.waiting)
   const waitingDetail = attentionDetail(attention.counts)
+  // A done summary waits for nothing, so it is shown beside the count, not in it.
+  const summaries = summaryLabel(attention.counts)
+  const toggleLabel = [waitingLabel, summaries].filter(Boolean).join(', ')
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
@@ -210,8 +213,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 aria-expanded={open}
                 aria-controls={mounted ? PANEL_ID : undefined}
                 aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
-                aria-label={waitingLabel ? `Assistant, ${waitingLabel}` : undefined}
-                title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${waitingLabel ? `: ${waitingLabel} (${waitingDetail})` : ''}`}
+                aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
+                title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
                 className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                   open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                 }`}
@@ -224,6 +227,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                     className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-warn/50 bg-warn/10 px-1 text-[10.5px] leading-none font-semibold text-warn"
                   >
                     {attentionCount(attention.waiting)}
+                  </span>
+                )}
+                {summaries && (
+                  <span data-testid="assistant-summaries" aria-hidden="true" className="text-[11px] text-muted">
+                    {summaries}
                   </span>
                 )}
               </button>

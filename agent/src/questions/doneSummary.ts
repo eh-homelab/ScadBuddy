@@ -1,4 +1,5 @@
 import type { TransactionSql } from 'postgres'
+import { redact } from '../secrets.js'
 
 // The record ScadBuddy adds to a `done` attention request (#815 §4,
 // harness/attention.ts): what the turn created, changed or deleted, read from
@@ -88,8 +89,30 @@ export function inAway(t: DoneTouch, away: readonly AwayWindow[]): boolean {
   return away.some((w) => t.at >= w.from && (w.until === null || t.at < w.until))
 }
 
-/** The summary as the card shows it (Markdown). `touches` in the order they happened, `away` in the order asked. */
-export function doneSummary(touches: readonly DoneTouch[], away: readonly AwayWindow[]): string {
+/** Each raw name with the turn's secrets redacted: before an id is shortened or Markdown escaped, either of which hides a secret from `redact`. */
+function redacted(t: DoneTouch, secrets: readonly string[]): DoneTouch {
+  const r = (text: string) => redact(text, secrets)
+  return {
+    ...t,
+    tool: r(t.tool),
+    resourceType: r(t.resourceType),
+    resourceId: t.resourceId === null ? null : r(t.resourceId),
+    action: r(t.action),
+    model: t.model === null ? null : r(t.model),
+  }
+}
+
+/**
+ * The summary as the card shows it (Markdown). `touches` in the order they
+ * happened, `away` in the order asked, `secrets` the turn's (redacted from
+ * every name before it is formatted).
+ */
+export function doneSummary(
+  rawTouches: readonly DoneTouch[],
+  away: readonly AwayWindow[],
+  secrets: readonly string[] = [],
+): string {
+  const touches = rawTouches.map((t) => redacted(t, secrets))
   if (touches.length === 0) return 'ScadBuddy recorded nothing created, changed or deleted in this turn.'
   const first = away[0]
   if (!first) return section('What this turn changed', touches)
@@ -112,13 +135,15 @@ export function doneSummary(touches: readonly DoneTouch[], away: readonly AwayWi
  * the transaction that posts the done request, so it covers every touch
  * committed before it. `unattended`: some touch was made while nobody answered
  * (the first section lists something), which keeps the summary from being
- * replaced by a later turn's (questions/service.ts).
+ * replaced by a later turn's (questions/service.ts). `secrets`: the turn's,
+ * redacted from every name before it is formatted.
  */
 export async function loadDoneSummary(
   tx: TransactionSql,
   sessionId: string,
   turnId: string,
   since: Date,
+  secrets: readonly string[],
 ): Promise<{ summary: string; unattended: boolean }> {
   const rows = await tx<
     { at: Date; tool: string; resource_type: string; resource_id: string | null; action: string; model_slug: string | null }[]
@@ -149,5 +174,5 @@ export async function loadDoneSummary(
     model: r.model_slug,
   }))
   const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
-  return { summary: doneSummary(touches, windows), unattended: touches.some((t) => inAway(t, windows)) }
+  return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => inAway(t, windows)) }
 }
