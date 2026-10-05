@@ -224,26 +224,128 @@ async def test_folders_recorded_on_another_bambuddy_are_not_uploaded_into(pool: 
     await backend.aclose()
 
 
-@respx.mock
-async def test_folders_recorded_before_instances_belong_to_the_current_bambuddy(
-    pool: Pool,
-) -> None:
-    """Rows from before #683 carry no instance (''): the first process to use the store
-    after the upgrade claims them for the Bambuddy it is configured for, so the files
-    already in those Work folders stay deletable."""
-    _record_folders(pool, "", ("old", "work", 42))
-    respx.get(f"{API}/library/files/78").mock(
+def _placed_tree() -> httpx.Response:
+    """This instance's tree: template folder 40 under the inbox, its Work folder 42."""
+    return httpx.Response(
+        200,
+        json=[
+            folder_row(
+                id=INBOX,
+                name="ScadBuddy",
+                parent_id=None,
+                children=[
+                    folder_row(
+                        id=40,
+                        name="Old",
+                        parent_id=INBOX,
+                        children=[folder_row(id=42, name="Work", parent_id=40)],
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def _instances(pool: Pool) -> dict[int, str]:
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT folder_id, instance FROM store_folders").fetchall()
+    return {int(row["folder_id"]): row["instance"] for row in rows}
+
+
+def _file_in(folder_id: int, file_id: int = 78) -> None:
+    respx.get(f"{API}/library/files/{file_id}").mock(
         return_value=httpx.Response(
-            200, json=shaped("FileResponse", id=78, filename="p", folder_id=42)
+            200, json=shaped("FileResponse", id=file_id, filename="p", folder_id=folder_id)
         )
     )
+
+
+@respx.mock
+async def test_pre_instance_folders_placed_on_this_bambuddy_are_claimed(pool: Pool) -> None:
+    """Rows from before #683 carry no instance (''). One whose folder sits where
+    ScadBuddy put it on the configured Bambuddy is claimed for it, so the files already
+    in that Work folder stay deletable."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    _file_in(42)
     delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
     backend = BambuddyContentBackend(target(), pool)
     await backend.remove("78")
     assert delete.called
+    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    await backend.aclose()
+
+
+@respx.mock
+async def test_pre_instance_folders_not_on_this_bambuddy_are_dropped_not_claimed(
+    pool: Pool,
+) -> None:
+    """The #683 case across the upgrade: the URL was already repointed, so the legacy
+    rows hold another instance's ids. Here id 42 is some unrelated folder (not under a
+    recorded template folder). It must not become deletable, and the row is dropped
+    rather than left for whichever instance comes next."""
+    _record_folders(pool, "", ("old", "template", 50), ("old", "work", 42))
+    respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78")
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("78")
+    assert not delete.called
+    assert _instances(pool) == {}
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_pre_instance_row_this_bambuddy_already_records_is_dropped(pool: Pool) -> None:
+    """A legacy row for a folder or a slot the instance already has (another process
+    claimed or made it first) is not claimed twice and raises no unique violation."""
+    _record_folders(pool, BASE_URL, ("old", "template", 40), ("old", "work", 42))
     with pool.connection() as conn:
-        row = conn.execute("SELECT instance FROM store_folders WHERE folder_id = 42").fetchone()
-    assert row is not None and row["instance"] == BASE_URL
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES ('', %s, 'old', 'template', 40), ('', %s, 'old', 'work', 43)",
+            (INBOX, INBOX),
+        )
+    respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    _file_in(42)
+    respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    await backend.remove("78")
+    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_live_switch_to_another_bambuddy_does_not_reuse_cached_folders(
+    pool: Pool,
+) -> None:
+    """#683 inside one process: Settings repoints the URL and the next call sees it
+    without a restart. The folder ids this process cached for the first instance must
+    not be used on the second."""
+    other_api = f"{OTHER}/api/v1"
+    current = [BASE_URL]
+
+    async def switching() -> BambuddyTarget:
+        return BambuddyTarget(
+            config=BambuddyConfig(base_url=current[0], api_key="narrow"), inbox_id=INBOX
+        )
+
+    for api in (API, other_api):
+        respx.get(f"{api}/library/folders").mock(return_value=inbox_tree())
+        respx.post(f"{api}/library/folders/").mock(side_effect=create_folder)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    created_there = respx.post(f"{other_api}/library/folders/").mock(side_effect=create_folder)
+    upload_there = respx.post(f"{other_api}/library/files").mock(return_value=uploaded())
+    backend = BambuddyContentBackend(switching, pool)
+    await backend.upload("piece", b"a", name="a.zip", scope=SCOPE)
+    current[0] = OTHER
+    await backend.upload("piece", b"b", name="b.zip", scope=SCOPE)
+    assert created_there.call_count == 2  # its own template folder and Work
+    assert upload_there.called
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT DISTINCT instance FROM store_folders").fetchall()
+    assert {row["instance"] for row in rows} == {BASE_URL, OTHER}
     await backend.aclose()
 
 

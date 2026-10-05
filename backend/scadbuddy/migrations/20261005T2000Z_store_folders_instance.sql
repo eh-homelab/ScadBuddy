@@ -4,11 +4,16 @@
 -- deleting from, whatever unrelated folder has that id there.
 --
 -- `instance` is the Bambuddy base URL with no trailing slash. Rows from before this
--- carry '' and are claimed by the first process that uses the store afterwards
--- (`BambuddyContentBackend._claim_legacy`): the URL is often an environment seed,
--- which SQL cannot read, and that process runs against the instance they were made on.
+-- carry '' (the URL is often an environment seed, which SQL cannot read). Each
+-- process settles them before its instance's first find or delete
+-- (`BambuddyContentBackend._claim_legacy`): a row is claimed only when its folder
+-- sits where ScadBuddy put it on that instance, and dropped otherwise, so ids from an
+-- instance the URL was already repointed away from are never trusted.
+--
+-- The DEFAULT stays for the rollout: a render worker of the previous release, still
+-- draining, inserts without `instance`, and its row lands as '' for the same check
+-- rather than failing the render. Drop it in a later migration.
 ALTER TABLE store_folders ADD COLUMN instance text NOT NULL DEFAULT '';
-ALTER TABLE store_folders ALTER COLUMN instance DROP DEFAULT;
 ALTER TABLE store_folders DROP CONSTRAINT store_folders_pkey;
 ALTER TABLE store_folders DROP CONSTRAINT store_folders_folder_id_key;
 ALTER TABLE store_folders ADD PRIMARY KEY (instance, inbox_id, slug, role);

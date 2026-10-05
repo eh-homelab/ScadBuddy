@@ -69,6 +69,16 @@ class BambuddyTarget:
 
 
 @dataclass(frozen=True)
+class _LegacyFolder:
+    """A `store_folders` row recorded before rows carried their instance (#683)."""
+
+    inbox_id: int
+    slug: str
+    role: str
+    folder_id: int
+
+
+@dataclass(frozen=True)
 class _Inbox:
     """Where this call's folders are: one inbox on one Bambuddy instance."""
 
@@ -175,7 +185,7 @@ class BambuddyContentBackend:
         #: One per folder being found or made, so this process's other callers for it
         #: wait in the event loop rather than each holding a thread and a connection.
         self._finding: dict[tuple[str, int, str, str], asyncio.Lock] = {}
-        #: The instances whose pre-#683 rows this process has claimed (`_claim_legacy`).
+        #: The instances whose pre-#683 rows this process has settled (`_claim_legacy`).
         self._claimed: set[str] = set()
 
     async def aclose(self) -> None:
@@ -186,25 +196,84 @@ class BambuddyContentBackend:
     async def _client(self) -> AsyncIterator[tuple[BambuddyClient, _Inbox]]:
         target = await self._target()
         inbox = _Inbox(target.instance, target.inbox_id)
-        if inbox.instance not in self._claimed:
-            await asyncio.to_thread(self._claim_legacy, inbox.instance)
-            self._claimed.add(inbox.instance)
         async with BambuddyClient(target.config, http=self._http) as client:
+            if inbox.instance not in self._claimed:
+                await self._claim_legacy(client, inbox.instance)
             yield client, inbox
 
-    def _claim_legacy(self, instance: str) -> None:
-        """Give the rows recorded before folders were per instance (``''``) to the
-        instance this process uses. Run before any find or delete, so the files already
-        in those `Work/` folders stay deletable; a row the instance already has (another
-        process claimed or made it first) is left, unmatched."""
-        with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE store_folders AS legacy SET instance = %s WHERE legacy.instance = ''"
-                " AND NOT EXISTS (SELECT 1 FROM store_folders AS own WHERE own.instance = %s"
-                " AND (own.folder_id = legacy.folder_id OR (own.inbox_id, own.slug, own.role)"
-                " = (legacy.inbox_id, legacy.slug, legacy.role)))",
-                (instance, instance),
+    async def _claim_legacy(self, client: BambuddyClient, instance: str) -> None:
+        """Settle the rows recorded before folders were per instance (``''``), before
+        this instance's first find or delete. Such a row is claimed only if its folder
+        sits where ScadBuddy put it on THIS instance: a template folder directly under
+        its inbox, a `Work` folder directly under its claimed template folder. Anything
+        else (ids from an instance the URL was repointed away from, #683; a folder moved
+        or deleted since) is dropped, never trusted, so the next find adopts or makes the
+        folder again. Best effort: a folder listing that fails leaves the rows for the
+        next call."""
+        legacy = await asyncio.to_thread(self._legacy_rows)
+        if not legacy:
+            self._claimed.add(instance)
+            return
+        try:
+            folders = {f.id: f for root in await client.folders() for f in root.walk()}
+        except (ApiError, httpx.HTTPError):
+            logger.warning("could not list folders to settle pre-instance folder records")
+            return
+        templates = {
+            (row.inbox_id, row.slug): row.folder_id
+            for row in legacy
+            if row.role == "template"
+            and (folder := folders.get(row.folder_id)) is not None
+            and folder.parent_id == row.inbox_id
+        }
+
+        def placed(row: _LegacyFolder) -> bool:
+            if row.role == "template":
+                return templates.get((row.inbox_id, row.slug)) == row.folder_id
+            folder = folders.get(row.folder_id)
+            return (
+                folder is not None
+                and folder.name == WORK
+                and folder.parent_id == templates.get((row.inbox_id, row.slug))
             )
+
+        await asyncio.to_thread(
+            self._settle_legacy, instance, [row for row in legacy if placed(row)], legacy
+        )
+        self._claimed.add(instance)
+
+    def _legacy_rows(self) -> list[_LegacyFolder]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT inbox_id, slug, role, folder_id FROM store_folders WHERE instance = ''"
+            ).fetchall()
+        return [
+            _LegacyFolder(int(r["inbox_id"]), r["slug"], r["role"], int(r["folder_id"]))
+            for r in rows
+        ]
+
+    def _settle_legacy(
+        self, instance: str, claimed: list[_LegacyFolder], seen: list[_LegacyFolder]
+    ) -> None:
+        """Claim ``claimed`` for ``instance`` (unless it already records that folder or
+        that slot), then drop whatever of ``seen`` is still unclaimed. A row an older
+        release inserts after ``seen`` was read is left for the next process."""
+        with self._pool.connection() as conn, conn.transaction():
+            for row in claimed:
+                conn.execute(
+                    "UPDATE store_folders AS legacy SET instance = %s WHERE legacy.instance = ''"
+                    " AND inbox_id = %s AND slug = %s AND role = %s AND folder_id = %s"
+                    " AND NOT EXISTS (SELECT 1 FROM store_folders AS own WHERE own.instance = %s"
+                    " AND (own.folder_id = legacy.folder_id OR (own.inbox_id, own.slug, own.role)"
+                    " = (legacy.inbox_id, legacy.slug, legacy.role)))",
+                    (instance, row.inbox_id, row.slug, row.role, row.folder_id, instance),
+                )
+            for row in seen:
+                conn.execute(
+                    "DELETE FROM store_folders WHERE instance = '' AND inbox_id = %s"
+                    " AND slug = %s AND role = %s AND folder_id = %s",
+                    (row.inbox_id, row.slug, row.role, row.folder_id),
+                )
 
     # --- ContentBackend ------------------------------------------------------
 
