@@ -24,11 +24,14 @@ from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
     start_command,
+    temporal_failure,
 )
-from tests.support.temporal import current_address, temporal_client
+from tests.support.temporal import current_address, namespace_not_found_error, temporal_client
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -209,6 +212,55 @@ async def test_only_a_failed_connect_says_nothing_started(queue: str) -> None:
 
     with pytest.raises(TemporalUnreachableError):
         await echo(cast(Client, NeverConnects()), queue, "echo-never-connects")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (TimeoutError(), TemporalUnavailableError),
+        (RuntimeError("Failed client connect: connection refused"), TemporalUnreachableError),
+        (RPCError("reset", RPCStatusCode.UNAVAILABLE, b""), TemporalUnavailableError),
+        (RPCError("slow", RPCStatusCode.DEADLINE_EXCEEDED, b""), TemporalBusyError),
+        (RPCError("limit", RPCStatusCode.RESOURCE_EXHAUSTED, b""), TemporalBusyError),
+        (RPCError("cancelled", RPCStatusCode.CANCELLED, b""), TemporalBusyError),
+        (RPCError("internal", RPCStatusCode.INTERNAL, b""), TemporalBusyError),
+        (namespace_not_found_error(), TemporalBusyError),
+        (RPCError("no execution", RPCStatusCode.NOT_FOUND, b""), TemporalRefusedError),
+        (RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""), TemporalRefusedError),
+        (RPCError("who", RPCStatusCode.UNAUTHENTICATED, b""), TemporalRefusedError),
+        (RPCError("bad", RPCStatusCode.INVALID_ARGUMENT, b""), TemporalRefusedError),
+    ],
+)
+def test_temporal_failure_is_the_one_reading_of_a_failed_call(
+    error: BaseException, expected: type[Exception]
+) -> None:
+    """Review #1316 (11) 2, 5; (12) 1: the routes and the reconcilers read a failed call
+    the same way: unreachable, unavailable or busy (each worth sending again) or refused."""
+    failure = temporal_failure(error, "x")
+    assert type(failure) is expected
+
+
+def test_temporal_failure_leaves_a_failure_not_about_temporal() -> None:
+    assert temporal_failure(RuntimeError("a bug"), "x") is None
+    assert temporal_failure(ValueError("a bug"), "x") is None
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (RPCStatusCode.RESOURCE_EXHAUSTED, TemporalBusyError),
+        (RPCStatusCode.PERMISSION_DENIED, TemporalRefusedError),
+    ],
+)
+async def test_start_command_raises_what_temporal_failure_reads(
+    queue: str, code: RPCStatusCode, expected: type[Exception]
+) -> None:
+    class Failing:
+        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+            raise RPCError("no", code, b"")
+
+    with pytest.raises(expected):
+        await echo(cast(Client, Failing()), queue, "echo-failing")
 
 
 class Proxy:

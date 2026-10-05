@@ -33,7 +33,7 @@ from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -42,6 +42,7 @@ from scadbuddy.workflows.commands import (
     CommandClosedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    temporal_failure,
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import prepared, queue_route
@@ -53,7 +54,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
-from tests.support.temporal import WorkflowReaper
+from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -521,6 +522,12 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
 
 
+def _failure(error: BaseException) -> Exception:
+    failure = temporal_failure(error, "print-x")
+    assert failure is not None
+    return failure
+
+
 @respx.mock
 def test_only_a_failed_connect_says_nothing_was_queued(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
@@ -548,7 +555,7 @@ def test_only_a_failed_connect_says_nothing_was_queued(
         # An `UNAVAILABLE` response, or a bound that expired with Temporal down: either
         # may follow a persisted start (review #1316 (9) 1a).
         TemporalUnavailableError("blip"),
-        RPCError("blip", RPCStatusCode.UNAVAILABLE, b""),
+        temporal_failure(RPCError("blip", RPCStatusCode.UNAVAILABLE, b""), "x"),
     ],
 )
 @respx.mock
@@ -594,7 +601,8 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     output_id = prepared(client, model)
 
     async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
-        raise RPCError("blip", code, b"")
+        # What `start_command` raises for it (`tests/test_commands.py`).
+        raise _failure(RPCError("blip", code, b""))
 
     monkeypatch.setattr(printing_api, "start_command", failing_start)
 
@@ -609,6 +617,25 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     # (9) 1b).
     assert "cannot reach" not in response.text
     assert "could not start this print right now" in response.text
+
+
+@respx.mock
+def test_a_missing_namespace_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A namespace Temporal does not (yet) know is read as the reconciler reads it:
+    worth sending again, never a 500 (review #1316 (12) 1)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise _failure(namespace_not_found_error())
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == printing_api.TEMPORAL_BUSY_DETAIL
 
 
 @pytest.mark.parametrize(
@@ -631,12 +658,12 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
     caplog: pytest.LogCaptureFixture,
     code: RPCStatusCode,
 ) -> None:
-    """Review #1061 (3) 3: a wrong namespace is a misconfiguration, not a blip, so it is
-    never "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
+    """Review #1061 (3) 3: a refusal is a misconfiguration, not a blip, so it is never
+    "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
     output_id = prepared(client, model)
 
     async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
-        raise RPCError("namespace not found", code, b"")
+        raise _failure(RPCError("permission denied", code, b""))
 
     monkeypatch.setattr(printing_api, "start_command", failing_start)
 
@@ -647,7 +674,7 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
 
     assert response.status_code == 500, response.text
     assert response.json()["type"].endswith("/temporal-refused")
-    assert "namespace not found" not in response.text
+    assert "permission denied" not in response.text
     # Some refusals come after the start was persisted (review #1316 4).
     assert "Nothing was queued" not in response.text
     assert any(record.levelname == "ERROR" for record in caplog.records)
@@ -842,7 +869,7 @@ def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str
     spec = app.openapi()
     responses = spec["paths"][path]["post"]["responses"]
     for code, problems in (
-        ("500", [printing_api.TEMPORAL_REFUSED_PROBLEM]),
+        ("500", [operations_api.TEMPORAL_REFUSED_PROBLEM]),
         (
             "503",
             [operations_api.TEMPORAL_UNAVAILABLE_PROBLEM, operations_api.STILL_ACCEPTING_PROBLEM],
@@ -852,3 +879,18 @@ def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str
         assert all(problem in declared["description"] for problem in problems)
         schema = declared["content"]["application/problem+json"]["schema"]
         assert {"type", "status", "detail"} <= set(schema["required"])
+    # Each detail the route sends is the one its description quotes (review #1316 (11) 1,
+    # (12) 2), and the 500 names the check's unexpected failure too.
+    assert printing_api.TEMPORAL_REFUSED_DETAIL in responses["500"]["description"]
+    assert "about:blank" in responses["500"]["description"]
+    assert UNEXPECTED_DETAIL in responses["500"]["description"]
+    for detail in (
+        printing_api.TEMPORAL_UNREACHABLE_DETAIL,
+        printing_api.TEMPORAL_DOWN_DETAIL,
+        printing_api.TEMPORAL_BUSY_DETAIL,
+        printing_api.STILL_CHECKING_DETAIL,
+    ):
+        assert detail in responses["503"]["description"]
+    assert "did not answer or could not start the run" in responses["503"]["description"]
+    # The check's refusals pass through with their own status.
+    assert "own status" in responses["default"]["description"]

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import (
     Client,
@@ -48,12 +49,86 @@ class CommandStillAcceptingError(Exception):
 class TemporalUnavailableError(Exception):
     """Temporal did not answer within the deadline, or answered ``UNAVAILABLE`` (its
     frontend is down or unreachable). A request may have reached it before it went, so
-    a start may exist (review #1316 (9) 1a)."""
+    a start may exist (review #1316 (9) 1a). Worth sending again."""
 
 
 class TemporalUnreachableError(TemporalUnavailableError):
     """The lazy client's first connect failed: no request was written, so nothing was
     started."""
+
+
+class TemporalBusyError(TemporalUnavailableError):
+    """Temporal answered, or gRPC ended the call, with a code Temporal's own client
+    retries, or the namespace is not (yet) known: it could not take the call now, and
+    the same call may succeed shortly."""
+
+
+class TemporalRefusedError(Exception):
+    """Temporal answered and refused (a denied permission, a failed authentication, a
+    request it rejects): sending it again will not help until that is fixed."""
+
+
+#: The `RPCError`s worth sending again; any other is :class:`TemporalRefusedError`
+#: (review #1316 1a). First the codes Temporal's own client retries,
+#: `RETRYABLE_ERROR_CODES` in the sdk-core this SDK bundles (temporalio 1.33.0's
+#: `temporalio/bridge/sdk-core` at temporalio/sdk-rust@85b71d7e,
+#: `crates/client/src/retry.rs`): one reaching us outlived those retries.
+#: `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a busy server (review #1316
+#: 4); `ABORTED` is gRPC's "retry at a higher level" (google.rpc.Code). Then the two gRPC
+#: itself raises on a call that never answered
+#: (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): `DEADLINE_EXCEEDED`, and
+#: `CANCELLED`, which sdk-core also retries when the transport cancelled it. The rest
+#: (`NOT_FOUND` other than a namespace's, `PERMISSION_DENIED`, `UNAUTHENTICATED`,
+#: `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `UNIMPLEMENTED`) are what neither retries.
+#: A start the reuse policy refuses (`ALREADY_EXISTS`) never reaches here as an
+#: `RPCError`: update-with-start raises it as `WorkflowAlreadyStartedError`, which
+#: `start_command` answers as `AlreadyClosedError` (review #1316 (10) 2).
+TRANSIENT_RPC = frozenset(
+    {
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.CANCELLED,
+    }
+)
+
+
+def namespace_not_found(error: RPCError) -> bool:
+    """A NOT_FOUND about the namespace (a `NamespaceNotFoundFailure` in its details, as
+    #1066's), not about the execution the call named."""
+    return error.status == RPCStatusCode.NOT_FOUND and any(
+        detail.Is(NamespaceNotFoundFailure.DESCRIPTOR) for detail in error.grpc_status.details
+    )
+
+
+def temporal_failure(error: BaseException, id: str) -> Exception | None:
+    """What a failed call to Temporal means, the one reading the routes and the
+    lost-run reconcilers share (review #1316 (11) 2, 5; (12) 1): unreachable,
+    unavailable, busy (each worth sending again) or refused. ``None`` for a failure
+    that is not about Temporal at all. A caller that expects an execution NOT_FOUND
+    tells it apart first: here it is a refusal."""
+    if isinstance(error, TimeoutError):
+        return TemporalUnavailableError(id)
+    if isinstance(error, RuntimeError):
+        # How a lazy client's first connect fails (temporalio 1.33).
+        if str(error).startswith("Failed client connect"):
+            return TemporalUnreachableError(id)
+        return None
+    if not isinstance(error, RPCError):
+        return None
+    if error.status == RPCStatusCode.UNAVAILABLE:
+        # A connected client's `UNAVAILABLE` cannot tell a refused reconnect from a
+        # stream reset after the start was persisted (temporalio 1.33.0,
+        # `bridge/src/client.rs` `rpc_resp`), and sdk-core retries it.
+        return TemporalUnavailableError(id)
+    if error.status in TRANSIENT_RPC or namespace_not_found(error):
+        return TemporalBusyError(id)
+    return TemporalRefusedError(id)
 
 
 #: The failure Temporal gives an Update whose execution completed before it answered.
@@ -145,18 +220,10 @@ async def start_command[T](
             )
     except TimeoutError as error:
         raise await _late(client, id) from error
-    except RPCError as error:
-        # A connected client's `UNAVAILABLE` cannot tell a refused reconnect from a
-        # stream reset after the start was persisted (temporalio 1.33.0,
-        # `bridge/src/client.rs` `rpc_resp`), and sdk-core retries it.
-        if error.status == RPCStatusCode.UNAVAILABLE:
-            raise TemporalUnavailableError(id) from error
-        raise
-    except RuntimeError as error:
-        # How a lazy client's first connect fails (temporalio 1.33).
-        if str(error).startswith("Failed client connect"):
-            raise TemporalUnreachableError(id) from error
-        raise
+    except (RPCError, RuntimeError) as error:
+        if (failure := temporal_failure(error, id)) is None:
+            raise
+        raise failure from error
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
         # The SDK reports the outer bound's cancellation as this error too.
         if bound.expired():

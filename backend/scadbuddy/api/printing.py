@@ -20,7 +20,6 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
@@ -39,10 +38,12 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     STILL_ACCEPTING_PROBLEM,
+    TEMPORAL_REFUSED_PROBLEM,
     TEMPORAL_UNAVAILABLE_PROBLEM,
     IdempotencyKey,
     operation_answer,
     run_operation,
+    temporal_refused,
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
@@ -63,7 +64,7 @@ from scadbuddy.bambuddy.projects import (
     ProjectView,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
@@ -77,6 +78,8 @@ from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
     start_command,
@@ -91,54 +94,59 @@ from scadbuddy.workflows.print_models import (
 
 logger = logging.getLogger(__name__)
 
-#: Temporal answered and refused (a wrong namespace, a denied permission): sending the
-#: same request again will not help until it is fixed (review #1316 (2) 7).
-TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
-#: The `RPCError`s that answer `temporal-unavailable`; any other is a 500 (review #1316
-#: 1a). First the codes Temporal's own client retries, `RETRYABLE_ERROR_CODES` in the
-#: sdk-core this SDK bundles (temporalio 1.33.0's `temporalio/bridge/sdk-core` at
-#: temporalio/sdk-rust@85b71d7e, `crates/client/src/retry.rs`): one reaching us
-#: outlived those retries. `RESOURCE_EXHAUSTED` is a namespace past its rate limit or a
-#: busy server (review #1316 4); `ABORTED` is gRPC's "retry at a higher level"
-#: (google.rpc.Code). Then the two gRPC itself raises on a call that never answered
-#: (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): `DEADLINE_EXCEEDED`,
-#: and `CANCELLED`, which sdk-core also retries when the transport cancelled it. The
-#: rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
-#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`) are what neither retries. A start the reuse
-#: policy refuses (`ALREADY_EXISTS`) never reaches here as an `RPCError`: update-with-start
-#: raises it as `WorkflowAlreadyStartedError`, which `start_command` answers as
-#: `AlreadyClosedError` (`tests/test_commands.py`), and the route answers from the record
-#: (review #1316 (10) 2).
-TRANSIENT_RPC = frozenset(
-    {
-        RPCStatusCode.DATA_LOSS,
-        RPCStatusCode.INTERNAL,
-        RPCStatusCode.UNKNOWN,
-        RPCStatusCode.RESOURCE_EXHAUSTED,
-        RPCStatusCode.ABORTED,
-        RPCStatusCode.OUT_OF_RANGE,
-        RPCStatusCode.UNAVAILABLE,
-        RPCStatusCode.DEADLINE_EXCEEDED,
-        RPCStatusCode.CANCELLED,
-    }
+#: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
+#: was persisted, and the same request sent again follows it (review #1316 4).
+TEMPORAL_REFUSED_DETAIL = (
+    "Temporal refused to start this print; see ScadBuddy's logs. Send the same request"
+    " again to follow it if it started."
+)
+#: ``TemporalUnreachableError``: the first connect failed, so no request was written.
+TEMPORAL_UNREACHABLE_DETAIL = (
+    "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try again shortly."
+)
+#: ``TemporalUnavailableError``: no answer within the bound, or ``UNAVAILABLE``. Either
+#: may follow a persisted start (review #1316 (9) 1a).
+TEMPORAL_DOWN_DETAIL = (
+    "ScadBuddy cannot reach Temporal, where print runs run. Send the same request again"
+    " shortly to follow it if it started."
+)
+#: ``TemporalBusyError``: Temporal answered, or gRPC ended the call, so it is not "cannot
+#: reach" (review #1316 (9) 1b).
+TEMPORAL_BUSY_DETAIL = (
+    "Temporal could not start this print right now. Send the same request again shortly"
+    " to follow it if it started."
+)
+STILL_CHECKING_DETAIL = (
+    "ScadBuddy is still checking this print. Send the same request again to follow it."
 )
 
 #: Inline: a ``model`` would be documented as ``application/json``, the route's own type.
 PROBLEM_SCHEMA = Problem.model_json_schema()
-#: The problems a print run's routes answer when Temporal did not take the run, beside
-#: the 200 and 202 (review #1316 (10) 3).
+#: What a print run's routes answer beside the 200 and 202, built from the details the
+#: route sends (review #1316 (10) 3, (11) 1, (12) 2).
 PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = {
     status.HTTP_500_INTERNAL_SERVER_ERROR: {
         "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
-        "description": f"`{TEMPORAL_REFUSED_PROBLEM}`: Temporal refused to start the run (a "
-        "wrong namespace, a denied permission). Fix that first; the same request sent again "
-        "then follows the run if it started.",
+        "description": f"`{TEMPORAL_REFUSED_PROBLEM}`: {TEMPORAL_REFUSED_DETAIL} Or "
+        f'`about:blank`: the check failed unexpectedly ("{UNEXPECTED_DETAIL}"), or'
+        " ScadBuddy did.",
     },
     status.HTTP_503_SERVICE_UNAVAILABLE: {
         "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
-        "description": f"`{TEMPORAL_UNAVAILABLE_PROBLEM}`: Temporal did not answer; or "
-        f"`{STILL_ACCEPTING_PROBLEM}`: the run is still being checked. Send the same "
-        "request again after `Retry-After` to follow it.",
+        "description": f"`{TEMPORAL_UNAVAILABLE_PROBLEM}`, with `Retry-After`: Temporal did"
+        " not answer or could not start the run right now, one of: "
+        + "; ".join(
+            f'"{detail}"'
+            for detail in (TEMPORAL_UNREACHABLE_DETAIL, TEMPORAL_DOWN_DETAIL, TEMPORAL_BUSY_DETAIL)
+        )
+        + f'. Or `{STILL_ACCEPTING_PROBLEM}`, with `Retry-After`: "{STILL_CHECKING_DETAIL}"',
+    },
+    "default": {
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+        "description": "Any other problem. The check's refusal passes through with its own"
+        " status and type (409, 422, or Bambuddy's own, such as 404 for a library file it no"
+        " longer has, 502 or 504); the route's own are 404 for an unknown output and 409 for"
+        " a run whose record expired.",
     },
 }
 
@@ -432,46 +440,21 @@ async def accept_run(
         # the same request sent again starts a new one.
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ScadBuddy is still checking this print. Send the same request again to follow it.",
+            STILL_CHECKING_DETAIL,
             type_=STILL_ACCEPTING_PROBLEM,
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
-    except (RPCError, TemporalUnavailableError) as error:
-        # Only what Temporal's client would retry is worth retrying (`TRANSIENT_RPC`); a
-        # wrong namespace or a refused permission is a misconfiguration (review #1061
-        # (3) 3). Its gRPC message stays in the log, out of the response.
-        if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
-            logger.error("Temporal refused to start a print run", exc_info=True)
-            raise ApiError(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                # Not "nothing was queued": some refusals come after the start was
-                # persisted, and the same request sent again follows it (review #1316 4).
-                "Temporal refused to start this print; see ScadBuddy's logs. Send the same"
-                " request again to follow it if it started.",
-                type_=TEMPORAL_REFUSED_PROBLEM,
-            ) from None
+    except TemporalRefusedError:
+        # A misconfiguration, not a blip (review #1061 (3) 3).
+        raise temporal_refused("a print run", TEMPORAL_REFUSED_DETAIL) from None
+    except TemporalUnavailableError as error:
         logger.warning("could not start a print run on Temporal", exc_info=True)
-        # Only a failed connect wrote nothing; any other may follow a persisted start
-        # (review #1316 (9) 1a). Only an unreachable Temporal is "cannot reach": the
-        # other codes are Temporal's answers, or gRPC ending the call (review #1316 (9)
-        # 1b).
         if isinstance(error, TemporalUnreachableError):
-            detail = (
-                "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued;"
-                " try again shortly."
-            )
-        elif isinstance(error, TemporalUnavailableError) or (
-            error.status == RPCStatusCode.UNAVAILABLE
-        ):
-            detail = (
-                "ScadBuddy cannot reach Temporal, where print runs run. Send the same"
-                " request again shortly to follow it if it started."
-            )
+            detail = TEMPORAL_UNREACHABLE_DETAIL
+        elif isinstance(error, TemporalBusyError):
+            detail = TEMPORAL_BUSY_DETAIL
         else:
-            detail = (
-                "Temporal could not start this print right now. Send the same request"
-                " again shortly to follow it if it started."
-            )
+            detail = TEMPORAL_DOWN_DETAIL
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail,

@@ -11,10 +11,7 @@ from datetime import timedelta
 from typing import Any, cast
 
 import pytest
-from google.protobuf.any_pb2 import Any as Any_
 from psycopg import Connection
-from temporalio.api.common.v1 import GrpcStatus
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -31,7 +28,7 @@ from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_runs
-from tests.support.temporal import temporal_client
+from tests.support.temporal import DownClient, namespace_not_found_error, temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -393,17 +390,24 @@ async def test_a_pre_1052_row_never_beaten_is_stale_once_it_is_old(
 
 
 async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
-    store: PrintRunStore, jobs: JobProjection
+    store: PrintRunStore, jobs: JobProjection, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Review #1061 (3) 2: otherwise the row is ``running`` for good, and every repeat
     of its body-only key is answered with it. A late heartbeat does not show its pod is
     dead: one stalled past ``PRE_1052_LOST_AFTER`` may yet queue it, so the row may have
-    queued however far it got, as the migration says of such rows (review #1316 2a)."""
+    queued however far it got, as the migration says of such rows (review #1316 2a).
+    It never had an execution, so it is logged in its own words and not counted among
+    the runs whose execution was gone (review #1316 (11) 4)."""
     _insert_pre_1052(jobs, "dead", timedelta(days=1))
     _insert_pre_1052(jobs, "alive", timedelta(days=-1))
-    async with temporal_client() as client:
-        ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
-    assert ended == 1
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        async with temporal_client() as client:
+            ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+    assert ended == 0
+    logged = [r for r in caplog.records if r.name == client_module.__name__]
+    assert [(r.getMessage(), getattr(r, "count", None)) for r in logged] == [
+        ("ended print runs a pre-#1052 pod left running", 1)
+    ]
     dead = await store.get("dead")
     assert dead is not None
     assert dead.error == UPGRADE_INTERRUPTED and dead.may_have_queued
@@ -429,29 +433,10 @@ async def test_one_failing_row_does_not_stop_the_reconcile(
     monkeypatch.setattr(store, "fail_pre_1052", failing)
     async with temporal_client() as client:
         ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
-    assert ended == 2
+    assert ended == 1  # "gone"; "dead" is a pre-#1052 row, logged on its own
     assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
     assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
-
-
-class _DownClient:
-    """A client whose every describe fails as Temporal down does (``describe`` given),
-    counting the calls and the ``rpc_timeout`` each was given."""
-
-    def __init__(self, describe: Any) -> None:
-        self.describe = describe
-        self.timeouts: list[timedelta | None] = []
-
-    def get_workflow_handle(self, workflow_id: str, *, run_id: str | None = None) -> Any:
-        client = self
-
-        class Handle:
-            async def describe(self, *, rpc_timeout: timedelta | None = None) -> Any:
-                client.timeouts.append(rpc_timeout)
-                return await client.describe()
-
-        return Handle()
 
 
 async def _unavailable() -> Any:
@@ -463,20 +448,34 @@ async def _hangs() -> Any:
 
 
 async def _no_namespace() -> Any:
-    """What Temporal answers a call to a namespace it does not have: NOT_FOUND, with a
-    `NamespaceNotFoundFailure` in its details (as #1066's `namespace_not_found`)."""
-    status = GrpcStatus(
-        code=RPCStatusCode.NOT_FOUND,
-        message="Namespace nope is not found.",
-        details=[
-            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
-        ],
-    )
-    raise RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())
+    raise namespace_not_found_error()
+
+
+async def _exhausted() -> Any:
+    raise RPCError("namespace rate limit exceeded", RPCStatusCode.RESOURCE_EXHAUSTED, b"")
+
+
+async def _denied() -> Any:
+    raise RPCError("request unauthorized", RPCStatusCode.PERMISSION_DENIED, b"")
+
+
+async def _unauthenticated() -> Any:
+    raise RPCError("missing credentials", RPCStatusCode.UNAUTHENTICATED, b"")
 
 
 @pytest.mark.parametrize(
-    "describe", [_unavailable, _hangs, _no_namespace], ids=["unavailable", "hangs", "namespace"]
+    ("describe", "level"),
+    [
+        (_unavailable, logging.WARNING),
+        (_hangs, logging.WARNING),
+        (_no_namespace, logging.WARNING),
+        (_exhausted, logging.WARNING),
+        # Temporal refused: about Temporal, not the row, so it stops the pass too, but
+        # once, at ERROR (review #1316 (11) 2, (12) 1).
+        (_denied, logging.ERROR),
+        (_unauthenticated, logging.ERROR),
+    ],
+    ids=["unavailable", "hangs", "namespace", "exhausted", "denied", "unauthenticated"],
 )
 async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
     store: PrintRunStore,
@@ -484,23 +483,29 @@ async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     describe: Any,
+    level: int,
 ) -> None:
     """Review #1316 (10) 1: the pre-#1052 sweep needs only Postgres, so it runs first;
     a Temporal that does not answer stops the pass at the first describe, logged once,
     and each describe is bounded. A missing namespace's NOT_FOUND is about Temporal,
-    not the execution: it never ends a live row."""
+    not the execution: it never ends a live row. Every other failure of the describe is
+    about Temporal too, read as the route reads it (review #1316 (12) 1)."""
     monkeypatch.setattr(client_module, "DESCRIBE_SECONDS", 0.05)
     monkeypatch.setattr(client_module, "CONNECT_MARGIN_SECONDS", 0.05)
     _insert_pre_1052(jobs, "dead", timedelta(days=1))
     for run_id in ("one", "two", "three"):
         await accept(store, run_id, run_id=run_id, wf_run=str(uuid.uuid4()))
-    client = _DownClient(describe)
+    client = DownClient(describe)
 
     with caplog.at_level(logging.WARNING, logger=client_module.__name__):
         ended = await reconcile_lost_runs(cast(Any, client), store, older_than=timedelta(0))
 
-    assert ended == 1
+    # The pre-#1052 row never had an execution: logged on its own, not counted.
+    assert ended == 0
     assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
     assert (await store.get("one")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("two")).status == "running"  # type: ignore[union-attr]
     assert len(client.timeouts) == 1 and client.timeouts[0] is not None
-    assert len([r for r in caplog.records if r.name == client_module.__name__]) == 1
+    records = [r for r in caplog.records if r.name == client_module.__name__]
+    assert records[0].getMessage() == "ended print runs a pre-#1052 pod left running"
+    assert [r.levelno for r in records[1:]] == [level]

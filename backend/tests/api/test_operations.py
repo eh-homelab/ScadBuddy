@@ -28,6 +28,7 @@ from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CommandClosedError,
+    TemporalRefusedError,
     start_command,
 )
 
@@ -254,3 +255,20 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
     response = post(client, {})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_a_refusing_temporal_is_a_500_as_the_reconciler_reads_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the route reads a failed start as the lost-operation
+    reconciler does (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly", as the print-run routes answer it."""
+
+    async def refused_start(*args: Any, **kwargs: Any) -> Any:
+        raise TemporalRefusedError("op-x")
+
+    monkeypatch.setattr(operations_api, "start_command", refused_start)
+    response = post(client, {})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    assert "try again shortly" not in response.text

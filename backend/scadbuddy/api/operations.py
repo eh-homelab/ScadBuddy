@@ -19,7 +19,6 @@ from fastapi import APIRouter, Header, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.service import RPCError
 
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.problems import ApiError
@@ -31,6 +30,7 @@ from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalRefusedError,
     TemporalUnavailableError,
     start_command,
 )
@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 #: Problem ``type``s for a command the route could not hand to Temporal (#1052, #1053).
 STILL_ACCEPTING_PROBLEM = "https://scadbuddy.dev/problems/command-still-accepting"
 TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavailable"
+#: Temporal answered and refused (a denied permission, a failed authentication):
+#: sending the same request again will not help until it is fixed (review #1316 (2) 7).
+TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
 #: A request that already ran and whose record was pruned: it may have been done.
 RECORD_GONE_PROBLEM = "https://scadbuddy.dev/problems/operation-record-gone"
 
@@ -72,6 +75,13 @@ def temporal_unavailable(what: str) -> ApiError:
         type_=TEMPORAL_UNAVAILABLE_PROBLEM,
         headers={"Retry-After": "5"},
     )
+
+
+def temporal_refused(what: str, detail: str) -> ApiError:
+    """``TemporalRefusedError``, read as the reconcilers read it (review #1316 (12) 1).
+    Its gRPC message stays in the log, out of the response."""
+    logger.error("Temporal refused to start %s", what, exc_info=True)
+    return ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, detail, type_=TEMPORAL_REFUSED_PROBLEM)
 
 
 def _answer(
@@ -148,7 +158,13 @@ async def run_operation(
         # Ended before it answered. A re-send reads whatever it recorded (the reconciler
         # ends a row it left running); with no record, the same request starts again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError):
+    except TemporalRefusedError:
+        raise temporal_refused(
+            "an operation",
+            "Temporal refused to start this; see ScadBuddy's logs. Send the same request"
+            " again to follow it if it started.",
+        ) from None
+    except TemporalUnavailableError:
         raise temporal_unavailable("operations") from None
     if answer.refusal is not None:
         refusal = answer.refusal
