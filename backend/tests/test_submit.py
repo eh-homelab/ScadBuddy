@@ -1293,3 +1293,49 @@ async def test_with_no_valid_span_rows_carry_no_traceparent(
     assert submit_span.parent is None
     assert stored is not None
     assert stored.split("-")[1] == f"{submit_span.context.trace_id:032x}"
+
+
+def _unsettled_and_stale(projection: JobProjection) -> None:
+    """A row of a ``render-<render_key>`` run and an aged legacy row: one describe each."""
+    unsettled, stale = _legacy(projection), _legacy(projection)
+    with psycopg.connect(projection.conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_run_id = %s WHERE id = %s",
+            (uuid.uuid4().hex, unsettled.id),
+        )
+    _aged(projection, stale.id)
+
+
+async def test_start_does_not_wait_for_the_settle_pass_while_temporal_is_unreachable(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """The lazy client's first connect retries for minutes: the boot pass runs in the
+    background, so the lifespan finishes at once (review #1066 1.1, 6.1)."""
+    # Here, not at the top: the workflow sandbox re-imports this module.
+    from scadbuddy.workflows.client import connect_lazily
+
+    _unsettled_and_stale(projection)
+    service = make_service(connect_lazily("127.0.0.1:1", "default"), "unused")
+    began = time.monotonic()
+    try:
+        async with asyncio.timeout(10):
+            await service.start()
+    finally:
+        await service.aclose()
+    assert time.monotonic() - began < 10
+
+
+async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """Each describe is bounded, and the pass stops at the first that Temporal does not
+    answer: the rows wait for the next pass (review #1066 1.1)."""
+    from scadbuddy.workflows.client import connect_lazily
+
+    _unsettled_and_stale(projection)
+    service = make_service(connect_lazily("127.0.0.1:1", "default"), "unused")
+    began = time.monotonic()
+    async with asyncio.timeout(60):
+        await service.settle()
+    assert time.monotonic() - began < 30
+    assert all(job.state == "pending" for job in await asyncio.to_thread(projection.list_jobs))

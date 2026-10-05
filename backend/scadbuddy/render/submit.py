@@ -63,6 +63,7 @@ from scadbuddy.render.projection import (
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.commands import (
+    CONNECT_MARGIN_SECONDS,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     start_command,
@@ -76,6 +77,9 @@ logger = logging.getLogger(__name__)
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
 RPC_TIMEOUT = timedelta(seconds=5)
+#: What a settle pass waits on one describe: `rpc_timeout` does not bound a lazy
+#: client's first connect, which retries for minutes on its own (review #1066 1.1).
+DESCRIBE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
 #: How long a submit that reached an execution closing on its last release waits for it
 #: to close before it starts again (ruling 10 of the phase 2b plan).
 CLOSING_WAIT = 5.0
@@ -135,7 +139,6 @@ class RenderService:
 
     async def start(self) -> None:
         self.store.listener(on_state=self._listener_state)
-        await self.settle()
         self._pruner = asyncio.create_task(self._prune_forever())
 
     async def aclose(self) -> None:
@@ -326,7 +329,7 @@ class RenderService:
         return answer.cancelled
 
     async def settle(self) -> None:
-        """At start and on every prune: fail the rows nothing will settle, which would
+        """In the background at start and on every prune: fail the rows nothing will settle, which would
         otherwise hold their render key and count towards the queue (review #1066 1.2).
         A failed pass is logged; the next one tries again."""
         for settle in (self.settle_legacy, self.settle_closed):
@@ -341,12 +344,13 @@ class RenderService:
         closed: list[str] = []
         for job in await asyncio.to_thread(self.store.unsettled):
             try:
-                if not await run_closed(self.client, job, rpc_timeout=RPC_TIMEOUT):
-                    continue
-            except RPCError as error:
+                async with asyncio.timeout(DESCRIBE_BOUND):
+                    if not await run_closed(self.client, job, rpc_timeout=RPC_TIMEOUT):
+                        continue
+            except (RPCError, TimeoutError) as error:
                 logger.warning(
                     "could not ask Temporal about the unsettled renders; the next pass tries again",
-                    extra={"status": error.status.name},
+                    extra={"error_type": type(error).__name__},
                 )
                 break
             closed.append(job.id)
@@ -365,13 +369,14 @@ class RenderService:
         failed: list[str] = []
         for job in await asyncio.to_thread(self.store.legacy_pending, LEGACY_GRACE):
             try:
-                if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
-                    continue
-            except RPCError as error:
+                async with asyncio.timeout(DESCRIBE_BOUND):
+                    if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
+                        continue
+            except (RPCError, TimeoutError) as error:
                 logger.warning(
                     "could not ask Temporal about the renders an older release left"
-                    " pending; the next start tries again",
-                    extra={"status": error.status.name},
+                    " pending; the next pass tries again",
+                    extra={"error_type": type(error).__name__},
                 )
                 break
             failed.append(job.id)
@@ -485,6 +490,9 @@ class RenderService:
             self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _prune_forever(self) -> None:
+        # The boot pass, here rather than in `start`: the lifespan never waits on
+        # Temporal (review #1066 1.1).
+        await self.settle()
         while True:
             await asyncio.sleep(self.prune_interval)
             try:
