@@ -18,6 +18,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -56,6 +57,14 @@ class LegacyPendingError(Exception):
         self.job = job
 
 
+def execution_gone(error: RPCError) -> bool:
+    """A NOT_FOUND about the execution, not about the namespace: a mistyped or
+    unregistered namespace answers NOT_FOUND too (review #1066 (7) 2)."""
+    return error.status == RPCStatusCode.NOT_FOUND and not any(
+        detail.Is(NamespaceNotFoundFailure.DESCRIPTOR) for detail in error.grpc_status.details
+    )
+
+
 async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
     """Whether no workflow will settle ``job``, a pending or running row an older build
     inserted past `LEGACY_GRACE`: it names none, or Temporal has none running. Raises the
@@ -69,7 +78,7 @@ async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> b
             rpc_timeout=rpc_timeout
         )
     except RPCError as error:
-        if error.status == RPCStatusCode.NOT_FOUND:
+        if execution_gone(error):
             return True
         raise
     # A closed run (terminated, failed) that retention still keeps never settles it.
@@ -87,7 +96,7 @@ async def run_closed(client: Client, job: Job, *, rpc_timeout: timedelta) -> boo
             job.workflow_id, run_id=job.workflow_run_id
         ).describe(rpc_timeout=rpc_timeout)
     except RPCError as error:
-        if error.status == RPCStatusCode.NOT_FOUND:
+        if execution_gone(error):
             return True  # past retention
         raise
     return described.status != WorkflowExecutionStatus.RUNNING

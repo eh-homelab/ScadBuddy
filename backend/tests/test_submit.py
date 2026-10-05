@@ -15,12 +15,9 @@ from typing import Any
 
 import psycopg
 import pytest
-from google.protobuf.any_pb2 import Any as Any_
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
-from temporalio.api.common.v1 import GrpcStatus
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
@@ -74,7 +71,7 @@ from scadbuddy.workflows.models import (
     RenderAnswer,
 )
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
-from tests.support.renders import legacy_row
+from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
 from tests.test_workflows import FakeActivities, _worker
 
@@ -1171,17 +1168,6 @@ async def test_a_release_while_an_input_problems_failure_waits_to_be_written_can
     assert answer.cancelled is not None and answer.cancelled.id == job.id
 
 
-def _namespace_not_found() -> RPCError:
-    status = GrpcStatus(
-        code=RPCStatusCode.NOT_FOUND,
-        message="Namespace nope is not found.",
-        details=[
-            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
-        ],
-    )
-    return RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())
-
-
 async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
     make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1191,7 +1177,7 @@ async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
 
     async def refusing(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        raise _namespace_not_found()
+        raise namespace_not_found()
 
     monkeypatch.setattr(submit_module, "start_command", refusing)
     async with temporal_client() as client:
@@ -1201,6 +1187,37 @@ async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
         await service.aclose()
 
     assert len(calls) == 1
+
+
+class _Refusing:
+    """A client whose every Update and cancel raises ``error``."""
+
+    def __init__(self, error: RPCError) -> None:
+        self.error = error
+
+    def get_workflow_handle(self, *_: object, **__: object) -> _Refusing:
+        return self
+
+    async def execute_update(self, *_: object, **__: object) -> None:
+        raise self.error
+
+
+async def test_a_release_to_a_missing_namespace_is_not_taken_for_a_closed_run(
+    make_service: ServiceFactory,
+) -> None:
+    """Its NOT_FOUND is configuration: the release fails (a warning in the supersede),
+    never "closed, nothing to release" (review #1066 (7) 2)."""
+    service = make_service(_Refusing(namespace_not_found()), "unused")
+    job = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        created_at=now(),
+        workflow_id="render-x",
+        workflow_run_id="run-1",
+    )
+    with pytest.raises(TemporalUnavailableError):
+        await service._release(job, None)
+    await service.aclose()
 
 
 # ── inputs Temporal can never take (final review I2) ────────────────────────────

@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -28,9 +30,12 @@ from scadbuddy.render.projection import (
     ORPHANED_ERROR,
     JobProjection,
     LegacyPendingError,
+    legacy_unrun,
+    run_closed,
 )
 from scadbuddy.render.schema import ParamValue
 from tests.support.renders import legacy_row as _row
+from tests.support.renders import namespace_not_found
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -453,3 +458,41 @@ def test_accept_writes_the_first_callers_traceparent(projection: JobProjection) 
     accepted = projection.accept(job, key, workflow_id=f"render-{key}", run_id="run-1")
     assert accepted.traceparent == job.traceparent
     assert projection.read(accepted.id).traceparent == job.traceparent
+
+
+class _Describing:
+    """A client whose every describe raises ``error``."""
+
+    def __init__(self, error: RPCError) -> None:
+        self.error = error
+
+    def get_workflow_handle(self, *_: object, **__: object) -> _Describing:
+        return self
+
+    async def describe(self, **_: object) -> None:
+        raise self.error
+
+
+def _unsettled() -> Job:
+    job = _job("demo", width=60)
+    job.created_at -= timedelta(hours=1)
+    job.workflow_id, job.workflow_run_id = f"render-{job.id}", "run-1"
+    return job
+
+
+async def test_a_missing_namespace_is_not_taken_for_a_gone_execution() -> None:
+    """Its NOT_FOUND is configuration: raised, so the settle pass stops rather than
+    failing live rows (review #1066 (7) 2)."""
+    client: Client = _Describing(namespace_not_found())  # type: ignore[assignment]
+    with pytest.raises(RPCError):
+        await run_closed(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
+    with pytest.raises(RPCError):
+        await legacy_unrun(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
+
+
+async def test_an_execution_past_retention_is_gone() -> None:
+    client: Client = _Describing(  # type: ignore[assignment]
+        RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+    )
+    assert await run_closed(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
+    assert await legacy_unrun(client, _unsettled(), rpc_timeout=timedelta(seconds=1))

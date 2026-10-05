@@ -21,7 +21,6 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import (
     Client,
     WorkflowUpdateFailedError,
@@ -30,7 +29,7 @@ from temporalio.client import (
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -59,6 +58,7 @@ from scadbuddy.render.jobs import (
 from scadbuddy.render.projection import (
     LEGACY_GRACE,
     JobProjection,
+    execution_gone,
     legacy_unrun,
     run_closed,
     workflow_id_for,
@@ -98,13 +98,6 @@ CLOSING_WAIT = 5.0
 #: The largest request a submit sends as a workflow input. Temporal refuses a payload
 #: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
 MAX_WORKFLOW_INPUT_BYTES = 1024 * 1024
-
-
-def _execution_gone(error: RPCError) -> bool:
-    """A NOT_FOUND about the execution, not about the namespace."""
-    return error.status == RPCStatusCode.NOT_FOUND and not any(
-        detail.Is(NamespaceNotFoundFailure.DESCRIPTOR) for detail in error.grpc_status.details
-    )
 
 
 class RenderService:
@@ -296,7 +289,7 @@ class RenderService:
             except RPCError as error:
                 # An Update that reached the execution as it completed is aborted. A
                 # missing namespace is NOT_FOUND too: configuration, raised at once.
-                if not _execution_gone(error) or attempt:
+                if not execution_gone(error) or attempt:
                     raise
                 answer = RenderAnswer(closing=True)
             except WorkflowUpdateFailedError as error:
@@ -349,7 +342,7 @@ class RenderService:
                 rpc_timeout=RPC_TIMEOUT,
             )
         except RPCError as error:
-            if error.status == RPCStatusCode.NOT_FOUND:
+            if execution_gone(error):
                 return None  # it has closed: settled, nothing to release
             self.metrics.store_errors.labels("cancel_workflow").inc()
             raise TemporalUnavailableError(job.workflow_id) from error
@@ -500,7 +493,7 @@ class RenderService:
                 rpc_timeout=RPC_TIMEOUT
             )
         except RPCError as error:
-            if error.status == RPCStatusCode.NOT_FOUND:
+            if execution_gone(error):
                 # Never started. A closed one accepts the cancel without an error.
                 logger.debug("no workflow to cancel", extra={"job_id": job.id})
                 return
