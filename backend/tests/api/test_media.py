@@ -245,6 +245,19 @@ def test_an_undecodable_image_is_its_own_thumbnail(client: TestClient, model: st
     assert response.content == PNG
 
 
+def test_an_image_too_large_to_decode_cheaply_is_its_own_thumbnail(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scadbuddy.api.media.MAX_THUMBNAIL_SOURCE_PIXELS", 100 * 100)
+    original = _real_image((101, 100), "PNG")
+    item = _upload(client, model, original).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200
+    assert response.content == original
+
+
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:
     response = _upload(client, model, PNG + b"\x00" * (10 * 1024 * 1024))
 

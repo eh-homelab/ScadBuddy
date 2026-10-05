@@ -379,13 +379,19 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
 
 #: The longest side of a thumbnail: the gallery strip's tile at 2x, with room to spare.
 THUMBNAIL_SIDE = 192
+#: The most pixels a thumbnail is decoded from: a 10 MB PNG can declare far more than
+#: a photo has, and every request would decode it again. Larger is served as it is.
+MAX_THUMBNAIL_SOURCE_PIXELS = 50_000_000
 
 
 def _thumbnail_of(path: FilePath) -> bytes | None:
     """``path`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
-    cannot read it. ``draft`` lets a JPEG decode at a fraction of its size."""
+    cannot read it or it is over `MAX_THUMBNAIL_SOURCE_PIXELS` (checked from the header,
+    before decoding). ``draft`` lets a JPEG decode at a fraction of its size."""
     try:
         with Image.open(path) as image:
+            if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
+                return None
             image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
             image.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)
             out = io.BytesIO()
