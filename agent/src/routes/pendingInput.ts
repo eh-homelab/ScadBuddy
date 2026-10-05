@@ -172,8 +172,9 @@ export async function respond(
 ): Promise<RespondResult> {
   const match = /^(approval|question):(.+)$/.exec(requestId)
   const stale = new RespondError(404, `no pending input ${requestId}: it is stale or was never asked`)
-  if (!match) throw stale
-  const [, store, rowId] = match as unknown as [string, 'approval' | 'question', string]
+  if (!match?.[1] || !match[2]) throw stale
+  const store = match[1] === 'approval' ? 'approval' : 'question'
+  const rowId = match[2]
 
   if (store === 'approval') {
     if (body.kind !== 'approval') {
@@ -222,6 +223,10 @@ export async function respond(
       const a = given[q] ?? ''
       return typeof a === 'string' ? a : a.join(', ')
     })
+    // The socket caps each answer at ANSWER_MAX; joined picks must fit it too.
+    if (answers.some((a) => a.length > ANSWER_MAX)) {
+      throw new RespondError(400, `each answer must be at most ${ANSWER_MAX} characters, a multi-select's picks joined with ", "`)
+    }
   }
   try {
     await sessions.questions.answer(

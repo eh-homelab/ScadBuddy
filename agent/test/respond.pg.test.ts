@@ -154,6 +154,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which size?': 'M' } })).status).toBe(400)
     expect((await post(ids.question, { kind: 'answer', choice: 'Red' })).status).toBe(400)
     expect((await post(ids.question, { kind: 'answer', answers: { 'Which colour?': '', 'Which parts?': 'Lid' } })).status).toBe(400)
+    // A multi-select's picks join to one answer, which ANSWER_MAX bounds as it bounds a typed one.
+    const half = 'x'.repeat(ANSWER_MAX / 2)
+    const joined = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': [half, half] } })
+    expect(joined.status).toBe(400)
+    expect(await detail(joined)).toMatch(/at most 20000 characters/)
 
     // The shape itself, before any entry is read.
     expect((await post(ids.approval, { kind: 'approval', decision: 'maybe' })).status).toBe(400)
