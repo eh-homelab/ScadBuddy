@@ -729,10 +729,13 @@ async def test_a_cancel_during_the_insert_answers_the_run_recorded_as_cancelled(
         fake.insert_gate.set()
 
 
-async def cancel_during(client: Client, worker: str, fake: Fake, activity_name: str) -> PrintRun:
-    """Start a run, cancel it while ``activity_name`` runs, and return how it ended."""
+async def cancel_during(
+    client: Client, worker: str, fake: Fake, activity_name: str, *, window: float = 0.0
+) -> PrintRun:
+    """Start a run, cancel it while ``activity_name`` first runs, and return how it ended:
+    within 60 s, so a cancel that leaves a repeat window open fails the test."""
     gate = fake.gates[activity_name] = asyncio.Event()
-    arg = run_input()
+    arg = run_input(window=window)
     try:
         await start(client, worker, arg)
         while activity_name not in fake.calls:
@@ -752,13 +755,15 @@ async def cancel_during(client: Client, worker: str, fake: Fake, activity_name: 
         gate.set()
 
 
-@pytest.mark.parametrize("activity_name", ["finish", "succeed"])
+@pytest.mark.parametrize("activity_name", ["record", "finish", "succeed"])
 async def test_a_cancel_once_every_plate_is_queued_still_ends_succeeded(
     client: Client, worker: str, fake: Fake, activity_name: str
 ) -> None:
-    """Review #1061 (3) 1: from ``print_finish`` on, the print is queued, so a cancel
-    must not record it failed; both are shielded, as the insert is."""
-    finished = await cancel_during(client, worker, fake, activity_name)
+    """Review #1061 (3) 1: from the last ``print_enqueue`` on, the print is queued, so a
+    cancel must not record it failed; the last ``print_record``, ``print_finish`` and
+    ``print_succeed`` are shielded, as the insert is (review #1316 1). The cancel also
+    ends the repeat window, rather than being swallowed (review #1316 2)."""
+    finished = await cancel_during(client, worker, fake, activity_name, window=600)
     assert finished.status == "succeeded"
     assert not any(call.startswith("fail") for call in fake.calls)
 
@@ -775,7 +780,11 @@ async def test_a_cancel_before_any_enqueue_is_recorded_cancelled(
 async def test_a_cancel_after_the_enqueue_says_the_print_may_be_queued(
     client: Client, worker: str, fake: Fake
 ) -> None:
-    finished = await cancel_during(client, worker, fake, "record")
+    """The first of two plates is queued and the second is not: the run may be queued,
+    and the cancel ends its repeat window (review #1316 2)."""
+    fake.plates = [1, 2]
+    finished = await cancel_during(client, worker, fake, "record", window=600)
+    assert "enqueue:2" not in fake.calls
     assert finished.status == "failed" and finished.may_have_queued
     assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
     assert "check Bambuddy's queue" in CANCELLED_QUEUEING.detail

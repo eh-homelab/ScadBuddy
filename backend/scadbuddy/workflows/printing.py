@@ -7,7 +7,7 @@
 2. From the record on, every outcome *completes* the execution and is recorded: one
    ``try`` holds the rest, and whatever an activity raised becomes ``print_fail``.
 3. A run that succeeded or may have queued stays open for its repeat window, so a
-   repeat (``USE_EXISTING``) gets the same row (§5.2).
+   repeat (``USE_EXISTING``) gets the same row (§5.2); a cancelled one closes at once.
 
 ``print_slice_start`` and ``print_enqueue`` each start something Bambuddy does not
 dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
@@ -131,12 +131,10 @@ def _problem(error: BaseException) -> PrintRunError:
     return PrintRunError(status=500, title="Internal Server Error", detail=UNEXPECTED_DETAIL)
 
 
-async def _shielded[T](handle: workflow.ActivityHandle[T]) -> T:
-    """``handle``'s result, waited for through a cancel: the activity is not cancelled."""
-    try:
-        return await asyncio.shield(handle)
-    except asyncio.CancelledError:
-        return await handle
+#: ``workflow.patched`` id for review #1316's cancel handling: once every plate is
+#: queued a cancel waits for the last activities, and a cancel the run absorbed ends its
+#: repeat window. A history from before it (#1061) replays with neither.
+CANCEL_PATCH = "print-cancel-ends-window"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -148,6 +146,9 @@ class PrintRunWorkflow:
         self.search_attributes = False
         #: Whether ``_print`` has reached the first ``POST /queue/``.
         self.enqueue_attempted = False
+        #: Whether the run caught a cancel and carried on; it then holds no repeat
+        #: window, since Temporal drops a second cancel request (review #1316 2).
+        self.cancel_absorbed = False
 
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> AcceptAnswer:
@@ -201,7 +202,7 @@ class PrintRunWorkflow:
         try:
             run = await asyncio.shield(insert)
         except asyncio.CancelledError:
-            cancelled = True
+            cancelled = self.cancel_absorbed = True
             run = await insert
         accepted = Accepted(run=run, source=checked.source, prepared=checked.prepared)
         if cancelled:
@@ -216,13 +217,14 @@ class PrintRunWorkflow:
                 # completes. A cancel is recorded as one (review #1061 (3) 1).
                 if not is_cancelled_exception(error):
                     problem = _problem(error)
-                elif self.enqueue_attempted:
-                    problem = CANCELLED_QUEUEING
                 else:
-                    problem = CANCELLED
+                    self.cancel_absorbed = True
+                    problem = CANCELLED_QUEUEING if self.enqueue_attempted else CANCELLED
                 self.row = await self._fail(input, accepted, problem)
         self._upsert(status=self.row.status, may_have_queued=self.row.may_have_queued)
-        if self.row.status == "succeeded" or self.row.may_have_queued:
+        if (self.row.status == "succeeded" or self.row.may_have_queued) and not (
+            self.cancel_absorbed and workflow.patched(CANCEL_PATCH)
+        ):
             # Repeats of a body-only key inside the window get this row (§5.2). A cancel
             # ends the window early but the execution still completes, so the failed-only
             # reuse policy keeps a re-sent request off a second print (review #1061).
@@ -230,6 +232,18 @@ class PrintRunWorkflow:
                 await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
         return self.row
+
+    async def _shielded[T](self, handle: workflow.ActivityHandle[T]) -> T:
+        """``handle``'s result, waited for through a cancel: the activity is not
+        cancelled. A run from before ``CANCEL_PATCH`` cancels it, as it did then."""
+        try:
+            return await asyncio.shield(handle)
+        except asyncio.CancelledError:
+            if not workflow.patched(CANCEL_PATCH):
+                handle.cancel()
+            else:
+                self.cancel_absorbed = True
+            return await handle
 
     async def _fail(
         self, input: PrintRunInput, accepted: Accepted, error: PrintRunError
@@ -261,7 +275,8 @@ class PrintRunWorkflow:
         outcomes: list[QueueOutcome] = []
         queued: list[QueuedPlate] = []
         sent: list[PlateSend] = []
-        for plate in planned.plates:
+        last = len(planned.plates) - 1
+        for index, plate in enumerate(planned.plates):
             started = await workflow.execute_activity(
                 "print_slice_start",
                 SliceStartInput(
@@ -311,7 +326,7 @@ class PrintRunWorkflow:
             )
             outcomes.append(outcome)
             queued.append(queued_plate)
-            sent = await workflow.execute_activity(
+            record = workflow.start_activity(
                 "print_record",
                 RecordInput(
                     source=accepted.source,
@@ -325,9 +340,10 @@ class PrintRunWorkflow:
                 start_to_close_timeout=SHORT,
                 retry_policy=BOUNDED_RETRY,
             )
-        # Every plate is queued, so a cancel from here waits for the last two activities
-        # and the run still ends succeeded, as the insert is shielded (review #1061 (3) 1).
-        result: PrintRunResult = await _shielded(
+            # Once the last plate is queued, a cancel waits for the rest and the run
+            # still ends succeeded, as the insert is shielded (review #1316 1).
+            sent = await (self._shielded(record) if index == last else record)
+        result: PrintRunResult = await self._shielded(
             workflow.start_activity(
                 "print_finish",
                 FinishInput(
@@ -345,7 +361,7 @@ class PrintRunWorkflow:
             )
         )
         # Only the record is left, and it does not give up either (review #1061).
-        finished: PrintRun = await _shielded(
+        finished: PrintRun = await self._shielded(
             workflow.start_activity(
                 "print_succeed",
                 SucceedInput(input=input, run_id=accepted.run.id, result=result),
