@@ -442,7 +442,7 @@ async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
         await real_wait_for(awaitable, 5)  # the store finishes...
         raise TimeoutError  # ...and the wait reports a timeout anyway
 
-    monkeypatch.setattr(asyncio, "wait_for", late)
+    monkeypatch.setattr(snapshots_module, "_wait", late)
     api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
     assert await api.pin("demo", rev) == rev
 

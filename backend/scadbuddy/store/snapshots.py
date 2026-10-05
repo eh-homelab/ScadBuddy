@@ -48,6 +48,10 @@ PIN_TIMEOUT = 30.0
 SHUTDOWN_GRACE = 10.0
 
 
+#: `pin`'s bounded wait; a module seam so a test can fake its timeout alone.
+_wait = asyncio.wait_for
+
+
 def snapshot_key(slug: str, revision: str) -> str:
     return f"src-{re.sub(r'[^A-Za-z0-9._-]', '_', slug)}-{revision}"
 
@@ -84,7 +88,7 @@ class SnapshotStore:
         # the store running, so the retry finds it done or joins it under the key's lock.
         storing = asyncio.create_task(self.ensure(slug, revision))
         try:
-            await asyncio.wait_for(asyncio.shield(storing), self.pin_timeout)
+            await _wait(asyncio.shield(storing), self.pin_timeout)
         except TimeoutError:
             if storing.done():
                 # It finished as the wait ran out: its own outcome, not "pending".

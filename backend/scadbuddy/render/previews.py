@@ -35,6 +35,7 @@ from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
+    SnapshotPendingError,
     extruder_order,
     library_lease,
     plate_thumbnails,
@@ -243,6 +244,16 @@ class PreviewScheduler:
                 png = await self.runner(slug, self.timeout)
         except asyncio.CancelledError:
             raise
+        except SnapshotPendingError as error:
+            # The source's first snapshot is still uploading and carries on (#686):
+            # come back once it should be stored. Nothing else would bring the slug
+            # back before its next edit or the next boot.
+            logger.info(
+                "a preview waits for its source snapshot; it is tried again",
+                extra={"slug": slug, "retry_after": error.retry_after},
+            )
+            self._schedule(slug, error.retry_after)
+            return True
         except Exception as error:
             reason = str(error) or type(error).__name__
             if not is_render_error(error):
