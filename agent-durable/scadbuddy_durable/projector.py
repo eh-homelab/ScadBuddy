@@ -205,16 +205,22 @@ class Projector:
         route's after a decision, or a stop's) means nobody owes it again on `cancelled`.
         """
         prefix = f"durable:{session_id}:"
+        # Decided on the parsed `type` and `status` only: text inside an event (a delta, a
+        # tool input, a user turn) is model- or user-controlled and may spell out anything.
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT event FROM ai_session_events WHERE session_id = %(id)s AND seq > coalesce("
-                "  (SELECT max(seq) FROM ai_session_events WHERE session_id = %(id)s"
-                "   AND event LIKE '%%\"session.status\"%%'"
-                "   AND (event LIKE '%%\"idle\"%%' OR event LIKE '%%\"done\"%%'"
-                "        OR event LIKE '%%\"failed\"%%')), 0)"
-                " AND (event LIKE '%%\"approval.%%' OR event LIKE '%%\"tool.result\"%%')"
+                "SELECT seq FROM ai_session_events WHERE session_id = %s"
+                " AND event::jsonb ->> 'type' = 'session.status'"
+                " AND event::jsonb ->> 'status' IN ('idle', 'done', 'failed')"
+                " ORDER BY seq DESC LIMIT 1",
+                (session_id,),
+            )
+            boundary = await cur.fetchone()
+            cur = await conn.execute(
+                "SELECT event FROM ai_session_events WHERE session_id = %s AND seq > %s"
+                " AND event::jsonb ->> 'type' IN ('approval.required', 'approval.resolved', 'tool.result')"
                 " ORDER BY seq",
-                {"id": session_id},
+                (session_id, boundary[0] if boundary else 0),
             )
             rows = await cur.fetchall()
         open_ids: list[str] = []
