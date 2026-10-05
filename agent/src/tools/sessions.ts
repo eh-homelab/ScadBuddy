@@ -6,7 +6,7 @@ import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approva
 import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import type { LoggedEvent } from '../sessions/eventLog.js'
-import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
+import { SESSION_MODES, SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -345,13 +345,20 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
+      mode: z
+        .enum(SESSION_MODES)
+        .optional()
+        .describe(
+          "Where the session runs: 'classic' in the agent service, 'durable' as a workflow that survives restarts. " +
+            'Fixed for the session. Left out, the session_mode setting applies.',
+        ),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
     routes: [],
     source: TRANSCRIPT_SOURCE,
     summarize: ({ title, prompt }) => `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}`,
-    handler: async ({ prompt, title, tags, scope, wait_seconds }, ctx) => {
+    handler: async ({ prompt, title, tags, scope, mode, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       const { session, turn } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
@@ -359,6 +366,7 @@ export const sessionTools: Tool[] = [
           ...(title === undefined ? {} : { title }),
           ...(tags === undefined ? {} : { tags }),
           ...(scope === undefined ? {} : { scope }),
+          ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
         }),
       )

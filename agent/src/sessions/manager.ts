@@ -7,6 +7,7 @@ import {
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
+import type { PayloadKeys } from '../temporal/payloadKeys.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
@@ -146,6 +147,22 @@ import { type ResourceRef, SessionResources, type TouchedRecord } from './touche
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+/** The mode a session gets when its start chooses none (#1056; routes/sessionMode.ts). */
+export const SETTING_SESSION_MODE = 'session_mode'
+
+/**
+ * Where a session runs (spec 2026-10-01 §6.1): `classic` in this service's harness,
+ * `durable` as a DurableSession workflow. Chosen at start (`ai_sessions.mode`,
+ * 20261004T1330Z_session_mode.sql) and never changed.
+ */
+export type SessionMode = 'classic' | 'durable'
+export const SESSION_MODES = ['classic', 'durable'] as const satisfies readonly SessionMode[]
+export const MODE_IS_FIXED = 'mode is chosen when a session starts and cannot change'
+export const DURABLE_NEEDS_KEK = 'durable sessions need SCADBUDDY_SECRET_KEY_FILE'
+
+export function isSessionMode(value: unknown): value is SessionMode {
+  return value === 'classic' || value === 'durable'
+}
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -183,6 +200,7 @@ export type SessionErrorCode =
   | 'closed'
   | 'invalid'
   | 'rate_limited'
+  | 'unsupported'
 
 type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
 
@@ -194,6 +212,7 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   closed: 409,
   invalid: 400,
   rate_limited: 429,
+  unsupported: 409,
 }
 
 /**
@@ -248,6 +267,7 @@ export type SessionRecord = {
   tags: string[]
   scope: Record<string, unknown>
   parentId: string | null
+  mode: SessionMode
   maxTurns: number
   budgetUsd: number
   costUsd: number
@@ -281,6 +301,8 @@ export type StartOptions = {
   context?: string
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
+  /** Left out: the `session_mode` setting, else `classic`. */
+  mode?: SessionMode
 }
 
 export type SendOptions = {
@@ -319,6 +341,12 @@ export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
 
 export type SessionManagerDeps = {
   sql: Sql
+  /**
+   * The payload codec's keys (temporal/payloadKeys.ts): a durable session's
+   * `session-<id>` key is created with its row. Undefined without a KEK, and then
+   * no durable session can be started.
+   */
+  payloadKeys?: Pick<PayloadKeys, 'createKey'>
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -442,6 +470,7 @@ type Row = {
   tags: string[]
   scope: Record<string, unknown>
   parent_id: string | null
+  mode: SessionMode
   max_turns: number
   budget_usd: number
   cost_usd: number
@@ -459,7 +488,7 @@ const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, cr
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, max_turns, budget_usd, cost_usd, turns,
+  status, title, tags, scope, parent_id, mode, max_turns, budget_usd, cost_usd, turns,
   (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
 
 function record(row: Row): SessionRecord {
@@ -477,6 +506,7 @@ function record(row: Row): SessionRecord {
     tags: row.tags,
     scope: row.scope,
     parentId: row.parent_id,
+    mode: row.mode,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
     costUsd: row.cost_usd,
@@ -655,6 +685,7 @@ export class SessionManager {
         origin: s.origin,
         owner: s.owner,
         status: s.status,
+        mode: s.mode,
       })),
     })
   }
@@ -689,24 +720,38 @@ export class SessionManager {
   private async insert(
     id: string,
     principal: Owner,
-    fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+    fields: {
+      origin: Origin
+      title: string
+      tags: string[]
+      scope: Record<string, unknown>
+      parentId: string | null
+      mode: SessionMode
+    },
     options: { rateLimited?: boolean } = {},
   ): Promise<SessionRecord> {
     const { maxTurns, budgetUsd } = await this.limits()
+    const payloadKeys = this.deps.payloadKeys
+    if (fields.mode === 'durable' && !payloadKeys) throw new SessionError('invalid', DURABLE_NEEDS_KEK)
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, max_turns, budget_usd)
+                                 status, title, tags, scope, parent_id, mode, max_turns, budget_usd)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${maxTurns}, ${budgetUsd})`
     }
-    if (options.rateLimited) {
+    if (options.rateLimited || fields.mode === 'durable') {
       await this.deps.sql.begin(async (tx) => {
-        // Per owner, held until commit, so concurrent starts count each other.
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
-        await this.withinNewSessionLimit(principal, tx as unknown as Sql)
+        if (options.rateLimited) {
+          // Per owner, held until commit, so concurrent starts count each other.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
+          await this.withinNewSessionLimit(principal, tx as unknown as Sql)
+        }
         await insert(tx as unknown as Sql)
+        // A durable session's payloads are sealed under its own key (spec 2026-10-01
+        // §6.5): no row without the key, so nothing can start it unkeyed.
+        if (fields.mode === 'durable') await payloadKeys?.createKey(`session-${id}`, tx)
       })
     } else {
       await insert(this.deps.sql)
@@ -731,6 +776,12 @@ export class SessionManager {
     }
   }
 
+  /** The `session_mode` setting, else `classic` (plan ruling 2). */
+  private async defaultMode(): Promise<SessionMode> {
+    const stored = await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE)
+    return isSessionMode(stored) ? stored : 'classic'
+  }
+
   async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
@@ -741,6 +792,7 @@ export class SessionManager {
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
+      mode: options.mode ?? (await this.defaultMode()),
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -750,6 +802,7 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
+        mode: session.mode,
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
@@ -1618,6 +1671,8 @@ export class SessionManager {
     options: { title?: string; origin?: Origin; rateLimited?: boolean } = {},
   ): Promise<SessionRecord> {
     const parent = await this.get(id, principal)
+    // Plan ruling 9: the SDK cannot copy a workflow's state into a new session.
+    if (parent.mode === 'durable') throw new SessionError('unsupported', `session ${id} is durable and cannot be forked`)
     if (!(await this.store.exists(id))) {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
     }
@@ -1637,6 +1692,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
+      mode: 'classic',
     }, { rateLimited: options.rateLimited ?? true })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.

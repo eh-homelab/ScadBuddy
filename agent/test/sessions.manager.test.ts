@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -15,6 +16,7 @@ import {
   SessionError,
   SETTING_SESSION_BUDGET_USD,
   SETTING_SESSION_MAX_TURNS,
+  SETTING_SESSION_MODE,
   TITLE_MAX,
   titleFrom,
   type TurnOutcome,
@@ -22,6 +24,8 @@ import {
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { AuditLog } from '../src/audit/log.js'
+import { kekFromBase64 } from '../src/secrets.js'
+import { PgPayloadKeys } from '../src/temporal/payloadKeys.js'
 import { drainRetains } from '../src/memory/hindsight.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -698,6 +702,84 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(Object.keys(runs[2]!.mcpServers ?? {})).toContain(HTTP_SERVER)
     })
 
+    describe('mode (#1056)', () => {
+      const newKek = () => kekFromBase64(randomBytes(32).toString('base64'))
+
+      it('stores a durable session with its payload key, in the same transaction', async () => {
+        const payloadKeys = new PgPayloadKeys(db.sql, { current: newKek() })
+        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys })
+        const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+        expect(session.mode).toBe('durable')
+        const [row] = await db.sql<{ mode: string }[]>`SELECT mode FROM ai_sessions WHERE id = ${session.id}`
+        expect(row?.mode).toBe('durable')
+        expect(await payloadKeys.dataKey(`session-${session.id}`)).toBeInstanceOf(Buffer)
+        const started = (await m.events.read(session.id)).map((e) => e.event).find((e) => e.type === 'session.started')
+        expect(started).toMatchObject({ mode: 'durable' })
+      })
+
+      it('leaves no session when its payload key cannot be stored', async () => {
+        const seen: { inTx: number; outside: number }[] = []
+        const m = manager({
+          sql: db.sql,
+          paths: await tempPaths(),
+          payloadKeys: {
+            createKey: async (subject, tx) => {
+              const id = subject.replace(/^session-/, '')
+              const inTx = await tx!`SELECT 1 FROM ai_sessions WHERE id = ${id}`
+              const outside = await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${id}`
+              seen.push({ inTx: inTx.length, outside: outside.length })
+              throw new Error('no key for you')
+            },
+          },
+        })
+        await expect(m.start(browser, { origin: 'chat', mode: 'durable' })).rejects.toThrow('no key for you')
+        expect(seen).toEqual([{ inTx: 1, outside: 0 }])
+        expect(await db.sql`SELECT 1 FROM ai_sessions`).toHaveLength(0)
+      })
+
+      it('refuses a durable start without a secret key', async () => {
+        const m = manager({ sql: db.sql, paths: await tempPaths() })
+        await expect(m.start(browser, { origin: 'chat', mode: 'durable' })).rejects.toMatchObject({
+          code: 'invalid',
+          status: 400,
+          message: 'durable sessions need SCADBUDDY_SECRET_KEY_FILE',
+        })
+        expect(await db.sql`SELECT 1 FROM ai_sessions`).toHaveLength(0)
+      })
+
+      it('takes session_mode when the start chooses none, and classic when it is unset or invalid', async () => {
+        const settings = new SettingsStore(db.sql)
+        const payloadKeys = new PgPayloadKeys(db.sql, { current: newKek() })
+        const m = manager({ sql: db.sql, paths: await tempPaths(), settings, payloadKeys })
+        expect((await m.start(browser, { origin: 'chat' })).session.mode).toBe('classic')
+        await settings.set(SETTING_SESSION_MODE, 'durable')
+        expect((await m.start(browser, { origin: 'chat' })).session.mode).toBe('durable')
+        expect((await m.start(browser, { origin: 'chat', mode: 'classic' })).session.mode).toBe('classic')
+        await settings.set(SETTING_SESSION_MODE, 'turbo')
+        expect((await m.start(browser, { origin: 'chat' })).session.mode).toBe('classic')
+      })
+
+      it('shows the mode in sessions.snapshot', async () => {
+        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }) })
+        const { session: durable } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+        const { session: classic } = await m.start(browser, { origin: 'chat' })
+        const snapshot = await m.snapshot(browser)
+        expect(snapshot).toMatchObject({
+          type: 'sessions.snapshot',
+          sessions: expect.arrayContaining([
+            expect.objectContaining({ sessionId: durable.id, mode: 'durable' }),
+            expect.objectContaining({ sessionId: classic.id, mode: 'classic' }),
+          ]),
+        })
+      })
+
+      it('refuses to fork a durable session', async () => {
+        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }) })
+        const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+        await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'unsupported', status: 409 })
+      })
+    })
+
     describe('ownership and handoff', () => {
       it('lets only the owner send; others get forbidden or, if they cannot see it, not_found', async () => {
         const paths = await tempPaths()
@@ -726,7 +808,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(snapshot).toEqual({
           v: 1,
           type: 'sessions.snapshot',
-          sessions: [{ sessionId: b.id, title: 'b', origin: 'mcp', owner: agentB, status: 'idle' }],
+          sessions: [{ sessionId: b.id, title: 'b', origin: 'mcp', owner: agentB, status: 'idle', mode: 'classic' }],
         })
       })
 

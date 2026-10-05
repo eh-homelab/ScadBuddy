@@ -6,7 +6,7 @@ import { QuestionError } from '../questions/service.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
-import { type SessionManager, SessionError } from '../sessions/manager.js'
+import { MODE_IS_FIXED, type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
@@ -28,6 +28,8 @@ import { ready, type RouteModule } from './module.js'
 //   user.message           → SessionManager.start (no sessionId: a new `chat`
 //                            session) or .send; the page context rides along
 //                            for the model only (manager.ts SendOptions)
+//                            `mode` (#1056) chooses a new session's mode; with a
+//                            sessionId it is refused (`invalid`), nothing sent
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
 //   question.answer        → QuestionService.answer (#940): the user's answer to
@@ -349,12 +351,14 @@ export class ChatConnection {
               origin: 'chat',
               prompt: message.text,
               context,
+              ...(message.mode ? { mode: message.mode } : {}),
             })
             this.pairTab(session.id)
             // From the start: session.started is what the panel adopts its new chat by.
             this.follow(session.id, 0)
             return
           }
+          if (message.mode !== undefined) throw new SessionError('invalid', MODE_IS_FIXED)
           // Ownership first, every time (get() refuses another owner's session):
           // pairing this tab must never outrun the check that send() repeats.
           await this.sessions.get(message.sessionId, this.principal)

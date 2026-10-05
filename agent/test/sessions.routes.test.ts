@@ -94,6 +94,38 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect((await m.get(id, browser)).turns).toBe(2)
   })
 
+  it('takes a mode at start, shows it, and refuses one on a message (#1056)', async () => {
+    const res = await app.request('/api/v1/ai/sessions', {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ title: 'plain', mode: 'classic' }),
+    })
+    expect(res.status).toBe(201)
+    const { session } = (await res.json()) as { session: { id: string; mode: string } }
+    expect(session.mode).toBe('classic')
+    const one = await app.request(`/api/v1/ai/sessions/${session.id}`, { headers: UI_READ })
+    expect(await one.json()).toMatchObject({ id: session.id, mode: 'classic' })
+    // No payload keys here: a durable start reaches the manager, which refuses it.
+    const durable = await app.request('/api/v1/ai/sessions', {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ mode: 'durable' }),
+    })
+    expect(durable.status).toBe(400)
+    expect(await durable.json()).toEqual({ detail: 'durable sessions need SCADBUDDY_SECRET_KEY_FILE' })
+    const turbo = await app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify({ mode: 'turbo' }) })
+    expect(turbo.status).toBe(400)
+
+    const sent = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ text: 'hi', mode: 'durable' }),
+    })
+    expect(sent.status).toBe(400)
+    expect(await sent.json()).toEqual({ detail: 'mode is chosen when a session starts and cannot change' })
+    expect((await m.get(session.id, browser)).turns).toBe(0)
+  })
+
   it('streams the event log as SSE from ?after= / Last-Event-ID', async () => {
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
     await turn!.done

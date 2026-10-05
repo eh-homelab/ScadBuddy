@@ -34,6 +34,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1).max(MESSAGE_MAX),
     context: PageContextSchema,
+    /** #1056: a new session's mode; refused with a `sessionId` (the mode is fixed at start). */
+    mode: z.enum(['classic', 'durable']).optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).

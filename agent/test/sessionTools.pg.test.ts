@@ -208,6 +208,20 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(got.transcript).toContainEqual(expect.objectContaining({ type: 'user.turn', text: 'first' }))
     })
 
+    it('takes a mode at start (#1056)', async () => {
+      const { agent } = await setup()
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string; mode: string } }>(
+        await a.call('sessions_start', { title: 'classic', mode: 'classic' }),
+      )
+      expect(session.mode).toBe('classic')
+      // No payload keys in this setup: the durable start reaches the manager, which refuses it.
+      expect(errorText(await a.call('sessions_start', { title: 'durable', mode: 'durable' }))).toMatch(
+        /durable sessions need SCADBUDDY_SECRET_KEY_FILE/,
+      )
+      expect(errorText(await a.call('sessions_start', { title: 'x', mode: 'turbo' }))).toMatch(/mode/)
+    })
+
     it('lets only a token with the approval grant decide, and never its own', async () => {
       const { agent, sessions, publisher } = await setup()
       const a = await agent('write')

@@ -101,6 +101,43 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
     expect(m.events.watchedSessions()).toBe(0)
   })
 
+  it('refuses a mode on a message to an existing session, and sends nothing (#1056)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const out: { type: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e))
+    await connection.open()
+    await connection.receive(
+      JSON.stringify({ v: 1, type: 'user.message', sessionId: session.id, mode: 'durable', text: 'more', context: { route: '/' } }),
+    )
+    expect(out.filter((e) => e.type === 'error')).toEqual([
+      {
+        v: 1,
+        type: 'error',
+        sessionId: session.id,
+        code: 'invalid',
+        message: 'mode is chosen when a session starts and cannot change',
+      },
+    ])
+    expect((await m.get(session.id, browser)).turns).toBe(0)
+    expect((await m.events.read(session.id)).map((e) => e.event.type)).not.toContain('user.turn')
+    connection.close()
+  })
+
+  it('starts a new chat in the mode its first message chooses (#1056)', async () => {
+    const out: { type: string; message?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e))
+    await connection.open()
+    await connection.receive(JSON.stringify({ v: 1, type: 'user.message', mode: 'classic', text: 'hi', context: { route: '/' } }))
+    const [session] = await m.list(browser)
+    expect(session?.mode).toBe('classic')
+    // No payload keys here, so a durable start is refused by the manager: the mode reached it.
+    await connection.receive(JSON.stringify({ v: 1, type: 'user.message', mode: 'durable', text: 'hi', context: { route: '/' } }))
+    expect(out.filter((e) => e.type === 'error')).toEqual([
+      expect.objectContaining({ code: 'invalid', message: 'durable sessions need SCADBUDDY_SECRET_KEY_FILE' }),
+    ])
+    connection.close()
+  })
+
   it('answers a send to a spent session with its numbers, then the refusal (#790)', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     await db.sql`UPDATE ai_sessions SET cost_usd = 1.0160000001 WHERE id = ${session.id}`

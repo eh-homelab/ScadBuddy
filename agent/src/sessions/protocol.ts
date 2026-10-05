@@ -52,6 +52,8 @@ export type SessionSummary = {
   origin: Origin
   owner: Owner
   status: SessionStatus
+  /** #1056: where the session runs; absent from servers before it. */
+  mode?: 'classic' | 'durable'
 }
 
 type V = { v: typeof PROTOCOL_VERSION }
@@ -60,7 +62,7 @@ export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
     /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
+    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number; mode?: 'classic' | 'durable' }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }

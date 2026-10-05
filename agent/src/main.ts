@@ -234,6 +234,14 @@ const chromiumSandbox = (): Promise<boolean> =>
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
+// The payload codec's keys (spec 2026-10-01 §6.5): one per session-*/flow-* subject,
+// sealed under the KEK. Without a KEK there are none, and no durable session can be
+// created (sessions/manager.ts DURABLE_NEEDS_KEK).
+const payloadKeys =
+  database && kek.ok
+    ? new PgPayloadKeys(database.sql, { current: kek.kek, ...(previousKek?.ok ? { previous: previousKek.kek } : {}) })
+    : undefined
+
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -245,6 +253,8 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // A durable session's payload key is created with its row (#1056).
+        ...(payloadKeys ? { payloadKeys } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
@@ -323,12 +333,8 @@ const temporal = config.temporalAddress && database ? { address: config.temporal
 if (config.temporalAddress && !database) console.error('agent-tools worker: not started, it needs SCADBUDDY_DATABASE_URL')
 if (temporal) Runtime.install({ shutdownSignals: [] })
 // The payload codec (spec 2026-10-01 §6.5): session-*/flow-* payloads are sealed per
-// subject. Without a KEK it stays off, and no durable session can be created.
-const payloadKeys =
-  temporal && kek.ok
-    ? new PgPayloadKeys(temporal.sql, { current: kek.kek, ...(previousKek?.ok ? { previous: previousKek.kek } : {}) })
-    : undefined
-const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+// subject (payloadKeys, above).
+const dataConverter = temporal && payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
 const temporalWorker =

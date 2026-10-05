@@ -6,6 +6,8 @@ import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import {
   MAX_SESSION_BUDGET_USD,
+  MODE_IS_FIXED,
+  SESSION_MODES,
   type SessionManager,
   SessionError,
   type SessionRecord,
@@ -32,14 +34,17 @@ import { ready, type RouteModule } from './module.js'
 //                                                 whose tool calls touched that resource (#931,
 //                                                 sessions/touched.ts ResourceRef: a `model`
 //                                                 matches anything of the model)
-//   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?};
+//   POST /api/v1/ai/sessions                      {title?, prompt?, mode?} → 201 {session, turn_id?};
+//                                                 `mode` classic|durable (#1056), else the
+//                                                 session_mode setting (routes/sessionMode.ts);
 //                                                 429 past the owner's new-session limit
 //                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
 //   GET  /api/v1/ai/sessions/:id                  one session
 //   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
 //                                                 changed or deleted, oldest first (#931,
 //                                                 sessions/touched.ts)
-//   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
+//   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs;
+//                                                 400 with `mode`, which is fixed at start
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
 //                                                 (a reconnect) or else `?after=`, then
@@ -83,6 +88,8 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
+  /** #1056: where the session runs, fixed at start. */
+  mode: SessionRecord['mode']
   turns: number
   cost_usd: number
   budget_usd: number
@@ -107,6 +114,7 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
+    mode: s.mode,
     turns: s.turns,
     cost_usd: s.costUsd,
     budget_usd: s.budgetUsd,
@@ -119,8 +127,10 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
 const StartBody = z.strictObject({
   title: z.string().max(200).optional(),
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
+  mode: z.enum(SESSION_MODES).optional(),
 })
-const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
+// `mode` is named only to refuse it with the reason (plan ruling 2).
+const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX), mode: z.unknown().optional() })
 const ForkBody = z.strictObject({ title: z.string().max(200).optional() })
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
@@ -258,6 +268,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
+        ...(body.value.mode ? { mode: body.value.mode } : {}),
       })
       return c.json({ session: sessionView(session, BROWSER_USER), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
     }),
@@ -279,6 +290,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, SendBody, undefined)
       if (!body.ok) return body.response
+      if (body.value.mode !== undefined) return c.json({ detail: MODE_IS_FIXED }, 400)
       const turn = await sessions.send(idOf(c), BROWSER_USER, body.value.text)
       return c.json({ turn_id: turn.turnId }, 202)
     }),
