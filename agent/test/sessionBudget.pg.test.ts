@@ -243,6 +243,44 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
   })
 
+  // #823: a fork is not a way round the user-only raise. Only the panel's
+  // "continue in a new chat" (the route, without the headless browser's marker)
+  // gives a fresh budget; every other fork carries over what the parent has left.
+  describe('a fork that is not the user’s carries over the parent’s budget', () => {
+    /** The scripted runner writes no SDK transcript; a fork needs one. */
+    const transcript = (id: string) => m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const fork = (id: string, headers: Record<string, string>) =>
+      app.request(`/api/v1/ai/sessions/${id}/fork`, { method: 'POST', headers })
+
+    it('gives a tool’s fork (sessions_fork) and the headless browser’s only what the parent has left', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      await transcript(session.id)
+      expect(await m.get(session.id, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+
+      expect((await m.fork(session.id, browser)).budgetUsd).toBe(0.6)
+      const marked = await fork(session.id, { ...UI, [AGENT_ACTOR_HEADER]: session.id })
+      expect(marked.status).toBe(201)
+      expect(((await marked.json()) as { session: { budget_usd: number } }).session.budget_usd).toBe(0.6)
+    })
+
+    it('refuses a spent session’s fork unless it is the user’s, which gets a fresh budget', async () => {
+      const id = await spentSession()
+      await transcript(id)
+      await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
+      const marked = await fork(id, { ...UI, [AGENT_ACTOR_HEADER]: id })
+      expect(marked.status).toBe(409)
+      expect(((await marked.json()) as { detail: string }).detail).toContain('only you can continue it')
+
+      const ui = await fork(id, UI)
+      expect(ui.status).toBe(201)
+      expect(((await ui.json()) as { session: { budget_usd: number; cost_usd: number } }).session).toMatchObject({
+        budget_usd: 1,
+        cost_usd: 0,
+      })
+    })
+  })
+
   // Forking needs a real transcript, so a fork that works is in
   // test/sessions.e2e.test.ts ("continues a spent session in a new chat").
   describe('continuing a spent session in a new chat', () => {

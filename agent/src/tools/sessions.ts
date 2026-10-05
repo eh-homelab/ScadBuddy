@@ -486,7 +486,8 @@ export const sessionTools: Tool[] = [
     name: 'sessions_fork',
     description:
       'Branch a session this caller may see into a new one it owns, with the conversation so far, to try an ' +
-      'alternative without changing the original.',
+      'alternative without changing the original. The fork has only the budget the original has left, so a ' +
+      'session that has spent its budget cannot be forked; only the user can raise a budget.',
     input: z.object({ session_id: sessionId, title: z.string().max(200).optional() }),
     risk: 'write',
     routes: [],

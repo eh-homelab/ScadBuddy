@@ -692,9 +692,11 @@ export class SessionManager {
     id: string,
     principal: Owner,
     fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
-    options: { rateLimited?: boolean } = {},
+    options: { rateLimited?: boolean; budgetUsd?: number } = {},
   ): Promise<SessionRecord> {
-    const { maxTurns, budgetUsd } = await this.limits()
+    const limits = await this.limits()
+    const maxTurns = limits.maxTurns
+    const budgetUsd = options.budgetUsd === undefined ? limits.budgetUsd : Math.min(limits.budgetUsd, options.budgetUsd)
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
@@ -1652,15 +1654,29 @@ export class SessionManager {
    * branch with fresh UUIDs"; "When provided, read/write session data via this
    * store"). The child is owned by whoever forked it, records its parent, and
    * starts with the parent's conversation events so attach shows its history.
+   *
+   * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
+   * route) gives the child a fresh budget. Any other fork, `sessions_fork`
+   * above all, carries over what the parent has left, so forking cannot
+   * stand in for the user-only `raiseBudget` (#823).
    */
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin; rateLimited?: boolean } = {},
+    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean } = {},
   ): Promise<SessionRecord> {
     const parent = await this.get(id, principal)
     if (!(await this.store.exists(id))) {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
+    }
+    const left = cents(Math.max(parent.budgetUsd - parent.costUsd, 0))
+    if (!options.freshBudget && left <= 0) {
+      throw new SessionError(
+        'budget_exhausted',
+        `session ${id} has spent its budget (${usd(parent.costUsd)} of ${usd(parent.budgetUsd)}); ` +
+          'only you can continue it in a new chat or raise its budget, in the ScadBuddy UI',
+        { costUsd: parent.costUsd, budgetUsd: parent.budgetUsd },
+      )
     }
     const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
     // A fork is a new session and counts against the same limit as a start (PR #715
@@ -1678,7 +1694,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
-    }, { rateLimited: options.rateLimited ?? true })
+    }, { rateLimited: options.rateLimited ?? true, ...(options.freshBudget ? {} : { budgetUsd: left }) })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []
