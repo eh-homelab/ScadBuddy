@@ -256,11 +256,15 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
       // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
       // other reply is the user's own words, which the model must read, so the
-      // call is not run and its error carries them.
+      // call is not run and its error carries them. It ends the turn's tab waits
+      // too: a later call must not ask again before the model has acted on it.
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
         if (reply === IM_BACK) return { back: true, why: 'user_back' }
         if (reply !== CARRY_ON) {
+          gaveUp =
+            `The user already replied ${JSON.stringify(reply)} when asked for the tab this turn; the call was not run ` +
+            'and the tab is not asked for again this turn. Act on their reply.'
           return { back: false, message: `The user replied ${JSON.stringify(reply)} instead; the call was not run. Act on their reply.` }
         }
         gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`

@@ -159,6 +159,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
+  // #1353: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
+  it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3, onParked: hangs }) }), approvalPollMs: 20 })
+    const first = await timed.start(browser, { origin: 'chat', prompt: 'go' })
+    await first.turn!.done
+    expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
+
+    verdicts = []
+    const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }), approvalPollMs: 20 })
+    const second = await stopped.start(browser, { origin: 'chat', prompt: 'go' })
+    await pending(second.session.id)
+    expect(await stopped.interrupt(second.session.id, browser)).toBe(true)
+    await second.turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+  })
+
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
@@ -584,6 +601,20 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       expect(later).toEqual(first)
       expect(asked).toBe(1)
     }
+  })
+
+  // #1345: a typed reply ends the turn's tab waits too, so a later call cannot ask again before the model acted on it.
+  it('after a typed reply, a later call that finds no tab fails at once and does not ask again', async () => {
+    let asked = 0
+    const wait = waitForTab((request) => {
+      asked += 1
+      return Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'use the other printer' } })
+    }, never, noop)
+    const first = await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })
+    const later = await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })
+    expect(first).toEqual({ back: false, message: expect.stringMatching(/^The user replied "use the other printer" instead/) })
+    expect(later).toEqual({ back: false, message: expect.stringMatching(/already replied "use the other printer".*not asked for again/) })
+    expect(asked).toBe(1)
   })
 
   it('a call that comes after every waiter withdrew opens a wait of its own, not the withdrawn one', async () => {

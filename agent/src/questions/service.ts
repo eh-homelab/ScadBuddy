@@ -597,13 +597,15 @@ export class QuestionService {
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
-      // A failed check (the hub, the database) must not leave the row with
-      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
-      await attention?.onParked?.().catch(() => undefined)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
       const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
+      // A failed check (the hub, the database) must not leave the row with
+      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
+      // A check that hangs (a pool or lock wait) is raced against the timer and
+      // the abort, which are armed first, so it cannot stall the call (#1353).
+      if (attention?.onParked) await settledOrDone(attention.onParked(), signal, deadline)
       const waited = await this.waitFor(id, signal, deadline)
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
@@ -635,4 +637,19 @@ export class QuestionService {
       return { answered: true, answers }
     }
   }
+}
+
+/** Resolves when `work` settles (either way), `signal` aborts, or `deadline` (epoch ms) passes, whichever is first. */
+function settledOrDone(work: Promise<unknown>, signal: AbortSignal, deadline: number | undefined): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = deadline === undefined ? undefined : setTimeout(done, Math.max(0, deadline - Date.now()))
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    if (signal.aborted) return done()
+    signal.addEventListener('abort', done, { once: true })
+    work.then(done, done)
+  })
 }

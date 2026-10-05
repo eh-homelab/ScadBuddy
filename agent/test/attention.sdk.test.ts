@@ -11,6 +11,7 @@ import {
   DEFAULT_REPLIES,
   DEFAULT_TIMEOUT_S,
   parseAttention,
+  RECONNECTED_TEXT,
   timedOutText,
   WAIT_CEILING_S,
 } from '../src/harness/attention.js'
@@ -116,6 +117,15 @@ describe('request_user_attention handler', () => {
     const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'blocked', message: MESSAGE, timeout_s: 30 }, extra())
     expect(result).toEqual({ content: [{ type: 'text', text: timedOutText(30) }] })
     expect(timedOutText(30)).toMatch(/^timed_out: .*never approves anything/)
+  })
+
+  // #1343: only a read is re-run when the tab is back; the model must not repeat a write blind.
+  it('a reconnect is a result, not an error, and sends the model to re-check the page, not to retry', async () => {
+    const { gate } = recording(() => Promise.resolve({ answered: false, reconnected: true, message: 'the ScadBuddy tab is connected again' }))
+    const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'tab_disconnected', message: MESSAGE }, extra())
+    expect(result).toEqual({ content: [{ type: 'text', text: RECONNECTED_TEXT }] })
+    expect(RECONNECTED_TEXT).toMatch(/^reconnected: .*re-check it \(browser_status, then browser_snapshot\)/)
+    expect(RECONNECTED_TEXT).not.toMatch(/retry/i)
   })
 
   it('anything else is the error the model reads, and malformed input parks nothing', async () => {

@@ -144,7 +144,9 @@ export function timedOutText(seconds: number): string {
 
 /** The result the model reads when the session's tab came back (#815 §2): not a reply, but the wait is over. */
 export const RECONNECTED_TEXT =
-  'reconnected: the ScadBuddy tab is connected again (the user has not replied). Retry the browser_* call that failed.'
+  'reconnected: the ScadBuddy tab is connected again (the user has not replied). A browser_* call that failed was ' +
+  'not run since, and the page may have reloaded or changed while the tab was away: re-check it (browser_status, ' +
+  'then browser_snapshot) before calling a browser_* tool that changes it again.'
 
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
