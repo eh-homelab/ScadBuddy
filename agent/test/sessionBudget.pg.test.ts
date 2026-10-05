@@ -264,6 +264,16 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(((await marked.json()) as { session: { budget_usd: number } }).session.budget_usd).toBe(0.6)
     })
 
+    it('rounds what is left down, so a fork never gets more than the parent has, and under a cent is spent', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      await transcript(session.id)
+      await db.sql`UPDATE ai_sessions SET cost_usd = 0.346 WHERE id = ${session.id}`
+      expect((await m.fork(session.id, browser)).budgetUsd).toBe(0.65)
+      await db.sql`UPDATE ai_sessions SET cost_usd = 0.995 WHERE id = ${session.id}`
+      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
+    })
+
     it('refuses a spent session’s fork unless it is the user’s, which gets a fresh budget', async () => {
       const id = await spentSession()
       await transcript(id)

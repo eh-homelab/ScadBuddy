@@ -1669,7 +1669,9 @@ export class SessionManager {
     if (!(await this.store.exists(id))) {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
     }
-    const left = cents(Math.max(parent.budgetUsd - parent.costUsd, 0))
+    // Rounded down, so a fork never gets more than the parent has left; under a cent is spent.
+    // The epsilon keeps a float like 0.6 - 1e-16 from flooring to 0.59.
+    const left = Math.max(Math.floor((parent.budgetUsd - parent.costUsd) * 100 + 1e-9) / 100, 0)
     if (!options.freshBudget && left <= 0) {
       throw new SessionError(
         'budget_exhausted',
