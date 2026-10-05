@@ -32,7 +32,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, Connection
+from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -203,9 +204,11 @@ class BambuddyContentBackend:
 
     async def _claim_legacy(self, client: BambuddyClient, instance: str) -> None:
         """Settle the rows recorded before folders were per instance (``''``), before
-        this instance's first find or delete. Such a row is claimed only if its folder
-        sits where ScadBuddy put it on THIS instance: a template folder directly under
-        its inbox, a `Work` folder directly under its claimed template folder. Anything
+        this instance's first find or delete. A slug's rows are claimed only as a pair
+        that sits where ScadBuddy put it on THIS instance: the template folder directly
+        under its inbox, with the recorded `Work` folder directly under it. One id that
+        happens to be some folder under the inbox is not enough (that would send uploads
+        into a folder the user made). Anything
         else (ids from an instance the URL was repointed away from, #683; a folder moved
         or deleted since) is dropped, never trusted, so the next find adopts or makes the
         folder again. Best effort: a folder listing that fails leaves the rows for the
@@ -226,16 +229,18 @@ class BambuddyContentBackend:
             and (folder := folders.get(row.folder_id)) is not None
             and folder.parent_id == row.inbox_id
         }
+        # The slots whose recorded Work folder sits under their recorded template folder.
+        paired = {
+            (row.inbox_id, row.slug)
+            for row in legacy
+            if row.role == "work"
+            and (folder := folders.get(row.folder_id)) is not None
+            and folder.name == WORK
+            and folder.parent_id == templates.get((row.inbox_id, row.slug))
+        }
 
         def placed(row: _LegacyFolder) -> bool:
-            if row.role == "template":
-                return templates.get((row.inbox_id, row.slug)) == row.folder_id
-            folder = folders.get(row.folder_id)
-            return (
-                folder is not None
-                and folder.name == WORK
-                and folder.parent_id == templates.get((row.inbox_id, row.slug))
-            )
+            return (row.inbox_id, row.slug) in paired
 
         await asyncio.to_thread(
             self._settle_legacy, instance, [row for row in legacy if placed(row)], legacy
@@ -260,20 +265,31 @@ class BambuddyContentBackend:
         release inserts after ``seen`` was read is left for the next process."""
         with self._pool.connection() as conn, conn.transaction():
             for row in claimed:
-                conn.execute(
-                    "UPDATE store_folders AS legacy SET instance = %s WHERE legacy.instance = ''"
-                    " AND inbox_id = %s AND slug = %s AND role = %s AND folder_id = %s"
-                    " AND NOT EXISTS (SELECT 1 FROM store_folders AS own WHERE own.instance = %s"
-                    " AND (own.folder_id = legacy.folder_id OR (own.inbox_id, own.slug, own.role)"
-                    " = (legacy.inbox_id, legacy.slug, legacy.role)))",
-                    (instance, row.inbox_id, row.slug, row.role, row.folder_id, instance),
-                )
+                try:
+                    # A savepoint each: a find in another process may record the same
+                    # slot meanwhile (its row is not visible to NOT EXISTS until it
+                    # commits). Then this row is simply not claimed, and goes below.
+                    with conn.transaction():
+                        self._claim_row(conn, instance, row)
+                except UniqueViolation:
+                    continue
             for row in seen:
                 conn.execute(
                     "DELETE FROM store_folders WHERE instance = '' AND inbox_id = %s"
                     " AND slug = %s AND role = %s AND folder_id = %s",
                     (row.inbox_id, row.slug, row.role, row.folder_id),
                 )
+
+    @staticmethod
+    def _claim_row(conn: Connection[DictRow], instance: str, row: _LegacyFolder) -> None:
+        conn.execute(
+            "UPDATE store_folders AS legacy SET instance = %s WHERE legacy.instance = ''"
+            " AND inbox_id = %s AND slug = %s AND role = %s AND folder_id = %s"
+            " AND NOT EXISTS (SELECT 1 FROM store_folders AS own WHERE own.instance = %s"
+            " AND (own.folder_id = legacy.folder_id OR (own.inbox_id, own.slug, own.role)"
+            " = (legacy.inbox_id, legacy.slug, legacy.role)))",
+            (instance, row.inbox_id, row.slug, row.role, row.folder_id, instance),
+        )
 
     # --- ContentBackend ------------------------------------------------------
 

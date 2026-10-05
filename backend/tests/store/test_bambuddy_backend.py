@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -314,6 +315,71 @@ async def test_a_pre_instance_row_this_bambuddy_already_records_is_dropped(pool:
     await backend.remove("78")
     assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
     await backend.aclose()
+
+
+@respx.mock
+async def test_a_pre_instance_template_folder_without_its_work_folder_is_dropped(
+    pool: Pool,
+) -> None:
+    """#1418 review: an id that happens to be some folder under the inbox is not enough
+    to claim a template row. Without its recorded Work folder beneath it, the row goes,
+    and the next upload adopts or makes the template's folders by name."""
+    _record_folders(pool, "", (SCOPE.slug or "", "template", 40), (SCOPE.slug or "", "work", 77))
+    respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    upload = respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    backend = BambuddyContentBackend(target(), pool)
+    await backend.upload("piece", b"zip", name="piece-k.zip", scope=SCOPE)
+    assert upload.calls[0].request.url.params["folder_id"] == "11"
+    assert 40 not in _instances(pool)
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_failed_folder_listing_leaves_pre_instance_rows_for_the_next_call(
+    pool: Pool,
+) -> None:
+    """While the listing fails nothing is claimed (a delete in a legacy Work folder is
+    refused); the next call that can list settles them, and later calls list no more."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    listing = respx.get(f"{API}/library/folders").mock(
+        side_effect=[httpx.Response(503, json={"detail": "down"}), _placed_tree()]
+    )
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("78")
+    assert _instances(pool) == {40: "", 42: ""}
+    await backend.remove("78")
+    assert delete.call_count == 1
+    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    await backend.remove("78")
+    assert listing.call_count == 2
+    await backend.aclose()
+
+
+def test_a_slot_recorded_by_another_process_mid_settle_is_not_a_unique_violation(
+    pool: Pool, pg_conninfo: str
+) -> None:
+    """#1418 review: a find in another process records the slot after this settle read
+    its legacy rows, and commits only once the claim is waiting on it. The claim then
+    yields to it rather than failing the call with a unique violation."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    backend = BambuddyContentBackend(target(), pool)
+    legacy = backend._legacy_rows()
+    with psycopg.connect(pg_conninfo) as other:
+        other.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, 'old', 'work', 99)",
+            (BASE_URL, INBOX),
+        )
+        with ThreadPoolExecutor(1) as pool_thread:
+            settling = pool_thread.submit(backend._settle_legacy, BASE_URL, legacy, legacy)
+            time.sleep(0.5)  # the claim of ('old', 'work') waits on the uncommitted row
+            other.commit()
+            settling.result(10)
+    assert _instances(pool) == {40: BASE_URL, 99: BASE_URL}
 
 
 @respx.mock
