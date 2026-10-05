@@ -49,8 +49,13 @@ export async function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promi
   }
 }
 
-const isDone = (attention: unknown): boolean =>
-  typeof attention === 'object' && attention !== null && (attention as { reason?: unknown }).reason === 'done'
+// A `done` summary has no timer. An older replica's done row with one is an ordinary
+// attention request its turn is parked on (agent questions/service.ts), so it waits.
+const isDone = (attention: unknown): boolean => {
+  if (typeof attention !== 'object' || attention === null) return false
+  const a = attention as { reason?: unknown; on_timeout?: unknown }
+  return a.reason === 'done' && a.on_timeout === null
+}
 
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {

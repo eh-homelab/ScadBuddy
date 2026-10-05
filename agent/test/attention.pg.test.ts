@@ -234,7 +234,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
     const [row] = await db.sql`SELECT id, kind, attention_reason, on_timeout, expires_at, outcome, summary FROM ai_questions WHERE session_id = ${session.id}`
     expect(row).toMatchObject({ kind: 'attention', attention_reason: 'done', on_timeout: null, expires_at: null, outcome: null })
-    const summary = '**What this turn changed**\n- created preset `preset-1` of sign (save_preset)'
+    const summary = '**What this turn changed**\n- created preset `preset-1` of `sign` (`save_preset`)'
     expect(row!.summary).toBe(summary)
     // Nothing waits on it: the session is idle, not waiting_input.
     expect((await m.get(session.id, browser)).status).toBe('idle')
@@ -272,8 +272,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const [timedOut] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out'`
     const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
     expect(done!.summary).toBe(
-      `**While nobody answered (attention request ${timedOut!.id.slice(0, 8)} timed out)**\n- created preset \`unattended\` of sign (save_preset)` +
-        '\n\n**Before you were asked**\n- created preset `before` of sign (save_preset)',
+      `**While nobody answered (attention request ${timedOut!.id.slice(0, 8)} timed out)**\n- created preset \`unattended\` of \`sign\` (\`save_preset\`)` +
+        '\n\n**Before you were asked**\n- created preset `before` of `sign` (`save_preset`)',
     )
   })
 
@@ -307,7 +307,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
     expect(done!.summary).toBe(
       `**While nobody answered (attention requests ${timedOut[0]!.id.slice(0, 8)}, ${timedOut[1]!.id.slice(0, 8)} timed out)**\n` +
-        '- created preset `unattended` of sign (save_preset)',
+        '- created preset `unattended` of `sign` (`save_preset`)',
     )
   })
 
@@ -326,7 +326,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
       await turn!.done
       const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
-      expect(done!.summary).toBe('**What this turn changed**\n- created preset `preset-1` of sign (save_preset)')
+      expect(done!.summary).toBe('**What this turn changed**\n- created preset `preset-1` of `sign` (`save_preset`)')
     } finally {
       vi.useRealTimers()
     }

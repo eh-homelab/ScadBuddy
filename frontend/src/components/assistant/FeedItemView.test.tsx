@@ -376,6 +376,14 @@ describe('the done summary (#815 §4)', () => {
     return onAnswer
   }
 
+  it('renders a name from a tool literally: the agent puts it in a code span, so no link or emphasis', () => {
+    // As agent questions/doneSummary.ts writes a hostile model slug and tool name.
+    post({ attention: { reason: 'done', summary: '**What this turn changed**\n- created preset `x` of `evil [click](http://e)` (`a*b*c`)' } })
+    const record = screen.getByTestId('agent-done-summary')
+    expect(record.querySelector('a, em')).toBeNull()
+    expect(record).toHaveTextContent('created preset x of evil [click](http://e) (a*b*c)')
+  })
+
   it("shows the agent's message and ScadBuddy's own record, with no timer and nothing to reply, and dismisses", async () => {
     const user = userEvent.setup()
     const onAnswer = post()

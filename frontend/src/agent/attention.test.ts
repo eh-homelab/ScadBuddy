@@ -42,6 +42,15 @@ describe('fetchPendingInput', () => {
     expect(summaryLabel(only)).toBe('1 summary')
   })
 
+  it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'answer', attention: { reason: 'done', on_timeout: 'proceed' } }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 1, summaries: 0 })
+  })
+
   it('is unknown (null), not zero, when the agent cannot answer', async () => {
     server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
     expect(await fetchPendingInput()).toBeNull()

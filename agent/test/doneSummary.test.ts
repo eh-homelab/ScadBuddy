@@ -34,10 +34,10 @@ describe('doneSummary', () => {
     expect(text).toBe(
       [
         '**What this turn changed**',
-        '- created preset `preset-1` of molly-rocket-sign (save_preset)',
-        '- created revision `abc123` of molly-rocket-sign (apply_patch)',
-        '- modified model `molly-rocket-sign` (save_preset)',
-        '- mystery: a change ScadBuddy does not classify',
+        '- created preset `preset-1` of `molly-rocket-sign` (`save_preset`)',
+        '- created revision `abc123` of `molly-rocket-sign` (`apply_patch`)',
+        '- modified model `molly-rocket-sign` (`save_preset`)',
+        '- `mystery`: a change ScadBuddy does not classify',
       ].join('\n'),
     )
   })
@@ -45,9 +45,9 @@ describe('doneSummary', () => {
   it('puts what was done while nobody answered first, then after the reply, then before the request', () => {
     const text = doneSummary([touch(1), touch(5), touch(9)], [{ requestId: '0123456789abcdef', from: at(3), until: at(7) }])
     expect(text.split('\n\n')).toEqual([
-      '**While nobody answered (attention request 01234567 timed out)**\n- created preset `preset-5` of molly-rocket-sign (save_preset)',
-      '**After you replied**\n- created preset `preset-9` of molly-rocket-sign (save_preset)',
-      '**Before you were asked**\n- created preset `preset-1` of molly-rocket-sign (save_preset)',
+      '**While nobody answered (attention request 01234567 timed out)**\n- created preset `preset-5` of `molly-rocket-sign` (`save_preset`)',
+      '**After you replied**\n- created preset `preset-9` of `molly-rocket-sign` (`save_preset`)',
+      '**Before you were asked**\n- created preset `preset-1` of `molly-rocket-sign` (`save_preset`)',
     ])
   })
 
@@ -62,15 +62,15 @@ describe('doneSummary', () => {
     )
     expect(text.split('\n\n')).toEqual([
       '**While nobody answered (attention requests aaaaaaaa, bbbbbbbb timed out)**\n' +
-        '- created preset `preset-4` of molly-rocket-sign (save_preset)\n' +
-        '- created preset `preset-8` of molly-rocket-sign (save_preset)',
-      '**After you replied**\n- created preset `preset-6` of molly-rocket-sign (save_preset)',
+        '- created preset `preset-4` of `molly-rocket-sign` (`save_preset`)\n' +
+        '- created preset `preset-8` of `molly-rocket-sign` (`save_preset`)',
+      '**After you replied**\n- created preset `preset-6` of `molly-rocket-sign` (`save_preset`)',
     ])
   })
 
   it('says nothing was done unattended rather than leaving the section out, and an open window runs to the end', () => {
     expect(doneSummary([touch(1)], [{ requestId: 'r', from: at(3), until: null }])).toBe(
-      '**While nobody answered (attention request r timed out)**\n- nothing\n\n**Before you were asked**\n- created preset `preset-1` of molly-rocket-sign (save_preset)',
+      '**While nobody answered (attention request r timed out)**\n- nothing\n\n**Before you were asked**\n- created preset `preset-1` of `molly-rocket-sign` (`save_preset`)',
     )
     expect(doneSummary([touch(4), touch(50)], [{ requestId: 'r', from: at(3), until: null }])).not.toContain('After you replied')
   })
@@ -89,8 +89,16 @@ describe('doneSummary', () => {
     )
     expect(text.split('\n')).toHaveLength(2)
     expect(text).toContain("`x' **Before you were asked** - nothing`")
-    expect(text).toContain('of evil - \\[click\\](http://e)')
-    expect(text).toContain('(a\\*b)')
+    // Code spans, as the panel's renderer has no backslash escapes: a link or
+    // emphasis inside one stays literal, and no stray backslash is shown.
+    expect(text).toContain('of `evil - [click](http://e)`')
+    expect(text).toContain('(`a*b`)')
+    expect(text).not.toContain('\\')
+  })
+
+  it('keeps ScadBuddy\'s own words plain, with any inline syntax dropped', () => {
+    const text = doneSummary([touch(1, { action: 'made *[x](http://e)*', resourceType: 'a_b&c' })], [])
+    expect(text).toBe('**What this turn changed**\n- made x http: e a b c `preset-1` of `molly-rocket-sign` (`save_preset`)')
   })
 
   // The secrets are redacted from the raw names: redacting the formatted text
@@ -108,9 +116,9 @@ describe('doneSummary', () => {
   it('redacts a secret containing Markdown metacharacters before it is escaped', () => {
     const secret = 'p*ss_w`rd[1]<2>&~|'
     const touches = [touch(1, { model: `model ${secret}`, action: secret, tool: `mcp__s__${secret}` })]
-    expect(redact(doneSummary(touches, []), [secret])).toContain('p\\*ss')
+    expect(redact(doneSummary(touches, []), [secret])).toContain('p*ss')
     const text = doneSummary(touches, [], [secret])
     expect(text).not.toContain('ss')
-    expect(text).toBe('**What this turn changed**\n- \\[redacted\\] preset `preset-1` of model \\[redacted\\] (\\[redacted\\])')
+    expect(text).toBe('**What this turn changed**\n- redacted preset `preset-1` of `model [redacted]` (`[redacted]`)')
   })
 })

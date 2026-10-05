@@ -40,7 +40,11 @@ const SHORT_ID = 12
 
 // Every name below came from a tool's input or result (a preset's name, a model's
 // slug), so none may shape the Markdown: a newline or a backtick in one could
-// otherwise forge a section or a line of this record.
+// otherwise forge a section or a line of this record. The card renders this with
+// the panel's own Markdown (frontend agent/chat/Markdown.tsx), which has no
+// backslash escapes, so a name is either a code span or plain words with every
+// inline-syntax character dropped; escaping would show as stray backslashes and
+// not stop a link.
 /** One line, no control characters. */
 function flat(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -48,13 +52,15 @@ function flat(text: string): string {
 }
 
 /**
- * Plain text in Markdown. Flattened to one line nothing can start a block, so
- * only inline syntax is escaped: emphasis, code, links, HTML, strikethrough and
- * tables. An underscore inside a word (`save_preset`) is left alone, as
- * CommonMark never reads one as emphasis.
+ * Plain words: ScadBuddy's own vocabulary (an action, a resource type, an id).
+ * Flattened to one line nothing can start a block, and anything but letters,
+ * digits, spaces and `-.,:'` becomes a space, so no inline syntax survives.
  */
 function plain(text: string): string {
-  return flat(text).replace(/[\\`*[\]<>&~|]|(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])/g, (c) => `\\${c}`)
+  return flat(text)
+    .replace(/[^\p{L}\p{N} \-.,:']+/gu, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim()
 }
 
 /** Inside a code span: no backtick can close it early. */
@@ -64,7 +70,7 @@ function code(text: string): string {
 
 /** `mcp__scadbuddy__apply_patch` reads as `apply_patch`. */
 function toolName(tool: string): string {
-  return plain(tool.replace(/^mcp__.+?__/, ''))
+  return code(tool.replace(/^mcp__.+?__/, ''))
 }
 
 function line(t: DoneTouch): string {
@@ -72,7 +78,7 @@ function line(t: DoneTouch): string {
     return `- ${toolName(t.tool)}: a change ScadBuddy does not classify`
   }
   const id = t.resourceId.length > 40 ? `${t.resourceId.slice(0, SHORT_ID)}…` : t.resourceId
-  const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${plain(t.model)}` : ''
+  const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${code(t.model)}` : ''
   return `- ${plain(t.action)} ${plain(t.resourceType.replace(/_/g, ' '))} ${code(id)}${of} (${toolName(t.tool)})`
 }
 
