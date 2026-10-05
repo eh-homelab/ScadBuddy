@@ -16,6 +16,8 @@ import {
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
+import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
+import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -154,6 +156,10 @@ export type ApprovalRecord = {
   consumedAt: string | null
   /** Approved but voided before it was used. */
   revokedAt: string | null
+  /** The parked call's tool span (W3C traceparent), for the decision's link (#988); never shown to clients. */
+  traceparent: string | null
+  /** The decision's `agent.approval` span, the parent of what the turn does next (#988). */
+  decisionTraceparent: string | null
 }
 
 export type ApprovalErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'expired' | 'input_mismatch' | 'invalid'
@@ -231,7 +237,27 @@ export type GateContext = {
   secrets: () => readonly string[]
   /** The turn's own abort signal (interrupt, shutdown). */
   signal: AbortSignal
+  /** The turn's trace (telemetry/turn.ts TurnTrace): told when a call parks and when it is decided. */
+  trace?: GateTrace
 }
+
+/**
+ * What a parked call tells its turn's trace (spec 2026-10-01 §5.4, "Approvals
+ * end and link"). `traceparent` is the parked tool span's, stored on the row;
+ * `parked` ends that span and the open turn segment once the row exists;
+ * `decided` hands over the decision (its `decisionTraceparent` is the parent
+ * of what the turn does next), and whether the call now runs; `abandoned` says
+ * the row was never written (the gate's throw becomes a deny), so the call no
+ * longer waits on a decision.
+ */
+export type ParkTrace = {
+  traceparent: string | undefined
+  parked(approvalId: string): void
+  decided(approval: Pick<ApprovalRecord, 'id' | 'decision' | 'decisionTraceparent'>, runs: boolean): void
+  abandoned(): void
+}
+
+export type GateTrace = { park(toolUseId: string, toolName: string): ParkTrace }
 
 type Row = {
   id: string
@@ -258,13 +284,15 @@ type Row = {
   resume_turn_id: string | null
   consumed_at: Date | null
   revoked_at: Date | null
+  traceparent: string | null
+  decision_traceparent: string | null
   due: boolean
 }
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
   requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
   decided_by_kind, decided_by_id, decided_by_label, decided_at, reason, usable_until, resume_turn_id,
-  consumed_at, revoked_at, (decision IS NULL AND expires_at <= now()) AS due`
+  consumed_at, revoked_at, traceparent, decision_traceparent, (decision IS NULL AND expires_at <= now()) AS due`
 
 /** An approved row that can still be used. */
 const USABLE = `decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL AND usable_until > now()`
@@ -294,6 +322,8 @@ function record(row: Row): ApprovalRecord {
     resumeTurnId: row.resume_turn_id,
     consumedAt: row.consumed_at?.toISOString() ?? null,
     revokedAt: row.revoked_at?.toISOString() ?? null,
+    traceparent: row.traceparent,
+    decisionTraceparent: row.decision_traceparent,
   }
 }
 
@@ -369,6 +399,8 @@ export type CreateApproval = {
   /** See GateContext.requestedTiers. */
   requestedTiers?: readonly Tier[]
   secrets?: readonly string[]
+  /** The parked tool span's traceparent (ParkTrace.traceparent). */
+  traceparent?: string
 }
 
 export type DecideOptions = {
@@ -396,6 +428,31 @@ export type RevokeFilter = {
   turnId?: string
   /** Leave the row bound to this resumed turn alone. */
   exceptResumeTurn?: string
+}
+
+/**
+ * The decision's own trace (spec 2026-10-01 §5.4): a principal's decision is a
+ * child of the request that made it; an expiry or a cancellation, which no one
+ * asked for, is a root. Either way it links to the parked call's span.
+ */
+function decisionSpan(approval: ApprovalRecord, by: Owner | undefined): Span {
+  const link = linkTo(approval.traceparent)
+  const waited = approval.decidedAt ? (Date.parse(approval.decidedAt) - Date.parse(approval.createdAt)) / 1000 : 0
+  return tracer().startSpan('agent.approval', {
+    kind: SpanKind.INTERNAL,
+    root: by === undefined,
+    ...(link ? { links: [link] } : {}),
+    attributes: {
+      'scadbuddy.approval_id': approval.id,
+      'scadbuddy.tool': approval.tool,
+      'scadbuddy.tier': approval.tier,
+      'scadbuddy.outcome': approval.decision ?? 'unknown',
+      'scadbuddy.wait_seconds': Math.max(waited, 0),
+      ...(approval.sessionId ? { 'scadbuddy.session_id': approval.sessionId } : {}),
+      ...(approval.turnId ? { 'scadbuddy.turn_id': approval.turnId } : {}),
+      ...(by ? { 'scadbuddy.decided_by_kind': by.kind } : {}),
+    },
+  })
 }
 
 export class ApprovalService {
@@ -544,8 +601,9 @@ export class ApprovalService {
     const { requestedBy: by } = request
     const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'))
+                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at,
+                                 traceparent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'), $14)
        RETURNING ${COLUMNS}`,
       [
         randomUUID(),
@@ -561,6 +619,7 @@ export class ApprovalService {
         by.label,
         request.requestedTiers ? [...request.requestedTiers] : null,
         ttl,
+        request.traceparent ?? null,
       ],
     )
     return row
@@ -625,37 +684,53 @@ export class ApprovalService {
     // polling the row must not see the decision (and log the session's
     // `running`) before the event that reports it is in the log.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
-    const approval = await this.deps.sql.begin(async (tx) => {
-      const [row] = await tx.unsafe<Row[]>(
-        `UPDATE ai_approvals
-         SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-             decided_at = now(), reason = $6,
-             usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-         WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-         RETURNING ${COLUMNS}`,
-        [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-      )
-      if (!row) return undefined
-      const settled = record(row)
-      if (settled.sessionId !== null) {
-        const resolved = event({
-          type: 'approval.resolved',
-          sessionId: settled.sessionId,
-          id,
-          approved: decision === 'approved',
-          ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-        })
-        const events = [scrubForLog(resolved, [])]
-        logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
-      }
-      return settled
-    })
-    if (!approval) return undefined
-    // Committed: wake followers, and announce it on the bus (#300).
-    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
-    this.wakeWaiters(id)
-    await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
-    return approval
+    // Started only once the UPDATE has won, so a lost race leaves no span.
+    const traced: { span?: Span } = {}
+    try {
+      const approval = await this.deps.sql.begin(async (tx) => {
+        const [row] = await tx.unsafe<Row[]>(
+          `UPDATE ai_approvals
+           SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
+               decided_at = now(), reason = $6,
+               usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
+           WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
+           RETURNING ${COLUMNS}`,
+          [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
+        )
+        if (!row) return undefined
+        const settled = record(row)
+        // In the same transaction, so whoever sees the decision sees its span too.
+        traced.span = decisionSpan(settled, by)
+        const traceparent = traceparentOf(traced.span)
+        if (traceparent !== undefined) {
+          await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${id}`
+          settled.decisionTraceparent = traceparent
+        }
+        if (settled.sessionId !== null) {
+          const resolved = event({
+            type: 'approval.resolved',
+            sessionId: settled.sessionId,
+            id,
+            approved: decision === 'approved',
+            ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+          })
+          const events = [scrubForLog(resolved, [])]
+          logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
+        }
+        return settled
+      })
+      if (!approval) return undefined
+      // Committed: wake followers, and announce it on the bus (#300).
+      if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
+      this.wakeWaiters(id)
+      await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
+      return approval
+    } catch (err) {
+      if (traced.span) recordFailure(traced.span, err)
+      throw err
+    } finally {
+      traced.span?.end()
+    }
   }
 
   /** One `approval` row in the audit log (#258). */
@@ -770,7 +845,12 @@ export class ApprovalService {
       const parked = session?.turnActive === true && session.turnId === settled.turnId && settled.turnId !== null
       if (!parked) {
         await this.refreshStatus(settled.sessionId)
-        if (approve) await this.resumeOrphan(settled, principal)
+        // The resumed turn is the decision's child (spec 2026-10-01 §5.4).
+        if (approve) {
+          await otelContext.with(contextFrom(settled.decisionTraceparent, otelContext.active()), () =>
+            this.resumeOrphan(settled, principal),
+          )
+        }
       }
     }
     return settled
@@ -947,31 +1027,53 @@ export class ApprovalService {
   ): Promise<ApprovalRecord | undefined> {
     const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
     const by = request.requestedBy
-    const row = await this.deps.sql.begin(async (tx) => {
-      // One key for every MCP prepare: the per-principal and the global
-      // bound are both read and written under it. Held until commit.
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
-      const own = await tx<{ id: string }[]>`
-        SELECT id FROM ai_approvals
-        WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
-          AND decision IS NULL AND expires_at > now()
-        ORDER BY created_at, id`
-      const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
-      if (evict.length > 0) {
-        await tx`
-          UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = ${bounds.evictReason}
-          WHERE id = ANY(${evict}::uuid[]) AND decision IS NULL`
-      } else {
-        const [n] = await tx<{ n: number }[]>`
-          SELECT count(*)::int AS n FROM ai_approvals
-          WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
-        if ((n?.n ?? 0) >= bounds.total) return undefined
-      }
-      const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
-      if (!inserted) throw new Error('approval vanished after insert')
-      return inserted
-    })
-    return row ? record(row) : undefined
+    // An eviction is a system cancellation: each evicted row gets its root
+    // `agent.approval` span and `decision_traceparent` in this transaction, as
+    // settle() gives one. The spans end once the transaction has settled.
+    const evicted: Span[] = []
+    try {
+      const row = await this.deps.sql.begin(async (tx) => {
+        // One key for every MCP prepare: the per-principal and the global
+        // bound are both read and written under it. Held until commit.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
+        const own = await tx<{ id: string }[]>`
+          SELECT id FROM ai_approvals
+          WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
+            AND decision IS NULL AND expires_at > now()
+          ORDER BY created_at, id`
+        const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
+        if (evict.length > 0) {
+          const cancelled = await tx.unsafe<Row[]>(
+            `UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = $2
+             WHERE id = ANY($1::uuid[]) AND decision IS NULL
+             RETURNING ${COLUMNS}`,
+            [evict, bounds.evictReason],
+          )
+          for (const cancelledRow of cancelled) {
+            const span = decisionSpan(record(cancelledRow), undefined)
+            evicted.push(span)
+            const traceparent = traceparentOf(span)
+            if (traceparent !== undefined) {
+              await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${cancelledRow.id}`
+            }
+          }
+        } else {
+          const [n] = await tx<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM ai_approvals
+            WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+          if ((n?.n ?? 0) >= bounds.total) return undefined
+        }
+        const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
+        if (!inserted) throw new Error('approval vanished after insert')
+        return inserted
+      })
+      return row ? record(row) : undefined
+    } catch (err) {
+      for (const span of evicted) recordFailure(span, err)
+      throw err
+    } finally {
+      for (const span of evicted) span.end()
+    }
   }
 
   /** Expires this one approval if it is pending and past its time. */
@@ -1053,17 +1155,28 @@ export class ApprovalService {
       const resumed = await this.consume(context.sessionId, context.turnId, request.toolName, hash)
       if (resumed) return { approved: true, input, approvalId: resumed.id, decision: 'approved' }
 
-      const approval = await this.create({
-        sessionId: context.sessionId,
-        turnId: context.turnId,
-        toolUseId: request.toolUseId,
-        tool: request.toolName,
-        input,
-        tier: request.tier,
-        requestedBy: context.requestedBy,
-        ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
-        secrets: context.secrets(),
-      })
+      // The turn's trace (#988): the call's span context goes on the row, and
+      // the span and the turn's open segment end as soon as the row exists.
+      const park = context.trace?.park(request.toolUseId, request.toolName)
+      let approval: ApprovalRecord
+      try {
+        approval = await this.create({
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          toolUseId: request.toolUseId,
+          tool: request.toolName,
+          input,
+          tier: request.tier,
+          requestedBy: context.requestedBy,
+          ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
+          secrets: context.secrets(),
+          ...(park?.traceparent ? { traceparent: park.traceparent } : {}),
+        })
+      } catch (err) {
+        park?.abandoned()
+        throw err
+      }
+      park?.parked(approval.id)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it or, on shutdown, keeps it
       // (sessions/manager.ts finish). The SDK has dropped the request by then.
@@ -1071,11 +1184,16 @@ export class ApprovalService {
       await this.refreshStatus(context.sessionId)
       const source = { approvalId: decided.id, decision: decided.decision ?? undefined }
       if (decided.decision === 'approved') {
-        if (await this.consumeById(decided.id)) return { approved: true, input, ...source }
+        if (await this.consumeById(decided.id)) {
+          park?.decided(decided, true)
+          return { approved: true, input, ...source }
+        }
         // Voided between the decision and now (interrupt, handoff).
+        park?.decided(decided, false)
         const now = await this.row(decided.id)
         return { approved: false, message: refusal(now ?? decided), ...source }
       }
+      park?.decided(decided, false)
       return { approved: false, message: refusal(decided), ...source }
     }
   }
