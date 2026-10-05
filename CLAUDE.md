@@ -353,9 +353,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
