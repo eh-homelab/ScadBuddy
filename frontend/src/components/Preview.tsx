@@ -8,6 +8,8 @@ import { formatBbox } from '../lib/format'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
+import { ErrorBoundary } from './ErrorBoundary'
+import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import type { RenderStage } from '../lib/useRenderJob'
 
@@ -135,6 +137,16 @@ export function Preview({
       // window.
       className="relative h-full min-h-0 w-full min-w-0 bg-bg"
     >
+      {/* #361 — a GLB that fails to load throws out of the scene: without this, the
+          whole app unmounts. A new render tries again by itself. */}
+      <ErrorBoundary
+        resetKey={shown?.url}
+        // The loader keeps a failed load cached, so a retry would only throw it again.
+        onRetry={() => {
+          if (shown) useLoader.clear(GLTFLoader, shown.url)
+        }}
+        fallback={(_, retry) => <PreviewFailed onRetry={retry} />}
+      >
       <Canvas
         key={theme.bg}
         data-testid="preview-canvas"
@@ -193,6 +205,7 @@ export function Preview({
           target={[0, 20, 0]}
         />
       </Canvas>
+      </ErrorBoundary>
 
       <div
         className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3"
@@ -242,6 +255,21 @@ export function Preview({
           Change a parameter to render.
         </p>
       )}
+    </div>
+  )
+}
+
+function PreviewFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      data-testid="preview-failed"
+      className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[13px] text-muted"
+    >
+      Could not load the preview.
+      <Button size="sm" onClick={onRetry}>
+        Try again
+      </Button>
     </div>
   )
 }

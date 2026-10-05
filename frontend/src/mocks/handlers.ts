@@ -2455,6 +2455,9 @@ export const handlers = [
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.BROKEN_PREVIEW_NAME) {
+      return problem(500, 'Internal Server Error')
+    }
     const [x, y, z] = job.bbox_mm.size
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {

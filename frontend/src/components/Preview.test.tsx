@@ -1,13 +1,18 @@
-import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
 import { Preview } from './Preview'
 
 // WebGL does not exist in jsdom: the scene is dropped and only the overlays render.
+const scene = vi.hoisted(() => ({ failure: null as Error | null, clear: vi.fn() }))
 vi.mock('@react-three/fiber', () => ({
-  Canvas: () => null,
-  useLoader: () => ({ scene: { clone: () => ({}) } }),
+  // A GLB that fails to load throws out of the Canvas, as r3f rethrows it (#361).
+  Canvas: () => {
+    if (scene.failure) throw scene.failure
+    return null
+  },
+  useLoader: Object.assign(() => ({ scene: { clone: () => ({}) } }), { clear: scene.clear }),
   useThree: () => null,
 }))
 vi.mock('@react-three/drei', () => ({ Grid: () => null, OrbitControls: () => null }))
@@ -27,6 +32,41 @@ function job(overrides: Partial<Job>): Job {
 }
 
 describe('Preview', () => {
+  afterEach(() => {
+    scene.failure = null
+    scene.clear.mockClear()
+  })
+
+  it('keeps a preview that fails to load to the viewer, with a retry (#361)', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    scene.failure = new Error('Could not load /api/v1/jobs/aaaa/preview.glb: 422')
+    render(<Preview job={job({})} rendering={false} controls={<button type="button">Full screen</button>} />)
+
+    expect(screen.getByTestId('preview-failed')).toHaveTextContent('Could not load the preview.')
+    // The rest of the viewer stays: its readouts and the page's own buttons.
+    expect(screen.getByTestId('bbox-readout')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+
+    scene.failure = null
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    // The failed load is dropped from the loader's cache, or the retry would rethrow it.
+    expect(scene.clear).toHaveBeenCalledWith(expect.anything(), '/api/v1/jobs/aaaa/preview.glb')
+    expect(screen.queryByTestId('preview-failed')).not.toBeInTheDocument()
+  })
+
+  it('tries again by itself when the next render arrives (#361)', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    scene.failure = new Error('boom')
+    const { rerender } = render(<Preview job={job({})} rendering={false} />)
+    expect(screen.getByTestId('preview-failed')).toBeInTheDocument()
+
+    scene.failure = null
+    rerender(
+      <Preview job={job({ id: 'b'.repeat(32), preview_url: '/api/v1/jobs/bbbb/preview.glb' })} rendering={false} />,
+    )
+    expect(screen.queryByTestId('preview-failed')).not.toBeInTheDocument()
+  })
+
   it("shows a successful render's template notes (#285)", () => {
     render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
 
