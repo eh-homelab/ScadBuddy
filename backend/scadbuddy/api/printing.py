@@ -14,11 +14,14 @@ from contextlib import suppress
 from datetime import timedelta
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Query, Response, status
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
+from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
@@ -166,16 +169,42 @@ def put_printer_bed_type(
     "/printers/{printer_id}/rack-algorithm",
     response_model=PrinterRackAlgorithm,
     summary="Remember how this printer's rack nozzle is picked",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "The database did not answer within the save's bound, so it was probably not saved "
+                "(#1129). Whether resending is safe is #1216."
+            )
+        }
+    },
 )
 def put_printer_rack_algorithm(
     printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
     Bambuddy, like the printer's remembered plate."""
-    settings = store.set_printer_rack_algorithm(printer_id, body.algorithm)
-    return PrinterRackAlgorithm(
-        printer_id=printer_id, algorithm=settings.rack_algorithm(printer_id)
-    )
+    try:
+        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+    except DATABASE_ERRORS as error:
+        # The store gives up on purpose rather than commit after the dialog has (#1129).
+        # Only a pool wait or a cancelled statement is known to have saved nothing; any
+        # other lost connection may have dropped after the commit.
+        logger.warning(
+            "rack-algorithm save gave up on the database",
+            extra={"printer_id": printer_id, "error": type(error).__name__},
+        )
+        rolled_back = isinstance(error, PoolTimeout | psycopg.errors.QueryCanceled)
+        outcome = (
+            "nothing was saved"
+            if rolled_back
+            else "could not confirm the save; check the setting before resending"
+        )
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{outcome}: the database did not answer in time ({type(error).__name__})",
+            type_=DATABASE_UNAVAILABLE_PROBLEM,
+        ) from None
+    return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
 
 
 @router.get(
