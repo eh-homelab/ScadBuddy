@@ -90,7 +90,7 @@ describe('useAgentChat', () => {
     expect(result.current.state.activeId).toBe('s1')
   })
 
-  it('sends a decision to the respond route, shows it sending, then as the server confirms it (#815)', async () => {
+  it('sends a decision to the respond route, and shows it decided once the route takes it (#815)', async () => {
     const posted = capture()
     const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
@@ -100,14 +100,16 @@ describe('useAgentChat', () => {
     })
     act(() => result.current.decide('s1', 'a1', true))
     expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
-    await waitFor(() => expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }]))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved', by: owner }))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
     // Nothing rides the socket.
     expect(t.chat()).toEqual([])
+    // The resolve frame that follows changes nothing.
     act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: owner })))
     expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
   })
 
-  it('decides while the socket is down: the route does not need it', async () => {
+  it('decides while the socket is down: the route does not need it, and the card does not wait for it', async () => {
     const posted = capture()
     const t = scripted(() => 'queued')
     const { result } = renderHook(() => useAgentChat(t.factory))
@@ -117,12 +119,12 @@ describe('useAgentChat', () => {
       t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
     })
     act(() => result.current.decide('s1', 'a1', false))
-    await waitFor(() => expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'deny' } }]))
-    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'denied' }))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'deny' } }])
   })
 
   it('puts the card back, with the reason, when the route refuses the decision', async () => {
-    capture(409, 'approval a1 was already denied')
+    capture(400, 'approval:a1 is an approval')
     const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
     act(() => {
@@ -133,8 +135,28 @@ describe('useAgentChat', () => {
     await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'pending' }))
     expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
       kind: 'error',
-      message: 'Your decision was not taken: approval a1 was already denied',
+      message: 'Your decision was not taken: approval:a1 is an approval',
     })
+  })
+
+  it('keeps the buttons gone when the entry was already decided or expired (409/410)', async () => {
+    capture(409, 'approval a1 was already denied')
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+    })
+    act(() => result.current.decide('s1', 'a1', true))
+    await waitFor(() =>
+      expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
+        kind: 'error',
+        message: 'Your decision was not taken: approval a1 was already denied',
+      }),
+    )
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+    act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: owner })))
+    expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
   })
 
   it('sends a question\'s answers keyed by question, and an attention request\'s as its choice or text (#815)', async () => {
@@ -172,19 +194,17 @@ describe('useAgentChat', () => {
     act(() => result.current.answer('s1', 'q1', ['Blue', 'Lid, Base']))
     expect(question('q1')).toMatchObject({ state: 'sent' })
     act(() => result.current.answer('s1', 'q2', ["I'm here"]))
-    await waitFor(() =>
-      expect(posted).toEqual([
-        { id: 'question:q1', body: { kind: 'answer', answers: { 'Colour?': 'Blue', 'Parts?': 'Lid, Base' } } },
-        { id: 'question:q2', body: { kind: 'answer', choice: "I'm here" } },
-      ]),
-    )
+    await waitFor(() => expect(question('q2')).toMatchObject({ state: 'answered', answers: ["I'm here"] }))
+    expect(question('q1')).toMatchObject({ state: 'answered', answers: ['Blue', 'Lid, Base'], by: owner })
+    expect(posted).toEqual([
+      { id: 'question:q1', body: { kind: 'answer', answers: { 'Colour?': 'Blue', 'Parts?': 'Lid, Base' } } },
+      { id: 'question:q2', body: { kind: 'answer', choice: "I'm here" } },
+    ])
     expect(t.chat()).toEqual([])
-    act(() => t.h().onFrame(frame({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Blue', 'Lid, Base'], by: owner })))
-    expect(question('q1')).toMatchObject({ state: 'answered' })
   })
 
   it('puts a question back, with the reason, when the route refuses the answer; own words go as text', async () => {
-    const posted = capture(409, 'question q1 is no longer waiting for an answer')
+    const posted = capture(400, '"choice" must be one of ["I\'m here"]')
     const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
     act(() => {
@@ -207,7 +227,7 @@ describe('useAgentChat', () => {
     expect(posted).toEqual([{ id: 'question:q1', body: { kind: 'answer', text: 'back in five' } }])
     expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
       kind: 'error',
-      message: 'Your answer was not taken: question q1 is no longer waiting for an answer',
+      message: 'Your answer was not taken: "choice" must be one of ["I\'m here"]',
     })
   })
 

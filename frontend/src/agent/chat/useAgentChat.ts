@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
 import { TAB_ID } from '../tabId'
-import { answerBody, decisionBody, respond } from '../respond'
+import { answerBody, decisionBody, respond, type RespondError } from '../respond'
 import { messageTraceparent } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
+
+/** The respond route acts as the browser user (agent `routes/approvals.ts` BROWSER_USER). */
+const YOU = { kind: 'browser', id: 'browser', label: 'You' } as const
 
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
@@ -113,8 +116,10 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // Shown as `sent` until the server's approval.resolved confirms it; a refused one
     // goes back to pending, buttons live, with the agent's reason (#815).
     dispatch({ type: 'decided', sessionId, approvalId })
-    respond(`approval:${approvalId}`, decisionBody(approve)).catch((err: Error) =>
-      dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}` }),
+    respond(`approval:${approvalId}`, decisionBody(approve)).then(
+      (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
+      (err: RespondError) =>
+        dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, settled: err.settled }),
     )
   }, [])
 
@@ -122,8 +127,10 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const item = latest.current.sessions[sessionId]?.items.find((i) => i.kind === 'question' && i.id === questionId)
     if (item?.kind !== 'question') return
     dispatch({ type: 'answered', sessionId, questionId })
-    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).catch((err: Error) =>
-      dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}` }),
+    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).then(
+      (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
+      (err: RespondError) =>
+        dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, settled: err.settled }),
     )
   }, [])
 

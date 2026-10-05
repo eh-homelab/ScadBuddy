@@ -112,8 +112,17 @@ export type ChatAction =
   | { type: 'decided'; sessionId: string; approvalId: string }
   /** #940 — the user's answer to a question left the panel. */
   | { type: 'answered'; sessionId: string; questionId: string }
-  /** #815 — the respond route refused a decision or an answer: its card is live again. */
-  | { type: 'respond-failed'; sessionId: string; id: string; message: string }
+  /**
+   * #815 — the respond route took a decision or an answer: the card shows it at once,
+   * without waiting for the socket's resolve frame (which may be reconnecting).
+   */
+  | { type: 'responded'; sessionId: string; id: string; outcome: 'approved' | 'denied' | 'answered'; answers?: string[]; by: Owner }
+  /**
+   * #815 — the respond route refused a decision or an answer. The card is live again,
+   * unless `settled`: the entry was already resolved or expired, so its buttons stay
+   * gone and the resolve frame says how it ended.
+   */
+  | { type: 'respond-failed'; sessionId: string; id: string; message: string; settled?: boolean }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -451,11 +460,22 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
+    case 'responded':
+      return patchSession(state, action.sessionId, (s) =>
+        mapItems(s, (i) => {
+          if ((i.kind !== 'approval' && i.kind !== 'question') || i.id !== action.id || i.state !== 'sent') return i
+          if (i.kind === 'approval' && action.outcome !== 'answered') return { ...i, state: action.outcome, by: action.by }
+          if (i.kind === 'question' && action.outcome === 'answered') {
+            return { ...i, state: 'answered', by: action.by, ...(action.answers ? { answers: action.answers } : {}) }
+          }
+          return i
+        }),
+      )
     case 'respond-failed':
       return patchSession(state, action.sessionId, (s) =>
         push(
           mapItems(s, (i) =>
-            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' && !action.settled
               ? { ...i, state: 'pending' }
               : i,
           ),

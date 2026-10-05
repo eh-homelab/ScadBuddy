@@ -98,6 +98,11 @@ describe('chatReducer', () => {
     const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'Your decision was not taken: expired' }], sent)
     expect(failed.sessions.s1?.items[0]).toMatchObject({ kind: 'approval', state: 'pending' })
     expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your decision was not taken: expired' })
+    // A settled refusal (409/410) leaves the buttons gone; the resolve frame ends it.
+    const settled = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'already denied', settled: true }], sent)
+    expect(settled.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    // The route's own 2xx resolves the card without the socket.
+    expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
     // A failure that lands after the server resolved it changes nothing on the card.
     expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })

@@ -34,8 +34,24 @@ export function answerBody(questions: readonly Question[], answers: readonly str
   return { kind: 'answer', answers: Object.fromEntries(questions.map((q, i) => [q.question, answers[i] ?? ''])) }
 }
 
-/** Sends a response; rejects with the agent's reason when it is refused or unreachable. */
-export async function respond(requestId: string, body: RespondBody): Promise<void> {
+/** What the agent recorded for a response. */
+export type RespondOutcome = 'approved' | 'denied' | 'answered'
+
+/** A refused response; `status` is undefined when the agent was not reached. */
+export class RespondError extends Error {
+  readonly status: number | undefined
+  constructor(message: string, status?: number) {
+    super(message)
+    this.status = status
+  }
+  /** The entry was already resolved (409) or expired (410): answering again cannot help. */
+  get settled(): boolean {
+    return this.status === 409 || this.status === 410
+  }
+}
+
+/** Sends a response and returns what the agent recorded; rejects (RespondError) when it is refused or unreachable. */
+export async function respond(requestId: string, body: RespondBody): Promise<RespondOutcome> {
   let res: Response
   try {
     res = await fetch(respondPath(requestId), {
@@ -44,9 +60,9 @@ export async function respond(requestId: string, body: RespondBody): Promise<voi
       body: JSON.stringify(body),
     })
   } catch {
-    throw new Error('The assistant could not be reached; try again.')
+    throw new RespondError('The assistant could not be reached; try again.')
   }
-  if (res.ok) return
+  if (res.ok) return ((await res.json().catch(() => ({}))) as { outcome?: RespondOutcome }).outcome ?? fallback(body)
   let detail = `HTTP ${res.status}`
   try {
     const parsed = (await res.json()) as { detail?: unknown }
@@ -54,5 +70,9 @@ export async function respond(requestId: string, body: RespondBody): Promise<voi
   } catch {
     // Not JSON: keep the status.
   }
-  throw new Error(detail)
+  throw new RespondError(detail, res.status)
+}
+
+function fallback(body: RespondBody): RespondOutcome {
+  return body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied'
 }
