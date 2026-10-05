@@ -35,6 +35,8 @@ describe('Preview', () => {
   afterEach(() => {
     scene.failure = null
     scene.clear.mockClear()
+    // The console.error spies below must not silence React's warnings in later tests.
+    vi.restoreAllMocks()
   })
 
   it('keeps a preview that fails to load to the viewer, with a retry (#361)', () => {

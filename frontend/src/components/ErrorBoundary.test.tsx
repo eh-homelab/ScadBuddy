@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary } from './ErrorBoundary'
 
 const state = { throws: true }
@@ -18,6 +18,11 @@ function fallback(error: Error, retry: () => void) {
 }
 
 describe('ErrorBoundary (#361)', () => {
+  // The console.error spies below must not silence React's warnings in later tests.
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('shows the fallback for a child that throws, and its siblings stay', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     state.throws = true
