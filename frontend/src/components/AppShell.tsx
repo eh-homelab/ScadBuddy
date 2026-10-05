@@ -242,10 +242,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         <div className="relative flex min-h-0 flex-1">
           <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
             {/* #361 — the last resort: one page that throws never blanks the app, and
-                leaving it clears the error. */}
+                leaving it clears the error. Reload, not an in-place retry: what lands
+                here is mostly a lazy chunk that failed, which React caches as failed. */}
             <ErrorBoundary
               resetKey={location.pathname}
-              fallback={(error, retry) => <PageFailed error={error} onRetry={retry} />}
+              fallback={() => <PageFailed />}
             >
               <Outlet />
             </ErrorBoundary>
@@ -276,12 +277,12 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   )
 }
 
-function PageFailed({ error, onRetry }: { error: Error; onRetry: () => void }) {
+function PageFailed() {
   return (
     <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]">
-      <p className="text-ink">This page stopped working: {error.message}</p>
-      <Button size="sm" onClick={onRetry}>
-        Try again
+      <p className="text-ink">This page stopped working. The details are in the browser console.</p>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        Reload page
       </Button>
     </div>
   )

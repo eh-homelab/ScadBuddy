@@ -33,19 +33,19 @@ describe('ErrorBoundary (#361)', () => {
     expect(screen.getByText('header')).toBeInTheDocument()
   })
 
-  it('mounts the children again on retry, after onRetry', () => {
+  it('tells onError once a child threw, and mounts the children again on retry', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     state.throws = true
-    const onRetry = vi.fn(() => {
+    const onError = vi.fn(() => {
       state.throws = false
     })
     render(
-      <ErrorBoundary fallback={fallback} onRetry={onRetry}>
+      <ErrorBoundary fallback={fallback} onError={onError}>
         <Flaky />
       </ErrorBoundary>,
     )
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'boom' }))
     fireEvent.click(screen.getByRole('button'))
-    expect(onRetry).toHaveBeenCalledOnce()
     expect(screen.getByText('fine')).toBeInTheDocument()
   })
 

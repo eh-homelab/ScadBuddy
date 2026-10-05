@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
-import { Preview } from './Preview'
+import { Preview, type PreviewCapture } from './Preview'
 
 // WebGL does not exist in jsdom: the scene is dropped and only the overlays render.
 const scene = vi.hoisted(() => ({ failure: null as Error | null, clear: vi.fn() }))
@@ -47,11 +47,30 @@ describe('Preview', () => {
     expect(screen.getByTestId('bbox-readout')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
 
+    // The failed load is dropped from the loader's cache at once, or any remount of the
+    // scene — Try again, or coming back to this render later — would rethrow it.
+    expect(scene.clear).toHaveBeenCalledWith(expect.anything(), '/api/v1/jobs/aaaa/preview.glb')
+
     scene.failure = null
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
-    // The failed load is dropped from the loader's cache, or the retry would rethrow it.
-    expect(scene.clear).toHaveBeenCalledWith(expect.anything(), '/api/v1/jobs/aaaa/preview.glb')
     expect(screen.queryByTestId('preview-failed')).not.toBeInTheDocument()
+  })
+
+  it('leaves the page nothing to capture while the preview has failed (#361)', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // What the scene's onCreated left behind, closing over a renderer now disposed.
+    const captureRef: React.RefObject<PreviewCapture | null> = {
+      current: {
+        capturePng: async () => null,
+        captureImage: async () => null,
+        viewSize: () => ({ width: 1, height: 1 }),
+        cameraView: () => ({ position: [0, 0, 0], target: [0, 0, 0], fov: 35 }),
+      },
+    }
+    scene.failure = new Error('boom')
+    render(<Preview job={job({})} rendering={false} captureRef={captureRef} />)
+    expect(screen.getByTestId('preview-failed')).toBeInTheDocument()
+    expect(captureRef.current).toBeNull()
   })
 
   it('tries again by itself when the next render arrives (#361)', () => {

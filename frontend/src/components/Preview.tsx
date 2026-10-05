@@ -138,73 +138,74 @@ export function Preview({
       className="relative h-full min-h-0 w-full min-w-0 bg-bg"
     >
       {/* #361 — a GLB that fails to load throws out of the scene: without this, the
-          whole app unmounts. A new render tries again by itself. */}
+          whole app unmounts. A new render, or Try again, mounts the scene afresh. */}
       <ErrorBoundary
         resetKey={shown?.url}
-        // The loader keeps a failed load cached, so a retry would only throw it again.
-        onRetry={() => {
+        // The loader keeps a failed load cached, so any remount would only rethrow it:
+        // drop it as soon as it fails, and the next load of that URL fetches again.
+        onError={() => {
           if (shown) useLoader.clear(GLTFLoader, shown.url)
         }}
-        fallback={(_, retry) => <PreviewFailed onRetry={retry} />}
+        fallback={(_, retry) => <PreviewFailed captureRef={captureRef} onRetry={retry} />}
       >
-      <Canvas
-        key={theme.bg}
-        data-testid="preview-canvas"
-        gl={{ preserveDrawingBuffer: true, antialias: true }}
-        camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
-        onCreated={({ gl, get }) => {
-          if (captureRef) {
-            captureRef.current = {
-              capturePng: () =>
-                new Promise((resolve) => {
-                  gl.domElement.toBlob((blob) => resolve(blob), 'image/png')
+        <Canvas
+          key={theme.bg}
+          data-testid="preview-canvas"
+          gl={{ preserveDrawingBuffer: true, antialias: true }}
+          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
+          onCreated={({ gl, get }) => {
+            if (captureRef) {
+              captureRef.current = {
+                capturePng: () =>
+                  new Promise((resolve) => {
+                    gl.domElement.toBlob((blob) => resolve(blob), 'image/png')
+                  }),
+                // Read at capture time: the camera and scene are the ones on screen then.
+                captureImage: (options) => {
+                  const { scene, camera } = get()
+                  return captureSnapshot(gl, scene, camera, options)
+                },
+                viewSize: () => ({
+                  width: gl.domElement.clientWidth,
+                  height: gl.domElement.clientHeight,
                 }),
-              // Read at capture time: the camera and scene are the ones on screen then.
-              captureImage: (options) => {
-                const { scene, camera } = get()
-                return captureSnapshot(gl, scene, camera, options)
-              },
-              viewSize: () => ({
-                width: gl.domElement.clientWidth,
-                height: gl.domElement.clientHeight,
-              }),
-              cameraView: () => {
-                const { camera, controls } = get()
-                const target =
-                  (controls as { target?: THREE.Vector3 } | null)?.target ?? new THREE.Vector3(0, 20, 0)
-                return {
-                  position: camera.position.toArray(),
-                  target: target.toArray(),
-                  fov: (camera as THREE.PerspectiveCamera).fov ?? 35,
-                }
-              },
+                cameraView: () => {
+                  const { camera, controls } = get()
+                  const target =
+                    (controls as { target?: THREE.Vector3 } | null)?.target ?? new THREE.Vector3(0, 20, 0)
+                  return {
+                    position: camera.position.toArray(),
+                    target: target.toArray(),
+                    fov: (camera as THREE.PerspectiveCamera).fov ?? 35,
+                  }
+                },
+              }
             }
-          }
-        }}
-      >
-        <color attach="background" args={[theme.bg]} />
-        <hemisphereLight args={['#dbe6f5', '#1a202b', 1.1]} />
-        <directionalLight position={[180, 320, 140]} intensity={2.1} />
-        <directionalLight position={[-220, 140, -180]} intensity={0.7} />
+          }}
+        >
+          <color attach="background" args={[theme.bg]} />
+          <hemisphereLight args={['#dbe6f5', '#1a202b', 1.1]} />
+          <directionalLight position={[180, 320, 140]} intensity={2.1} />
+          <directionalLight position={[-220, 140, -180]} intensity={0.7} />
 
-        {plate && <BuildPlate theme={theme} size={plate.size} />}
-        <FitCamera bbox={shown?.bbox} />
+          {plate && <BuildPlate theme={theme} size={plate.size} />}
+          <FitCamera bbox={shown?.bbox} />
 
-        {shown && (
-          <Suspense fallback={null}>
-            <Model url={shown.url} bbox={shown.bbox} />
-          </Suspense>
-        )}
+          {shown && (
+            <Suspense fallback={null}>
+              <Model url={shown.url} bbox={shown.bbox} />
+            </Suspense>
+          )}
 
-        <OrbitControls
-          makeDefault
-          enablePan
-          minDistance={40}
-          maxDistance={1200}
-          maxPolarAngle={Math.PI / 2 - 0.02}
-          target={[0, 20, 0]}
-        />
-      </Canvas>
+          <OrbitControls
+            makeDefault
+            enablePan
+            minDistance={40}
+            maxDistance={1200}
+            maxPolarAngle={Math.PI / 2 - 0.02}
+            target={[0, 20, 0]}
+          />
+        </Canvas>
       </ErrorBoundary>
 
       <div
@@ -259,7 +260,19 @@ export function Preview({
   )
 }
 
-function PreviewFailed({ onRetry }: { onRetry: () => void }) {
+function PreviewFailed({
+  captureRef,
+  onRetry,
+}: {
+  captureRef: Props['captureRef']
+  onRetry: () => void
+}) {
+  // The scene's renderer is gone with it: a capture now would save a blank cover, so
+  // the page gets none until the scene is back (its `onCreated` sets the ref again).
+  useEffect(() => {
+    if (captureRef) captureRef.current = null
+  }, [captureRef])
+
   return (
     <div
       role="alert"

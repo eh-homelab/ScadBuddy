@@ -6,8 +6,8 @@ interface Props {
   fallback: (error: Error, retry: () => void) => ReactNode
   /** A change of this value mounts the children again: a new render, another page. */
   resetKey?: unknown
-  /** Runs before a retry, to drop whatever cached the failure. */
-  onRetry?: () => void
+  /** Runs once a child threw: drop whatever cached the failure, so a remount tries afresh. */
+  onError?: (error: Error) => void
 }
 
 interface State {
@@ -27,6 +27,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   override componentDidCatch(error: unknown, info: ErrorInfo) {
     console.error('A component failed to render', error, info.componentStack)
+    this.props.onError?.(error instanceof Error ? error : new Error(String(error)))
   }
 
   override componentDidUpdate(previous: Props) {
@@ -36,7 +37,6 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   retry = () => {
-    this.props.onRetry?.()
     this.setState({ error: null })
   }
 
