@@ -104,7 +104,11 @@ TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
 #: (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): `DEADLINE_EXCEEDED`,
 #: and `CANCELLED`, which sdk-core also retries when the transport cancelled it. The
 #: rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
-#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are what neither retries.
+#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`) are what neither retries. A start the reuse
+#: policy refuses (`ALREADY_EXISTS`) never reaches here as an `RPCError`: update-with-start
+#: raises it as `WorkflowAlreadyStartedError`, which `start_command` answers as
+#: `AlreadyClosedError` (`tests/test_commands.py`), and the route answers from the record
+#: (review #1316 (10) 2).
 TRANSIENT_RPC = frozenset(
     {
         RPCStatusCode.DATA_LOSS,
