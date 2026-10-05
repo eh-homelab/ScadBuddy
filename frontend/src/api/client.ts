@@ -345,8 +345,10 @@ const seg = encodeURIComponent
  * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
  * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
  * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
- * `main.py`) for the reconciler to end a lost one: 1203 s. The agent's
- * `operationFollowMs` is the same (agent/src/tools/registry.ts).
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent does not follow
+ * that long: it follows for `COMMAND_FOLLOW_MS` (the backend's answer deadline plus a
+ * margin, agent/src/tools/command.ts), then hands back the running operation for
+ * `get_operation`.
  */
 export const printRunPoll = {
   intervalMs: 1000,
