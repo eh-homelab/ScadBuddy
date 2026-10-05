@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 from starlette.exceptions import HTTPException
 from starlette.responses import FileResponse, PlainTextResponse, Response
+from starlette.routing import Match, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 INDEX_NAME = "index.html"
 ASSETS_DIR = "assets"
+#: Every API route lives under ``/api/``. One that reached this mount matched no route,
+#: so it is a 404 problem document, never the SPA's HTML or a 405 (#365).
+API_DIR = "api"
 
 #: Vite content-hashes every file under ``assets/``, so a URL there never changes meaning.
 #: Nothing else may land there: ``frontend/public/assets/<name>`` would be copied to the
@@ -23,6 +28,11 @@ REVALIDATE = "no-cache"
 def _is_asset(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return bool(parts) and parts[0] == ASSETS_DIR
+
+
+def _is_api(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return bool(parts) and parts[0] == API_DIR
 
 
 #: The app document's policy (spec 2026-09-27 §9). A template UI runs unsandboxed in
@@ -49,6 +59,20 @@ def _missing_asset() -> Response:
     return PlainTextResponse("Not Found", 404)
 
 
+def _refuse_api(path: str, scope: Scope) -> NoReturn:
+    """An ``/api/`` request no route took. The mount at ``/`` matches every path, so the
+    router hands it a request for a real route with the wrong method too: that one is a
+    405 naming the methods the route takes, everything else a 404."""
+    probe: Scope = {"type": "http", "path": f"/{path}", "root_path": "", "method": scope["method"]}
+    allowed: set[str] = set()
+    for route in scope["app"].routes:
+        if isinstance(route, Route) and route.matches(probe)[0] is Match.PARTIAL:
+            allowed |= route.methods or set()
+    if allowed:
+        raise HTTPException(405, headers={"Allow": ", ".join(sorted(allowed))})
+    raise HTTPException(404, f"no API route matches {scope['method']} /{path}")
+
+
 class SPAStaticFiles(StaticFiles):
     """Serve the built bundle, falling back to ``index.html`` for client-side routes.
 
@@ -61,6 +85,8 @@ class SPAStaticFiles(StaticFiles):
         self.index = directory / INDEX_NAME
 
     async def get_response(self, path: str, scope: Scope) -> Response:
+        if _is_api(path):
+            _refuse_api(path, scope)
         response = await self._response_or_fallback(path, scope)
         ok = response.status_code in (200, 304)
         response.headers["Cache-Control"] = IMMUTABLE if ok and _is_asset(path) else REVALIDATE
