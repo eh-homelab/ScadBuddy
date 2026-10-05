@@ -25,6 +25,13 @@ runs). Recorded by the patched one: ``cancelled_once_queued`` (the cancel during
 ``cancelled_during_last_enqueue`` (the same during the last ``print_enqueue``) and
 ``cancelled_while_queueing`` (a cancel while the first of two plates is recorded: may be
 queued, and no window).
+
+``PLATES_PATCH`` (review #1316 (3)) is the second. Recorded by #1061's workflow, which
+cancels the activity: ``cancelled_during_first_enqueue_1061`` (a cancel while the first
+of two plates' ``print_enqueue`` runs) and ``cancelled_during_start_enqueue_1061`` (a
+cancel while ``print_start_enqueue`` runs). Recorded by the patched one, which waits:
+``cancelled_during_first_enqueue`` (plate 1 is recorded, plate 2 never sliced) and
+``cancelled_during_start_enqueue`` (no ``POST /queue/``).
 """
 
 from __future__ import annotations
@@ -54,6 +61,10 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "cancelled_once_queued",
         "cancelled_during_last_enqueue",
         "cancelled_while_queueing",
+        "cancelled_during_first_enqueue_1061",
+        "cancelled_during_start_enqueue_1061",
+        "cancelled_during_first_enqueue",
+        "cancelled_during_start_enqueue",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:

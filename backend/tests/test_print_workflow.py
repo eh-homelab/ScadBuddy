@@ -105,6 +105,10 @@ class Fake:
         self.project_id: int | None = None
         #: An activity named here waits on its event, so a test can cancel while it runs.
         self.gates: dict[str, asyncio.Event] = {}
+        #: How long `print_start_enqueue` takes once its gate opens.
+        self.start_enqueue_delay = 0.0
+        #: The queue items `print_record` wrote, in order.
+        self.recorded: list[int] = []
 
     async def _gate(self, name: str) -> None:
         if name in self.gates:
@@ -170,6 +174,8 @@ class Fake:
     @activity.defn(name="print_start_enqueue")
     async def start_enqueue(self, run_id: str) -> None:
         self.calls.append("start_enqueue")
+        await self._gate("start_enqueue")
+        await asyncio.sleep(self.start_enqueue_delay)
         self.enqueue_attempted = True
 
     @activity.defn(name="print_enqueue")
@@ -186,6 +192,7 @@ class Fake:
         await self._gate("record")
         if self.record_error is not None:
             raise self.record_error
+        self.recorded.extend(input.outcome.queue_item_ids)
         return input.sent
 
     @activity.defn(name="print_finish")
@@ -790,3 +797,30 @@ async def test_a_cancel_after_the_enqueue_says_the_print_may_be_queued(
     assert finished.status == "failed" and finished.may_have_queued
     assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
     assert "check Bambuddy's queue" in CANCELLED_QUEUEING.detail
+
+
+async def test_a_cancel_during_an_earlier_plates_enqueue_records_its_item_and_stops(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (3) 1: the ``POST /queue/`` for plate 1 may land after the cancel, so
+    the run waits for it and records its item, then queues no further plate."""
+    fake.plates = [1, 2]
+    finished = await cancel_during(client, worker, fake, "enqueue", window=600)
+    assert fake.recorded == [51]
+    assert "enqueue:2" not in fake.calls and "slice_start:2" not in fake.calls
+    assert finished.status == "failed" and finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
+
+
+async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the_row(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (3) 2: ``print_start_enqueue`` writes the row's ``enqueue_attempted``;
+    the run waits for it, so its message and the row's ``may_have_queued`` agree, and it
+    stops before any ``POST /queue/``."""
+    # Its write lands well after the cancel: a run that did not wait records first.
+    fake.start_enqueue_delay = 2.0
+    finished = await cancel_during(client, worker, fake, "start_enqueue", window=600)
+    assert not any(call.startswith("enqueue") for call in fake.calls)
+    assert finished.status == "failed" and finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
