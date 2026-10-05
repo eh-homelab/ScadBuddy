@@ -15,13 +15,15 @@ chosen with ``PUT .../media/cover``, since its shipped items keep their place.
 from __future__ import annotations
 
 import asyncio
+import io
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
 from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -373,6 +375,55 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
         media_type=content_type_of(path.name),
         headers={"Cache-Control": IMMUTABLE_CACHE_CONTROL},
     )
+
+
+#: The longest side of a thumbnail: the gallery strip's tile at 2x, with room to spare.
+THUMBNAIL_SIDE = 192
+
+
+def _thumbnail_of(path: FilePath) -> bytes | None:
+    """``path`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
+    cannot read it. ``draft`` lets a JPEG decode at a fraction of its size."""
+    try:
+        with Image.open(path) as image:
+            image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
+            image.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            image.save(out, "WEBP", quality=80)
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+        return None
+
+
+@router.get(
+    "/models/{slug}/media/{item_id}/thumbnail",
+    response_class=Response,
+    responses={200: {"content": {"image/webp": {}, "image/*": {}}}},
+    summary="A small copy of one item",
+    description=(
+        f"The image, or a video's poster, shrunk to at most {THUMBNAIL_SIDE} pixels a "
+        "side as WebP, so a strip of thumbnails does not download every original. A "
+        "file the server cannot decode is served as it is. 404 for an unknown id, a "
+        "missing file and a video with no poster. Cached as the item itself is."
+    ),
+)
+def get_media_thumbnail(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> Response:
+    require_model_exists(catalogue, slug)
+    try:
+        item, path = catalogue.media_item(slug, item_id)
+        if item.kind == "video":
+            path = catalogue.media_poster(slug, item_id)
+    except ModelNotFoundError:
+        raise _no_model(slug) from None
+    except MediaNotFoundError:
+        raise _no_item(slug, item_id) from None
+    cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
+    small = _thumbnail_of(path)
+    if small is None:
+        return FileResponse(
+            path, media_type=content_type_of(path.name), headers={"Cache-Control": cache}
+        )
+    return Response(small, media_type="image/webp", headers={"Cache-Control": cache})
 
 
 @router.post(
