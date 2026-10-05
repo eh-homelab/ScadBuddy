@@ -80,9 +80,11 @@ Stacked on PR #1063 (`feat/1053-operations`).
    - The cost is that a later supersede does not cancel that job: it renders to the end, and
      `piece_key` dedupes its openscad work.
    - Pinning it would need an update id per request, which the route has no key for.
-10. **An `accepted` that reaches an execution already released to zero** answers
-    `closing: true`. `submit` then waits up to `CLOSING_WAIT` (5 s) for the execution to close
-    and starts again. This mirrors the repeat race in phase 1's `PrintRun`.
+10. **An `accepted` that reaches an execution already released to zero** (or whose render
+    raised) is rejected by its validator (`RenderClosing`), not answered: a rejected Update is
+    not in history, so the same id starts the next run (review #1066 (7) 1). `submit` then
+    waits up to `CLOSING_WAIT` (5 s) for the execution to close and starts again. This
+    mirrors the repeat race in phase 1's `PrintRun`.
 
 ## Global Constraints
 
