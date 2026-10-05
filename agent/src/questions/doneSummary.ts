@@ -13,7 +13,8 @@ import type { TransactionSql } from 'postgres'
 //
 // "Away" starts at the turn's first attention request that timed out, and ends
 // at the first reply the user gave afterwards in the same turn (an answered
-// question or attention request, or an approval they decided). With no timed-out
+// question or attention request, or an approval they decided in the panel; a
+// grant holder's decision is not the user coming back). With no timed-out
 // request the turn's changes are one list.
 
 /** One recorded touch, as the summary reads it. */
@@ -34,9 +35,33 @@ export const SECTION_MAX = 20
 
 const SHORT_ID = 12
 
+// Every name below came from a tool's input or result (a preset's name, a model's
+// slug), so none may shape the Markdown: a newline or a backtick in one could
+// otherwise forge a section or a line of this record.
+/** One line, no control characters. */
+function flat(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
+}
+
+/**
+ * Plain text in Markdown. Flattened to one line nothing can start a block, so
+ * only inline syntax is escaped: emphasis, code, links, HTML, strikethrough and
+ * tables. An underscore inside a word (`save_preset`) is left alone, as
+ * CommonMark never reads one as emphasis.
+ */
+function plain(text: string): string {
+  return flat(text).replace(/[\\`*[\]<>&~|]|(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])/g, (c) => `\\${c}`)
+}
+
+/** Inside a code span: no backtick can close it early. */
+function code(text: string): string {
+  return `\`${flat(text).replace(/`/g, "'")}\``
+}
+
 /** `mcp__scadbuddy__apply_patch` reads as `apply_patch`. */
 function toolName(tool: string): string {
-  return tool.replace(/^mcp__.+?__/, '')
+  return plain(tool.replace(/^mcp__.+?__/, ''))
 }
 
 function line(t: DoneTouch): string {
@@ -44,8 +69,8 @@ function line(t: DoneTouch): string {
     return `- ${toolName(t.tool)}: a change ScadBuddy does not classify`
   }
   const id = t.resourceId.length > 40 ? `${t.resourceId.slice(0, SHORT_ID)}…` : t.resourceId
-  const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${t.model}` : ''
-  return `- ${t.action} ${t.resourceType.replace(/_/g, ' ')} \`${id}\`${of} (${toolName(t.tool)})`
+  const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${plain(t.model)}` : ''
+  return `- ${plain(t.action)} ${plain(t.resourceType.replace(/_/g, ' '))} ${code(id)}${of} (${toolName(t.tool)})`
 }
 
 function section(title: string, touches: readonly DoneTouch[]): string {
@@ -65,7 +90,7 @@ export function doneSummary(touches: readonly DoneTouch[], away: AwayWindow | nu
   const until = away.until
   const after = until === null ? [] : touches.filter((t) => t.at >= until)
   const parts = [
-    section(`While nobody answered (attention request ${away.requestId.slice(0, 8)} timed out)`, during),
+    section(`While nobody answered (attention request ${plain(away.requestId.slice(0, 8))} timed out)`, during),
     ...(after.length ? [section('After you replied', after)] : []),
     ...(before.length ? [section('Before you were asked', before)] : []),
   ]
@@ -96,7 +121,7 @@ export async function loadDoneSummary(tx: TransactionSql, sessionId: string, tur
         WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND outcome = 'answered' AND resolved_at > ${timedOut.created_at}
         UNION ALL
         SELECT decided_at FROM ai_approvals
-        WHERE session_id = ${sessionId} AND decision IN ('approved', 'denied')
+        WHERE session_id = ${sessionId} AND decision IN ('approved', 'denied') AND decided_by_kind = 'browser'
           AND decided_at > ${timedOut.created_at}
       ) replies`
     away = { requestId: timedOut.id, from: timedOut.created_at, until: reply?.at ?? null }
