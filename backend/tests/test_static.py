@@ -150,3 +150,14 @@ def test_a_real_api_route_with_the_wrong_method_is_still_a_405(tmp_path: Path) -
     assert response.headers["allow"] == "GET"
     assert response.headers["content-type"] == "application/problem+json"
     assert client.post("/api/v1/nope").status_code == 404
+
+    # A path that names the route only once normalised is told which route it meant,
+    # never that the route does not exist (and never redirected: nothing here redirects).
+    slash = client.get("/api/v1/things/a/", follow_redirects=False)
+    assert slash.status_code == 404
+    assert slash.json()["detail"] == (
+        "no API route matches GET /api/v1/things/a/; did you mean /api/v1/things/a?"
+    )
+    missing = client.get("/api/v1/nope/")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "no API route matches GET /api/v1/nope/"

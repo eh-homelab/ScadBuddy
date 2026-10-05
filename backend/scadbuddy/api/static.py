@@ -62,15 +62,26 @@ def _missing_asset() -> Response:
 def _refuse_api(path: str, scope: Scope) -> NoReturn:
     """An ``/api/`` request no route took. The mount at ``/`` matches every path, so the
     router hands it a request for a real route with the wrong method too: that one is a
-    405 naming the methods the route takes, everything else a 404."""
+    405 naming the methods the route takes. ``path`` is normalised (no trailing slash, no
+    ``..``): a request that names a real route only once normalised is a 404 that names
+    that route, not a redirect (nothing here redirects, tests/api/test_no_open_redirect.py)
+    and not a claim that the route is missing. Everything else is a plain 404."""
     probe: Scope = {"type": "http", "path": f"/{path}", "root_path": "", "method": scope["method"]}
     allowed: set[str] = set()
     for route in scope["app"].routes:
-        if isinstance(route, Route) and route.matches(probe)[0] is Match.PARTIAL:
+        if not isinstance(route, Route):
+            continue
+        match = route.matches(probe)[0]
+        if match is Match.FULL:
+            raise HTTPException(
+                404,
+                f"no API route matches {scope['method']} {scope['path']}; did you mean /{path}?",
+            )
+        if match is Match.PARTIAL:
             allowed |= route.methods or set()
     if allowed:
         raise HTTPException(405, headers={"Allow": ", ".join(sorted(allowed))})
-    raise HTTPException(404, f"no API route matches {scope['method']} /{path}")
+    raise HTTPException(404, f"no API route matches {scope['method']} {scope['path']}")
 
 
 class SPAStaticFiles(StaticFiles):
