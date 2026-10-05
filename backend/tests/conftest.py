@@ -28,6 +28,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.api import printing as printing_api
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
@@ -41,7 +42,7 @@ from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.workflows.commands import start_command
+from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE, start_command
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     TEST_TEMPORAL_ADDRESS_ENV,
@@ -190,7 +191,9 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
 #: inline window and its accept bound. Production's 10 s is a promise about latency
 #: that a loaded machine breaks (a 202, or a 503 `command-still-accepting`, where the
 #: test asserts the final answer), so tests wait this long instead. A test of the
-#: deadline itself names one, or sets this default back.
+#: deadline itself names one, or sets this default back. The print route names its own
+#: (`COMMAND_ANSWER_DEADLINE`, and `ACCEPT_BUDGET` built on it), so it is set there too:
+#: under load its first start answered a 503 `command-still-accepting`.
 TEST_ANSWER_DEADLINE = timedelta(seconds=60)
 
 
@@ -199,6 +202,9 @@ def _answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     defaults = start_command.__kwdefaults__
     assert defaults is not None
     monkeypatch.setitem(defaults, "deadline", TEST_ANSWER_DEADLINE)
+    longer = (TEST_ANSWER_DEADLINE - COMMAND_ANSWER_DEADLINE).total_seconds()
+    monkeypatch.setattr(printing_api, "COMMAND_ANSWER_DEADLINE", TEST_ANSWER_DEADLINE)
+    monkeypatch.setattr(printing_api, "ACCEPT_BUDGET", printing_api.ACCEPT_BUDGET + longer)
 
 
 #: For a `Settings` whose app never starts: the database URL is required (#401), but

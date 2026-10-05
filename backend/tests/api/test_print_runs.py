@@ -239,7 +239,7 @@ def test_another_request_for_the_same_output_is_another_run(
     follow_run(client, first.json()["id"])
     second = start(client, output_id, run_request(copies=2))
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
     assert queued.call_count == 2
@@ -310,7 +310,7 @@ def test_a_retry_after_a_failure_before_any_enqueue_starts_a_new_run(
     assert failed["may_have_queued"] is False
     second = start(client, output_id, request)
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
 
