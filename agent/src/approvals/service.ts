@@ -172,10 +172,13 @@ export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
   readonly status: 400 | 403 | 404 | 409 | 410
-  constructor(code: ApprovalErrorCode, message: string) {
+  /** For a conflict, how the approval ended, as a clause ("it was already denied"). */
+  readonly reason: string | undefined
+  constructor(code: ApprovalErrorCode, message: string, reason?: string) {
     super(message)
     this.code = code
     this.status = STATUS_OF[code]
+    this.reason = reason
   }
 }
 
@@ -758,7 +761,11 @@ export class ApprovalService {
         throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
       }
       if (now?.decision === 'expired') throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
-      throw new ApprovalError('conflict', `approval ${id} was already ${now?.decision ?? 'decided'}`)
+      throw new ApprovalError(
+        'conflict',
+        `approval ${id} was already ${now?.decision ?? 'decided'}`,
+        now?.decision === 'cancelled' ? 'it was cancelled' : `it was already ${now?.decision ?? 'decided'}`,
+      )
     }
     // A parked turn (on any replica) picks the decision up itself. A turn
     // that is finishing as the decision lands looks parked here; it voids

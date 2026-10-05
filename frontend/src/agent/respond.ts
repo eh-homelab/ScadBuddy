@@ -37,16 +37,25 @@ export function answerBody(questions: readonly Question[], answers: readonly str
 /** What the agent recorded for a response. */
 export type RespondOutcome = 'approved' | 'denied' | 'answered'
 
-/** A refused response; `status` is undefined when the agent was not reached. */
+/**
+ * A refused response; `status` is undefined when the agent was not reached. `reason`
+ * is the agent's account of how a 409's entry ended ("it was already answered",
+ * "nobody replied in time …"), when it gave one (#1400).
+ */
 export class RespondError extends Error {
   readonly status: number | undefined
-  constructor(message: string, status?: number) {
+  readonly reason: string | undefined
+  constructor(message: string, status?: number, reason?: string) {
     super(message)
     this.status = status
+    this.reason = reason
   }
-  /** The entry was already resolved (409) or expired (410): answering again cannot help. */
+  /**
+   * The entry is stale (404), no longer pending (409) or expired (410): answering
+   * again cannot help (#1403).
+   */
   get settled(): boolean {
-    return this.status === 409 || this.status === 410
+    return this.status === 404 || this.status === 409 || this.status === 410
   }
 }
 
@@ -64,13 +73,15 @@ export async function respond(requestId: string, body: RespondBody): Promise<Res
   }
   if (res.ok) return ((await res.json().catch(() => ({}))) as { outcome?: RespondOutcome }).outcome ?? fallback(body)
   let detail = `HTTP ${res.status}`
+  let reason: string | undefined
   try {
-    const parsed = (await res.json()) as { detail?: unknown }
+    const parsed = (await res.json()) as { detail?: unknown; reason?: unknown }
     if (typeof parsed.detail === 'string') detail = parsed.detail
+    if (typeof parsed.reason === 'string') reason = parsed.reason
   } catch {
     // Not JSON: keep the status.
   }
-  throw new RespondError(detail, res.status)
+  throw new RespondError(detail, res.status, reason)
 }
 
 function fallback(body: RespondBody): RespondOutcome {

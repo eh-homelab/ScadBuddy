@@ -37,12 +37,12 @@ function scripted(answer: () => SendResult = () => 'sent') {
 const frame = (body: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...body })
 
 /** Answers the respond route (#815) with `status`, keeping what the panel posted. */
-function capture(status = 200, detail = '') {
+function capture(status = 200, detail = '', reason?: string) {
   const posted: { id: string; body: unknown }[] = []
   server.use(
     http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
       posted.push({ id: String(params.id), body: await request.json() })
-      return status === 200 ? HttpResponse.json({}) : HttpResponse.json({ detail }, { status })
+      return status === 200 ? HttpResponse.json({}) : HttpResponse.json({ detail, ...(reason ? { reason } : {}) }, { status })
     }),
   )
   return posted
@@ -172,12 +172,16 @@ describe('useAgentChat', () => {
     })
   })
 
-  it('ends the card with the reason when the entry was already decided or expired (409/410), without waiting on the socket (#1385)', async () => {
-    for (const [status, reason] of [
-      [409, 'Your decision was not taken: it was already resolved elsewhere.'],
-      [410, 'Your decision was not taken: it expired before your response arrived.'],
+  it('ends the card with the reason when the entry is stale, no longer pending or expired (404/409/410), without waiting on the socket (#1385, #1400, #1403)', async () => {
+    for (const [status, given, reason] of [
+      // The agent's own account of how it ended, never a guess (#1400).
+      [409, 'it was already denied', 'Your decision was not taken: it was already denied.'],
+      [409, undefined, 'Your decision was not taken: it is no longer waiting for a response.'],
+      // A stale id can only 404 again: the card closes rather than re-arming (#1403).
+      [404, undefined, 'Your decision was not taken: the assistant no longer has it waiting.'],
+      [410, undefined, 'Your decision was not taken: it expired before your response arrived.'],
     ] as const) {
-      capture(status, 'approval a1 is no longer waiting')
+      capture(status, 'approval a1 is no longer waiting', given)
       const t = scripted(() => 'queued')
       const { result, unmount } = renderHook(() => useAgentChat(t.factory))
       act(() => {
@@ -197,6 +201,25 @@ describe('useAgentChat', () => {
       expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
       unmount()
     }
+  })
+
+  it('posts a decision once however often it is clicked, and not for a card no longer pending (#1403)', async () => {
+    const posted = capture()
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+    })
+    act(() => {
+      result.current.decide('s1', 'a1', true)
+      result.current.decide('s1', 'a1', false)
+    })
+    act(() => result.current.decide('s1', 'a1', false))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved' }))
+    act(() => result.current.decide('s1', 'a1', false))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
   })
 
   it('sends a question\'s answers keyed by question, and an attention request\'s as its choice or text (#815)', async () => {
