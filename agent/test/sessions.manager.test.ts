@@ -30,6 +30,7 @@ import { drainRetains } from '../src/memory/hindsight.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { FakeDurable } from './support/fakeDurable.js'
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -707,7 +708,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       it('stores a durable session with its payload key, in the same transaction', async () => {
         const payloadKeys = new PgPayloadKeys(db.sql, { current: newKek() })
-        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys })
+        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys, durable: new FakeDurable() })
         const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
         expect(session.mode).toBe('durable')
         const [row] = await db.sql<{ mode: string }[]>`SELECT mode FROM ai_sessions WHERE id = ${session.id}`
@@ -722,6 +723,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const m = manager({
           sql: db.sql,
           paths: await tempPaths(),
+          durable: new FakeDurable(),
           payloadKeys: {
             createKey: async (subject, tx) => {
               const id = subject.replace(/^session-/, '')
@@ -750,7 +752,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it('takes session_mode when the start chooses none, and classic when it is unset or invalid', async () => {
         const settings = new SettingsStore(db.sql)
         const payloadKeys = new PgPayloadKeys(db.sql, { current: newKek() })
-        const m = manager({ sql: db.sql, paths: await tempPaths(), settings, payloadKeys })
+        const m = manager({ sql: db.sql, paths: await tempPaths(), settings, payloadKeys, durable: new FakeDurable() })
         expect((await m.start(browser, { origin: 'chat' })).session.mode).toBe('classic')
         await settings.set(SETTING_SESSION_MODE, 'durable')
         expect((await m.start(browser, { origin: 'chat' })).session.mode).toBe('durable')
@@ -760,7 +762,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it('shows the mode in sessions.snapshot', async () => {
-        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }) })
+        const m = manager({
+          sql: db.sql,
+          paths: await tempPaths(),
+          payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }),
+          durable: new FakeDurable(),
+        })
         const { session: durable } = await m.start(browser, { origin: 'chat', mode: 'durable' })
         const { session: classic } = await m.start(browser, { origin: 'chat' })
         const snapshot = await m.snapshot(browser)
@@ -774,7 +781,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it('refuses to fork a durable session', async () => {
-        const m = manager({ sql: db.sql, paths: await tempPaths(), payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }) })
+        const m = manager({
+          sql: db.sql,
+          paths: await tempPaths(),
+          payloadKeys: new PgPayloadKeys(db.sql, { current: newKek() }),
+          durable: new FakeDurable(),
+        })
         const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
         await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'unsupported', status: 409 })
       })

@@ -43,6 +43,7 @@ import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { AgentWorker } from './temporal/worker.js'
 import { SubjectPayloadCodec } from './temporal/codec.js'
 import { PgPayloadKeys } from './temporal/payloadKeys.js'
+import { TemporalDurableSessions } from './durable/client.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
@@ -242,6 +243,21 @@ const payloadKeys =
     ? new PgPayloadKeys(database.sql, { current: kek.kek, ...(previousKek?.ok ? { previous: previousKek.kek } : {}) })
     : undefined
 
+// Durable sessions' workflows (#1056, durable/client.ts), which agent-durable runs: they
+// need Temporal, the database (snapshots) and the KEK (their payloads are sealed per
+// session). Without them no durable session starts, and an omitted mode is classic.
+const durable =
+  config.temporalAddress && database && payloadKeys
+    ? new TemporalDurableSessions(
+        new Client({
+          connection: Connection.lazy({ address: config.temporalAddress }),
+          namespace: config.temporalNamespace,
+          dataConverter: { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] },
+        }),
+        database.sql,
+      )
+    : undefined
+
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -255,6 +271,7 @@ const sessions =
         ...(settings ? { settings } : {}),
         // A durable session's payload key is created with its row (#1056).
         ...(payloadKeys ? { payloadKeys } : {}),
+        ...(durable ? { durable } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and

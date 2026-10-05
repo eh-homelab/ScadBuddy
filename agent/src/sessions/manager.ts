@@ -8,6 +8,14 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import type { PayloadKeys } from '../temporal/payloadKeys.js'
+import {
+  DurableRefused,
+  type DurableSendResult,
+  type DurableSessionInput,
+  type DurableSessions,
+  DurableUnavailable,
+} from '../durable/client.js'
+import { WorkflowUpdateRPCTimeoutOrCancelledError } from '@temporalio/client'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
@@ -159,6 +167,18 @@ export type SessionMode = 'classic' | 'durable'
 export const SESSION_MODES = ['classic', 'durable'] as const satisfies readonly SessionMode[]
 export const MODE_IS_FIXED = 'mode is chosen when a session starts and cannot change'
 export const DURABLE_NEEDS_KEK = 'durable sessions need SCADBUDDY_SECRET_KEY_FILE'
+export const DURABLE_NEEDS_TEMPORAL = 'durable sessions need SCADBUDDY_TEMPORAL_ADDRESS'
+/** A durable send whose Temporal did not answer (DurableUnavailable). */
+export const DURABLE_UNREACHABLE = "the durable worker's Temporal is unreachable; send again"
+/** The `error` a durable session logs when its earlier conversation could not be resumed. */
+export const RESUMED_FRESH =
+  "this session's earlier conversation could not be restored (its run ended without saving it); it continues without it"
+/**
+ * How long a durable send waits for its Update to be accepted before it answers anyway.
+ * Acceptance needs an agent-durable worker; with none polling, the turn stays `running`
+ * and runs when one starts (plan Review Focus 1), and the socket is not held meanwhile.
+ */
+export const DURABLE_ACCEPT_WAIT_MS = 5_000
 
 export function isSessionMode(value: unknown): value is SessionMode {
   return value === 'classic' || value === 'durable'
@@ -347,6 +367,14 @@ export type SessionManagerDeps = {
    * no durable session can be started.
    */
   payloadKeys?: Pick<PayloadKeys, 'createKey'>
+  /**
+   * The DurableSession workflows (durable/client.ts, #1056): a durable session's sends,
+   * Stop and approvals. Undefined without Temporal, and then no durable session can be
+   * started (and an omitted mode is classic).
+   */
+  durable?: DurableSessions
+  /** DURABLE_ACCEPT_WAIT_MS by default. */
+  durableAcceptWaitMs?: number
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -523,6 +551,13 @@ function positive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 }
 
+/** What a durable send's failure tells its sender (durable/client.ts). */
+function durableError(err: unknown): unknown {
+  if (err instanceof DurableRefused) return new SessionError('busy', err.message)
+  if (err instanceof DurableUnavailable) return new SessionError('busy', DURABLE_UNREACHABLE)
+  return err
+}
+
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -631,6 +666,7 @@ export class SessionManager {
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
+      ...(deps.durable ? { durable: deps.durable } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
     this.questions = new QuestionService({
@@ -733,6 +769,7 @@ export class SessionManager {
     const { maxTurns, budgetUsd } = await this.limits()
     const payloadKeys = this.deps.payloadKeys
     if (fields.mode === 'durable' && !payloadKeys) throw new SessionError('invalid', DURABLE_NEEDS_KEK)
+    if (fields.mode === 'durable' && !this.deps.durable) throw new SessionError('invalid', DURABLE_NEEDS_TEMPORAL)
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
@@ -776,9 +813,13 @@ export class SessionManager {
     }
   }
 
-  /** The `session_mode` setting, else `classic` (plan ruling 2). */
+  /**
+   * The `session_mode` setting, else `classic` (plan ruling 2); `classic` too while durable
+   * sessions cannot start here (no KEK, no Temporal), so the setting cannot break new chats.
+   */
   private async defaultMode(): Promise<SessionMode> {
     const stored = await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE)
+    if (stored === 'durable' && (!this.deps.payloadKeys || !this.deps.durable)) return 'classic'
     return isSessionMode(stored) ? stored : 'classic'
   }
 
@@ -823,6 +864,8 @@ export class SessionManager {
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
+    // A classic turn never runs on a durable session (#1056).
+    if (before.mode === 'durable') return this.sendDurable(before, principal, prompt, options)
     const turnId = randomUUID()
     const [claimed] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_sessions
@@ -966,6 +1009,171 @@ export class SessionManager {
       'busy',
       `a turn is already running in session ${id}; wait for it to finish or interrupt it`,
     )
+  }
+
+  // -- durable sessions (#1056) -------------------------------------------------
+
+  /**
+   * A durable session's send: the message goes to its DurableSession workflow
+   * (durable/client.ts), whose live output agent-durable's projector logs. The claim is
+   * one UPDATE taken once the execution is chosen (DurableSendOptions.beforeStart), with
+   * the stream offset reset for a new execution in the same transaction, so the projector
+   * never follows a new execution from the old one's offset. Resolves once the Update was
+   * accepted, or after `durableAcceptWaitMs` when it was not yet (no worker polls): the
+   * turn then stays `running` and runs when a worker starts.
+   */
+  private async sendDurable(session: SessionRecord, principal: Owner, prompt: string, options: SendOptions): Promise<Turn> {
+    const durable = this.deps.durable
+    if (!durable) throw new SessionError('unsupported', DURABLE_NEEDS_TEMPORAL)
+    const id = session.id
+    // Checked before Temporal is asked anything; the claim checks again.
+    if (!sameOwner(principal, session.owner) || !this.claimable(session)) throw await this.whyNotClaimed(id, principal, session)
+    const turnId = randomUUID()
+    const [expiry, model] = await Promise.all([
+      this.approvals.expirySeconds(),
+      this.deps.settings?.get<unknown>(SETTING_MODEL),
+    ])
+    const input: DurableSessionInput = {
+      session_id: id,
+      max_turns: session.maxTurns,
+      approval_expiry_seconds: expiry,
+      model: typeof model === 'string' && model ? model : null,
+    }
+    let userSeq: number | undefined
+    let claimed = () => {}
+    const claim = new Promise<void>((resolve) => {
+      claimed = resolve
+    })
+    const sending = durable.send(
+      input,
+      { text: prompt, context: options.context ?? null },
+      {
+        beforeStart: async (result) => {
+          userSeq = await this.claimDurable(session, principal, turnId, prompt, result)
+          claimed()
+        },
+      },
+    )
+    let timer: NodeJS.Timeout | undefined
+    const late = Symbol('late')
+    const first = await Promise.race([
+      sending.then(
+        () => undefined,
+        (err: unknown) => ({ err }),
+      ),
+      claim.then(
+        () =>
+          new Promise<typeof late>((resolve) => {
+            timer = setTimeout(() => resolve(late), this.deps.durableAcceptWaitMs ?? DURABLE_ACCEPT_WAIT_MS)
+          }),
+      ),
+    ])
+    clearTimeout(timer)
+    if (first === late) {
+      sending.catch((err: unknown) =>
+        this.failDurable(id, err).catch((e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)),
+      )
+    } else if (first !== undefined) {
+      if (userSeq === undefined) throw durableError(first.err)
+      if (await this.failDurable(id, first.err)) throw durableError(first.err)
+    }
+    const after = userSeq!
+    const outcome = () => this.durableOutcome(id, after)
+    let done: Promise<TurnOutcome> | undefined
+    // Followed only when someone waits for it: with no worker, it may never settle.
+    return {
+      turnId,
+      get done() {
+        done ??= outcome()
+        return done
+      },
+    }
+  }
+
+  /** What a send may claim: not running or waiting, not done, budget left. */
+  private claimable(session: SessionRecord): boolean {
+    return (
+      session.status !== 'running' &&
+      session.status !== 'waiting_approval' &&
+      session.status !== 'done' &&
+      session.costUsd < session.budgetUsd
+    )
+  }
+
+  /**
+   * Claims a durable session for a turn and logs it, in one transaction; returns the
+   * `user.turn`'s seq. A new execution's live output starts at offset 0 again
+   * (plan ruling 9), so its `ai_durable_streams.next_offset` is reset with the claim.
+   */
+  private async claimDurable(
+    session: SessionRecord,
+    principal: Owner,
+    turnId: string,
+    prompt: string,
+    result: DurableSendResult,
+  ): Promise<number> {
+    const id = session.id
+    const events: ServerEvent[] = [
+      ...(result.resumedFresh ? [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })] : []),
+      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author: principal }),
+      event({ type: 'session.status', sessionId: id, status: 'running' }),
+    ]
+    const seqs = await this.deps.sql.begin(async (tx) => {
+      const claimed = await tx`
+        UPDATE ai_sessions SET status = 'running', updated_at = now()
+        WHERE id = ${id} AND owner_kind = ${principal.kind} AND owner_id = ${principal.id}
+          AND status NOT IN ('running', 'waiting_approval', 'done') AND cost_usd < budget_usd
+        RETURNING id`
+      if (claimed.length === 0) return undefined
+      if (result.started !== 'attached') {
+        await tx`
+          INSERT INTO ai_durable_streams (session_id) VALUES (${id})
+          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0`
+      }
+      return this.events.append(id, events, tx)
+    })
+    if (!seqs) throw await this.whyNotClaimed(id, principal, session)
+    this.events.committed(id, events, seqs)
+    return seqs[result.resumedFresh ? 1 : 0]!
+  }
+
+  /**
+   * A claimed durable send that did not reach its workflow: the session goes back to
+   * `idle` and the log says why. False when the Update may still be delivered (its RPC
+   * timed out after Temporal admitted it): the turn stays `running`.
+   */
+  private async failDurable(id: string, err: unknown): Promise<boolean> {
+    if (err instanceof WorkflowUpdateRPCTimeoutOrCancelledError) return false
+    const failure = durableError(err)
+    const code = failure instanceof SessionError ? failure.code : 'internal'
+    const released = await this.deps.sql`
+      UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`
+    if (released.count > 0) {
+      await this.events.append(id, [
+        event({ type: 'error', sessionId: id, code, message: describe(failure) }),
+        event({ type: 'session.status', sessionId: id, status: 'idle' }),
+      ])
+    }
+    return true
+  }
+
+  /** A durable turn's end, from the log after its `user.turn` to the next settled status. */
+  private async durableOutcome(id: string, afterSeq: number): Promise<TurnOutcome> {
+    let failed: string | undefined
+    let result = false
+    try {
+      for await (const { event: e } of this.events.follow(id, afterSeq)) {
+        if (e.type === 'error') failed = e.message
+        if (e.type === 'session.result') result = true
+        if (e.type === 'session.status' && (e.status === 'idle' || e.status === 'done' || e.status === 'failed')) break
+      }
+    } catch (err) {
+      return { kind: 'failed', message: describe(err) }
+    }
+    if (failed !== undefined) return { kind: 'failed', message: failed }
+    if (!result) return { kind: 'interrupted' }
+    const now = await this.row(id)
+    return { kind: 'result', subtype: 'success', costUsd: now?.costUsd ?? 0, turns: now?.turns ?? 0 }
   }
 
   private async runTurn(
@@ -1501,6 +1709,15 @@ export class SessionManager {
    */
   async interrupt(id: string, principal: Owner): Promise<boolean> {
     const session = await this.get(id, principal)
+    if (session.mode === 'durable') {
+      // Stop is cancellation of the running execution (deviation 4); its projector logs the end.
+      if (!this.deps.durable) return false
+      try {
+        return await this.deps.durable.cancel(id)
+      } catch (err) {
+        throw durableError(err)
+      }
+    }
     const local = this.active.get(id)
     if (local) {
       // Accurate, not optimistic: a turn whose result is already in is

@@ -16,6 +16,9 @@ import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
+import { DurableRefused, durableApprovalId } from '../src/durable/client.js'
+import { PgPayloadKeys } from '../src/temporal/payloadKeys.js'
+import { FakeDurable } from './support/fakeDurable.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
@@ -645,5 +648,160 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
         expect(((await res.json()) as { detail: string }).detail).toMatch(/^approval reads must/)
       }
     })
+  })
+})
+
+// A durable session's approvals (#1056, plan ruling 7): no ai_approvals row; the decision
+// is its workflow's `review` Update, after the same visibility and authority checks.
+describe.skipIf(!TEST_DATABASE_URL)(`durable approvals${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  let db: Database
+  let drop: () => Promise<void>
+  let m: SessionManager
+  let durable: FakeDurable
+  const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
+
+  beforeEach(async () => {
+    ;({ db, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+    durable = new FakeDurable()
+    m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scriptedRunner(() => ({ reply: 'ok' })).runner,
+      payloadKeys: new PgPayloadKeys(db.sql, { current: kekFromBase64(randomBytes(32).toString('base64')) }),
+      durable,
+    })
+  })
+  afterEach(async () => {
+    await drop()
+  })
+
+  function app(): Hono {
+    const a = new Hono()
+    registerApprovalRoutes(a, {
+      approvals: m.approvals,
+      ready: () => Promise.resolve(true),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    return a
+  }
+
+  async function waiting(owner: Owner = browser) {
+    const { session } = await m.start(owner, { origin: owner.kind === 'browser' ? 'chat' : 'mcp', mode: 'durable' })
+    durable.pendingCalls.set(session.id, [{ id: 'toolu_1', name: 'send_to_bambuddy', input: { output: 'box.3mf' } }])
+    const id = durableApprovalId(session.id, 'toolu_1')
+    await m.events.append(session.id, [
+      { v: 1, type: 'approval.required', sessionId: session.id, id, tool: 'toolu_1', summary: 'send_to_bambuddy {}', risk: 'outward' },
+    ])
+    return { session, id }
+  }
+
+  it('decides through review with the approver string, and logs approval.resolved', async () => {
+    const { session, id } = await waiting()
+    const decided = await m.approvals.decide(browser, id, true)
+    expect(durable.reviews).toEqual([{ sessionId: session.id, toolUseId: 'toolu_1', approved: true, approver: 'browser:browser' }])
+    expect(decided).toMatchObject({ id, sessionId: session.id, tool: 'send_to_bambuddy', decision: 'approved', decidedBy: browser })
+    const last = (await m.events.read(session.id)).at(-1)?.event
+    expect(last).toEqual({ v: 1, type: 'approval.resolved', sessionId: session.id, id, approved: true, by: browser })
+    await expectPanelAccepts([last!])
+    expect(await db.sql`SELECT 1 FROM ai_approvals`).toHaveLength(0)
+  })
+
+  it("the panel's approval.decision takes the same path", async () => {
+    const { session, id } = await waiting()
+    await m.approvals.decision(browser, { v: 1, type: 'approval.decision', sessionId: session.id, id, approve: false })
+    expect(durable.reviews).toEqual([{ sessionId: session.id, toolUseId: 'toolu_1', approved: false, approver: 'browser:browser' }])
+  })
+
+  it('hides the approval from a principal that may not see the session, as classic does', async () => {
+    const { id } = await waiting(agentA)
+    await expect(m.approvals.decide(agentB, id, true)).rejects.toMatchObject({ code: 'not_found' })
+    // Its owner may see it, but never decide its own outward call.
+    await expect(m.approvals.decide(agentA, id, true)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(durable.reviews).toEqual([])
+  })
+
+  it('a refused review (expired, or decided already) is 409 conflict on the route, and logs nothing', async () => {
+    const { session, id } = await waiting()
+    durable.reviewError = new DurableRefused('Tool call toolu_1 was already decided')
+    await expect(m.approvals.decide(browser, id, true)).rejects.toMatchObject({ code: 'conflict', status: 409 })
+    const res = await app().request(`/api/v1/ai/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST', headers: UI })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ detail: 'Tool call toolu_1 was already decided' })
+    expect((await m.events.read(session.id)).map((e) => e.event.type)).not.toContain('approval.resolved')
+  })
+
+  it('the route decides a durable approval', async () => {
+    const { id } = await waiting()
+    const res = await app().request(`/api/v1/ai/approvals/${encodeURIComponent(id)}/deny`, { method: 'POST', headers: UI })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ id, decision: 'denied', decided_by: browser, tier: 'outward' })
+    expect(durable.reviews).toMatchObject([{ approved: false }])
+  })
+
+  it('refuses a mismatched input hash, and an id naming another session', async () => {
+    const { session, id } = await waiting()
+    await expect(
+      m.approvals.decide(browser, id, true, { inputHash: m.approvals.hash('send_to_bambuddy', { output: 'other.3mf' }) }),
+    ).rejects.toMatchObject({ code: 'input_mismatch' })
+    const { session: other } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+    await expect(m.approvals.decide(browser, id, true, { sessionId: other.id })).rejects.toMatchObject({ code: 'not_found' })
+    // A durable id over a classic session is no approval at all.
+    const { session: classic } = await m.start(browser, { origin: 'chat', mode: 'classic' })
+    await expect(m.approvals.decide(browser, durableApprovalId(classic.id, 'toolu_1'), true)).rejects.toMatchObject({
+      code: 'not_found',
+    })
+    expect(durable.reviews).toEqual([])
+    expect(session.id).not.toBe(other.id)
+  })
+
+  it('Review Focus 7: an id without the prefix settles its ai_approvals row and never calls review', async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp' })
+    const approval = await m.approvals.create({
+      sessionId: session.id,
+      turnId: null,
+      toolUseId: 'toolu_1',
+      tool: 'mcp__stub__print',
+      input: { job: 'box.3mf' },
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ id: approval.id, decision: 'denied' })
+    expect(durable.reviews).toEqual([])
+  })
+
+  it('lists a durable session\'s waiting calls from its workflow', async () => {
+    const { session, id } = await waiting()
+    const long = 'x'.repeat(800)
+    durable.pendingCalls.set(session.id, [
+      { id: 'toolu_1', name: 'send_to_bambuddy', input: { output: 'box.3mf' } },
+      { id: 'toolu_2', name: 'save_preset', input: { name: long } },
+    ])
+    const read = { host: UI.host, 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+    const res = await app().request(`/api/v1/ai/approvals?session=${session.id}&pending=true`, { headers: read })
+    expect(res.status).toBe(200)
+    const { approvals } = (await res.json()) as { approvals: Record<string, unknown>[] }
+    expect(approvals).toEqual([
+      expect.objectContaining({
+        id,
+        session_id: session.id,
+        tool_use_id: 'toolu_1',
+        tool: 'send_to_bambuddy',
+        input_summary: '{"output":"box.3mf"}',
+        input_hash: m.approvals.hash('send_to_bambuddy', { output: 'box.3mf' }),
+        tier: 'outward',
+        requested_by: browser,
+        decision: null,
+        used: false,
+        voided: false,
+      }),
+      expect.objectContaining({ id: durableApprovalId(session.id, 'toolu_2'), tool: 'save_preset', decision: null }),
+    ])
+    expect(String(approvals[1]?.input_summary)).toHaveLength(500)
+    expect(Date.parse(String(approvals[0]?.expires_at)) - Date.parse(String(approvals[0]?.created_at))).toBe(
+      DEFAULT_APPROVAL_EXPIRY_SECONDS * 1000,
+    )
+    expect(await db.sql`SELECT 1 FROM ai_approvals`).toHaveLength(0)
   })
 })

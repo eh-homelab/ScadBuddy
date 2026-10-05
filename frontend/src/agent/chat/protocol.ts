@@ -246,6 +246,7 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     id: z.string().min(1),
     approved: z.boolean(),
     by: OwnerSchema.optional(),
+    reason: z.string().optional(),
   }),
   /**
    * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.

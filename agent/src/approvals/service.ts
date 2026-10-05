@@ -15,6 +15,7 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { DurableRefused, type DurableSessions, durableApprovalId, parseDurableApprovalId } from '../durable/client.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
@@ -212,6 +213,12 @@ export type ApprovalServiceDeps = {
    * and void is recorded as an `approval` row.
    */
   audit?: AuditSink
+  /**
+   * A durable session's approvals live in its workflow (#1056, plan ruling 7): ids
+   * `durable:<session>:<tool_use_id>` are decided through its `review` Update and listed
+   * from its `pending_approvals` Query, never in ai_approvals.
+   */
+  durable?: Pick<DurableSessions, 'review' | 'pending'>
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -354,6 +361,7 @@ type SessionAccess = {
   /** A live handoff offer's target, who may see the session too (sessions/protocol.ts `canSee`). */
   offer: { to: Pick<Owner, 'kind' | 'id'> } | null
   status: string
+  mode: string
   turnId: string | null
   turnActive: boolean
 }
@@ -441,6 +449,7 @@ export class ApprovalService {
         offer_kind: Owner['kind'] | null
         offer_id: string | null
         status: string
+        mode: string
         turn_id: string | null
         turn_active: boolean
       }[]
@@ -448,7 +457,7 @@ export class ApprovalService {
       SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id,
              CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
              CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id,
-             status, turn_id,
+             status, mode, turn_id,
              (turn_id IS NOT NULL AND lease_until > now()) AS turn_active
       FROM ai_sessions WHERE id = ${id}`
     if (!row) return undefined
@@ -457,6 +466,7 @@ export class ApprovalService {
       creator: { kind: row.creator_kind, id: row.creator_id },
       offer: row.offer_kind && row.offer_id ? { to: { kind: row.offer_kind, id: row.offer_id } } : null,
       status: row.status,
+      mode: row.mode,
       turnId: row.turn_id,
       turnActive: row.turn_active,
     }
@@ -472,11 +482,30 @@ export class ApprovalService {
    * session, their own. `null` means visible with no session.
    */
   private async visible(principal: Owner, approval: ApprovalRecord): Promise<SessionAccess | null | false> {
-    const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
-    if (approval.sessionId === null) return everything || sameOwner(principal, approval.requestedBy) ? null : false
-    const session = await this.session(approval.sessionId)
+    if (approval.sessionId === null) {
+      const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
+      return everything || sameOwner(principal, approval.requestedBy) ? null : false
+    }
+    return this.sessionVisible(principal, approval.sessionId)
+  }
+
+  /** The session-level half of `visible`: the browser user and grant holders see all, others theirs. */
+  private async sessionVisible(principal: Owner, sessionId: string): Promise<SessionAccess | false> {
+    const session = isUuid(sessionId) ? await this.session(sessionId) : undefined
     if (!session) return false
+    const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
     return everything || canSee(principal, session) ? session : false
+  }
+
+  /**
+   * Whether `principal` may decide an approval of the session's that `requestedBy` asked
+   * for: `visible` + `authorize` for an approval with no ai_approvals row (a durable one).
+   */
+  async authorizeSession(principal: Owner, sessionId: string, requestedBy?: Owner): Promise<SessionAccess> {
+    const session = await this.sessionVisible(principal, sessionId)
+    if (!session) throw new ApprovalError('not_found', `no session ${sessionId}`)
+    await this.authorize(principal, requestedBy ?? session.owner, session)
+    return session
   }
 
   /** One approval, if the principal may see it. */
@@ -503,6 +532,7 @@ export class ApprovalService {
       if (!session || !(everything || canSee(principal, session))) {
         throw new ApprovalError('not_found', `no session ${sessionId}`)
       }
+      if (session.mode === 'durable') return this.durablePending(sessionId, session)
       const rows = await this.deps.sql.unsafe<Row[]>(
         `SELECT ${COLUMNS} FROM ai_approvals WHERE session_id = $1 ${pending ? 'AND decision IS NULL' : ''}
          ORDER BY created_at, id LIMIT 500`,
@@ -709,7 +739,7 @@ export class ApprovalService {
     if (row) await this.append(sessionId, [event({ type: 'session.status', sessionId, status: row.status })])
   }
 
-  private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
+  private async authorize(principal: Owner, requestedBy: Owner, session: SessionAccess | null): Promise<void> {
     if (principal.kind === 'browser') return
     if (!(await this.hasGrant(principal))) {
       throw new ApprovalError(
@@ -719,7 +749,7 @@ export class ApprovalService {
       )
     }
     const own =
-      sameOwner(principal, approval.requestedBy) ||
+      sameOwner(principal, requestedBy) ||
       (session !== null && (sameOwner(principal, session.owner) || sameOwner(principal, session.creator)))
     if (own) {
       throw new ApprovalError(
@@ -735,12 +765,14 @@ export class ApprovalService {
    * the HTTP routes (routes/approvals.ts), and #251's `sessions.approve/deny`.
    */
   async decide(principal: Owner, id: string, approve: boolean, options: DecideOptions = {}): Promise<ApprovalRecord> {
+    const durable = parseDurableApprovalId(id)
+    if (durable) return this.decideDurable(principal, durable.sessionId, durable.toolUseId, approve, options)
     const approval = await this.row(id)
     const access = approval ? await this.visible(principal, approval) : false
     if (!approval || access === false || (options.sessionId !== undefined && options.sessionId !== approval.sessionId)) {
       throw new ApprovalError('not_found', `no approval ${id}`)
     }
-    await this.authorize(principal, approval, access)
+    await this.authorize(principal, approval.requestedBy, access)
     if (options.inputHash !== undefined && options.inputHash !== approval.inputHash) {
       throw new ApprovalError(
         'input_mismatch',
@@ -774,6 +806,111 @@ export class ApprovalService {
       }
     }
     return settled
+  }
+
+  /**
+   * A durable approval (plan ruling 7): the same visibility and authority as `decide`,
+   * then the workflow's `review` Update, whose validator refuses a call that is not
+   * waiting or was decided (409 `conflict`: the timer's denial, a second click). The
+   * decision is logged as `approval.resolved {approved, by}` once the Update succeeded.
+   */
+  private async decideDurable(
+    principal: Owner,
+    sessionId: string,
+    toolUseId: string,
+    approve: boolean,
+    options: DecideOptions,
+  ): Promise<ApprovalRecord> {
+    const id = durableApprovalId(sessionId, toolUseId)
+    const durable = this.deps.durable
+    if (!durable || (options.sessionId !== undefined && options.sessionId !== sessionId)) {
+      throw new ApprovalError('not_found', `no approval ${id}`)
+    }
+    const session = await this.authorizeSession(principal, sessionId)
+    if (session.mode !== 'durable') throw new ApprovalError('not_found', `no approval ${id}`)
+    const pending = (await this.durablePending(sessionId, session)).find((a) => a.id === id)
+    if (options.inputHash !== undefined && pending && options.inputHash !== pending.inputHash) {
+      throw new ApprovalError(
+        'input_mismatch',
+        `approval ${id} is for a different input than the one you were shown; the call needs a new approval`,
+      )
+    }
+    try {
+      await durable.review(sessionId, toolUseId, approve, `${principal.kind}:${principal.id}`)
+    } catch (err) {
+      if (err instanceof DurableRefused) throw new ApprovalError('conflict', err.message)
+      throw err
+    }
+    await this.append(sessionId, [event({ type: 'approval.resolved', sessionId, id, approved: approve, by: principal })])
+    const decision: Decision = approve ? 'approved' : 'denied'
+    const decided: ApprovalRecord = {
+      ...(pending ?? this.durableRecord(sessionId, session, { id: toolUseId, name: toolUseId, input: {} }, new Date())),
+      decision,
+      decidedBy: principal,
+      decidedAt: new Date().toISOString(),
+    }
+    await this.audited(decided, decision, auditOutcome(decision), principal, null, {
+      clientIp: options.clientIp,
+      ...(options.surface ? { surface: options.surface } : {}),
+    })
+    return decided
+  }
+
+  /** A durable session's waiting calls (its `pending_approvals` Query) as approval records. */
+  private async durablePending(sessionId: string, session: SessionAccess): Promise<ApprovalRecord[]> {
+    const calls = (await this.deps.durable?.pending(sessionId)) ?? []
+    if (calls.length === 0) return []
+    // When each was asked for: its `approval.required` in the log (parsed here, not by
+    // Postgres, which refuses some text as jsonb).
+    const ids = new Set(calls.map((c) => durableApprovalId(sessionId, c.id)))
+    const rows = await this.deps.sql<{ event: string; created_at: Date }[]>`
+      SELECT event, created_at FROM ai_session_events
+      WHERE session_id = ${sessionId} AND strpos(event, '"approval.required"') > 0 ORDER BY seq`
+    const asked = new Map<string, Date>()
+    for (const row of rows) {
+      const e = JSON.parse(row.event) as { type?: unknown; id?: unknown }
+      if (e.type === 'approval.required' && typeof e.id === 'string' && ids.has(e.id)) asked.set(e.id, row.created_at)
+    }
+    const expiry = await this.expirySeconds()
+    return calls.map((c) => {
+      const record = this.durableRecord(sessionId, session, c, asked.get(durableApprovalId(sessionId, c.id)) ?? new Date())
+      return { ...record, expiresAt: new Date(Date.parse(record.createdAt) + expiry * 1000).toISOString() }
+    })
+  }
+
+  private durableRecord(
+    sessionId: string,
+    session: SessionAccess,
+    call: { id: string; name: string; input: unknown },
+    createdAt: Date,
+  ): ApprovalRecord {
+    const input =
+      typeof call.input === 'object' && call.input !== null && !Array.isArray(call.input)
+        ? (call.input as Record<string, unknown>)
+        : { input: call.input }
+    const summary = typeof call.input === 'string' ? call.input : summariseInput(call.name, input, [])
+    return {
+      id: durableApprovalId(sessionId, call.id),
+      sessionId,
+      turnId: null,
+      toolUseId: call.id,
+      tool: call.name,
+      inputSummary: cap(summary, APPROVAL_SUMMARY_MAX),
+      inputHash: this.hash(call.name, input),
+      tier: 'outward',
+      requestedBy: session.owner,
+      requestedTiers: null,
+      createdAt: createdAt.toISOString(),
+      expiresAt: createdAt.toISOString(),
+      decision: null,
+      decidedBy: null,
+      decidedAt: null,
+      reason: null,
+      usableUntil: null,
+      resumeTurnId: null,
+      consumedAt: null,
+      revokedAt: null,
+    }
   }
 
   /** Resumes the session for an approved orphan; voids it, and says so, when it cannot. */
