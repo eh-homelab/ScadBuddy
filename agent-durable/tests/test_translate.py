@@ -6,9 +6,9 @@ import json
 from typing import Any
 
 import pytest
-from scadbuddy_durable.translate import Batch, Translator, bus_kind_of, durable_approval_id
 
 from scadbuddy_durable.models import EXPIRED_BY
+from scadbuddy_durable.translate import Batch, Translator, bus_kind_of, durable_approval_id
 
 S = "11111111-2222-3333-4444-555555555555"
 TIERS = {"get_model": "read", "update_source": "write", "print_output": "outward"}
@@ -218,3 +218,39 @@ def test_quiet_events(kind: str) -> None:
 )
 def test_bus_kind_of(events: list[dict[str, Any]], expected: tuple[str, str | None]) -> None:
     assert bus_kind_of(events) == expected
+
+
+def test_a_second_turn_runs_again_and_never_resolves_the_stopped_approval_twice() -> None:
+    t = Translator(S, TIERS)
+    for e in needs("c1"):
+        t.feed(e)
+    stopped = t.feed(ev("cancelled", 3))
+    assert stopped.events[0]["id"] == f"durable:{S}:c1"
+    t.feed(ev("tool_call", 4, id="c2", name="print_output", input={}))
+    t.feed(ev("approval_needed", 5, id="c2", name="print_output", input={}))
+    settled = t.feed(ev("tool_result", 6, id="c2", name="print_output", status="done"))
+    assert settled.status == "running"
+    t.feed(ev("tool_call", 7, id="c3", name="print_output", input={}))
+    t.feed(ev("approval_needed", 8, id="c3", name="print_output", input={}))
+    again = t.feed(ev("cancelled", 9))
+    assert [e.get("id") for e in again.events if e["type"] == "approval.resolved"] == [f"durable:{S}:c3"]
+
+
+def test_cancelled_skips_an_approval_the_route_resolved() -> None:
+    t = Translator(S, TIERS)
+    for e in [*needs("c1"), *needs("c2")]:
+        t.feed(e)
+    t.mark_resolved(["c1"])  # a person approved; the route logged approval.resolved
+    b = t.feed(ev("cancelled", 5))
+    assert b.events == [
+        p("approval.resolved", id=f"durable:{S}:c2", approved=False, reason="the turn was stopped"),
+        status("idle"),
+    ]
+
+
+def test_a_takeover_knows_which_open_approvals_were_resolved() -> None:
+    t = Translator(S, TIERS, open_approvals=["c1", "c2"], resolved=["c1"])
+    b = t.feed(ev("tool_result", 7, id="c1", name="print_output", status="done"))
+    assert b.status is None  # c2 still waits
+    stopped = t.feed(ev("cancelled", 8))
+    assert [e["id"] for e in stopped.events if e["type"] == "approval.resolved"] == [f"durable:{S}:c2"]

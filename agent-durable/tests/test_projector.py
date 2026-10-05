@@ -14,11 +14,11 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg_pool import AsyncConnectionPool
-from scadbuddy_durable.projector import Projector, append_batch
-from scadbuddy_durable.translate import Batch
 from temporalio.client import Client
 
 from scadbuddy_durable.models import PENDING_QUERY
+from scadbuddy_durable.projector import Projector, append_batch
+from scadbuddy_durable.translate import Batch
 from scadbuddy_durable.workflow import DurableSession
 from tests.support import WAIT, Rig, rig_on
 
@@ -95,6 +95,15 @@ async def until[T](check: Callable[[], Awaitable[T | None]]) -> T:
 def status_is(pool: AsyncConnectionPool, sid: str, want: str) -> Callable[[], Awaitable[bool | None]]:
     async def check() -> bool | None:
         return (await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid)) == want or None
+
+    return check
+
+
+def logged_type_after(
+    pool: AsyncConnectionPool, sid: str, kind: str, call: str
+) -> Callable[[], Awaitable[bool | None]]:
+    async def check() -> bool | None:
+        return any(e["type"] == kind and e.get("id") == call for e in await logged(pool, sid)) or None
 
     return check
 
@@ -281,3 +290,72 @@ async def test_append_batch_refuses_without_the_lease(pool: AsyncConnectionPool)
     assert await logged(pool, sid) == []
     assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
     assert await one(pool, "SELECT next_offset FROM ai_durable_streams WHERE session_id = %s", sid) == 0
+
+
+async def route_resolved(pool: AsyncConnectionPool, sid: str, tool_use_id: str) -> None:
+    """What the approval route appends after a person's decision (ruling 7), via EventLog's SQL."""
+    event = {
+        "v": 1,
+        "type": "approval.resolved",
+        "sessionId": sid,
+        "id": f"durable:{sid}:{tool_use_id}",
+        "approved": True,
+        "by": {"kind": "browser", "id": "browser", "label": "You"},
+    }
+    async with pool.connection() as conn:
+        await conn.execute(
+            "WITH s AS (UPDATE ai_sessions SET event_seq = event_seq + 1 WHERE id = %(id)s"
+            " RETURNING event_seq AS seq)"
+            " INSERT INTO ai_session_events (session_id, seq, event) SELECT %(id)s, s.seq, %(e)s FROM s",
+            {"id": sid, "e": json.dumps(event)},
+        )
+
+
+def resolutions(events: list[dict[str, Any]]) -> list[str]:
+    return [e["id"] for e in events if e["type"] == "approval.resolved"]
+
+
+async def test_a_turn_after_a_stop_runs_again(pool: AsyncConnectionPool, rig: Rig) -> None:
+    sid = await make_session(pool)
+    wid, inp = rig.new(sid=sid)
+    async with projecting(pool, rig.client, "a"):
+        await rig.send(wid, inp, "print 1")
+        first = (await rig.pending(wid))["id"]
+        await until(status_is(pool, sid, "waiting_approval"))
+        await rig.handle(wid).cancel()
+        await until(status_is(pool, sid, "idle"))
+        state = await rig.handle(wid).result()
+        # The agent service's next execution (ruling 9): a new start, its offset reset, running.
+        await rig.send(wid, inp, "print 2", state)
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE ai_durable_streams SET next_offset = 0 WHERE session_id = %s", (sid,))
+            await conn.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        second = await approve(rig, wid)
+        await until(logged_type_after(pool, sid, "tool.result", second))
+        await until(status_is(pool, sid, "running"))
+        await until(status_is(pool, sid, "idle"))
+    events = await logged(pool, sid)
+    assert resolutions(events) == [f"durable:{sid}:{first}"]
+    after = [e for e in events if e["type"] == "tool.result" and e["id"] == second]
+    i = events.index(after[0])
+    assert events[i + 1] == {"v": 1, "type": "session.status", "sessionId": sid, "status": "running"}
+
+
+async def test_a_stop_after_the_route_resolved_does_not_resolve_again(
+    pool: AsyncConnectionPool, rig: Rig
+) -> None:
+    gate = rig.stubs.gate("print_output")
+    sid = await make_session(pool)
+    wid, inp = rig.new(sid=sid)
+    async with projecting(pool, rig.client, "a"):
+        await rig.send(wid, inp, "print 1")
+        await until(status_is(pool, sid, "waiting_approval"))
+        call = await approve(rig, wid)
+        await route_resolved(pool, sid, call)
+        await rig.started("print_output")
+        await rig.handle(wid).cancel()
+        await until(status_is(pool, sid, "idle"))
+    gate.set()
+    events = await logged(pool, sid)
+    assert resolutions(events) == [f"durable:{sid}:{call}"]
+    assert events[-1] == {"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"}

@@ -197,31 +197,58 @@ class Projector:
                 (self._holder, session_id, session_id),
             )
 
-    async def _open_approvals(self, session_id: str) -> list[str]:
-        """Approvals already in the log with no result yet: a takeover owes them on `cancelled`."""
+    async def _open_approvals(self, session_id: str) -> tuple[list[str], list[str]]:
+        """This turn's approvals in the log with no result yet, and those already resolved.
+
+        The turn starts after the last settled `session.status`: an earlier turn's approvals
+        were closed by its `done`, `error` or `cancelled`. An `approval.resolved` (the
+        route's after a decision, or a stop's) means nobody owes it again on `cancelled`.
+        """
+        prefix = f"durable:{session_id}:"
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT event FROM ai_session_events WHERE session_id = %s"
-                " AND (event LIKE '%%\"approval.required\"%%' OR event LIKE '%%\"tool.result\"%%')"
+                "SELECT event FROM ai_session_events WHERE session_id = %(id)s AND seq > coalesce("
+                "  (SELECT max(seq) FROM ai_session_events WHERE session_id = %(id)s"
+                "   AND event LIKE '%%\"session.status\"%%'"
+                "   AND (event LIKE '%%\"idle\"%%' OR event LIKE '%%\"done\"%%'"
+                "        OR event LIKE '%%\"failed\"%%')), 0)"
+                " AND (event LIKE '%%\"approval.%%' OR event LIKE '%%\"tool.result\"%%')"
                 " ORDER BY seq",
-                (session_id,),
+                {"id": session_id},
             )
             rows = await cur.fetchall()
         open_ids: list[str] = []
+        resolved: set[str] = set()
         for (text,) in rows:
             event = json.loads(text)
-            if event.get("type") == "approval.required":
+            kind = event.get("type")
+            if kind == "approval.required":
                 open_ids.append(str(event["tool"]))
-            elif event.get("type") == "tool.result" and event.get("id") in open_ids:
+            elif kind == "approval.resolved" and str(event.get("id", "")).startswith(prefix):
+                resolved.add(str(event["id"]).removeprefix(prefix))
+            elif kind == "tool.result" and event.get("id") in open_ids:
                 open_ids.remove(event["id"])
-        return open_ids
+                resolved.discard(event["id"])
+        return open_ids, [i for i in open_ids if i in resolved]
+
+    async def _resolved_now(self, session_id: str, wid: str) -> set[str]:
+        """Before `cancelled`: approvals a person decided (the route logs their resolution)."""
+        _, resolved = await self._open_approvals(session_id)
+        decided = set(resolved)
+        try:
+            decisions: dict[str, str] = await self._client.get_workflow_handle(wid).query(DECISIONS_QUERY)
+            decided.update(decisions)
+        except Exception as err:  # the log alone answers when the run is gone
+            log.info("projector %s: no decisions for %s: %s", self._holder, session_id, err)
+        return decided
 
     async def _follow(self, session_id: str, offset: int) -> None:
         wid = f"session-{session_id}"
         try:
             while True:
                 # Rebuilt from the log each time: the stream is re-read from the committed offset.
-                translator = Translator(session_id, self._tiers, await self._open_approvals(session_id))
+                open_ids, resolved = await self._open_approvals(session_id)
+                translator = Translator(session_id, self._tiers, open_ids, resolved)
                 try:
                     offset, final = await self._drain(session_id, wid, translator, offset)
                 except RPCError as err:
@@ -252,6 +279,8 @@ class Projector:
                         DECISIONS_QUERY
                     )
                     decided_by = decisions.get(str(event.get("id")))
+                if event.get("type") == "cancelled":
+                    translator.mark_resolved(await self._resolved_now(session_id, wid))
                 batch = translator.feed(event, decided_by=decided_by)
                 if not batch.events:
                     continue  # nothing to log; the offset moves with the next batch

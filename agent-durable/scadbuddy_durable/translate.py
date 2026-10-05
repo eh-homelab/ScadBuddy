@@ -57,14 +57,24 @@ class _Text:
 class Translator:
     """One session's live events, in order, as panel events.
 
-    `open_approvals` are tool_use ids whose `approval.required` is already in the log
-    with no result yet (a projector taking over a session mid-turn reads them there).
+    `open_approvals` are tool_use ids of this turn whose `approval.required` is already in
+    the log with no result yet, and `resolved` those of them an `approval.resolved` in the
+    log already settled (a projector taking over a session mid-turn reads both there).
+    An open approval holds the status at `waiting_approval` until its result; `cancelled`
+    resolves only the ones nobody resolved.
     """
 
-    def __init__(self, session_id: str, tiers: Mapping[str, str], open_approvals: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        tiers: Mapping[str, str],
+        open_approvals: Iterable[str] = (),
+        resolved: Iterable[str] = (),
+    ) -> None:
         self._sid = session_id
         self._tiers = tiers
         self._open: list[str] = list(dict.fromkeys(open_approvals))
+        self._resolved: set[str] = set(resolved)
         self._texts: list[_Text] = []
         self._attempts: dict[int, int] = {}
 
@@ -72,6 +82,10 @@ class Translator:
     def buffered(self) -> bool:
         """Whether text is held back until the segment's next decision (ruling 10)."""
         return bool(self._texts)
+
+    def mark_resolved(self, tool_use_ids: Iterable[str]) -> None:
+        """Approvals someone else resolved (the route, after a person's decision)."""
+        self._resolved.update(tool_use_ids)
 
     def feed(self, event: Mapping[str, Any], *, decided_by: str | None = None) -> Batch:
         """`decided_by` is the `decisions` Query's answer for a rejected `tool_result`."""
@@ -108,6 +122,8 @@ class Translator:
             return self._with_status([*self._flush(), required], "waiting_approval")
         if kind == "tool_result":
             return self._result(event, decided_by)
+        if kind in ("done", "error"):
+            self._open, self._resolved = [], set()
         if kind == "done":
             return self._with_status([*self._flush(), self._event("session.result")], "idle", final=True)
         if kind == "error":
@@ -124,8 +140,10 @@ class Translator:
                     reason=STOPPED,
                 )
                 for call_id in self._open
+                if call_id not in self._resolved
             ]
             self._open = []
+            self._resolved = set()
             return self._with_status(resolved, "idle", final=True)
         return Batch()  # prompt, continued_as_new: the agent service logged the turn itself
 
@@ -155,6 +173,7 @@ class Translator:
             approval = durable_approval_id(self._sid, call_id)
             out.append(self._event("approval.resolved", id=approval, approved=False))
         out.append(self._event("tool.result", id=call_id, ok=status == "done", summary=status))
+        self._resolved.discard(call_id)
         if call_id not in self._open:
             return Batch(out)
         self._open.remove(call_id)
