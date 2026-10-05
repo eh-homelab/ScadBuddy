@@ -300,6 +300,15 @@ function record(row: Row): ApprovalRecord {
   }
 }
 
+/** How an approval that can no longer be decided ended, as a clause, from its row's own reason (#1400). */
+function conflictReason(now: ApprovalRecord | undefined): string {
+  if (now?.decision === 'cancelled') return now.reason ?? 'it was cancelled'
+  if (now?.decision === 'approved' && now.revokedAt !== null) {
+    return `it was approved, then withdrawn${now.reason ? ` (${now.reason})` : ''}`
+  }
+  return `it was already ${now?.decision ?? 'decided'}`
+}
+
 /** JSON with object keys sorted at every depth, so equal inputs hash equally. */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
@@ -764,7 +773,7 @@ export class ApprovalService {
       throw new ApprovalError(
         'conflict',
         `approval ${id} was already ${now?.decision ?? 'decided'}`,
-        now?.decision === 'cancelled' ? 'it was cancelled' : `it was already ${now?.decision ?? 'decided'}`,
+        conflictReason(now),
       )
     }
     // A parked turn (on any replica) picks the decision up itself. A turn

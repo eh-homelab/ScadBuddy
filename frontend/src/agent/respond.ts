@@ -45,17 +45,20 @@ export type RespondOutcome = 'approved' | 'denied' | 'answered'
 export class RespondError extends Error {
   readonly status: number | undefined
   readonly reason: string | undefined
-  constructor(message: string, status?: number, reason?: string) {
+  /** A 404 the agent itself marked stale; a bare 404 (a proxy, an older replica) is not. */
+  readonly stale: boolean
+  constructor(message: string, status?: number, reason?: string, stale = false) {
     super(message)
     this.status = status
     this.reason = reason
+    this.stale = stale
   }
   /**
-   * The entry is stale (404), no longer pending (409) or expired (410): answering
-   * again cannot help (#1403).
+   * The entry is stale (the agent's own 404), no longer pending (409) or expired
+   * (410): answering again cannot help (#1403).
    */
   get settled(): boolean {
-    return this.status === 404 || this.status === 409 || this.status === 410
+    return (this.status === 404 && this.stale) || this.status === 409 || this.status === 410
   }
 }
 
@@ -74,14 +77,16 @@ export async function respond(requestId: string, body: RespondBody): Promise<Res
   if (res.ok) return ((await res.json().catch(() => ({}))) as { outcome?: RespondOutcome }).outcome ?? fallback(body)
   let detail = `HTTP ${res.status}`
   let reason: string | undefined
+  let stale = false
   try {
-    const parsed = (await res.json()) as { detail?: unknown; reason?: unknown }
+    const parsed = (await res.json()) as { detail?: unknown; reason?: unknown; stale?: unknown }
     if (typeof parsed.detail === 'string') detail = parsed.detail
     if (typeof parsed.reason === 'string') reason = parsed.reason
+    stale = parsed.stale === true
   } catch {
     // Not JSON: keep the status.
   }
-  throw new RespondError(detail, res.status, reason)
+  throw new RespondError(detail, res.status, reason, stale)
 }
 
 function fallback(body: RespondBody): RespondOutcome {

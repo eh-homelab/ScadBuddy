@@ -290,7 +290,12 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
       return c.json(await respond(deps.sessions, BROWSER_USER, c.req.param('id'), body, { clientIp: deps.remoteAddress(c) }))
     } catch (err) {
       if (err instanceof RespondError) {
-        return c.json({ detail: err.message, ...(err.reason === undefined ? {} : { reason: err.reason }) }, err.status)
+        // `stale` marks the agent's own 404, so the panel can tell it from one a proxy or
+        // an older replica without this route answers: only this one closes the card.
+        return c.json(
+          { detail: err.message, ...(err.reason === undefined ? {} : { reason: err.reason }), ...(err.status === 404 ? { stale: true } : {}) },
+          err.status,
+        )
       }
       throw err
     }

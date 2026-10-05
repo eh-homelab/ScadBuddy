@@ -37,12 +37,12 @@ function scripted(answer: () => SendResult = () => 'sent') {
 const frame = (body: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...body })
 
 /** Answers the respond route (#815) with `status`, keeping what the panel posted. */
-function capture(status = 200, detail = '', reason?: string) {
+function capture(status = 200, detail = '', reason?: string, stale = status === 404) {
   const posted: { id: string; body: unknown }[] = []
   server.use(
     http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
       posted.push({ id: String(params.id), body: await request.json() })
-      return status === 200 ? HttpResponse.json({}) : HttpResponse.json({ detail, ...(reason ? { reason } : {}) }, { status })
+      return status === 200 ? HttpResponse.json({}) : HttpResponse.json({ detail, ...(reason ? { reason } : {}), ...(stale ? { stale } : {}) }, { status })
     }),
   )
   return posted

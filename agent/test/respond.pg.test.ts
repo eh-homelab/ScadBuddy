@@ -136,6 +136,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const decided = await post(ids.approval, { kind: 'approval', decision: 'deny' })
     expect(decided.status).toBe(409)
     expect(await decided.json()).toMatchObject({ reason: 'it was already approved' })
+    // Approved, then withdrawn unused: it no longer stands, so it must not read "already approved".
+    await db.sql`UPDATE ai_approvals SET consumed_at = NULL, revoked_at = now(), reason = 'the turn ended' WHERE id = ${ids.approval.slice('approval:'.length)}`
+    const revoked = await post(ids.approval, { kind: 'approval', decision: 'deny' })
+    expect(await revoked.json()).toMatchObject({ reason: 'it was approved, then withdrawn (the turn ended)' })
   })
 
   it("says a cancelled or timed-out entry's own reason in its 409, not that it was answered (#1400)", async () => {
@@ -154,6 +158,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect(cancelled.status).toBe(409)
     expect(await cancelled.json()).toMatchObject({ reason: row!.reason })
     expect(row!.reason).not.toMatch(/answered/)
+    // An approval cancelled with the turn says the row's reason too, not a generic one.
+    const [approvalRow] = await db.sql<{ decision: string; reason: string | null }[]>`
+      SELECT decision, reason FROM ai_approvals WHERE id = ${ids.approval.slice('approval:'.length)}`
+    expect(approvalRow).toMatchObject({ decision: 'cancelled', reason: expect.any(String) })
+    const cancelledApproval = await post(ids.approval, { kind: 'approval', decision: 'approve' })
+    expect(cancelledApproval.status).toBe(409)
+    expect(await cancelledApproval.json()).toMatchObject({ reason: approvalRow!.reason })
   })
 
   it("refuses a response that is not the entry's kind, or does not fit it, and leaves the entry pending", async () => {
@@ -197,7 +208,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
   it('refuses a stale or unknown id, a request not from the UI, a non-JSON body and an oversized one', async () => {
     const { m, ids, post, session, turn } = await setUp()
 
-    expect((await post('question:00000000-0000-4000-8000-000000000000', { kind: 'answer', text: 'hi' })).status).toBe(404)
+    const unknown = await post('question:00000000-0000-4000-8000-000000000000', { kind: 'answer', text: 'hi' })
+    expect(unknown.status).toBe(404)
+    // Marked as the agent's own, so the panel closes the card on it and on nothing else.
+    expect(await unknown.json()).toMatchObject({ stale: true })
     expect((await post('approval:00000000-0000-4000-8000-000000000000', { kind: 'approval', decision: 'deny' })).status).toBe(404)
     expect((await post('question:not-a-uuid', { kind: 'answer', text: 'hi' })).status).toBe(404)
     expect((await post(`durable:${session.id}:run:toolu_a`, { kind: 'answer', text: 'hi' })).status).toBe(404)

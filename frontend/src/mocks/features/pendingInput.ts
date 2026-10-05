@@ -84,7 +84,9 @@ export const handlers = [
     const agent = mockAgentSessions()
     if (!agent) return HttpResponse.json({ detail: 'the assistant is not connected' }, { status: 503 })
     const result = agent.respond(id, body)
-    if ('error' in result) return HttpResponse.json({ detail: result.error }, { status: result.status })
+    if ('error' in result) {
+      return HttpResponse.json({ detail: result.error, ...(result.status === 404 ? { stale: true } : {}) }, { status: result.status })
+    }
     return HttpResponse.json({ id, kind: body.kind, outcome: body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied' })
   }),
   http.get('/api/v1/ai/pending-input', () =>
