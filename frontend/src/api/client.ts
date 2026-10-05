@@ -192,6 +192,12 @@ export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
 /**
+ * The `type` of the problem `command()` writes when it stops following an operation
+ * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
+ * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
+ */
+export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
+/**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
  * enqueue, and Bambuddy may have done it.
@@ -458,7 +464,7 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   while (op.status === 'running') {
     if (Date.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
-        type: 'urn:scadbuddy:operation-unfinished',
+        type: OPERATION_UNFINISHED,
         title: 'Still running',
         status: 504,
         detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,

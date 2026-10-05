@@ -389,3 +389,14 @@ def test_two_features_claiming_one_kind_name_are_refused() -> None:
 
     with pytest.raises(DuplicateKindError, match="'send'"):
         build_kinds(CORE, Components(CORE, []), [lambda c, cs: [kind("send")]] * 2)
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> None:
+    """Review #1063 fourth review 2: Temporal reads ``maximum_attempts=0`` as unlimited."""
+
+    async def step(*args: object) -> dict[str, object]:
+        return {}
+
+    with pytest.raises(ValueError, match="run_attempts"):
+        OperationKind("send", step, step, run_attempts=attempts)

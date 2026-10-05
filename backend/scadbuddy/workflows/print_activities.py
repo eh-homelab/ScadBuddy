@@ -104,8 +104,9 @@ def raised_as(error: ApiError, kind: str) -> ApplicationError:
     return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
 
 
-async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
+async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive.
+    The operation activities beat with it too."""
     task = asyncio.create_task(work)
     try:
         while True:
@@ -209,7 +210,7 @@ class PrintActivities:
         try:
             async with client_for(settings) as client:
                 source = await self._source(client, input.accepted.source, settings)
-                return await _heartbeating(
+                return await heartbeating(
                     plan_run(client, source, settings, input.input.request, input.accepted.prepared)
                 )
         except ApiError as error:
@@ -233,7 +234,7 @@ class PrintActivities:
         """Polls the slice job inside the activity, heartbeating (§5.3)."""
         try:
             async with client_for(self._settings()) as client:
-                return await _heartbeating(wait_slice(client, job_id))
+                return await heartbeating(wait_slice(client, job_id))
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
