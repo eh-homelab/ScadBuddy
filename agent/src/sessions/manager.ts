@@ -1153,6 +1153,8 @@ export class SessionManager {
                   signal: controller.signal,
                   // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
                   stopTurn: (why) => controller.abort(new Error(why)),
+                  // The claim set updated_at = now(): the turn's start by the database's clock.
+                  turnStartedAt: new Date(session.updatedAt),
                 }),
               }
             : {}),

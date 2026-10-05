@@ -231,12 +231,6 @@ function attentionTimer(a: Exclude<NonNullable<QuestionItem['attention']>, DoneA
 }
 
 /**
- * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
- * the question allows it, or answer in your own words. A question with a draft (an
- * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
- * starting from that draft, so editing it returns the edited text.
- */
-/**
  * #815 §4 — the agent's `done` summary: its message, ScadBuddy's own list of what the
  * turn touched, and one Dismiss button. Nothing waits on it, so there is nothing to
  * reply: dismissing answers it with its first option, which takes it off the badge.
@@ -278,6 +272,12 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
   )
 }
 
+/**
+ * #940 — the agent asks the user (AskUserQuestion, or a subagent's `ask_user`): pick an option, or several when
+ * the question allows it, or answer in your own words. A question with a draft (an
+ * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
+ * starting from that draft, so editing it returns the edited text.
+ */
 function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answers: string[]) => void }) {
   const [choices, setChoices] = useState<Choice[]>(() => item.questions.map(() => NO_CHOICE))
   const headingId = `question-${item.id}`

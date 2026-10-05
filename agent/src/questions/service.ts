@@ -49,7 +49,9 @@ import {
 // `waiting_input` for it, and it OUTLIVES ITS TURN: it stays pending, and on the
 // badge, until the user dismisses it on its card (`answer`) or the session posts
 // a newer one. Its row carries `summary`, ScadBuddy's record of what the turn
-// touched (doneSummary.ts).
+// touched (doneSummary.ts). That is a done row WITHOUT a timer (`expires_at`
+// NULL): one with a timer was inserted by a replica on an older image, whose
+// turn parks on it, so it is treated as any other attention request.
 //
 // WHO ANSWERS. Only the user in the ScadBuddy panel (the browser principal):
 // the question is the agent's own call, and an answer is a human's. No tool
@@ -59,6 +61,8 @@ import {
 export const DEFAULT_QUESTION_POLL_MS = 1000
 
 /** #815 §5's per-user rate limit on attention requests: this many per window. */
+/** How many rows listPending returns per group: waiting rows, then `done` summaries. */
+export const PENDING_CAP = 500
 export const ATTENTION_RATE_LIMIT = 10
 export const ATTENTION_RATE_WINDOW_S = 600
 /** The advisory lock the rate limit's count and insert are taken under. */
@@ -95,6 +99,12 @@ export type QuestionGateContext = {
   signal: AbortSignal
   /** Ends the turn as an interrupt does: an attention request's `stop` and `wait` timers (#815). */
   stopTurn?: (why: string) => void
+  /**
+   * When the turn was claimed, by the database's clock (the claim's `now()`): a
+   * `done` summary covers the touches since, and `ai_session_resources.at` is
+   * stamped by the same clock. The agent's own clock may disagree with it.
+   */
+  turnStartedAt: Date
 }
 
 type Row = {
@@ -178,26 +188,36 @@ export class QuestionService {
     return row
   }
 
-  /** Every question and attention request still waiting for the user, oldest first (at most 500). */
+  /**
+   * Every question and attention request still waiting for the user, oldest
+   * first (at most PENDING_CAP), then the undismissed `done` summaries, newest
+   * first (at most PENDING_CAP more). The summaries have their own cap: nothing
+   * expires them, so under one shared cap enough of them would push a question
+   * a turn is parked on off the badge.
+   */
   async listPending(): Promise<PendingQuestion[]> {
-    const rows = await this.deps.sql<
-      {
-        id: string
-        session_id: string
-        kind: 'question' | 'attention'
-        tool: string
-        tool_use_id: string
-        questions: QuestionView[]
-        attention_reason: AttentionReason | null
-        on_timeout: OnTimeout | null
-        summary: string | null
-        created_at: Date
-        expires_at: Date | null
-      }[]
-    >`
+    type Pending = {
+      id: string
+      session_id: string
+      kind: 'question' | 'attention'
+      tool: string
+      tool_use_id: string
+      questions: QuestionView[]
+      attention_reason: AttentionReason | null
+      on_timeout: OnTimeout | null
+      summary: string | null
+      created_at: Date
+      expires_at: Date | null
+    }
+    const waiting = await this.deps.sql<Pending[]>`
       SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
-      FROM ai_questions WHERE outcome IS NULL ORDER BY created_at, id LIMIT 500`
-    return rows.map((r) => ({
+      FROM ai_questions WHERE outcome IS NULL AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL)
+      ORDER BY created_at, id LIMIT ${PENDING_CAP}`
+    const done = await this.deps.sql<Pending[]>`
+      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
+      FROM ai_questions WHERE outcome IS NULL AND attention_reason = 'done' AND expires_at IS NULL
+      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP}`
+    return [...waiting, ...done].map((r) => ({
       id: r.id,
       sessionId: r.session_id,
       kind: r.kind,
@@ -230,7 +250,7 @@ export class QuestionService {
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_input'
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                        AND attention_reason IS DISTINCT FROM 'done')
+                        AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL))
       RETURNING status`
       return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
     })
@@ -306,7 +326,9 @@ export class QuestionService {
    * cancels the newer turn's. A parked call is refused with `reason`.
    * `refresh: false`: the caller (a finishing turn) sets the status itself.
    * A `done` request is left alone unless named by `questionId`: nothing waits
-   * on it, and it is meant to outlive its turn.
+   * on it, and it is meant to outlive its turn. A timed one (from a replica on
+   * an older image) is cancelled like any other: only its turn's timer would
+   * ever have resolved it.
    */
   async cancelPending(
     sessionId: string,
@@ -321,7 +343,7 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
-          AND (${questionId}::uuid IS NOT NULL OR attention_reason IS DISTINCT FROM 'done')
+          AND (${questionId}::uuid IS NOT NULL OR attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL)
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
@@ -452,8 +474,6 @@ export class QuestionService {
 
   /** The canUseTool question gate for one turn (harness/questions.ts QuestionGate). */
   gate(context: QuestionGateContext): QuestionGate {
-    // A `done` summary covers the touches since the turn started; the gate is built as it starts.
-    const turnStartedAt = new Date()
     return async (request: QuestionRequest): Promise<QuestionVerdict> => {
       if (context.signal.aborted) return { answered: false, message: 'The turn is stopping; the question was not asked.' }
       const id = randomUUID()
@@ -500,7 +520,7 @@ export class QuestionService {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
           }
           if (attention.reason === 'done') {
-            summary = redact(await loadDoneSummary(tx, sessionId, turnId, turnStartedAt), context.secrets())
+            summary = redact(await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt), context.secrets())
             await tx`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},

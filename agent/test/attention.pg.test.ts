@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
@@ -7,7 +7,7 @@ import { attentionCard, type AttentionSpec, parseAttention } from '../src/harnes
 import { ATTENTION_TOOL, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { ATTENTION_RATE_LIMIT } from '../src/questions/service.js'
+import { ATTENTION_RATE_LIMIT, PENDING_CAP } from '../src/questions/service.js'
 import { pendingInput } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
@@ -275,6 +275,95 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       `**While nobody answered (attention request ${timedOut!.id.slice(0, 8)} timed out)**\n- created preset \`unattended\` of sign (save_preset)` +
         '\n\n**Before you were asked**\n- created preset `before` of sign (save_preset)',
     )
+  })
+
+  it('a second timeout after the user replied opens a second unattended window', async () => {
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string, s: AttentionSpec) =>
+          run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
+        verdicts.push(await ask('toolu_a', spec({ timeoutS: 0.3 })))
+        verdicts.push(await ask('toolu_b', spec())) // the user answers this one
+        verdicts.push(await ask('toolu_c', spec({ timeoutS: 0.3 })))
+        await touch(run.sessionId ?? run.resume!, 'unattended')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    let b: string | undefined
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ id: string }[]>`
+        SELECT id FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_b' AND outcome IS NULL`
+      b = row?.id
+      return b
+    }).toBeDefined()
+    await m.questions.answer(browser, answer(session.id, b!, ["I'm here"]))
+    await turn!.done
+    const timedOut = await db.sql<{ id: string }[]>`
+      SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out' ORDER BY created_at`
+    expect(timedOut).toHaveLength(2)
+    const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+    expect(done!.summary).toBe(
+      `**While nobody answered (attention requests ${timedOut[0]!.id.slice(0, 8)}, ${timedOut[1]!.id.slice(0, 8)} timed out)**\n` +
+        '- created preset `unattended` of sign (save_preset)',
+    )
+  })
+
+  it("the summary's turn start is the database's clock, not the agent's", async () => {
+    // The agent's clock runs an hour ahead of Postgres's: a touch Postgres stamps during the turn is still this turn's.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 3_600_000, shouldAdvanceTime: true })
+    try {
+      const working = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          await Promise.resolve()
+          await touch(run.sessionId ?? run.resume!, 'preset-1')
+          verdicts.push(await postDone(run))
+          yield result(run)
+        })()
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
+      await turn!.done
+      const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+      expect(done!.summary).toBe('**What this turn changed**\n- created preset `preset-1` of sign (save_preset)')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
+    const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, created_at)
+      SELECT gen_random_uuid(), ${old.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_d' || i, '[]', 'attention', 'done', 'x',
+             now() - interval '1 day' + i * interval '1 second'
+      FROM generate_series(1, ${PENDING_CAP}) AS i`
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    const listed = await m.questions.listPending()
+    expect(listed[0]).toMatchObject({ id, attentionReason: 'blocked' })
+    expect(listed.filter((q) => q.attentionReason === 'done')).toHaveLength(PENDING_CAP)
+    await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
+    await turn!.done
+  })
+
+  it('a timed done row (a replica on an older image) is cancelled when its turn ends; an untimed one is not', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turnId = '00000000-0000-4000-8000-0000000000aa'
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_old', '[]', 'attention', 'done', 'proceed', now() + interval '5 minutes')`
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
+      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_new', '[]', 'attention', 'done', 'x')`
+    expect(await m.questions.cancelPending(session.id, 'the turn ended', { turnId })).toBe(1)
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY tool_use_id`).toEqual([
+      { tool_use_id: 'toolu_new', outcome: null },
+      { tool_use_id: 'toolu_old', outcome: 'cancelled' },
+    ])
   })
 
   it("a later turn's done summary replaces the earlier one; neither is cancelled by its turn ending", async () => {

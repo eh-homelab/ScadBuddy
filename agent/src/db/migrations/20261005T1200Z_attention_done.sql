@@ -4,7 +4,10 @@
 -- ScadBuddy's own record of what the turn touched (src/questions/doneSummary.ts,
 -- from ai_session_resources), shown on its card beside the agent's message.
 -- A replica still on an older image (a rolling deploy) inserts a done row with
--- a timer, which stays valid: the check below allows both.
+-- a timer, which stays valid: the check below allows both, and the new image
+-- treats a timed done row as an ordinary attention request. The reverse is NOT
+-- compatible: an older image counts an untimed done row as waiting
+-- (waiting_input) and cancels it when any turn of its session ends.
 ALTER TABLE ai_questions
   ADD COLUMN summary text,
   DROP CONSTRAINT ai_questions_attention_check,
