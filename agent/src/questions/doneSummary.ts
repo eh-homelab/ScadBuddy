@@ -1,5 +1,6 @@
 import type { TransactionSql } from 'postgres'
 import { redact } from '../secrets.js'
+import { cutBetweenCodePoints } from '../sessions/touched.js'
 
 // The record ScadBuddy adds to a `done` attention request (#815 §4,
 // harness/attention.ts): what the turn created, changed or deleted, read from
@@ -82,7 +83,7 @@ function line(t: DoneTouch): string {
   if (t.resourceType === 'unclassified' || t.resourceId === null) {
     return `- ${toolName(t.tool)}: a change ScadBuddy does not classify`
   }
-  const id = t.resourceId.length > 40 ? `${t.resourceId.slice(0, SHORT_ID)}…` : t.resourceId
+  const id = t.resourceId.length > 40 ? `${cutBetweenCodePoints(t.resourceId, SHORT_ID)}…` : t.resourceId
   const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${code(t.model)}` : ''
   return `- ${plain(t.action)} ${plain(t.resourceType.replace(/_/g, ' '))} ${code(id)}${of} (${toolName(t.tool)})`
 }
@@ -144,10 +145,14 @@ export function doneSummary(
  * The summary of turn `turnId` of `sessionId`, which started at `since` by the
  * database's clock (the one `ai_session_resources.at` is stamped by): read in
  * the transaction that posts the done request, so it covers every touch
- * committed before it. `unattended`: some touch was made while nobody answered
- * (the first section lists something), which keeps the summary from being
- * replaced by a later turn's (questions/service.ts). `secrets`: the turn's,
- * redacted from every name before it is formatted.
+ * committed before it. A turn resumed to re-run an approved call (the
+ * approval's `resume_turn_id`, sessions/manager.ts resumeApproved) carries on
+ * the turn that parked on it, so that turn's away windows count too, and the
+ * touches from the first of them on: what it did while nobody answered is not
+ * lost because it ended waiting for the approval. `unattended`: some touch was
+ * made while nobody answered (the first section lists something), which keeps
+ * the summary from being replaced by a later turn's (questions/service.ts).
+ * `secrets`: the turn's, redacted from every name before it is formatted.
  */
 export async function loadDoneSummary(
   tx: TransactionSql,
@@ -156,26 +161,37 @@ export async function loadDoneSummary(
   since: Date,
   secrets: readonly string[],
 ): Promise<{ summary: string; unattended: boolean }> {
-  const rows = await tx<
-    { at: Date; tool: string; resource_type: string; resource_id: string | null; action: string; model_slug: string | null }[]
-  >`
-    SELECT at, tool, resource_type, resource_id, action, model_slug FROM ai_session_resources
-    WHERE session_id = ${sessionId} AND at >= ${since}
-    ORDER BY id`
+  // Each window closes at the user's first reply in that request's own turn: an
+  // answer there, or a browser decision on an approval that turn parked on or
+  // was resumed for. Another turn's approval is not a reply to this request.
   const away = await tx<{ id: string; away_from: Date; away_until: Date | null }[]>`
+    WITH RECURSIVE turns (id) AS (
+      SELECT ${turnId}::uuid
+      UNION
+      SELECT a.turn_id FROM ai_approvals a JOIN turns t ON a.resume_turn_id = t.id
+      WHERE a.session_id = ${sessionId} AND a.turn_id IS NOT NULL
+    )
     SELECT q.id, q.created_at AS away_from, reply.at AS away_until FROM ai_questions q
     CROSS JOIN LATERAL (
       SELECT min(at) AS at FROM (
         SELECT resolved_at AS at FROM ai_questions
-        WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND outcome = 'answered' AND resolved_at > q.created_at
+        WHERE session_id = ${sessionId} AND turn_id = q.turn_id AND outcome = 'answered' AND resolved_at > q.created_at
         UNION ALL
         SELECT decided_at FROM ai_approvals
-        WHERE session_id = ${sessionId} AND decision IN ('approved', 'denied') AND decided_by_kind = 'browser'
-          AND decided_at > q.created_at
+        WHERE session_id = ${sessionId} AND (turn_id = q.turn_id OR resume_turn_id = q.turn_id)
+          AND decision IN ('approved', 'denied') AND decided_by_kind = 'browser' AND decided_at > q.created_at
       ) replies
     ) reply
-    WHERE q.session_id = ${sessionId} AND q.turn_id = ${turnId} AND q.kind = 'attention' AND q.outcome = 'timed_out'
+    WHERE q.session_id = ${sessionId} AND q.turn_id IN (SELECT id FROM turns) AND q.kind = 'attention' AND q.outcome = 'timed_out'
     ORDER BY q.created_at, q.id`
+  const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
+  const from = windows.reduce((earliest, w) => (w.from < earliest ? w.from : earliest), since)
+  const rows = await tx<
+    { at: Date; tool: string; resource_type: string; resource_id: string | null; action: string; model_slug: string | null }[]
+  >`
+    SELECT at, tool, resource_type, resource_id, action, model_slug FROM ai_session_resources
+    WHERE session_id = ${sessionId} AND at >= ${from}
+    ORDER BY id`
   const touches = rows.map((r) => ({
     at: r.at,
     tool: r.tool,
@@ -184,6 +200,5 @@ export async function loadDoneSummary(
     action: r.action,
     model: r.model_slug,
   }))
-  const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
   return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => inAway(t, windows)) }
 }

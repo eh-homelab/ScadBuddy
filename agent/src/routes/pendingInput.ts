@@ -57,8 +57,18 @@ export type PendingInputRouteDeps = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
-export async function pendingInput(sessions: SessionManager): Promise<PendingInputEntry[]> {
-  const [approvals, answers] = await Promise.all([sessions.approvals.list(BROWSER_USER, { pending: true }), sessions.questions.listPending()])
+/**
+ * The response body. `summaries_truncated`: more undismissed `done` summaries
+ * are pending than are listed (questions/service.ts PENDING_CAP), so a count
+ * of them is a lower bound.
+ */
+export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncated: boolean }
+
+export async function pendingInput(sessions: SessionManager): Promise<PendingInputPage> {
+  const [approvals, { questions: answers, summariesTruncated }] = await Promise.all([
+    sessions.approvals.list(BROWSER_USER, { pending: true }),
+    sessions.questions.listPending(),
+  ])
   const entries: PendingInputEntry[] = [
     ...approvals.map((a) => ({
       id: `approval:${a.id}`,
@@ -96,7 +106,7 @@ export async function pendingInput(sessions: SessionManager): Promise<PendingInp
         : {}),
     })),
   ]
-  return entries.sort((a, b) => a.created_at.localeCompare(b.created_at))
+  return { entries: entries.sort((a, b) => a.created_at.localeCompare(b.created_at)), summaries_truncated: summariesTruncated }
 }
 
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {
@@ -105,7 +115,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
-    return c.json({ entries: await pendingInput(deps.sessions) })
+    return c.json(await pendingInput(deps.sessions))
   })
 }
 

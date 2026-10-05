@@ -28,6 +28,8 @@ export interface PendingCounts {
   attention: number
   /** `done` attention requests: a turn's summary, which waits for nothing, so it is not in `totalOf`. */
   summaries: number
+  /** More summaries are pending than the agent listed (its `summaries_truncated`): `summaries` is a lower bound. */
+  summariesTruncated?: true
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -76,6 +78,7 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
       else if (entry.attention !== undefined) counts.attention += 1
       else counts.questions += 1
     }
+    if ((body as { summaries_truncated?: unknown }).summaries_truncated === true) counts.summariesTruncated = true
     return counts
   } catch {
     return null
@@ -151,10 +154,15 @@ export function attentionLabel(n: number | null): string {
   return `${attentionCount(n)} waiting for you`
 }
 
-/** The done summaries, shown beside the waiting count but not in it ("1 summary"); empty for none or unknown. */
+/**
+ * The done summaries, shown beside the waiting count but not in it ("1 summary"); empty for none or
+ * unknown. `500+` when the agent says it listed only some of them, so older ones cut from the list
+ * are not silently uncounted.
+ */
 export function summaryLabel(c: PendingCounts | null): string {
   if (c === null || c.summaries <= 0) return ''
-  return `${attentionCount(c.summaries)} ${c.summaries === 1 ? 'summary' : 'summaries'}`
+  const n = c.summariesTruncated ? `${c.summaries}+` : String(c.summaries)
+  return `${n} ${c.summaries === 1 && !c.summariesTruncated ? 'summary' : 'summaries'}`
 }
 
 /** The counts by kind, for the toggle's title ("2 approvals, 1 question"); empty for none or unknown. */

@@ -42,6 +42,16 @@ describe('fetchPendingInput', () => {
     expect(summaryLabel(only)).toBe('1 summary')
   })
 
+  it('says when the agent listed only some of the done summaries, and not otherwise', async () => {
+    const done = { kind: 'answer', attention: { reason: 'done', on_timeout: null, summary: 'x' } }
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: true })))
+    const cut = await fetchPendingInput()
+    expect(cut).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: true })
+    expect(summaryLabel(cut)).toBe('2+ summaries')
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: false })))
+    expect(summaryLabel(await fetchPendingInput())).toBe('2 summaries')
+  })
+
   it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
     server.use(
       http.get('/api/v1/ai/pending-input', () =>
