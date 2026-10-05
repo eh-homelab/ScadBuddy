@@ -94,9 +94,9 @@ TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
 #: busy server (review #1316 4); `ABORTED` is gRPC's "retry at a higher level"
 #: (google.rpc.Code). Then the two gRPC itself raises on a call that never answered
 #: (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): `DEADLINE_EXCEEDED`,
-#: and `CANCELLED`, which sdk-core also retries when the transport cancelled it. The rest (`NOT_FOUND`,
-#: `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `FAILED_PRECONDITION`,
-#: `UNIMPLEMENTED`, `ALREADY_EXISTS`) are what neither retries.
+#: and `CANCELLED`, which sdk-core also retries when the transport cancelled it. The
+#: rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
+#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are what neither retries.
 TRANSIENT_RPC = frozenset(
     {
         RPCStatusCode.DATA_LOSS,
