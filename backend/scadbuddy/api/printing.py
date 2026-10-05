@@ -131,8 +131,8 @@ PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = {
     status.HTTP_500_INTERNAL_SERVER_ERROR: {
         "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
         "description": f"`{TEMPORAL_REFUSED_PROBLEM}`: Temporal refused to start the run (a "
-        "wrong namespace, a denied permission). Sending it again will not help until that "
-        "is fixed.",
+        "wrong namespace, a denied permission). Fix that first; the same request sent again "
+        "then follows the run if it started.",
     },
     status.HTTP_503_SERVICE_UNAVAILABLE: {
         "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
@@ -439,8 +439,7 @@ async def accept_run(
     except (RPCError, TemporalUnavailableError) as error:
         # Only what Temporal's client would retry is worth retrying (`TRANSIENT_RPC`); a
         # wrong namespace or a refused permission is a misconfiguration (review #1061
-        # (3) 3). Its gRPC
-        # message stays in the log, out of the response.
+        # (3) 3). Its gRPC message stays in the log, out of the response.
         if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
             logger.error("Temporal refused to start a print run", exc_info=True)
             raise ApiError(
