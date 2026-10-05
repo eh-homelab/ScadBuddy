@@ -413,6 +413,12 @@ class TemplatePipeline:
         except asyncio.CancelledError:
             if self._released is None:
                 raise
+        except Exception:
+            # Its `failed` row is written: a request still joining gets the job, not a
+            # run that closed under its Update (review #1066 (5) 1.1).
+            self._upsert(STATUS.value_set("failed"))
+            await workflow.wait_condition(workflow.all_handlers_finished)
+            raise
         self._upsert(STATUS.value_set("settled" if self._released is None else "cancelled"))
         await workflow.wait_condition(workflow.all_handlers_finished)
 
