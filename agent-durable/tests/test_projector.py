@@ -16,6 +16,7 @@ import pytest_asyncio
 from psycopg_pool import AsyncConnectionPool
 from temporalio.client import Client
 
+from scadbuddy_durable import projector as projector_module
 from scadbuddy_durable.models import PENDING_QUERY
 from scadbuddy_durable.projector import Projector, append_batch
 from scadbuddy_durable.translate import Batch
@@ -434,3 +435,23 @@ async def test_a_nul_in_model_text_does_not_break_the_takeover(pool: AsyncConnec
         await rig.handle(wid).cancel()
         await until(status_is(pool, sid, "idle"))
     assert resolutions(await logged(pool, sid)) == [f"durable:{sid}:{call}"]
+
+
+async def test_a_page_of_unreadable_rows_does_not_stall_the_scan(
+    pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(projector_module, "_SCAN_PAGE", 2)
+    sid = await make_session(pool)
+    await log_event(pool, sid, {"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"})
+    required = {"v": 1, "type": "approval.required", "sessionId": sid, "tool": "toolu_1"}
+    await log_event(pool, sid, required)
+    async with pool.connection() as conn:
+        for text in ("not json", "[1]", "null"):
+            await conn.execute(
+                "WITH s AS (UPDATE ai_sessions SET event_seq = event_seq + 1 WHERE id = %(id)s"
+                " RETURNING event_seq AS seq)"
+                " INSERT INTO ai_session_events (session_id, seq, event) SELECT %(id)s, s.seq, %(e)s FROM s",
+                {"id": sid, "e": text},
+            )
+        events = await asyncio.wait_for(projector_module._turn_events(conn, sid), WAIT)
+    assert events == [required]

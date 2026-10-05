@@ -144,6 +144,7 @@ async def _turn_events(conn: AsyncConnection[Any], session_id: str) -> list[dict
         )
         rows = await cur.fetchall()
         for seq, text in rows:
+            before = int(seq)
             try:
                 event = json.loads(text)
             except ValueError:
@@ -155,7 +156,6 @@ async def _turn_events(conn: AsyncConnection[Any], session_id: str) -> list[dict
                 return found[::-1]
             if kind in _APPROVAL_TYPES:
                 found.append(event)
-            before = int(seq)
         if len(rows) < _SCAN_PAGE:
             return found[::-1]
 
