@@ -34,9 +34,10 @@ from scadbuddy.workflows.print_activities import heartbeating, raised_as
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: Below the check activity's 8 s start-to-close (`workflows/operation.py` CHECK_TIMEOUT).
-#: It stops the wait, not the work: a check's ``asyncio.to_thread`` (``output_stem``'s
-#: reads) runs on after the 504, and each re-send may start another. Accepted: those
-#: reads are bounded, and the thread ends when they do (review #1063 5).
+#: It stops the wait, not the work: a check's ``asyncio.to_thread`` (the settings, the
+#: output, ``output_stem``'s reads) runs on after the 504, and each re-send may start
+#: another. Accepted: those reads are bounded, and the thread ends when they do (review
+#: #1063 5).
 CHECK_BUDGET_SECONDS = 6.0
 
 
@@ -47,7 +48,7 @@ def operation_activities(
     async def insert(input: InsertOp) -> Operation:
         info = activity.info()
         assert info.workflow_id is not None and info.workflow_run_id is not None
-        retention = settings_store.load().operation_retention_seconds
+        retention = (await asyncio.to_thread(settings_store.load)).operation_retention_seconds
         op = input.input
         return await store.insert(
             uuid.uuid4().hex,
