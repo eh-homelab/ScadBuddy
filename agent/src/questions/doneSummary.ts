@@ -147,9 +147,10 @@ export function doneSummary(
  * the transaction that posts the done request, so it covers every touch
  * committed before it. A turn resumed to re-run an approved call (the
  * approval's `resume_turn_id`, sessions/manager.ts resumeApproved) carries on
- * the turn that parked on it, so that turn's away windows count too, and the
- * touches from the first of them on: what it did while nobody answered is not
- * lost because it ended waiting for the approval. `unattended`: some touch was
+ * the turn that parked on it, so that turn's away windows count too, and of
+ * the touches before `since` the ones inside them: what it did while nobody
+ * answered is not lost because it ended waiting for the approval, and what it
+ * did while the user was there stays its own. `unattended`: some touch was
  * made while nobody answered (the first section lists something), which keeps
  * the summary from being replaced by a later turn's (questions/service.ts).
  * `secrets`: the turn's, redacted from every name before it is formatted.
@@ -192,13 +193,18 @@ export async function loadDoneSummary(
     SELECT at, tool, resource_type, resource_id, action, model_slug FROM ai_session_resources
     WHERE session_id = ${sessionId} AND at >= ${from}
     ORDER BY id`
-  const touches = rows.map((r) => ({
-    at: r.at,
-    tool: r.tool,
-    resourceType: r.resource_type,
-    resourceId: r.resource_id,
-    action: r.action,
-    model: r.model_slug,
-  }))
+  // Before `since` the touches are the parked turns', and only their unattended
+  // ones carry over: attended work before the approval is not this turn's to
+  // report, nor sectioned by how its windows happen to fall.
+  const touches = rows
+    .map((r) => ({
+      at: r.at,
+      tool: r.tool,
+      resourceType: r.resource_type,
+      resourceId: r.resource_id,
+      action: r.action,
+      model: r.model_slug,
+    }))
+    .filter((t) => t.at >= since || inAway(t, windows))
   return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => inAway(t, windows)) }
 }

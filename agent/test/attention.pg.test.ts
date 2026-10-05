@@ -352,6 +352,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
             'browser', 'browser', 'you', ${ts(s - 1)}, ${ts(s + 600)},
             'approved', 'browser', 'browser', 'you', ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
+  const answeredAt = (sessionId: string, turnId: string, s: number) => db.sql`
+    INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, answers,
+                              answered_by_kind, answered_by_id, answered_by_label, resolved_at, created_at)
+    VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'AskUserQuestion', 'toolu_ans', '[]', 'answered', '["yes"]',
+            'browser', 'browser', 'you', ${ts(s)}, ${ts(s - 1)})`
   const summaryOf = (sessionId: string, turnId: string, since: number) =>
     db.sql.begin((tx) => loadDoneSummary(tx, sessionId, turnId, ts(since), []))
 
@@ -379,6 +384,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await timedOut(session.id, a, 10)
     await touchedAt(session.id, 'unattended', 20)
     // The user approves at 40; turn B is resumed for it at 41, makes the call and posts done.
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  it("a resumed turn carries over only the parked turn's unattended touches, not its attended ones", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000c1'
+    const b = '00000000-0000-4000-8000-0000000000c2'
+    // Turn A: its request times out at 10, it works unattended, the user answers at 15 and A works on while they are there.
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 12)
+    await answeredAt(session.id, a, 15)
+    await touchedAt(session.id, 'attended', 20)
+    // A parks an outward call; the user approves at 40 and B is resumed for it at 41.
     await approvedAt(session.id, a, 40, b)
     await touchedAt(session.id, 'resumed', 50)
     const done = await summaryOf(session.id, b, 41)
