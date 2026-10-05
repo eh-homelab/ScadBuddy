@@ -1,7 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { ApprovalError } from '../approvals/service.js'
-import { ANSWER_MAX } from '../harness/questions.js'
+import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { QuestionError } from '../questions/service.js'
 import type { SessionManager } from '../sessions/manager.js'
@@ -107,8 +107,19 @@ export async function pendingInput(sessions: SessionManager): Promise<PendingInp
   return entries.sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
-/** A response's cap (§6.6: "any response over 16 KiB" is refused). */
-export const RESPONSE_MAX = 16 * 1024
+/**
+ * A response's cap, derived from the largest answer the panel can send rather
+ * than §6.6's flat 16 KiB, which is smaller than one ANSWER_MAX answer and would
+ * refuse answers the socket's `question.answer` takes. The largest valid body is
+ * a question's: QUESTIONS_MAX answers of ANSWER_MAX, each keyed by a question
+ * text of QUESTION_TEXT_MAX (an attention request's one `choice` or `text`, and
+ * a multi-select's picks, which join to one ANSWER_MAX answer, are smaller).
+ * Those bounds count UTF-16 code units, and a code unit is at most 6 bytes of
+ * JSON (a `\uXXXX` escape), as for guard.ts JSON_BODY_MAX; 1 KiB covers the
+ * rest of the body. The panel's copies of these bounds are pinned to the agent's
+ * (test/sessions.protocol.test.ts), so the cap follows them.
+ */
+export const RESPONSE_MAX = QUESTIONS_MAX * (QUESTION_TEXT_MAX + ANSWER_MAX) * 6 + 1024
 
 const answerText = z.string().min(1).max(ANSWER_MAX)
 

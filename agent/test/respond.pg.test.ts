@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { attentionCard, type AttentionSpec, parseAttention } from '../src/harness/attention.js'
-import { ATTENTION_TOOL, type QuestionVerdict } from '../src/harness/questions.js'
+import { ANSWER_MAX, ATTENTION_TOOL, QUESTION_TEXT_MAX, QUESTIONS_MAX, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { RESPONSE_MAX } from '../src/routes/pendingInput.js'
+import { RespondBody, RESPONSE_MAX } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -23,6 +23,22 @@ const COLOUR = { question: 'Which colour?', header: 'Colour', multiSelect: false
 const PARTS = { question: 'Which parts?', header: 'Parts', multiSelect: true, options: [{ label: 'Lid', description: '' }, { label: 'Base', description: '' }] }
 
 const result = { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01 }
+
+const bytes = (body: string) => new TextEncoder().encode(body).length
+
+describe('the respond cap', () => {
+  it('fits the largest valid answer at its worst JSON encoding', () => {
+    // QUESTIONS_MAX distinct questions of QUESTION_TEXT_MAX, each answered with ANSWER_MAX
+    // control characters, which JSON.stringify writes as 6-byte \uXXXX escapes.
+    const answers = Object.fromEntries(
+      Array.from({ length: QUESTIONS_MAX }, (_, i) => [`${i}`.padEnd(QUESTION_TEXT_MAX, '\u0001'), '\u0001'.repeat(ANSWER_MAX)]),
+    )
+    const body = JSON.stringify({ kind: 'answer', answers })
+    expect(RespondBody.safeParse(JSON.parse(body)).success).toBe(true)
+    expect(bytes(body)).toBeLessThanOrEqual(RESPONSE_MAX)
+    expect(RESPONSE_MAX).toBeGreaterThan(16 * 1024)
+  })
+})
 
 describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
@@ -164,9 +180,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.attention, { kind: 'answer', text: 'hi' }, noOrigin)).status).toBe(403)
     expect((await post(ids.attention, { kind: 'answer', text: 'hi' }, { ...UI, 'content-type': 'text/plain' })).status).toBe(415)
     expect((await post(ids.attention, { kind: 'answer', text: 'x'.repeat(RESPONSE_MAX) })).status).toBe(413)
+    // One byte over the cap is refused unread; a body of exactly the cap is read (below).
+    const padded = (n: number) => `{"kind":"answer","text":"hi"}`.padEnd(n, ' ')
+    expect((await post(ids.attention, padded(RESPONSE_MAX + 1))).status).toBe(413)
 
     expect((await m.questions.listPending()).length).toBe(2)
+    expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
     await turn.done
+  })
+
+  it('takes answers of ANSWER_MAX, which are larger than 16 KiB as JSON (the socket path took them)', async () => {
+    const { ids, post, turn } = await setUp()
+    // '"' is one code unit and two bytes of JSON, so each answer is 40 000 bytes on the wire.
+    const long = '"'.repeat(ANSWER_MAX)
+    const body = JSON.stringify({ kind: 'answer', answers: { 'Which colour?': long, 'Which parts?': long } })
+    expect(bytes(body)).toBeGreaterThan(16 * 1024)
+    expect((await post(ids.question, body)).status).toBe(200)
+    expect((await post(ids.attention, { kind: 'answer', text: long })).status).toBe(200)
+    expect((await post(ids.approval, { kind: 'approval', decision: 'deny' })).status).toBe(200)
+    await turn.done
+    expect(verdicts).toEqual([
+      { answered: true, answers: { 'The ScadBuddy tab closed; reopen it?': long } },
+      { answered: true, answers: { 'Which colour?': long, 'Which parts?': long } },
+    ])
   })
 })
