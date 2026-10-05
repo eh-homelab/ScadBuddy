@@ -32,9 +32,8 @@ __all__ = [
     "TraceRelayOutcome",
 ]
 
-#: How a job settled; ``superseded`` was replaced by a newer render first, and
-#: ``cancelled`` had every request for it withdrawn.
-RenderOutcome = Literal["done", "failed", "superseded", "cancelled"]
+#: How a job settled; ``superseded`` was replaced by a newer render first.
+RenderOutcome = Literal["done", "failed", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (its `accepted` Update unanswered or refused), or
