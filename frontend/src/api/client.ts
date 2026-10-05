@@ -59,6 +59,7 @@ import type {
   PrintCheck,
   PrintRun,
   Operation,
+  OperationAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -442,9 +443,9 @@ async function reattach<T>(
 async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
-  const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
+  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
-  let op = first.body as Operation
+  let op: Operation = first.body as OperationAccepted
   const began = Date.now()
   while (op.status === 'running') {
     if (Date.now() - began >= printRunPoll.operationFollowMs) {
