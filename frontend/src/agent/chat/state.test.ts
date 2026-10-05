@@ -93,6 +93,13 @@ describe('chatReducer', () => {
       sent,
     )
     expect(resolved.sessions.s1?.items[0]).toMatchObject({ state: 'approved', by: you })
+
+    // Refused by the respond route (#815): the buttons are live again, the reason beside them.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'Your decision was not taken: expired' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ kind: 'approval', state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your decision was not taken: expired' })
+    // A failure that lands after the server resolved it changes nothing on the card.
+    expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })
 
   it('moves a question pending → sent → answered, and shows a cancelled one as not answered (#940)', () => {
@@ -132,16 +139,12 @@ describe('chatReducer', () => {
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
 
-    // Answered while offline: queued, and still not live after the reconnect's replay.
-    const queued = run([{ type: 'answered', sessionId: 's1', questionId: 'q1', queued: true }], waiting)
-    expect(queued.sessions.s1?.items[0]).toMatchObject({ state: 'queued' })
-    const replayed = run(
-      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
-      queued,
-    )
-    expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    // Refused by the respond route (#815): answerable again, with the reason beside it.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: stale' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your answer was not taken: stale' })
 
-    // Refused by the agent: answerable again, with the error beside it.
+    // Refused by the agent over the socket (a panel loaded before #815): the same.
     const refused = run(
       [server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each', questionId: 'q1' })],
       sent,

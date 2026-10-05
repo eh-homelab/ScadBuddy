@@ -167,6 +167,20 @@ export class QuestionService {
     return row
   }
 
+  /**
+   * One row by id, pending or not, for the respond route (routes/pendingInput.ts):
+   * what it checks a response against before `answer()` takes it.
+   */
+  async entry(
+    id: string,
+  ): Promise<{ sessionId: string; kind: 'question' | 'attention'; questions: QuestionView[]; pending: boolean } | undefined> {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql<
+      { session_id: string; kind: 'question' | 'attention'; questions: QuestionView[]; outcome: Row['outcome'] }[]
+    >`SELECT session_id, kind, questions, outcome FROM ai_questions WHERE id = ${id}`
+    return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null }
+  }
+
   /** Every question and attention request still waiting for the user, oldest first (at most 500). */
   async listPending(): Promise<PendingQuestion[]> {
     const rows = await this.deps.sql<

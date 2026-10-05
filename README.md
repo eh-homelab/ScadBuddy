@@ -713,7 +713,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
-  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  and the agent's questions are answered through
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
+  still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.

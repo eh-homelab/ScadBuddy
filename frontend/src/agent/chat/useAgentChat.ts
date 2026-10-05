@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
 import { TAB_ID } from '../tabId'
+import { answerBody, decisionBody, respond } from '../respond'
 import { messageTraceparent } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
@@ -109,25 +110,21 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
-    if (!transport.current) return
-    const result = transport.current.send(
-      clientMessage({ type: 'approval.decision', sessionId, id: approvalId, approve }),
+    // Shown as `sent` until the server's approval.resolved confirms it; a refused one
+    // goes back to pending, buttons live, with the agent's reason (#815).
+    dispatch({ type: 'decided', sessionId, approvalId })
+    respond(`approval:${approvalId}`, decisionBody(approve)).catch((err: Error) =>
+      dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}` }),
     )
-    // `sent` or `queued` is shown as such until the server's approval.resolved
-    // confirms it; a refused one leaves the card pending, buttons live, to try again.
-    if (result === 'refused') {
-      dispatch({ type: 'not-sent', message: `Your decision was not sent. ${NOT_SENT}` })
-    } else {
-      dispatch({ type: 'decided', sessionId, approvalId, queued: result === 'queued' })
-    }
   }, [])
 
   const answer = useCallback((sessionId: string, questionId: string, answers: string[]) => {
-    if (!transport.current) return
-    const result = transport.current.send(clientMessage({ type: 'question.answer', sessionId, id: questionId, answers }))
-    // A refused one leaves the card pending, to try again; a queued one goes first on reconnect.
-    if (result === 'refused') dispatch({ type: 'not-sent', message: `Your answer was not sent. ${NOT_SENT}` })
-    else dispatch({ type: 'answered', sessionId, questionId, queued: result === 'queued' })
+    const item = latest.current.sessions[sessionId]?.items.find((i) => i.kind === 'question' && i.id === questionId)
+    if (item?.kind !== 'question') return
+    dispatch({ type: 'answered', sessionId, questionId })
+    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).catch((err: Error) =>
+      dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}` }),
+    )
   }, [])
 
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */

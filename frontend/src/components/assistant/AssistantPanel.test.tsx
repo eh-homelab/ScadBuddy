@@ -5,7 +5,7 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/pendingInput'
+import { respondRequests, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
@@ -225,14 +225,14 @@ describe('assistant panel', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     })
-    expect(sentOf('approval.decision')).toEqual([])
+    expect(respondRequests()).toEqual([])
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
     expect(screen.getByTestId('agent-status')).toHaveTextContent('Waiting for approval')
 
     await user.click(approve)
-    expect(sentOf('approval.decision')).toEqual([
-      { v: 1, type: 'approval.decision', sessionId: 'chat-1', id: expect.any(String), approve: true },
-    ])
+    // Through the one respond route (#815), not the socket.
+    expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
+    expect(sentOf('approval.decision')).toEqual([])
     await screen.findByText('Queued 2 copies in the Keychains project.')
     await screen.findByText('Sent. Two copies are in the queue.')
     expect(within(card).getByText('Approved by You.')).toBeInTheDocument()
@@ -242,7 +242,7 @@ describe('assistant panel', () => {
   it('Deny sends a refusal and nothing is sent', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
-    expect(sentOf('approval.decision')).toMatchObject([{ approve: false }])
+    expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
     await screen.findByText('Denied: nothing was sent.')
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })

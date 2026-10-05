@@ -16,7 +16,6 @@ describe('the approval card', () => {
     const cases: [Parameters<typeof card>[0], string | null][] = [
       ['pending', null],
       ['sent', 'Sending your answer…'],
-      ['queued', 'Not connected: your answer goes first when the assistant reconnects.'],
       ['approved', 'Approved by You.'],
       ['denied', 'Denied by You.'],
     ]
@@ -266,7 +265,6 @@ describe('the question card (#940)', () => {
   it('says where the answer is once it is not pending', () => {
     const cases: [Partial<Question>, string][] = [
       [{ state: 'sent' }, 'Sending your answer…'],
-      [{ state: 'queued' }, 'Not connected: your answer goes first when the assistant reconnects.'],
       [{ state: 'answered', answers: ['Blue'], by: you }, 'Answered by You: Blue'],
       [{ state: 'cancelled', reason: 'interrupted by You' }, 'Not answered: interrupted by You.'],
     ]

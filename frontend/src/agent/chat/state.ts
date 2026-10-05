@@ -29,19 +29,18 @@ export type FeedItem =
       tool: string
       summary: string
       /**
-       * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `queued` when it is waiting for the connection
-       * to come back (sent first on reconnect); `approved`/`denied` from
-       * `approval.resolved`, the server's confirmation.
+       * `pending` until the user decides; `sent` while the decision is on its way
+       * (`POST /api/v1/ai/pending-input/{id}`, #815), back to `pending` if it was
+       * refused; `approved`/`denied` from `approval.resolved`, the server's confirmation.
        */
-      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'sent' | 'approved' | 'denied'
       by?: Owner
     }
   /**
    * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
-   * `sent` once the answer left the panel; `queued` when it waits for the connection to
-   * come back (sent first on reconnect); `answered` or `cancelled` (its turn ended
-   * first, `reason`) from `question.resolved`, the server's confirmation.
+   * `sent` while the answer is on its way, back to `pending` if it was refused;
+   * `answered` or `cancelled` (its turn ended first, `reason`) from
+   * `question.resolved`, the server's confirmation.
    */
   | {
       kind: 'question'
@@ -51,7 +50,7 @@ export type FeedItem =
       questions: Question[]
       /** #815 — set when this is an attention request rather than a question. */
       attention?: Attention
-      state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'
+      state: 'pending' | 'sent' | 'answered' | 'cancelled'
       answers?: string[]
       by?: Owner
       reason?: string
@@ -88,14 +87,6 @@ export interface SessionState {
    * panel shows one message and its actions instead of the agent's two errors.
    */
   budgetSpent?: boolean
-  /**
-   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
-   * Their decision goes out right after the attach, so the replayed card shows `sent`,
-   * not live buttons, until `approval.resolved`.
-   */
-  queuedDecisions?: string[]
-  /** #940 — the same for answers to questions: the replayed card shows `sent`. */
-  queuedAnswers?: string[]
 }
 
 export interface ChatState {
@@ -118,9 +109,11 @@ export type ChatAction =
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
-  /** #940 — the user's answer to a question left the panel (or waits for the reconnect). */
-  | { type: 'answered'; sessionId: string; questionId: string; queued?: boolean }
+  | { type: 'decided'; sessionId: string; approvalId: string }
+  /** #940 — the user's answer to a question left the panel. */
+  | { type: 'answered'; sessionId: string; questionId: string }
+  /** #815 — the respond route refused a decision or an answer: its card is live again. */
+  | { type: 'respond-failed'; sessionId: string; id: string; message: string }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -287,7 +280,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
+          state: 'pending',
         }),
       )
 
@@ -308,7 +301,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           tool: event.tool,
           questions: event.questions,
           ...(event.attention ? { attention: event.attention } : {}),
-          state: s.queuedAnswers?.includes(event.id) ? 'sent' : 'pending',
+          state: 'pending',
         }),
       )
 
@@ -438,8 +431,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             items: [],
             // Replayed from the log; the numbers stay for a log that has none.
             budgetSpent: false,
-            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
-            queuedAnswers: s.items.flatMap((i) => (i.kind === 'question' && i.state === 'queued' ? [i.id] : [])),
           }))
         : next
     }
@@ -451,17 +442,24 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'answered':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'question' && i.id === action.questionId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'question' && i.id === action.questionId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
+        ),
+      )
+    case 'respond-failed':
+      return patchSession(state, action.sessionId, (s) =>
+        push(
+          mapItems(s, (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
+              ? { ...i, state: 'pending' }
+              : i,
+          ),
+          { kind: 'error', id: `error-${s.items.length}`, message: action.message },
         ),
       )
   }
