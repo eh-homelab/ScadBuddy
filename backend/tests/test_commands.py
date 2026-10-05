@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
@@ -23,6 +25,7 @@ from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
+    TemporalUnreachableError,
     start_command,
 )
 from tests.support.temporal import current_address, temporal_client
@@ -178,6 +181,36 @@ async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue:
     assert time.monotonic() - began < 10
 
 
+async def test_an_unavailable_response_may_follow_a_start(queue: str) -> None:
+    """A connected client's `UNAVAILABLE` is a `tonic::Status` (temporalio 1.33.0,
+    `temporalio/bridge/src/client.rs` `rpc_resp`), the same for a refused reconnect and
+    a stream reset after the start was persisted, and sdk-core retries it
+    (`crates/client/src/retry.rs` `RETRYABLE_ERROR_CODES`): Temporal is unavailable, but
+    a start may exist (review #1316 (9) 1a)."""
+
+    class Refusing:
+        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+            raise RPCError("connection reset", RPCStatusCode.UNAVAILABLE, b"")
+
+    with pytest.raises(TemporalUnavailableError) as raised:
+        await echo(cast(Client, Refusing()), queue, "echo-unavailable")
+    assert not isinstance(raised.value, TemporalUnreachableError)
+
+
+async def test_only_a_failed_connect_says_nothing_started(queue: str) -> None:
+    """A lazy client's first connect runs before any request is written
+    (`_BridgeServiceClient._rpc_call` in temporalio 1.33.0's `service.py`), and fails as
+    the bridge's `Failed client connect` (`bridge/src/client.rs` `connect_client`): the
+    one failure that proves nothing started (review #1316 (9) 1a)."""
+
+    class NeverConnects:
+        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Failed client connect: connection refused")
+
+    with pytest.raises(TemporalUnreachableError):
+        await echo(cast(Client, NeverConnects()), queue, "echo-never-connects")
+
+
 class Proxy:
     """A TCP proxy to Temporal that can be cut, as a frontend going down would be."""
 
@@ -216,15 +249,17 @@ class Proxy:
 async def test_temporal_lost_after_connecting_is_unavailable_not_still_accepting(
     client: Client, queue: str
 ) -> None:
-    """Once connected, an outage surfaces as the Update's RPC timeout: nothing started,
-    so the route must say Temporal is unavailable (#1052 review)."""
+    """Once connected, an outage surfaces as the Update's RPC timeout: the route must say
+    Temporal is unavailable (#1052 review). The connection had carried requests, so it
+    is not the connect failure that proves nothing started (review #1316 (9) 1a)."""
     proxy = Proxy(current_address(client))
     via = await Client.connect(await proxy.start(), data_converter=pydantic_data_converter)
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
         await echo(via, queue, f"echo-{uuid.uuid4().hex}", EchoInput(finish_at_once=True))
         await proxy.cut()
-        with pytest.raises(TemporalUnavailableError):
+        with pytest.raises(TemporalUnavailableError) as raised:
             await echo(via, queue, f"echo-{uuid.uuid4().hex}", deadline=timedelta(seconds=4))
+    assert not isinstance(raised.value, TemporalUnreachableError)
 
 
 async def test_an_update_slower_than_the_default_deadline_is_still_accepting(

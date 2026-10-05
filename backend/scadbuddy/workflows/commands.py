@@ -45,8 +45,14 @@ class CommandStillAcceptingError(Exception):
 
 
 class TemporalUnavailableError(Exception):
-    """Temporal did not answer at all within the deadline (its frontend is down or
-    unreachable): nothing was started."""
+    """Temporal did not answer within the deadline, or answered ``UNAVAILABLE`` (its
+    frontend is down or unreachable). A request may have reached it before it went, so
+    a start may exist (review #1316 (9) 1a)."""
+
+
+class TemporalUnreachableError(TemporalUnavailableError):
+    """The lazy client's first connect failed: no request was written, so nothing was
+    started."""
 
 
 #: The failure Temporal gives an Update whose execution completed before it answered.
@@ -120,14 +126,16 @@ async def start_command[T](
     except TimeoutError as error:
         raise await _late(client, id) from error
     except RPCError as error:
-        # The frontend refused the connection outright.
+        # A connected client's `UNAVAILABLE` cannot tell a refused reconnect from a
+        # stream reset after the start was persisted (temporalio 1.33.0,
+        # `bridge/src/client.rs` `rpc_resp`), and sdk-core retries it.
         if error.status == RPCStatusCode.UNAVAILABLE:
             raise TemporalUnavailableError(id) from error
         raise
     except RuntimeError as error:
         # How a lazy client's first connect fails (temporalio 1.33).
         if str(error).startswith("Failed client connect"):
-            raise TemporalUnavailableError(id) from error
+            raise TemporalUnreachableError(id) from error
         raise
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
         # The SDK reports the outer bound's cancellation as this error too.
