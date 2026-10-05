@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
+from starlette._utils import get_route_path
 from starlette.exceptions import HTTPException
 from starlette.responses import FileResponse, PlainTextResponse, Response
-from starlette.routing import Match, Route
+from starlette.routing import Match
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
@@ -14,6 +15,8 @@ ASSETS_DIR = "assets"
 #: Every API route lives under ``/api/``. One that reached this mount matched no route,
 #: so it is a 404 problem document, never the SPA's HTML or a 405 (#365).
 API_DIR = "api"
+#: The methods a wrong-method request's ``Allow`` is drawn from.
+METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
 #: Vite content-hashes every file under ``assets/``, so a URL there never changes meaning.
 #: Nothing else may land there: ``frontend/public/assets/<name>`` would be copied to the
@@ -59,29 +62,35 @@ def _missing_asset() -> Response:
     return PlainTextResponse("Not Found", 404)
 
 
-def _refuse_api(path: str, scope: Scope) -> NoReturn:
+def _refuse_api(path: str, scope: Scope, spa: StaticFiles) -> NoReturn:
     """An ``/api/`` request no route took. The mount at ``/`` matches every path, so the
     router hands it a request for a real route with the wrong method too: that one is a
     405 naming the methods the route takes. ``path`` is normalised (no trailing slash, no
-    ``..``): a request that names a real route only once normalised is a 404 that names
-    that route, not a redirect (nothing here redirects, tests/api/test_no_open_redirect.py)
-    and not a claim that the route is missing. Everything else is a plain 404."""
+    ``..``), so a request whose own path is not a route but names one once normalised is
+    a 404 that names the route it meant, whatever the method: never a redirect (nothing
+    here redirects, tests/api/test_no_open_redirect.py), never a claim that the route is
+    missing, and never a 405 whose ``Allow`` would 404 on that same URL. Everything else
+    is a plain 404."""
     probe: Scope = {"type": "http", "path": f"/{path}", "root_path": "", "method": scope["method"]}
+    matched = False
     allowed: set[str] = set()
+    # Any route, not just `Route`: FastAPI keeps an included router as one
+    # `_IncludedRouter`, which says PARTIAL but not which methods, so each is asked.
     for route in scope["app"].routes:
-        if not isinstance(route, Route):
-            continue
+        if getattr(route, "app", None) is spa:
+            continue  # this mount itself, which matches every path
         match = route.matches(probe)[0]
-        if match is Match.FULL:
-            raise HTTPException(
-                404,
-                f"no API route matches {scope['method']} {scope['path']}; did you mean /{path}?",
-            )
+        if match is not Match.NONE:
+            matched = True
         if match is Match.PARTIAL:
-            allowed |= route.methods or set()
-    if allowed:
+            allowed |= {
+                m for m in METHODS if route.matches({**probe, "method": m})[0] is Match.FULL
+            }
+    sent = get_route_path(scope)
+    if allowed and sent == f"/{path}":
         raise HTTPException(405, headers={"Allow": ", ".join(sorted(allowed))})
-    raise HTTPException(404, f"no API route matches {scope['method']} {scope['path']}")
+    hint = f"; did you mean /{path}?" if matched else ""
+    raise HTTPException(404, f"no API route matches {scope['method']} {sent}{hint}")
 
 
 class SPAStaticFiles(StaticFiles):
@@ -97,7 +106,7 @@ class SPAStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         if _is_api(path):
-            _refuse_api(path, scope)
+            _refuse_api(path, scope, self)
         response = await self._response_or_fallback(path, scope)
         ok = response.status_code in (200, 304)
         response.headers["Cache-Control"] = IMMUTABLE if ok and _is_asset(path) else REVALIDATE

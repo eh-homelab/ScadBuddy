@@ -158,6 +158,12 @@ def test_a_real_api_route_with_the_wrong_method_is_still_a_405(tmp_path: Path) -
     assert slash.json()["detail"] == (
         "no API route matches GET /api/v1/things/a/; did you mean /api/v1/things/a?"
     )
+    # Whatever the method: a 405 here would advertise a GET that 404s on this same URL.
+    wrong = client.post("/api/v1/things/a/")
+    assert wrong.status_code == 404
+    assert wrong.json()["detail"] == (
+        "no API route matches POST /api/v1/things/a/; did you mean /api/v1/things/a?"
+    )
     missing = client.get("/api/v1/nope/")
     assert missing.status_code == 404
     assert missing.json()["detail"] == "no API route matches GET /api/v1/nope/"
