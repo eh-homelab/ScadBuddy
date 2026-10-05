@@ -111,11 +111,11 @@ LOST_UNQUEUED_DETAIL = (
     "This print's run ended without recording an outcome, before it queued anything. "
     "Nothing was queued; print again to retry."
 )
-#: A run whose execution closed, or is gone, while its row still said ``running``: one
-#: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
 #: A pre-#1052 pod beat its run's ``heartbeat_at`` and expired it past this: its
 #: ``LOST_AFTER``.
 PRE_1052_LOST_AFTER = timedelta(seconds=60)
+#: A run whose execution closed, or is gone, while its row still said ``running``: one
+#: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
 LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
 LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
 
