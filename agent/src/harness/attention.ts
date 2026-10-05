@@ -86,8 +86,12 @@ export type AttentionSpec = {
   onTimeout: OnTimeout
   /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
   timeoutS: number
-  /** Called once the request is recorded and shown (questions/service.ts `gate`). */
-  onParked?: () => Promise<void>
+  /**
+   * Called once the request is recorded and shown (questions/service.ts `gate`).
+   * `signal` aborts once the wait stops waiting for it (its timer, an abort): a
+   * check still running then must not act, or it could end a later wait's request.
+   */
+  onParked?: (signal: AbortSignal) => Promise<void>
 }
 
 /** The request's input, or why it is refused (and nothing parks). */

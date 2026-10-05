@@ -248,8 +248,10 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           ...attentionSpec(parsed.input),
           // The tab may have come back between the failed call and the row: the
           // hub saw nothing to resolve then, so look once now that there is one.
-          onParked: async () => {
-            if (await isBack()) await reconnected()
+          // A check that outlives the wait does nothing: reconnected() ends every
+          // open tab wait of the session, which by then may be a later one.
+          onParked: async (parked) => {
+            if ((await isBack()) && !parked.aborted) await reconnected()
           },
         },
       })

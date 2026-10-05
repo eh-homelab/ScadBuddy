@@ -604,8 +604,12 @@ export class QuestionService {
       // A failed check (the hub, the database) must not leave the row with
       // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
       // A check that hangs (a pool or lock wait) is raced against the timer and
-      // the abort, which are armed first, so it cannot stall the call (#1353).
-      if (attention?.onParked) await settledOrDone(attention.onParked(), signal, deadline)
+      // the abort, which are armed first, so it cannot stall the call (#1352).
+      if (attention?.onParked) {
+        const parked = new AbortController()
+        await settledOrDone(attention.onParked(parked.signal), signal, deadline)
+        parked.abort()
+      }
       const waited = await this.waitFor(id, signal, deadline)
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {

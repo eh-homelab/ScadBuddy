@@ -159,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
-  // #1353: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
+  // #1352: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
   it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
     const hangs = () => new Promise<void>(() => undefined)
     const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3, onParked: hangs }) }), approvalPollMs: 20 })
@@ -518,6 +518,33 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await m.questions.reconnected(session.id)).toBe(1)
     await turn.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }])
+  })
+
+  // #1352: a reconnect check that outlives its wait must not end the wait opened after it.
+  it("a reconnect check that returns after its wait ended does not end a later wait's request", async () => {
+    let late: (back: boolean) => void = () => undefined
+    const first = new AbortController()
+    const results: TabWait[] = []
+    const started: { m?: SessionManager; sessionId?: string } = {}
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (late = resolve)) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      first.abort()
+      results.push(await a)
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(0)
+      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      late(true)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`).toEqual([{ tool_use_id: 'toolu_b' }])
+      await expect.poll(() => started.m).toBeDefined()
+      await started.m!.questions.reconnected(started.sessionId!)
+      results.push(await b)
+    })
+    started.m = m
+    started.sessionId = session.id
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
   })
 
   it('a session another principal owns gets no wait: its browser_* calls fail at once', async () => {
