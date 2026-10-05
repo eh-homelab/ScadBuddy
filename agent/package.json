@@ -23,7 +23,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.283",
     "@anthropic-ai/sdk": "^0.128.0",
-    "@hono/node-server": "^2.1.1",
+    "@hono/node-server": "^2.1.3",
     "@modelcontextprotocol/sdk": "^1.30.1",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/core": "2.11.0",
@@ -34,7 +34,7 @@
     "@opentelemetry/sdk-node": "0.222.0",
     "@opentelemetry/sdk-trace": "2.11.0",
     "@playwright/mcp": "0.0.82",
-    "hono": "^4.13.9",
+    "hono": "^4.13.12",
     "jose": "^6.2.12",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
@@ -45,14 +45,14 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opentelemetry/context-async-hooks": "2.11.0",
-    "@types/node": "^24.19.0",
+    "@types/node": "^24.19.1",
     "@types/ws": "^8.18.1",
     "eslint": "^10.11.0",
-    "globals": "^17.12.0",
+    "globals": "^17.13.0",
     "msw": "^2.15.0",
     "openapi-typescript": "^7.13.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.1",
+    "typescript-eslint": "^8.71.0",
     "vitest": "^5.0.2"
   }
 }
