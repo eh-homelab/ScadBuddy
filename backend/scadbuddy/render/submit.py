@@ -22,9 +22,14 @@ from typing import Any
 
 from fastapi import status
 from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
-from temporalio.client import Client, WorkflowUpdateRPCTimeoutOrCancelledError
+from temporalio.client import (
+    Client,
+    WorkflowUpdateFailedError,
+    WorkflowUpdateRPCTimeoutOrCancelledError,
+)
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
@@ -68,7 +73,13 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     start_command,
 )
-from scadbuddy.workflows.models import RELEASE_UPDATE, ReleaseAnswer, RenderAnswer, RenderStart
+from scadbuddy.workflows.models import (
+    CLOSING,
+    RELEASE_UPDATE,
+    ReleaseAnswer,
+    RenderAnswer,
+    RenderStart,
+)
 from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 
@@ -264,7 +275,9 @@ class RenderService:
 
     async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:
         """The `accepted` answer of ``render-<render_key>``, started or joined. An
-        execution closing on its last release is waited out once and started again."""
+        execution closing (its last claim released, or its render raised) is waited out
+        once and started again; still closing, the request is still accepting, and the
+        client sends it again with the same key."""
         workflow_id = workflow_id_for_key(start.render_key)
         for attempt in range(2):
             try:
@@ -284,6 +297,13 @@ class RenderService:
                 # An Update that reached the execution as it completed is aborted. A
                 # missing namespace is NOT_FOUND too: configuration, raised at once.
                 if not _execution_gone(error) or attempt:
+                    raise
+                answer = RenderAnswer(closing=True)
+            except WorkflowUpdateFailedError as error:
+                # Rejected by a closing run, so its id is not in that run's history:
+                # sent again after the close, it starts the next run (review #1066 (7) 1).
+                cause = error.cause
+                if not (isinstance(cause, ApplicationError) and cause.type == CLOSING):
                     raise
                 answer = RenderAnswer(closing=True)
             if not answer.closing:

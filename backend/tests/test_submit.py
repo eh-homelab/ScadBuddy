@@ -369,25 +369,57 @@ async def test_a_refused_submit_supersedes_nothing(
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 1
 
 
-async def test_a_submit_after_the_last_release_waits_for_close_and_starts_again(
-    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+async def test_a_request_answered_closing_and_resent_after_the_close_gets_a_fresh_job(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job = Job(id=uuid.uuid4().hex, slug=SLUG, created_at=now())
-    answers = [RenderAnswer(closing=True), RenderAnswer(job=job)]
-    calls: list[str] = []
-
-    async def answering(*_: object, **kwargs: Any) -> RenderAnswer:
-        calls.append(str(kwargs["id"]))
-        return answers.pop(0)
-
-    monkeypatch.setattr(submit_module, "start_command", answering)
+    """A slider dragged from A to B and back: A's request reaches A's run while B's
+    supersede is releasing it, and is answered still-accepting. Sent again with its key
+    once the run has closed, it starts a fresh render of A, rather than being answered
+    from the closed run (review #1066 (7) 1)."""
+    monkeypatch.setattr(submit_module, "CLOSING_WAIT", 0.5)
+    a = {"width": _w()}
     async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        submitted = await service.submit(SLUG, {"width": _w()})
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate, projecting = asyncio.Event(), asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=projecting)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, a, request_id=uuid.uuid4().hex)
+            await _until(acts, "render_main")
+            superseding = asyncio.create_task(
+                service.submit(
+                    SLUG, {"width": _w()}, supersedes=first.id, request_id=uuid.uuid4().hex
+                )
+            )
+            # The release waits for the cancelled job to project (held here).
+            async with asyncio.timeout(30):
+                while not [
+                    p for p in acts.projections if p.state == "cancelled" and p.job_id == first.id
+                ]:
+                    await asyncio.sleep(0.01)
+            request = uuid.uuid4().hex
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, a, request_id=request)
+            projecting.set()
+            second = await asyncio.wait_for(superseding, timeout=30)
+            assert first.workflow_id is not None
+            await asyncio.wait_for(
+                client.get_workflow_handle(
+                    first.workflow_id, run_id=first.workflow_run_id
+                ).result(),
+                timeout=30,
+            )
+            again = await service.submit(SLUG, a, request_id=request)
+            gate.set()
+            await _settled(projection, again.id)
+            await _settled(projection, second.id)
         await service.aclose()
 
-    assert submitted.id == job.id
-    assert len(calls) == 2 and calls[0] == calls[1]
+    assert again.id != first.id and again.workflow_run_id != first.workflow_run_id
+    assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
 
 
 async def test_an_update_aborted_by_a_closing_execution_starts_again(

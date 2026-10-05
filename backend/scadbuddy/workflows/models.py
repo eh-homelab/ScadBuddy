@@ -132,6 +132,10 @@ RELEASE_UPDATE = "release"
 ReleaseReason = Literal["superseded", "cancelled"]
 #: `render_accept`'s refusal: `render_queue_max` jobs already wait.
 QUEUE_FULL = "QueueFull"
+#: `accepted`'s rejection by a run that is closing (its last claim released, or its
+#: render raised). Rejected, the Update is not in the run's history, so its id is free
+#: for the run that starts next (review #1066 (7) 1).
+CLOSING = "RenderClosing"
 
 
 class RenderStart(BaseModel):
@@ -167,7 +171,9 @@ class RenderAnswer(BaseModel):
     coalesced: bool = False
     #: How many jobs wait, when the queue was full and nothing was started.
     queue_full: int | None = None
-    #: The execution's last claim was released: it is closing, and starts again.
+    #: The execution is closing, and starts again. Normally a rejection (`CLOSING`);
+    #: an answer only for an Update that waited for the run's first step while a
+    #: release sent by hand took its last claim.
     closing: bool = False
 
 

@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
         CLAIMS_ACTIVITY,
+        CLOSING,
         QUEUE_FULL,
         RELEASE_UPDATE,
         AcceptRender,
@@ -283,16 +284,23 @@ class TemplatePipeline:
     def piece_finished(self, outcome: PieceOutcome) -> None:
         self._outcome = outcome
 
+    def _started(self) -> bool:
+        return self._work is not None or self._queue_full is not None
+
+    def _closing(self) -> bool:
+        return self._released is not None or self._raised()
+
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> RenderAnswer:
-        await workflow.wait_condition(
-            lambda: self._work is not None or self._queue_full is not None
-        )
+        # Once started, a handler claims or releases before it first yields: an
+        # `accepted` and a `release` in one activation then see each other's effect
+        # (the validator runs in the handler's task, temporalio 1.33).
+        if not self._started():
+            await workflow.wait_condition(self._started)
         if self._queue_full is not None:
             return RenderAnswer(queue_full=self._queue_full)
-        if self._released is not None or self._raised():
-            # Closing: the request waits for the close and starts a fresh run, rather
-            # than joining a job that has failed (review #1066 (6) 1).
+        if self._closing():
+            # Only after the wait above: a release sent by hand took the last claim.
             return RenderAnswer(closing=True)
         assert self._job is not None
         info = workflow.current_update_info()
@@ -310,11 +318,20 @@ class TemplatePipeline:
             job=self._job.model_copy(update={"claims": self._claims}), coalesced=coalesced
         )
 
+    @accepted.validator
+    def _accepting(self) -> None:
+        """A closing run rejects the request rather than answering it. A rejected
+        Update is never written to history ("the Workflow will have no indication that
+        it was ever requested", docs.temporal.io/handling-messages), so the same id,
+        re-sent once the run has closed, starts a fresh run instead of being answered
+        from this one (review #1066 (7) 1)."""
+        if self._closing():
+            raise ApplicationError("the render is closing", type=CLOSING, non_retryable=True)
+
     @workflow.update(name=RELEASE_UPDATE)
     async def release(self, reason: ReleaseReason) -> ReleaseAnswer:
-        await workflow.wait_condition(
-            lambda: self._work is not None or self._queue_full is not None
-        )
+        if not self._started():
+            await workflow.wait_condition(self._started)
         if self._work is None or self._released is not None or self._work.done():
             # Nothing to cancel: never started, already released, or finished while
             # the run waits for its handlers (review #1066 2.3).
