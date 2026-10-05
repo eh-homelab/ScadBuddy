@@ -7,20 +7,24 @@ this test is what says so.
 
 These histories are the phase-1 baseline (#1052), recorded before any ``PrintRun`` ran in
 the wild: ``succeeded``, ``refused``, ``enqueue_failed``, ``cancelled_during_print`` (a
-cancel while ``print_plan`` runs: the run is recorded cancelled) and
+cancel while ``print_plan`` runs: the run is recorded failed) and
 ``cancelled_during_insert`` (a cancel while ``print_insert`` runs: the row is recorded
-cancelled). They were re-recorded once, when the pre-merge patches came out (#1236), and
-``cancelled_during_print`` once more, when a cancel stopped being recorded as an
-unexpected failure (review #1061 (3) 1). Never re-record them again: a later change to
-the workflow's commands, including a new activity, goes behind ``workflow.patched`` and
-adds a history recorded on the changed code beside them, so both replay.
+cancelled). They were re-recorded once, when the pre-merge patches came out (#1236).
+Never re-record them again: a later change to the workflow's commands, including a new
+activity, goes behind ``workflow.patched`` and adds a history recorded on the changed
+code beside them, so both replay. A change to an activity's input alone is not a change
+to the commands: ``cancelled_during_print`` still carries the 500 that #1061's
+``print_fail`` was given, and replays.
 
-``CANCEL_PATCH`` (review #1316 1, 2) is the first: ``cancelled_during_print_1061`` and
-``cancelled_during_finish_1061`` were written by the workflow as #1061 merged it (a
-cancel while ``print_finish`` runs cancels it, records the run failed and holds the
-repeat window); ``cancelled_once_queued`` (the same cancel waits for the run, which
-succeeds and closes) and ``cancelled_while_queueing`` (a cancel while the first of two
-plates is recorded: may be queued, and no window) by the patched one.
+``CANCEL_PATCH`` (review #1316) is the first patch. Recorded by the workflow as #1061
+merged it: ``cancelled_during_finish_1061`` (a cancel while ``print_finish`` runs
+cancels it, records the run failed and holds the repeat window) and
+``cancelled_during_enqueue_1061`` (the same while the only plate's ``print_enqueue``
+runs). Recorded by the patched one: ``cancelled_once_queued`` (the cancel during
+``print_finish`` waits for the run, which succeeds and closes),
+``cancelled_during_last_enqueue`` (the same during the last ``print_enqueue``) and
+``cancelled_while_queueing`` (a cancel while the first of two plates is recorded: may be
+queued, and no window).
 """
 
 from __future__ import annotations
@@ -45,9 +49,10 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "enqueue_failed",
         "cancelled_during_print",
         "cancelled_during_insert",
-        "cancelled_during_print_1061",
         "cancelled_during_finish_1061",
+        "cancelled_during_enqueue_1061",
         "cancelled_once_queued",
+        "cancelled_during_last_enqueue",
         "cancelled_while_queueing",
     ],
 )

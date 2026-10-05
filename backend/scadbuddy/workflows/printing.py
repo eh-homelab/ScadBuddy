@@ -131,9 +131,10 @@ def _problem(error: BaseException) -> PrintRunError:
     return PrintRunError(status=500, title="Internal Server Error", detail=UNEXPECTED_DETAIL)
 
 
-#: ``workflow.patched`` id for review #1316's cancel handling: once every plate is
-#: queued a cancel waits for the last activities, and a cancel the run absorbed ends its
-#: repeat window. A history from before it (#1061) replays with neither.
+#: ``workflow.patched`` id for review #1316's cancel handling: from the last plate's
+#: ``print_enqueue`` on, a cancel waits for the last activities, and a cancel the run
+#: absorbed ends its repeat window. A history from before it (#1061) replays with
+#: neither.
 CANCEL_PATCH = "print-cancel-ends-window"
 
 
@@ -226,8 +227,10 @@ class PrintRunWorkflow:
             self.cancel_absorbed and workflow.patched(CANCEL_PATCH)
         ):
             # Repeats of a body-only key inside the window get this row (§5.2). A cancel
-            # ends the window early but the execution still completes, so the failed-only
-            # reuse policy keeps a re-sent request off a second print (review #1061).
+            # ends the window early; a re-sent request still does not print twice: for a
+            # body-only key (`ALLOW_DUPLICATE`) `accept_run`'s `runs.store.find` answers
+            # this row inside its repeat window, and for a `request_id` key the
+            # failed-only reuse policy refuses a second start (review #1316 (2) 2).
             with suppress(asyncio.CancelledError):
                 await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
@@ -305,7 +308,7 @@ class PrintRunWorkflow:
                     start_to_close_timeout=SHORT,
                     retry_policy=RECORD_RETRY,
                 )
-            queued_plate = await workflow.execute_activity(
+            enqueue = workflow.start_activity(
                 "print_enqueue",
                 EnqueueInput(
                     planned=planned,
@@ -317,6 +320,9 @@ class PrintRunWorkflow:
                 start_to_close_timeout=SHORT,
                 retry_policy=ONCE,
             )
+            # A cancel cannot take back a POST /queue/ in flight: on the last plate it
+            # waits for it, and the run goes on to succeed (review #1316 (2) 1).
+            queued_plate = await (self._shielded(enqueue) if index == last else enqueue)
             outcome = QueueOutcome(
                 slice_job_id=started.job_id,
                 sliced_library_file_id=sliced,

@@ -175,6 +175,7 @@ class Fake:
     @activity.defn(name="print_enqueue")
     async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
         self.calls.append(f"enqueue:{input.plate_id}")
+        await self._gate("enqueue")
         if self.enqueue_error is not None:
             raise self.enqueue_error
         return QueuedPlate(item_id=50 + input.plate_id)
@@ -738,7 +739,7 @@ async def cancel_during(
     arg = run_input(window=window)
     try:
         await start(client, worker, arg)
-        while activity_name not in fake.calls:
+        while not any(call.split(":")[0] == activity_name for call in fake.calls):
             await asyncio.sleep(0.05)
         handle = client.get_workflow_handle(f"print-{arg.key}")
         await handle.cancel()
@@ -755,13 +756,14 @@ async def cancel_during(
         gate.set()
 
 
-@pytest.mark.parametrize("activity_name", ["record", "finish", "succeed"])
+@pytest.mark.parametrize("activity_name", ["enqueue", "record", "finish", "succeed"])
 async def test_a_cancel_once_every_plate_is_queued_still_ends_succeeded(
     client: Client, worker: str, fake: Fake, activity_name: str
 ) -> None:
     """Review #1061 (3) 1: from the last ``print_enqueue`` on, the print is queued, so a
-    cancel must not record it failed; the last ``print_record``, ``print_finish`` and
-    ``print_succeed`` are shielded, as the insert is (review #1316 1). The cancel also
+    cancel must not record it failed; the last ``print_enqueue`` (whose ``POST /queue/``
+    a cancel cannot take back, review #1316 (2) 1) and ``print_record``, ``print_finish``
+    and ``print_succeed`` are shielded, as the insert is (review #1316 1). The cancel also
     ends the repeat window, rather than being swallowed (review #1316 2)."""
     finished = await cancel_during(client, worker, fake, activity_name, window=600)
     assert finished.status == "succeeded"
