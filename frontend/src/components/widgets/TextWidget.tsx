@@ -27,8 +27,9 @@ export function TextWidget({
         type="text"
         value={value}
         // Not the maxLength attribute: it counts UTF-16 units, so an emoji takes two (#920).
-        // An edit past the limit is refused whole, as maxlength refuses it, rather than
-        // trimmed from the end, which would drop the name's last letters wherever the caret is.
+        // An edit past the limit is refused whole. That differs from maxlength, which
+        // truncates a paste to fit, but trimming the result from the end would drop the
+        // name's last letters wherever the caret is.
         onChange={(event) => {
           const next = event.target.value
           if (maxLength && textLength(next) > maxLength && textLength(next) > length) return

@@ -125,7 +125,9 @@ module spine_2d() {
         // otherwise leave the tab on its own island.
         hull() {
             glyphs_2d();
-            translate([0, -outline / 2]) square([0.01, outline]);
+            // Not for an empty name: there is no word to join, and the square alone
+            // would leave a stray lump of base.
+            if (name != "") translate([0, -outline / 2]) square([0.01, outline]);
         }
         square([2 * bed_x, outline], center = true);
     }
