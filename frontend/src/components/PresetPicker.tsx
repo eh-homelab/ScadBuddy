@@ -3,7 +3,7 @@ import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
-import { sameValues, type ParamValues } from '../lib/params'
+import { defaultValues, sameValues, type ParamValues } from '../lib/params'
 import {
   applyPreset,
   parsePresetTags,
@@ -75,10 +75,29 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  /** #359 — the preset a pick would apply over edits no preset holds, while it asks. */
+  const [pending, setPending] = useState<ParamPreset | null>(null)
 
   const selected = selection?.preset
   const modified = selection !== null && !sameValues(values, selection.applied)
   const editable = selected?.origin === 'mine'
+  // Edits a pick would lose: values that are neither the selected preset's nor, with
+  // none selected, the defaults.
+  const unsaved = !sameValues(values, selection ? selection.applied : defaultValues(schema))
+
+  /**
+   * #359 — a pick replaces every value on screen, so with unsaved edits it asks first.
+   * The select stays on the current preset meanwhile, so arrowing through the list
+   * stops at the first preset instead of applying each one in turn.
+   */
+  function choose(id: string) {
+    const preset = presets.find((candidate) => candidate.id === id)
+    if (preset && unsaved) {
+      setPending(preset)
+      return
+    }
+    pick(id)
+  }
 
   function pick(id: string) {
     setError(null)
@@ -282,7 +301,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
         <select
           id="preset-select"
           value={selected?.id ?? ''}
-          onChange={(event) => pick(event.target.value)}
+          onChange={(event) => choose(event.target.value)}
           disabled={presetsState.loading && !presetsState.data}
           className="sb-field min-w-0 flex-1 cursor-pointer"
         >
@@ -469,6 +488,34 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
             {nameError}
           </p>
         )}
+      </Dialog>
+
+      <Dialog
+        open={pending !== null}
+        title={`Apply preset ${pending?.name ?? ''}?`}
+        description="The values on screen have changes no preset holds."
+        onClose={() => setPending(null)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (pending) pick(pending.id)
+                setPending(null)
+              }}
+              {...USER_ONLY}
+            >
+              Replace my changes
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-muted">
+          Applying {pending?.name} replaces them. To keep them, cancel and save them as a preset first.
+        </p>
       </Dialog>
 
       <Dialog

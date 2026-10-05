@@ -82,6 +82,47 @@ describe('PresetPicker', () => {
     }, { timeout: 4000 })
   })
 
+  it('asks before a pick replaces edits no preset holds (#359)', async () => {
+    const { user } = render()
+    const select = await picker()
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Emmalina')
+
+    await user.selectOptions(select, 'Mum')
+    const dialog = screen.getByRole('dialog', { name: 'Apply preset Mum?' })
+    // Nothing is replaced while it asks, and the picker still shows no preset.
+    expect(name).toHaveValue('Emmalina')
+    expect(select).toHaveValue('')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(name).toHaveValue('Emmalina')
+
+    await user.selectOptions(select, 'Mum')
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).getByRole('button', {
+        name: 'Replace my changes',
+      }),
+    )
+    expect(name).toHaveValue('Mum')
+    expect(select).toHaveDisplayValue('Mum')
+  })
+
+  it('asks before leaving a preset that was changed since it was picked (#359)', async () => {
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Tiny')
+    // Moving between unchanged presets loses nothing, so it does not ask.
+    await user.selectOptions(select, 'Mum')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+    await user.selectOptions(select, 'Tiny')
+    expect(screen.getByRole('dialog', { name: 'Apply preset Tiny?' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mummy')
+  })
+
   it('says which values it skipped because the template dropped them', async () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Old engraving')
@@ -421,7 +462,9 @@ describe('PresetPicker', () => {
     await savePresetNamed(user, 'Lid')
     await waitFor(() => expect(saved).toEqual({ name: 'Lid', inputs: { params: {}, tab: 'lid' }, description: '', tags: [] }))
     const select = await picker()
-    await user.selectOptions(select, 'Tiny')
+    // Away and back. Not by way of another preset: `values` here never follows a pick,
+    // so the values on screen would read as edits to it, and the pick would ask (#359).
+    await user.selectOptions(select, '')
     await user.selectOptions(select, 'Lid')
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
   })
