@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
+import { clientMessage, parseServerEvent, type ClientMessage, type PageContext, type SessionMode } from './protocol'
 import { TAB_ID } from '../tabId'
 import { messageTraceparent } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
@@ -13,7 +13,7 @@ const QUEUED_TAKE_OVER = 'The assistant is unreachable; your take-over will be s
 export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
-  send: (text: string, context: PageContext) => void
+  send: (text: string, context: PageContext, mode?: SessionMode) => void
   /** Answers an approval. Nothing outward proceeds until this is called (§8.2). */
   decide: (sessionId: string, approvalId: string, approve: boolean) => void
   /** #940 — answers the agent's question: one answer per question, in order. */
@@ -83,7 +83,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [factory])
 
-  const send = useCallback((text: string, context: PageContext) => {
+  const send = useCallback((text: string, context: PageContext, mode?: SessionMode) => {
     const trimmed = text.trim()
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
@@ -95,6 +95,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         ...(activeId ? { sessionId: activeId } : {}),
         text: trimmed,
         context,
+        // Fixed when a session starts; the agent refuses it on an existing one.
+        ...(!activeId && mode ? { mode } : {}),
         ...(traceparent ? { traceparent } : {}),
       }),
     )

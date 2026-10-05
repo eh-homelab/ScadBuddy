@@ -352,6 +352,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
             origin: 'chat',
             owner: BROWSER_USER,
             status: 'running',
+            ...(msg.mode ? { mode: msg.mode } : {}),
             log: [],
             timers: [],
             turns: 0,
@@ -359,7 +360,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
             budgetUsd,
           }
           sessions.set(s.sessionId, s)
-          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
+          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd, ...(s.mode ? { mode: s.mode } : {}) })
         }
         emit({ type: 'user.turn', sessionId: s.sessionId, turnId: nextId('turn'), text: msg.text, author: BROWSER_USER })
         setStatus(s, 'running')
@@ -460,12 +461,13 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
       deliver({
         v: PROTOCOL_VERSION,
         type: 'sessions.snapshot',
-        sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status }) => ({
+        sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, mode }) => ({
           sessionId,
           title,
           origin,
           owner,
           status,
+          ...(mode ? { mode } : {}),
         })),
       })
     },

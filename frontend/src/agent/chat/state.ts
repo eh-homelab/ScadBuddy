@@ -6,6 +6,7 @@ import type {
   Risk,
   ServerEvent,
   SessionStatus,
+  SessionMode,
   SessionSummary,
   Source,
   VersionLink,
@@ -57,6 +58,8 @@ export type FeedItem =
       reason?: string
     }
   | { kind: 'error'; id: string; message: string }
+  /** A non-fatal note from the agent (a durable message still waiting for its worker); the turn goes on. */
+  | { kind: 'notice'; id: string; message: string }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
   | {
       kind: 'memory'
@@ -76,6 +79,8 @@ export interface SessionState {
   origin: Origin
   owner: Owner
   status: SessionStatus
+  /** #1056 — absent means `classic`. */
+  mode?: SessionMode
   items: FeedItem[]
   result?: { costUsd?: number; turns: number }
   /**
@@ -142,7 +147,7 @@ function blankSession(summary: Omit<SessionSummary, 'sessionId'> & { id: string 
 function upsertSummary(state: ChatState, s: SessionSummary): ChatState {
   const existing = state.sessions[s.sessionId]
   const next: SessionState = existing
-    ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: s.status }
+    ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: s.status, ...(s.mode ? { mode: s.mode } : {}) }
     : blankSession({ id: s.sessionId, ...s })
   return {
     ...state,
@@ -190,6 +195,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
               title: s.title,
               origin: s.origin,
               owner: s.owner,
+              ...(s.mode ? { mode: s.mode } : {}),
               status: s.sessionId === state.activeId ? existing.status : s.status,
             }
           : blankSession({ id: s.sessionId, ...s })
@@ -211,6 +217,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         origin: event.origin,
         owner: event.owner,
         status: 'running',
+        ...(event.mode ? { mode: event.mode } : {}),
       })
       const next =
         event.budgetUsd === undefined
@@ -367,6 +374,12 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         // Shown once, in the panel's words (`budgetSpent`), not as the agent's text.
         return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
       }
+      // A durable message no worker has taken yet: the turn is still queued, not failed.
+      if (event.code === WORKER_PENDING && event.sessionId && state.sessions[event.sessionId]) {
+        return patchSession(state, event.sessionId, (s) =>
+          push(s, { kind: 'notice', id: `notice-${s.items.length}`, message: event.message }),
+        )
+      }
       const message = errorMessage(event.code, event.message)
       // #940: an answer the agent refused resolves nothing, and a question has no
       // expiry, so its card must be answerable again. The agent names the question
@@ -388,6 +401,9 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
  * The two ways the agent says a session's budget ran out: a turn stopped at it (the
  * SDK's result subtype), or a send was refused because of it (agent `manager.ts`).
  */
+/** agent `sessions/manager.ts` DURABLE_WAITING_CODE. */
+const WORKER_PENDING = 'worker_pending'
+
 const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
 
 /** New budget numbers; the session is spent exactly when they say so. */

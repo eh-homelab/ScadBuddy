@@ -305,6 +305,46 @@ describe('chatReducer', () => {
     expect(state.notice).toBe('down')
   })
 
+  it('shows worker_pending as a quiet notice: the turn keeps running and nothing failed', () => {
+    const state = run(
+      [
+        server({ type: 'session.status', sessionId: 's1', status: 'running' }),
+        server({
+          type: 'error',
+          sessionId: 's1',
+          code: 'worker_pending',
+          message: 'the durable worker has not picked up this message yet; it will run when a worker is available',
+        }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.items).toEqual([
+      {
+        kind: 'notice',
+        id: 'notice-0',
+        message: 'the durable worker has not picked up this message yet; it will run when a worker is available',
+      },
+    ])
+    expect(state.sessions.s1?.status).toBe('running')
+    expect(isBusy(state.sessions.s1)).toBe(true)
+    expect(state.notice).toBeNull()
+  })
+
+  it('carries a session mode from its start and from the list', () => {
+    const state = run([
+      server({ type: 'session.started', sessionId: 'd1', origin: 'chat', owner: you, mode: 'durable' }),
+      server({
+        type: 'sessions.snapshot',
+        sessions: [
+          { sessionId: 'd1', title: 'a', origin: 'chat', owner: you, status: 'idle', mode: 'durable' },
+          { sessionId: 'c1', title: 'b', origin: 'chat', owner: you, status: 'idle' },
+        ],
+      }),
+    ])
+    expect(state.sessions.d1?.mode).toBe('durable')
+    expect(state.sessions.c1?.mode).toBeUndefined()
+  })
+
   it('says plainly when the agent turned a message away for its connection limits', () => {
     const state = run(
       [

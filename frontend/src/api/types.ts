@@ -254,6 +254,13 @@ export interface HttpRequestSetting {
   enabled: boolean
 }
 
+/** #1056 — how an assistant session runs; `GET/PUT /api/v1/ai/settings/session-mode` (agent `routes/sessionMode.ts`). */
+export type SessionMode = 'classic' | 'durable'
+
+export interface SessionModeSetting {
+  mode: SessionMode
+}
+
 /**
  * #790 — what a new assistant session may spend in all (USD) and how many turns one
  * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent

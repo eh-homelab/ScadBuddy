@@ -419,6 +419,12 @@ export function FeedItemView({
       return <QuestionCard item={item} onAnswer={(answers) => onAnswer(item.id, answers)} />
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />
+    case 'notice':
+      return (
+        <p role="status" className="text-[12px] text-muted">
+          {item.message}
+        </p>
+      )
     case 'error':
       return (
         <p role="alert" className="text-[12.5px] text-warn">

@@ -21,6 +21,8 @@ import type {
   HttpRequestSetting,
   AiSessionView,
   SessionLimits,
+  SessionModeSetting,
+  SessionMode,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -1354,6 +1356,15 @@ export const api = {
     request<SessionLimits>('/ai/settings/session-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
+    }),
+
+  /** #1056 — the mode a new assistant session gets when its start chooses none. */
+  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+
+  putSessionMode: (mode: SessionMode) =>
+    request<SessionModeSetting>('/ai/settings/session-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
     }),
 
   /** #790 — "Continue in a new chat": a new session with this one's transcript and a fresh budget. */

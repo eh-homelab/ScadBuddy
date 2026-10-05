@@ -138,12 +138,18 @@ export const AttentionSchema = z.object({
 })
 export type Attention = z.infer<typeof AttentionSchema>
 
+/** #1056 — how a session runs: in the agent service (`classic`) or on Temporal (`durable`). */
+export const SessionModeSchema = z.enum(['classic', 'durable'])
+export type SessionMode = z.infer<typeof SessionModeSchema>
+
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
   title: z.string(),
   origin: OriginSchema,
   owner: OwnerSchema,
   status: SessionStatusSchema,
+  /** Absent on sessions from an agent that predates #1056: they are `classic`. */
+  mode: SessionModeSchema.optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 
@@ -186,6 +192,7 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     title: z.string().optional(),
     /** What the session may spend in all (#790); absent on sessions started before it. */
     budgetUsd: z.number().positive().optional(),
+    mode: SessionModeSchema.optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -346,6 +353,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
+    /** #1056 — a new session's mode; the agent refuses it with a `sessionId` (fixed at start). */
+    mode: SessionModeSchema.optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

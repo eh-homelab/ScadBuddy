@@ -46,6 +46,14 @@ export function OriginBadge({ origin }: { origin: Origin }) {
   )
 }
 
+export function DurableBadge() {
+  return (
+    <Pill className="border-accent/50 text-accent" title="Durable: survives restarts; approvals wait as long as needed">
+      Durable
+    </Pill>
+  )
+}
+
 export function OwnerBadge({ owner }: { owner: Owner }) {
   return owner.kind === 'browser' ? (
     <Pill className="border-ok/50 text-ok">you</Pill>

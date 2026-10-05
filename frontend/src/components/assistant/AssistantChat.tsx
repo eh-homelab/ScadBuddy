@@ -3,14 +3,17 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
+import type { SessionMode } from '../../agent/chat/protocol'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
+import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
-import { OriginBadge, OwnerBadge } from './badges'
+import { DurableBadge, OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
+import { ModePicker, readMode, writeMode } from './ModePicker'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -78,6 +81,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       return next
     })
   }
+  // #1056 — the mode a new chat starts in: this browser's last choice, else the server's default.
+  const [chosenMode, setChosenMode] = useState<SessionMode | null>(readMode)
+  const serverMode = useAsync(() => api.getSessionMode(), [])
+  const mode: SessionMode = chosenMode ?? serverMode.data?.mode ?? 'classic'
+  function chooseMode(next: SessionMode) {
+    setChosenMode(next)
+    writeMode(next)
+  }
   const composer = useRef<HTMLTextAreaElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
@@ -141,7 +152,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     dictation.cancel()
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }))
+    // Only a deliberate choice goes out; without one the agent applies its own default.
+    chat.send(text, pageContext(pathname, { tools, dialogs, page }), chosenMode ?? undefined)
     writeDraft('')
   }
 
@@ -241,6 +253,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                     <span className="flex items-center gap-1.5">
                       <OriginBadge origin={s.origin} />
                       <OwnerBadge owner={s.owner} />
+                      {s.mode === 'durable' && <DurableBadge />}
                       <span className="text-[11px] text-faint">{statusLabel(s.status)}</span>
                     </span>
                   </button>
@@ -257,6 +270,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             {active.title}
           </span>
           <OriginBadge origin={active.origin} />
+          {active.mode === 'durable' && <DurableBadge />}
           <span className="text-faint" data-testid="agent-status">
             {statusLabel(active.status)}
           </span>
@@ -410,6 +424,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           </Button>
         </div>
         <VoiceDisclosure id={voiceNoteId} />
+        {!state.activeId && !state.awaitingStart && <ModePicker value={mode} onChange={chooseMode} />}
       </form>
     </div>
   )

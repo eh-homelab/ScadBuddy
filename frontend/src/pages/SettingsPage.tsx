@@ -14,6 +14,7 @@ import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { SessionModeSetting } from '../components/SessionModeSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -1166,6 +1167,8 @@ export function SettingsPage() {
             <HttpRequestSetting />
             {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
             <SessionLimitsSetting />
+            {/* Saves on its own (#1056); hidden the same way. */}
+            <SessionModeSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}
