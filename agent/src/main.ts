@@ -273,6 +273,8 @@ const sessions =
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
+// #815 §2: a session whose tab is connected again stops waiting for it.
+if (sessions) tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
 // The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
 if (sessions) toolServices.sessions = sessions
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.

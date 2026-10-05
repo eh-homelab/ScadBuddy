@@ -272,7 +272,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
   `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
   `stop` end the turn; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts);
+  the one read of every parked call, approvals and answers, that the badge counts; a
+  browser_* call that finds no tab in such a session parks the same way as a
+  `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,

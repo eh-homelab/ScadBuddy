@@ -99,6 +99,8 @@ export type ServerEvent = V &
         answers?: string[]
         by?: Owner
         reason?: string
+        /** #815 §2: a `tab_disconnected` attention request ended because the session's tab is connected again. */
+        reconnected?: true
       }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
