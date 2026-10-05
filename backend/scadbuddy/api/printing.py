@@ -406,10 +406,15 @@ async def accept_run(
                 type_=TEMPORAL_REFUSED_PROBLEM,
             ) from None
         logger.warning("could not start a print run on Temporal", exc_info=True)
+        # Only `TemporalUnavailableError` means nothing started; a transient RPCError
+        # (`DEADLINE_EXCEEDED`) may follow a persisted start (review #1316 (8) 1).
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try"
-            " again shortly.",
+            " again shortly."
+            if isinstance(error, TemporalUnavailableError)
+            else "ScadBuddy cannot reach Temporal, where print runs run. Send the same"
+            " request again shortly to follow it if it started.",
             type_=TEMPORAL_UNAVAILABLE_PROBLEM,
             headers={"Retry-After": "5"},
         ) from None

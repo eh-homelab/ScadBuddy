@@ -37,7 +37,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.workflows.client import connect_lazily
-from scadbuddy.workflows.commands import CommandClosedError
+from scadbuddy.workflows.commands import CommandClosedError, TemporalUnavailableError
 from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
@@ -516,10 +516,29 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
 
 
+@respx.mock
+def test_an_unreachable_temporal_says_nothing_was_queued(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`start_command` raises `TemporalUnavailableError` (an `UNAVAILABLE` too) only
+    when nothing started, so only it says nothing was queued (review #1316 (8) 1)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise TemporalUnavailableError("blip")
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert "Nothing was queued" in response.text
+
+
 @pytest.mark.parametrize(
     "code",
     [
-        RPCStatusCode.UNAVAILABLE,
         RPCStatusCode.DEADLINE_EXCEEDED,
         # A namespace past its rate limit, or a busy server (review #1316 4).
         RPCStatusCode.RESOURCE_EXHAUSTED,
@@ -548,6 +567,8 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
+    # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
+    assert "Nothing was queued" not in response.text
 
 
 @pytest.mark.parametrize(
