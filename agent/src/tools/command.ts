@@ -94,28 +94,48 @@ export async function reattach<T>(
 
 type Operation = components['schemas']['Operation']
 
+/**
+ * How long a command follows a 202 before handing back the running operation: the
+ * backend's own answer deadline (`COMMAND_ANSWER_DEADLINE`, 10 s, backend
+ * `workflows/commands.py`) plus a margin. Following longer held the session in one
+ * tool call for up to the browser's 21 minutes (review #1063 r6 3).
+ */
+export const COMMAND_FOLLOW_MS = 10_000 + 5_000
+
+/** A command still running when the follow window ended: the model follows it. */
+export type OperationRunning = { status: 'running'; operation_id: string; next: string }
+
+export function isRunning(result: unknown): result is OperationRunning {
+  return (result as OperationRunning | undefined)?.status === 'running' && typeof (result as OperationRunning).operation_id === 'string'
+}
+
 /** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
 export type CommandHeaders = { 'Idempotency-Key': string }
 
 /**
  * Run a command route: `send` with this call's key, re-sent with the same key while it
- * goes unanswered, and a 202 followed to the operation's result. A failed operation is
- * a ToolError in the backend's own words, as the route's answer would have been.
+ * goes unanswered, and a 202 followed to the operation's result for `COMMAND_FOLLOW_MS`;
+ * past it, the running operation, for the model to follow with get_operation. A failed
+ * operation is a ToolError in the backend's own words, as the route's answer would have been.
  */
 export async function command<T>(
   ctx: ToolContext,
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
-): Promise<T> {
+): Promise<T | OperationRunning> {
   const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
   const gaveUp = ' It may have been done anyway: check before trying again.'
   const first = await answered(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return ok(Promise.resolve(first), what)
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + ctx.operationFollowMs
+  const deadline = Date.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
   for (let step = 1; op.status === 'running'; step++) {
     if (Date.now() >= deadline) {
-      throw new ToolError(`${what} is still running as operation ${op.id}: follow it with get_operation.`)
+      return {
+        status: 'running',
+        operation_id: op.id,
+        next: `${what} is still running. Follow it with get_operation until it is no longer running; do not send it again.`,
+      }
     }
     await ctx.progress(step, undefined, `${what}: running`)
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
