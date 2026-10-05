@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { toolManifest, writeManifest } from '../src/tools/manifest.js'
+import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
+import { toolManifest, writeDurablePrompt, writeManifest } from '../src/tools/manifest.js'
 import { createExternalServer } from '../src/tools/projections.js'
 import { services } from './helpers/mcp.js'
 
@@ -46,6 +47,21 @@ describe('the tool manifest', () => {
       await writeManifest(out)
       const written = JSON.parse(await readFile(out, 'utf8')) as { name: string }[]
       expect(written.map((t) => t.name)).toEqual((await toolManifest()).map((t) => t.name))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('names every tool as the durable plugin requires', async () => {
+    for (const entry of await toolManifest()) expect(entry.name).toMatch(/^[A-Za-z0-9_-]{1,50}$/)
+  })
+
+  it('writes the durable prompt exactly', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'manifest-'))
+    try {
+      const out = path.join(dir, 'durable-prompt.txt')
+      await writeDurablePrompt(out)
+      expect(await readFile(out, 'utf8')).toBe(UNTRUSTED_CONTENT_POLICY)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

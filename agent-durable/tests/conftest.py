@@ -15,6 +15,9 @@ import pytest_asyncio
 from psycopg import sql
 from temporalio.client import Client
 
+# Before any scadbuddy_durable import: the workflow tests see the sample tools.
+os.environ.setdefault("SCADBUDDY_AGENT_TOOLS_MANIFEST", str(Path(__file__).parent / "fixtures/tools.json"))
+
 MIGRATIONS = Path(__file__).parents[2] / "agent" / "src" / "db" / "migrations"
 
 

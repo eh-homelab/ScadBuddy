@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { writeFile } from 'node:fs/promises'
 import { createBackendClient } from '../api/backend.js'
 import type { Tier } from '../auth/principal.js'
+import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import { ALL_TOOLS } from './index.js'
 import { PendingActionStore } from './pending.js'
 import { createExternalServer } from './projections.js'
@@ -53,4 +54,10 @@ export async function toolManifest(tools: readonly Tool[] = ALL_TOOLS): Promise<
 /** The manifest as JSON at `file`. */
 export async function writeManifest(file: string, tools: readonly Tool[] = ALL_TOOLS): Promise<void> {
   await writeFile(file, `${JSON.stringify(await toolManifest(tools), null, 2)}\n`)
+}
+
+// The durable worker's system-prompt append (`dist/durable-prompt.txt`): the policy every
+// session turn carries, so a durable session reads tool results the same way.
+export async function writeDurablePrompt(path: string): Promise<void> {
+  await writeFile(path, UNTRUSTED_CONTENT_POLICY, 'utf8')
 }
