@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { ApiError, STILL_ACCEPTING, api } from '../api/client'
+import { ApiError, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
 import { useRenderJob } from './useRenderJob'
@@ -143,6 +143,27 @@ describe('useRenderJob', () => {
     const key = submit.mock.calls[0]![5]
     expect(key).toEqual(expect.any(String))
     expect(submit.mock.calls[1]![5]).toBe(key)
+  })
+
+  it('re-sends a render Temporal could not take with its key: a start may exist (review #1066 (8) 3)', async () => {
+    // As the client reads it: the 503's Retry-After header becomes `retry_after`.
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal could not start this render right now.',
+        retry_after: 5,
+      }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]![5]).toBe(submit.mock.calls[0]![5])
   })
 
   it('retries a full queue under a new key: the refusal is all its key was answered', async () => {

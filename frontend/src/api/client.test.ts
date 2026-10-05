@@ -6,6 +6,7 @@ import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
   OPERATION_UNFINISHED,
+  TEMPORAL_UNAVAILABLE,
   UNANSWERED,
   api,
   mayHaveRun,
@@ -905,6 +906,32 @@ describe('render (#1053)', () => {
 
     await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
     expect(posts).toBe(2)
+  })
+
+  it("answers temporal-unavailable once, with its Retry-After as retry_after for the caller's re-send", async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: TEMPORAL_UNAVAILABLE,
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'ScadBuddy cannot reach Temporal, where renders run.',
+          },
+          { status: 503, headers: { 'Retry-After': '5' } },
+        )
+      }),
+    )
+
+    // `useRenderJob` waits that long and sends it again with the same key (review #1066 (8) 3).
+    await expect(api.render('box', { params: {} })).rejects.toMatchObject({
+      status: 503,
+      problem: { type: TEMPORAL_UNAVAILABLE, retry_after: 5 },
+    })
+    expect(posts).toBe(1)
   })
 
   const accepting = () =>

@@ -46,7 +46,11 @@ export interface RenderState {
   stage: RenderStage | undefined
 }
 
-/** How long a refused render asks to wait: only a queue-full 503 carries it. */
+/**
+ * How long a refused render asks to wait: a 503's `retry_after`, from its body (a full
+ * queue) or its `Retry-After` header (the client copies it in: still accepting, Temporal
+ * unavailable, or an unanswered request with one).
+ */
 function retryAfterSeconds(cause: unknown): number | undefined {
   if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
   const seconds = cause.problem['retry_after']
