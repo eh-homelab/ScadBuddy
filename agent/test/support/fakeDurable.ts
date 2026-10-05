@@ -28,6 +28,9 @@ export class FakeDurable implements DurableSessions {
   accepted: Promise<void> | undefined
   reviewError: unknown
   pendingError: unknown
+  /** Sessions whose Query never answers. */
+  readonly hangPending = new Set<string>()
+  pendingAsked = 0
   /** Whether an execution is running for `cancel`. */
   running = true
 
@@ -47,6 +50,8 @@ export class FakeDurable implements DurableSessions {
 
   async pending(sessionId: string): Promise<PendingCall[]> {
     if (this.pendingError) throw this.pendingError
+    if (this.hangPending.has(sessionId)) await new Promise(() => {})
+    this.pendingAsked += 1
     return this.pendingCalls.get(sessionId) ?? []
   }
 
@@ -75,16 +80,21 @@ export function fakeTemporalClient(options: {
   /** The execution chain (first run id) `describe` reports; `chainAfterUpdate` once a start was sent. */
   chain?: string
   chainAfterUpdate?: string
+  /** `describe` calls (1-based) that fail as an unreachable Temporal would. */
+  failDescribes?: number[]
 }) {
   const updates: FakeUpdate[] = []
   const reviews: { id: string; name: string; args: unknown[] }[] = []
   const cancelled: string[] = []
+  let described = 0
   const notFound = () => Object.assign(new Error('workflow not found'), { name: 'WorkflowNotFoundError' })
   const client = {
     connection: { withDeadline: <T>(_deadline: number, fn: () => Promise<T>) => fn() },
     workflow: {
       getHandle: (id: string) => ({
         describe: async () => {
+          described += 1
+          if (options.failDescribes?.includes(described)) throw Object.assign(new Error('14 UNAVAILABLE'), { code: 14 })
           if (!options.status) throw notFound()
           const chain = (updates.length > 0 && options.chainAfterUpdate) || options.chain || 'run-1'
           return { status: { name: options.status }, runId: chain, raw: { workflowExecutionInfo: { firstRunId: chain } } }

@@ -198,8 +198,13 @@ export class TemporalDurableSessions implements DurableSessions {
     }
     if (result.started !== 'attached') return result
     // Attached as far as `describe` knew: a new chain means the run closed in between and
-    // this start made the next one, from the snapshot (or from nothing).
-    const after = await this.#describe(sessionId).catch(() => undefined)
+    // this start made the next one, from the snapshot (or from nothing). Asked twice; if
+    // Temporal cannot say, it stays `attached`: this only labels the result (the projector
+    // reads a new chain from offset 0 by itself), and a guess of "new" would log that the
+    // conversation was lost when it may not have been.
+    const after =
+      (await this.#describe(sessionId).catch(() => undefined)) ??
+      (await this.#describe(sessionId).catch(() => undefined))
     return after && before && after.chain !== before.chain ? fallback : result
   }
 

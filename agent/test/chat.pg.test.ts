@@ -409,6 +409,9 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
   })
 
   describe('which execution takes the message', () => {
+    const sending = async (id: string) =>
+      (await db.sql<{ sending: string | null }[]>`SELECT sending FROM ai_durable_streams WHERE session_id = ${id}`)[0]
+        ?.sending
     const offset = async (id: string) =>
       (await db.sql<{ next_offset: string }[]>`SELECT next_offset FROM ai_durable_streams WHERE session_id = ${id}`)[0]
         ?.next_offset
@@ -517,9 +520,41 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
       expect(input).toMatchObject({ restored: { in_flight: inFlight } })
       expect(startState).toEqual(state)
       expect(fake.updates[0]!.options.args).toEqual([{ text: 'go on', context: expect.stringContaining('save_preset (toolu_lost)') }])
-      // Claimed as an attach (the offset kept), then reset once the new run was seen.
+      // Claimed as an attach: the offset is kept, and the projector reads the new run's
+      // chain from 0 by itself (projector.py `_drain`), so nothing resets it after the start.
       expect(at.seen).toEqual([{ offset: '9', status: 'running' }])
-      expect(await offset(sid)).toBe('0')
+      expect(await offset(sid)).toBe('9')
+    })
+
+    it('marks the send in flight until its update-with-start answers, for the projector', async () => {
+      let sid = ''
+      const marks: (string | null | undefined)[] = []
+      const fake = fakeTemporalClient({
+        status: 'COMPLETED',
+        result: {},
+        onUpdate: async () => {
+          marks.push(await sending(sid))
+        },
+      })
+      const m = await durableManager(new TemporalDurableSessions(fake.client, db.sql))
+      const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+      sid = session.id
+      await db.sql`INSERT INTO ai_durable_streams (session_id, next_offset, chain) VALUES (${sid}, 41, 'old-chain')`
+      const turn = await m.send(sid, browser, 'again')
+      expect(marks).toEqual([turn.turnId])
+      await expect.poll(() => sending(sid)).toBeNull()
+      // A new run: the offset and its chain were reset with the claim.
+      expect(await db.sql`SELECT next_offset::int AS n, chain FROM ai_durable_streams WHERE session_id = ${sid}`).toEqual([
+        { n: 0, chain: null },
+      ])
+    })
+
+    it('clears the mark when the start fails too', async () => {
+      const fake = fakeTemporalClient({ status: 'RUNNING', updateError: new DurableUnavailable('14 UNAVAILABLE') })
+      const m = await durableManager(new TemporalDurableSessions(fake.client, db.sql))
+      const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+      await expect(m.send(session.id, browser, 'hi')).rejects.toMatchObject({ code: 'busy' })
+      await expect.poll(() => sending(session.id)).toBeNull()
     })
 
     it('a real attach carries the snapshot too, which the running execution ignores, and keeps the offset', async () => {

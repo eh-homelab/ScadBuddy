@@ -1076,6 +1076,11 @@ export class SessionManager {
     ])
     clearTimeout(timer)
     const report = (e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)
+    // Once the update-with-start answered, whatever it answered, no start is in flight.
+    sending.then(
+      () => this.clearSending(id, turnId).catch(report),
+      () => this.clearSending(id, turnId).catch(report),
+    )
     if (first === late) {
       // Nobody waits for the answer any more: the log says what becomes of the message.
       await this.events.append(id, [
@@ -1140,10 +1145,17 @@ export class SessionManager {
           AND status NOT IN ('running', 'waiting_approval', 'done') AND cost_usd < budget_usd
         RETURNING id`
       if (claimed.length === 0) return undefined
-      if (result.started !== 'attached') {
+      // `sending` marks the update-with-start in flight until it answers (clearSending):
+      // until then a closed run may be the new one not started yet, which the projector
+      // must not settle idle on (projector.py `_settle_if_stale`).
+      if (result.started === 'attached') {
         await tx`
-          INSERT INTO ai_durable_streams (session_id) VALUES (${id})
-          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0`
+          INSERT INTO ai_durable_streams (session_id, sending) VALUES (${id}, ${turnId})
+          ON CONFLICT (session_id) DO UPDATE SET sending = excluded.sending`
+      } else {
+        await tx`
+          INSERT INTO ai_durable_streams (session_id, sending) VALUES (${id}, ${turnId})
+          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0, chain = NULL, sending = excluded.sending`
       }
       return this.events.append(id, events, tx)
     })
@@ -1154,17 +1166,21 @@ export class SessionManager {
 
   /**
    * A durable send that `describe` took for an attach started a new execution instead (the
-   * running one closed in between): its live output starts at offset 0 (plan ruling 9).
-   * The projector refuses to write over the reset (projector.py `append_batch`).
+   * running one closed in between). Its live output starts at offset 0 in a new chain,
+   * which the projector reads from 0 itself (the stream row's offset counts in its
+   * `chain`, projector.py `_drain`), so nothing is reset here; the log says when the
+   * conversation could not be resumed.
    */
   private async startedDurable(id: string, planned: DurableSendResult, actual: DurableSendResult): Promise<void> {
     if (planned.started !== 'attached' || actual.started === 'attached') return
-    await this.deps.sql`
-      INSERT INTO ai_durable_streams (session_id) VALUES (${id})
-      ON CONFLICT (session_id) DO UPDATE SET next_offset = 0`
     if (actual.resumedFresh) {
       await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
     }
+  }
+
+  /** The claim's `sending` mark, once its update-with-start answered (claimDurable). */
+  private async clearSending(id: string, turnId: string): Promise<void> {
+    await this.deps.sql`UPDATE ai_durable_streams SET sending = NULL WHERE session_id = ${id} AND sending = ${turnId}`
   }
 
   /**

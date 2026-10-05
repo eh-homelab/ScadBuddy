@@ -70,6 +70,19 @@ describe('TemporalDurableSessions', () => {
     expectStart(updates[0], null)
   })
 
+  it('asks again when the describe after the start fails, and keeps attached when Temporal cannot say', async () => {
+    const retried = fakeClient({ status: 'RUNNING', chain: 'run-1', chainAfterUpdate: 'run-2', failDescribes: [2] })
+    expect(await new TemporalDurableSessions(retried.client, noRows).send(input, { text: 'hi', context: 'page' })).toEqual({
+      started: 'fresh',
+      resumedFresh: true,
+    })
+    const unknown = fakeClient({ status: 'RUNNING', chain: 'run-1', chainAfterUpdate: 'run-2', failDescribes: [2, 3] })
+    expect(await new TemporalDurableSessions(unknown.client, noRows).send(input, { text: 'hi', context: 'page' })).toEqual({
+      started: 'attached',
+      resumedFresh: false,
+    })
+  })
+
   it('starts an unknown ID with no state, and says it is fresh rather than resumed', async () => {
     const { client, updates } = fakeClient({})
     const result = await new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: 'page' })

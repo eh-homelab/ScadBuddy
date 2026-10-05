@@ -204,6 +204,10 @@ async def test_sigterm_shuts_the_worker_down_and_stops_the_projector(
             " 'u', 'running', 7, 2.5, 'durable')",
             (sid,),
         )
+        # As the agent service's claim leaves it: its send in flight (manager.ts claimDurable).
+        await conn.execute(
+            "INSERT INTO ai_durable_streams (session_id, sending) VALUES (%s, 'agent-send')", (sid,)
+        )
     key_file = tmp_path / "kek"
     key_file.write_text(base64.b64encode(os.urandom(32)).decode())
     port = _free_port()

@@ -811,6 +811,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`durable approvals${TEST_DATABASE_URL ? '' :
     })
   })
 
+  it('the all-pending list asks many sessions a few at a time, and leaves out one that never answers', async () => {
+    const ids: string[] = []
+    for (let i = 0; i < 10; i++) {
+      const { session, id } = await waiting()
+      await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+      if (i === 0) durable.hangPending.add(session.id)
+      else ids.push(id)
+    }
+    const service = new ApprovalService({ sql: db.sql, events: m.events, durable, durableListDeadlineMs: 5_000 })
+    const listed = await service.list(browser, { pending: true })
+    expect(listed.map((a) => a.id).sort()).toEqual(ids.sort())
+  }, 60_000)
+
   it('lists decided calls from the log when asked for all of them', async () => {
     const { session, id } = await waiting()
     await m.approvals.decide(browser, id, false)

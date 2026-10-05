@@ -75,6 +75,10 @@ async def insert_session(pool: AsyncConnectionPool) -> str:
             " 'u', 'running', 7, 2.5, 'durable')",
             (sid,),
         )
+        # As the agent service's claim leaves it: its send in flight (manager.ts claimDurable).
+        await conn.execute(
+            "INSERT INTO ai_durable_streams (session_id, sending) VALUES (%s, 'agent-send')", (sid,)
+        )
         await conn.execute(
             "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id) VALUES (%s, %s, %s)",
             (subject, seal_bytes(KEK.key, os.urandom(32), data_key_context(subject)), KEK.id),

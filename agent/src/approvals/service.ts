@@ -125,6 +125,10 @@ export const DEFAULT_APPROVAL_EXPIRY_SECONDS = 600
 export const MIN_APPROVAL_EXPIRY_SECONDS = 10
 export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
 export const DEFAULT_APPROVAL_POLL_MS = 1000
+/** The all-pending list asks at most this many durable sessions, this many at a time, within this long. */
+const DURABLE_LIST_MAX = 100
+const DURABLE_LIST_CONCURRENCY = 8
+const DURABLE_LIST_DEADLINE_MS = 15_000
 /** The longest `approval.required` summary. */
 export const APPROVAL_SUMMARY_MAX = 500
 /** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
@@ -235,6 +239,8 @@ export type ApprovalServiceDeps = {
    * from its `pending_approvals` Query, never in ai_approvals.
    */
   durable?: Pick<DurableSessions, 'review' | 'pending'>
+  /** How long the all-pending list waits for durable sessions' workflows (DURABLE_LIST_DEADLINE_MS). */
+  durableListDeadlineMs?: number
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -572,18 +578,39 @@ export class ApprovalService {
     if (!this.deps.durable) return []
     const sessions = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_sessions WHERE mode = 'durable' AND status = 'waiting_approval'
-      ORDER BY updated_at LIMIT 100`
-    const out: ApprovalRecord[] = []
-    for (const { id } of sessions) {
-      const session = await this.session(id)
-      if (!session) continue
-      try {
-        out.push(...(await this.durablePending(id, session)))
-      } catch (err) {
-        if (!(err instanceof ApprovalError && err.code === 'unavailable')) throw err
+      ORDER BY updated_at LIMIT ${DURABLE_LIST_MAX}`
+    // A few at a time, all within one deadline: a session not answered by then is left out.
+    let timer: NodeJS.Timeout | undefined
+    const deadline = new Promise<'late'>((resolve) => {
+      timer = setTimeout(() => resolve('late'), this.deps.durableListDeadlineMs ?? DURABLE_LIST_DEADLINE_MS)
+    })
+    const found: ApprovalRecord[][] = sessions.map(() => [])
+    let next = 0
+    const worker = async () => {
+      while (next < sessions.length) {
+        const i = next++
+        const id = sessions[i]!.id
+        const listed = (async () => {
+          const session = await this.session(id)
+          return session ? await this.durablePending(id, session) : []
+        })().catch((err: unknown) => {
+          if (err instanceof ApprovalError && err.code === 'unavailable') return []
+          throw err
+        })
+        const answer = await Promise.race([listed, deadline])
+        if (answer === 'late') {
+          listed.catch(() => {}) // answered after the deadline: left out
+          return
+        }
+        found[i] = answer
       }
     }
-    return out
+    try {
+      await Promise.all(Array.from({ length: Math.min(DURABLE_LIST_CONCURRENCY, sessions.length) }, worker))
+    } finally {
+      clearTimeout(timer)
+    }
+    return found.flat()
   }
 
   /** The latest approval a session's tool call asked for, if any (the audit log's link to it). */

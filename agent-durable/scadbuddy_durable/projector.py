@@ -9,10 +9,16 @@ and never logs an event twice. After each commit it sends the batch's `session.*
 (busEvents.ts `SessionEventPublisher`'s payload, without the throttle: batches are per
 event group, not per token).
 
-A follower is pinned to the run that was running when it started (`follow_run`), and it
-stores the offset only over the one it last committed: when the agent service starts a new
-run it resets the offset to 0 (ruling 9), and a follower of an older run can neither read
-the new run from its old offset nor write over the reset.
+A follower is pinned to the run that was running when it started (`follow_run`). The
+stored offset counts in a `chain` (the first run's id, which Continue-As-New keeps and a new
+start does not): a follower of another chain reads from 0, and it stores the offset only
+over the offset and chain it read or last committed. So a follower of an older run can
+neither read a new run from its old offset nor write over the agent service's reset
+(ruling 9), however the two interleave.
+
+A session that says it runs while no run runs (terminated, failed, or a claim whose sender
+died before its start) is settled idle (`_settle_if_stale`), but never while the agent
+service's send is still starting its run (`ai_durable_streams.sending`).
 """
 
 from __future__ import annotations
@@ -23,9 +29,11 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from temporalio.client import Client, WorkflowExecutionStatus
@@ -34,7 +42,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy_durable.models import DECISIONS_QUERY
 from scadbuddy_durable.tools import TIERS
-from scadbuddy_durable.translate import Batch, Translator, bus_kind_of
+from scadbuddy_durable.translate import Batch, Translator, bus_kind_of, durable_approval_id
 
 PG_CHANNEL = "scadbuddy_events"  # agent/src/events/bus.ts
 
@@ -47,8 +55,25 @@ WHERE mode = 'durable' AND status IN ('running', 'waiting_approval')
 ON CONFLICT (session_id) DO UPDATE SET holder = %(me)s, lease_until = excluded.lease_until
 WHERE ai_durable_streams.lease_until IS NULL OR ai_durable_streams.lease_until < now()
    OR ai_durable_streams.holder = %(me)s
-RETURNING session_id, next_offset
+RETURNING session_id, next_offset, chain
 """
+
+# Settling a session whose run is gone: its row moves to idle only if nothing was logged
+# and no send began since the projector looked (event_seq, sending).
+_SETTLE = """
+WITH s AS (
+  UPDATE ai_sessions SET event_seq = event_seq + %(n)s, status = 'idle', updated_at = now()
+  WHERE id = %(id)s AND status IN ('running', 'waiting_approval') AND event_seq = %(seq)s
+  RETURNING event_seq - %(n)s AS base
+)
+INSERT INTO ai_session_events (session_id, seq, event)
+SELECT %(id)s, s.base + e.ord, e.event
+FROM s, unnest(%(texts)s::text[]) WITH ORDINALITY AS e(event, ord)
+RETURNING seq
+"""
+
+# What a settled session's open approvals resolve with.
+RUN_ENDED = "the session's run ended"
 
 _APPEND = """
 WITH s AS (
@@ -69,6 +94,14 @@ RETURNING seq
 STREAM_TOPIC = "claude"
 
 
+@dataclass(frozen=True)
+class LatestRun:
+    run_id: str
+    #: The first run's id: Continue-As-New keeps it, a new start does not.
+    chain: str
+    running: bool
+
+
 class LeaseLost(Exception):
     """Another projector holds the session now, or the stream was reset under this one."""
 
@@ -76,11 +109,15 @@ class LeaseLost(Exception):
 async def follow_run(
     client: Client, workflow_id: str, run_id: str, *, from_offset: int
 ) -> AsyncIterator[dict[str, Any]]:
-    """`follow_agent`, pinned to one run (and its Continue-As-New successors).
+    """`follow_agent`, pinned to `run_id` until that run continues as new.
 
     `follow_agent` polls the latest run of the ID, so a follower left from a run that was
     terminated would go on reading the NEXT run (a new start, ruling 9) from the old run's
-    offset. Pinned, its polls fail once that run closes, and the stream ends.
+    offset. Pinned, its polls fail once that run closes, and the stream ends. The pin does
+    not carry over Continue-As-New: then the stream client re-targets the ID's latest run,
+    unpinned (workflow_streams `_follow_continue_as_new`), which is the successor unless a
+    new start replaced it; `append_batch`'s chain and offset check refuses what such a
+    follower would write after a reset, and `_follow` drops it once the run it saw closes.
     """
     stream = WorkflowStreamClient(client.get_workflow_handle(workflow_id, run_id=run_id), client=client)
     async for item in stream.subscribe(STREAM_TOPIC, from_offset=from_offset):
@@ -98,20 +135,24 @@ async def append_batch(
     *,
     holder: str,
     expected_offset: int,
+    expected_chain: str | None = None,
+    chain: str | None = None,
 ) -> int | None:
-    """Appends `batch` and stores `next_offset`, in one transaction; returns the last seq.
+    """Appends `batch` and stores `next_offset` in `chain`, in one transaction; returns the last seq.
 
-    None when `holder` no longer holds the lease, or the stored offset is no longer
-    `expected_offset` (the follower's last commit): the agent service reset it for a new
-    run (ruling 9), so this follower's events belong to a run that is gone. Nothing is
+    None when `holder` no longer holds the lease, or the stored offset and chain are no
+    longer `expected_offset` and `expected_chain` (what the follower read or last
+    committed): the agent service reset them for a new run (ruling 9), or another follower
+    moved them, so this follower's events are not the stream's next ones. Nothing is
     written then. A `session.result` takes the session's cost, turns and budget from its
     row, as classic fills them in.
     """
     async with conn.transaction():
         cur = await conn.execute(
-            "UPDATE ai_durable_streams SET next_offset = %s"
-            " WHERE session_id = %s AND holder = %s AND next_offset = %s",
-            (next_offset, session_id, holder, expected_offset),
+            "UPDATE ai_durable_streams SET next_offset = %s, chain = coalesce(%s, chain)"
+            " WHERE session_id = %s AND holder = %s AND next_offset = %s"
+            " AND chain IS NOT DISTINCT FROM %s",
+            (next_offset, chain, session_id, holder, expected_offset, expected_chain),
         )
         if cur.rowcount == 0:
             return None
@@ -125,13 +166,57 @@ async def append_batch(
         seqs = sorted(int(r[0]) for r in await cur.fetchall())
         if len(seqs) != len(texts):
             raise LookupError(f"session {session_id} does not exist")
+    await _notify(conn, session_id, events, seqs[-1], holder)
+    return seqs[-1]
+
+
+async def settle_idle(
+    conn: AsyncConnection[Any],
+    session_id: str,
+    events: list[dict[str, Any]],
+    *,
+    holder: str,
+    event_seq: int,
+    sending: str | None,
+) -> int | None:
+    """Moves a session whose run is gone to idle with `events`, in one transaction.
+
+    Only while `holder` holds the lease, the stream's `sending` is still `sending` (no send
+    began or finished since) and the session's `event_seq` is still `event_seq` (nothing was
+    logged since). Clears `sending`. Returns the last seq, or None when nothing changed.
+    """
+    texts = [json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in events]
+    seqs: list[int] = []
+    async with conn.transaction():
+        cur = await conn.execute(
+            "UPDATE ai_durable_streams SET sending = NULL"
+            " WHERE session_id = %s AND holder = %s AND sending IS NOT DISTINCT FROM %s",
+            (session_id, holder, sending),
+        )
+        if cur.rowcount == 0:
+            return None
+        cur = await conn.execute(
+            _SETTLE, {"n": len(texts), "id": session_id, "seq": event_seq, "texts": texts}
+        )
+        seqs = sorted(int(r[0]) for r in await cur.fetchall())
+        if len(seqs) != len(texts):
+            raise psycopg.Rollback()
+    if not seqs:
+        return None
+    await _notify(conn, session_id, events, seqs[-1], holder)
+    return seqs[-1]
+
+
+async def _notify(
+    conn: AsyncConnection[Any], session_id: str, events: list[dict[str, Any]], seq: int, holder: str
+) -> None:
     kind, status = bus_kind_of(events)
     payload: dict[str, Any] = {
         "id": uuid.uuid4().hex,
         "at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "kind": kind,
         "session_id": session_id,
-        "seq": seqs[-1],
+        "seq": seq,
     }
     if status is not None:
         payload["status"] = status
@@ -140,7 +225,6 @@ async def append_batch(
         await conn.execute("SELECT pg_notify(%s, %s)", (PG_CHANNEL, json.dumps(payload)))
     except Exception as err:  # the log is durable and polled; a lost NOTIFY costs latency
         log.warning("session events: NOTIFY failed: %s", err)
-    return seqs[-1]
 
 
 async def _with_totals(
@@ -207,6 +291,7 @@ class Projector:
         lease_s: float = 20,
         renew_s: float = 5,
         poll_s: float = 0.5,
+        settle_polls: int = 20,
         tiers: Mapping[str, str] = TIERS,
     ) -> None:
         self._pool = pool
@@ -217,6 +302,10 @@ class Projector:
         self._poll_s = poll_s
         self._tiers = tiers
         self._followers: dict[str, asyncio.Task[None]] = {}
+        # A session that says it runs, with no run running: how many claims in a row saw
+        # the same (run, event_seq, sending). See `_settle_if_stale`.
+        self._settle_polls = settle_polls
+        self._stale: dict[str, tuple[tuple[Any, ...], int]] = {}
 
     @property
     def following(self) -> set[str]:
@@ -230,9 +319,9 @@ class Projector:
         try:
             while not stop.is_set():
                 try:
-                    for sid, offset in await self._claim():
+                    for sid, offset, chain in await self._claim():
                         if sid not in self.following:
-                            self._followers[sid] = asyncio.create_task(self._follow(sid, offset))
+                            self._followers[sid] = asyncio.create_task(self._follow(sid, offset, chain))
                     self._followers = {s: t for s, t in self._followers.items() if not t.done()}
                     if loop.time() - renewed >= self._renew_s:
                         await self._renew()
@@ -249,10 +338,10 @@ class Projector:
             self._followers = {}
         await self._release()
 
-    async def _claim(self) -> list[tuple[str, int]]:
+    async def _claim(self) -> list[tuple[str, int, str | None]]:
         async with self._pool.connection() as conn:
             cur = await conn.execute(_CLAIM, {"me": self._holder, "lease": self._lease_s})
-            return [(str(r[0]), int(r[1])) for r in await cur.fetchall()]
+            return [(str(r[0]), int(r[1]), None if r[2] is None else str(r[2])) for r in await cur.fetchall()]
 
     async def _renew(self) -> None:
         held = list(self.following)
@@ -307,32 +396,35 @@ class Projector:
             log.info("projector %s: no decisions for %s: %s", self._holder, session_id, err)
         return decided
 
-    async def _follow(self, session_id: str, offset: int) -> None:
+    async def _follow(self, session_id: str, offset: int, chain: str | None) -> None:
+        """Follows the session's running run; `offset` counts in `chain` (None: the next run's)."""
         wid = f"session-{session_id}"
         try:
             while True:
-                run_id = await self._running_run(wid)
-                if run_id is None:
-                    await asyncio.sleep(self._poll_s)  # not started yet: its Update is on its way
-                    continue
-                if run_id == "":
-                    # The latest run is closed: nothing of it is ours to log (a new run is
-                    # about to start, or none will). The next claim reads the offset again.
+                latest = await self._latest(wid)
+                if latest is None or not latest.running:
+                    # No run runs: nothing of a closed one is ours to log. A new run may be
+                    # about to start (a send in flight), or none will (a terminate, a crash).
+                    await self._settle_if_stale(session_id, latest)
                     await self._release(session_id)
                     return
+                self._stale.pop(session_id, None)
                 # Rebuilt from the log each time: the stream is re-read from the committed offset.
                 open_ids, resolved = await self._open_approvals(session_id)
                 translator = Translator(session_id, self._tiers, open_ids, resolved)
                 try:
-                    offset, final = await self._drain(session_id, wid, run_id, translator, offset)
+                    offset, final, chain = await self._drain(
+                        session_id, wid, latest, translator, offset, chain
+                    )
                 except RPCError as err:
                     if err.status != RPCStatusCode.NOT_FOUND:
                         raise
                     final = False
-                if final or await self._running_run(wid) != run_id:
+                now = await self._latest(wid)
+                if final or now is None or now.run_id != latest.run_id:
                     # Its turn ended, or its run closed without ending it (terminated,
                     # failed): a later run is followed by a later claim, from the offset
-                    # the agent service set for it.
+                    # and chain stored for it.
                     await self._release(session_id)
                     return
                 await asyncio.sleep(self._poll_s)
@@ -343,23 +435,92 @@ class Projector:
         except Exception:
             log.exception("projector %s: following %s failed", self._holder, session_id)
 
-    async def _running_run(self, wid: str) -> str | None:
-        """The latest run's id while it runs; "" when it is closed; None when there is none."""
+    async def _latest(self, wid: str) -> LatestRun | None:
+        """The ID's latest run, or None when it has none."""
         try:
             desc = await self._client.get_workflow_handle(wid).describe()
         except RPCError as err:
             if err.status != RPCStatusCode.NOT_FOUND:
                 raise
             return None
-        if desc.status != WorkflowExecutionStatus.RUNNING:
-            return ""
-        return desc.run_id or ""
+        info = desc.raw_description.workflow_execution_info
+        return LatestRun(
+            run_id=desc.run_id,
+            chain=info.first_run_id or desc.run_id,
+            running=desc.status == WorkflowExecutionStatus.RUNNING,
+        )
+
+    async def _settle_if_stale(self, session_id: str, latest: LatestRun | None) -> None:
+        """A session that says `running` or `waiting_approval` with no run running goes idle.
+
+        Its run was terminated or failed, or the agent service died between its claim and
+        its start. The stream's `sending` (set by the agent service's claim, cleared once its
+        update-with-start answered) tells a send still in flight: while it is set, the run it
+        starts may simply not exist yet, so the session settles only after `settle_polls`
+        claims in a row saw the same run, `event_seq` and `sending` (polls, not clock time:
+        a live send clears `sending` or logs within one). With `sending` clear, no send is
+        in flight, and the session settles at once. Either way the settle is conditional on
+        both still being what was seen (`settle_idle`). Open approvals of the turn resolve
+        as not approved (RUN_ENDED).
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT s.status, s.event_seq, d.sending FROM ai_sessions s"
+                " JOIN ai_durable_streams d ON d.session_id = s.id WHERE s.id = %s",
+                (session_id,),
+            )
+            row = await cur.fetchone()
+        if row is None or row[0] not in ("running", "waiting_approval"):
+            self._stale.pop(session_id, None)
+            return
+        event_seq, sending = int(row[1]), None if row[2] is None else str(row[2])
+        if sending is not None:
+            seen = (None if latest is None else latest.run_id, event_seq, sending)
+            previous = self._stale.get(session_id)
+            count = previous[1] + 1 if previous and previous[0] == seen else 1
+            self._stale[session_id] = (seen, count)
+            if count < self._settle_polls:
+                return
+        self._stale.pop(session_id, None)
+        open_ids, resolved = await self._open_approvals(session_id)
+        events: list[dict[str, Any]] = [
+            {
+                "v": 1,
+                "type": "approval.resolved",
+                "sessionId": session_id,
+                "id": durable_approval_id(session_id, call_id),
+                "approved": False,
+                "reason": RUN_ENDED,
+            }
+            for call_id in open_ids
+            if call_id not in resolved
+        ]
+        events.append({"v": 1, "type": "session.status", "sessionId": session_id, "status": "idle"})
+        async with self._pool.connection() as conn:
+            settled = await settle_idle(
+                conn, session_id, events, holder=self._holder, event_seq=event_seq, sending=sending
+            )
+        if settled is not None:
+            log.info("projector %s: settled %s, whose run is gone, to idle", self._holder, session_id)
 
     async def _drain(
-        self, session_id: str, wid: str, run_id: str, translator: Translator, offset: int
-    ) -> tuple[int, bool]:
-        """Follows `run_id` until the turn ends (True) or the stream does; returns the next offset."""
-        events = follow_run(self._client, wid, run_id, from_offset=offset)
+        self,
+        session_id: str,
+        wid: str,
+        run: LatestRun,
+        translator: Translator,
+        offset: int,
+        chain: str | None,
+    ) -> tuple[int, bool, str | None]:
+        """Follows `run` until the turn ends (True) or the stream does.
+
+        `offset` and `chain` are what the stream row holds (read at the claim, or last
+        committed); returns them as they are after the last commit.
+        """
+        stored_offset, stored_chain = offset, chain
+        if chain is not None and chain != run.chain:
+            offset = 0
+        events = follow_run(self._client, wid, run.run_id, from_offset=offset)
         try:
             async for event in events:
                 decided_by: str | None = None
@@ -373,15 +534,23 @@ class Projector:
                 batch = translator.feed(event, decided_by=decided_by)
                 if not batch.events:
                     continue  # nothing to log; the offset moves with the next batch
-                committed, offset = offset, int(event["offset"]) + 1
+                offset = int(event["offset"]) + 1
                 async with self._pool.connection() as conn:
                     appended = await append_batch(
-                        conn, session_id, batch, offset, holder=self._holder, expected_offset=committed
+                        conn,
+                        session_id,
+                        batch,
+                        offset,
+                        holder=self._holder,
+                        expected_offset=stored_offset,
+                        expected_chain=stored_chain,
+                        chain=run.chain,
                     )
                     if appended is None:
                         raise LeaseLost(session_id)
+                stored_offset, stored_chain = offset, run.chain
                 if batch.final:
-                    return offset, True
+                    return stored_offset, True, stored_chain
         finally:
             await events.aclose()  # type: ignore[attr-defined]
-        return offset, False
+        return stored_offset, False, stored_chain
