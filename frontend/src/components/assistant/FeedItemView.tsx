@@ -261,7 +261,7 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
         </div>
       ) : (
         <p className="mt-1.5 text-[12px] text-muted" role="status">
-          {item.state === 'sent' || item.state === 'queued'
+          {item.state === 'sent'
             ? 'Dismissing…'
             : item.state === 'answered'
               ? `Dismissed${item.by ? ` by ${item.by.label}` : ''}.`
