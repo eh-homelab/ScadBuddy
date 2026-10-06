@@ -17,11 +17,13 @@ from temporalio.exceptions import (
     WorkflowAlreadyStartedError,
     is_cancelled_exception,
 )
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.job_models import CANCELLED_ERROR, SUPERSEDED_ERROR, Job, StepInfo
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
+        ACCEPT_TRANSIENT,
         CLAIMS_ACTIVITY,
         CLOSING,
         LEGACY_PENDING,
@@ -454,8 +456,13 @@ class TemplatePipeline:
             # A local activity's failure arrives as its ApplicationError itself
             # (temporalio 1.33), a regular one's as the ActivityError's cause.
             cause = error.cause if isinstance(error, ActivityError) else error
-            if isinstance(cause, ApplicationError) and cause.type == LEGACY_PENDING:
-                # Transient: the older build's workflow settles its row, so `accepted`
+            transient = isinstance(cause, ApplicationError) and cause.type in (
+                LEGACY_PENDING,
+                ACCEPT_TRANSIENT,
+            )
+            if transient or isinstance(cause, TemporalTimeoutError):
+                # Transient: the older build's workflow settles its row, Postgres comes
+                # back, or an attempt hung past `SHORT` (review #1066 (11)). `accepted`
                 # answers `closing` and the client sends the request again.
                 self._legacy_pending = True
                 self._upsert(STATUS.value_set("refused"))

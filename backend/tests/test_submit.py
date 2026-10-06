@@ -1299,6 +1299,32 @@ async def test_an_old_legacy_row_whose_workflow_never_ran_does_not_block_its_key
     assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
 
 
+async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres out of reach past the accept's retries is transient, as an older build's
+    row is: the request is still accepting, not a 500 render-unstartable that tells
+    clients not to send it again (review #1066 (11), the same class as 2)."""
+
+    def unreachable(*_: object, **__: object) -> Job:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(projection, "accept", unreachable)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+        await service.aclose()
+
+    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
+
+
 async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_closes(
     make_service: ServiceFactory,
     deps: WorkerDeps,
