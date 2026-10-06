@@ -205,6 +205,8 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /** #350 — counts resets to the defaults, which leave no preset selected. */
+  const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
   // The inputs as of the last write, ahead of the render that shows it: two writes in one
   // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
@@ -258,6 +260,8 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // Nothing to render until there is a seed; once there is, an empty one is a model
+  // with no parameters, whose defaults still render (#941).
   const {
     job,
     rendering,
@@ -265,7 +269,7 @@ export function CustomizePage() {
     busy: renderBusy,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering
@@ -303,6 +307,7 @@ export function CustomizePage() {
     if (schema) {
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+      setResets((n) => n + 1)
     }
   }, [schema])
 
@@ -646,9 +651,9 @@ export function CustomizePage() {
   }
 
   // The model's own name (#179): what Edit details renames, and what the page
-  // shows once its record is in. `schema.title` is OpenSCAD's customizer title,
-  // which no metadata edit changes, so it only stands in until then.
-  const displayName = modelState.data?.name ?? schema.title ?? slug
+  // shows once its record is in. Not `schema.title`: that is the .scad file OpenSCAD
+  // exported, "model" for every model (#939), so the slug stands in until then.
+  const displayName = modelState.data?.name ?? slug
 
   const originLabel =
     record?.origin === 'builtin'
@@ -673,6 +678,11 @@ export function CustomizePage() {
         stage={renderStage}
         plate={plate}
         captureRef={captureRef}
+        sourceLink={
+          origin && (
+            <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+          )
+        }
         leading={
           // The page slot has no parameters flyout: the template's own page is the panel.
           full && customUi?.slot !== 'page' && (
@@ -766,6 +776,7 @@ export function CustomizePage() {
       extra={extra}
       onApply={onApplyPreset}
       pinned={version !== undefined}
+      resetKey={resets}
     />
   )
   const templateUi = customUi && (
@@ -781,8 +792,13 @@ export function CustomizePage() {
   )
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
+    // #971 — `short:` scrolls the stacked page on a short window; full screen is the view
+    // alone, so none of it applies there.
+    <div
+      className={`grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
+    >
+      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971). */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
             Models
@@ -804,7 +820,7 @@ export function CustomizePage() {
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {version && (
             <button
               type="button"
@@ -986,7 +1002,7 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
           {choosing ? null : templateUi ? (
@@ -1008,6 +1024,7 @@ export function CustomizePage() {
               onChange={onChange}
               onReset={onReset}
               reveal={reveal}
+              growsWithPage={!full}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1021,6 +1038,7 @@ export function CustomizePage() {
                     extra={extra}
                     onApply={onApplyPreset}
                     pinned={version !== undefined}
+                    resetKey={resets}
                   />
                 </>
               }
@@ -1028,7 +1046,9 @@ export function CustomizePage() {
           )}
         </div>
 
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+        <div
+          className={`grid min-h-0 grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
+        >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into

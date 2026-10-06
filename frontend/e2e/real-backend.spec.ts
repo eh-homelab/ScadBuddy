@@ -170,6 +170,7 @@ test.describe('real backend', () => {
         .last()
         .getByRole('button', { name: 'Restore this version' })
         .click()
+      await page.getByRole('dialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
       await expect(versions.locator('li')).toHaveCount(3)
       expect(await (await request.get(`/api/v1/models/${slug}/source`)).text()).toContain(
         'width = 10;',

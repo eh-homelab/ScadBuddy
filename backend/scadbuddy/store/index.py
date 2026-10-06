@@ -59,43 +59,64 @@ class BlobIndex:
         return _stat(row).ref if row is not None else None
 
     @staticmethod
-    def _hold_shared(
-        conn: Connection[DictRow], ref: BlobRef, *, key: str, own: DictRow | None
-    ) -> None:
-        """For a reused object, in the caller's transaction and after it has locked
-        ``key``'s own row (``own``): hold a row that names the object. If ``own`` names
-        it, that lock is the hold. Otherwise lock another row FOR SHARE. Taking the key's
-        lock first keeps two re-puts of one key from both holding FOR SHARE on its row
-        and then deadlocking on the upgrade.
+    def _locked(
+        conn: Connection[DictRow], key: str, ref: BlobRef, *, reuse: bool, columns: str
+    ) -> DictRow | None:
+        """Lock ``key``'s row FOR UPDATE, in the caller's transaction, and return it.
 
-        A put or delete that would free the held row now waits for this transaction,
-        and its `shares_backend_id` check afterwards sees the new row. If the object was
-        freed first, no row matches, and this raises so the caller uploads its own copy.
-        A false miss (the one matched row moved on under READ COMMITTED) only costs an
-        upload.
+        With ``reuse``, ``ref`` names an existing object, and this also holds a row
+        that names it, so a put or delete that would free that row waits for this
+        transaction, and its `shares_backend_id` check afterwards sees the new row. If
+        ``key``'s own row names the object, its lock is the hold. Otherwise another
+        row is locked FOR SHARE. If the object was freed first, no row matches, and this
+        raises so the caller uploads its own copy. A false miss (the one matched row
+        moved on under READ COMMITTED) only costs an upload.
+
+        Rows are locked in key order, as `mark` locks them: a row naming the object
+        below ``key`` first, then ``key``'s, then one above it. Two puts swapping
+        objects between two keys then both start at the lower key, and one waits for
+        the other instead of each holding its own key and waiting for the other's
+        (#1605). That deadlock was retried, but the victim's retry could re-take its
+        key before the winner took it and deadlock again. Only a hold that moved on
+        between the two steps is taken out of order, and that rare deadlock is what
+        `_retrying` is still for. The hold is never ``key``'s own row FOR SHARE, so two
+        re-puts of one key cannot both share it and then deadlock on the upgrade.
 
         On the local backend the caller's own copy is the same path (`kind/sha`), so a
         release that already missed `shares_backend_id` can still unlink that re-upload
         before its row lands. No production path uses the local `ContentBackend` for
         this: the store builds a `ContentStore` only over Bambuddy, whose every upload
         is a new file."""
+        where = "backend = %s AND backend_id = %s"
+        held = reuse and (
+            conn.execute(
+                f"SELECT 1 FROM store_blobs WHERE {where} AND key < %s"
+                " ORDER BY key LIMIT 1 FOR SHARE",
+                (ref.backend, ref.backend_id, key),
+            ).fetchone()
+            is not None
+        )
+        own = conn.execute(
+            f"SELECT {columns} FROM store_blobs WHERE key = %s FOR UPDATE", (key,)
+        ).fetchone()
+        if not reuse or held:
+            return own
         if own is not None and (own["backend"], own["backend_id"]) == (ref.backend, ref.backend_id):
-            return
-        row = conn.execute(
-            "SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s AND key <> %s"
-            " LIMIT 1 FOR SHARE",
+            return own
+        above = conn.execute(
+            f"SELECT 1 FROM store_blobs WHERE {where} AND key <> %s"
+            " ORDER BY key DESC LIMIT 1 FOR SHARE",
             (ref.backend, ref.backend_id, key),
         ).fetchone()
-        if row is None:
+        if above is None:
             raise ReuseLostError(f"{ref.backend}:{ref.backend_id} was freed while being reused")
+        return own
 
     def _retrying[T](self, key: str, write: Callable[[Connection[DictRow]], T]) -> T:
         """Run ``write`` (its own transactions) on one pooled connection, again when
-        Postgres breaks a deadlock with it. Taking each key's lock before the hold
-        leaves one deadlock: two reuses that each lock their key and hold the other's
-        row, i.e. puts swapping objects between two keys. Locking every row in key text
-        order (picking the object's row unlocked first) would order those too; retrying
-        is simpler. The last attempt's `DeadlockDetected` propagates."""
+        Postgres breaks a deadlock with it. `_locked` takes its rows in key order, so
+        only a hold it had to take out of order can deadlock. The last attempt's
+        `DeadlockDetected` propagates."""
         with self._pool.connection() as conn:
             for attempt in range(1, _DEADLOCK_ATTEMPTS + 1):
                 try:
@@ -122,17 +143,13 @@ class BlobIndex:
         row's lock in the same transaction, so two racing puts each release exactly the
         object the other one replaced. A key another put created meanwhile is retried
         as an update: a single upsert would not see that row's object. With ``reuse``,
-        ``ref`` names an existing object (`_hold_shared`)."""
+        ``ref`` names an existing object (`_locked`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
 
         def write(conn: Connection[DictRow]) -> BlobRef | None:
             while True:
                 with conn.transaction():
-                    row = conn.execute(
-                        f"SELECT {_COLUMNS} FROM store_blobs WHERE key = %s FOR UPDATE", (key,)
-                    ).fetchone()
-                    if reuse:
-                        self._hold_shared(conn, ref, key=key, own=row)
+                    row = self._locked(conn, key, ref, reuse=reuse, columns=_COLUMNS)
                     if row is not None:
                         conn.execute(
                             "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
@@ -163,17 +180,12 @@ class BlobIndex:
         reuse: bool = False,
     ) -> bool:
         """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row).
-        With ``reuse``, ``ref`` names an existing object (`_hold_shared`)."""
+        With ``reuse``, ``ref`` names an existing object (`_locked`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
 
         def write(conn: Connection[DictRow]) -> bool:
             with conn.transaction():
-                own = conn.execute(
-                    "SELECT backend, backend_id FROM store_blobs WHERE key = %s FOR UPDATE",
-                    (key,),
-                ).fetchone()
-                if reuse:
-                    self._hold_shared(conn, ref, key=key, own=own)
+                self._locked(conn, key, ref, reuse=reuse, columns="backend, backend_id")
                 if expected is None:
                     cursor = conn.execute(
                         "INSERT INTO store_blobs"
