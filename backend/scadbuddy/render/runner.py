@@ -173,6 +173,17 @@ def _require_in_range(parameter: Parameter, value: int | float) -> None:
         )
 
 
+def _require_max_length(parameter: Parameter, value: str) -> None:
+    """The customizer's ``// N`` on a string (#1330), in code points: what OpenSCAD's
+    ``len()`` and the customizer's counter count (#920)."""
+    limit = parameter.max_length
+    if limit is not None and len(value) > limit:
+        raise ParameterValueError(
+            parameter.name,
+            f"parameter {parameter.name!r} must be at most {limit} characters, got {len(value)}",
+        )
+
+
 def _require_option(parameter: Parameter, value: ParamValue) -> None:
     """One of the select's options, or a value the template retired (#432)."""
     allowed = [option.value for option in parameter.options]
@@ -248,6 +259,7 @@ def _format_checked(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
         _refuse_path_like(parameter, value)
+        _require_max_length(parameter, value)
         return quote_string(value)
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
