@@ -6,9 +6,9 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
 // harness's own rules for any local plugin (src/harness/plugins.ts
-// `pluginProblems`: no command hooks, no stdio/bundled MCP servers, no LSP
-// servers, no monitors). A package is someone else's code fetched from the
-// network, so it gets these as well, each with its source:
+// `pluginProblems`: no command hooks, no hooks modules, no stdio/bundled MCP
+// servers, no LSP servers, no monitors). A package is someone else's code
+// fetched from the network, so it gets these as well, each with its source:
 //
 //   - Dynamic context injection. A skill or command line starting `` !`cmd` ``,
 //     or a ```` ```! ```` block, is run by a shell "before the skill content is

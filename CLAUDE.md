@@ -312,8 +312,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
-    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
-    refused, because it would inherit the credential env.
+    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
+    plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
+    Code 2.1.287) is refused, because it would inherit the credential env.
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback

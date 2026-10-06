@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "prompt", "prompt": "ok?" }] }]
+  },
+  "modules": ["./register.js"]
+}

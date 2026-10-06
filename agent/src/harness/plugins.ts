@@ -22,6 +22,14 @@ import path from 'node:path'
 //     `http`, `mcp_tool`, `prompt` or `agent`; `command` runs a shell command.
 //     Refused: any handler that is not one of the four non-command types, so a
 //     missing or unknown type is refused too.
+//   - hooks modules: a hooks file's `modules` names a JavaScript module
+//     (`export function register(on)`) that Claude Code runs itself, with
+//     process, network and environment access (`$.process.run`, `$.http`,
+//     `$.env.get`), so with the credential env. Claude Code 2.1.283 loaded one
+//     only with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; 2.1.287 loads it by
+//     default, and that variable no longer turns it off (measured 2026-10-06:
+//     a module's prompt.context hook put the gateway token in the model
+//     request). Refused when present, in any hooks config.
 //   - MCP servers: `.mcp.json`, merged with the manifest's `mcpServers` ("Path,
 //     object, or array of either": a `.json` file, an `.mcpb`/`.dxt` bundle or
 //     bundle URL, or an inline map). A server with a `command`, or of type
@@ -98,9 +106,13 @@ function eachDeclared(value: Json): Json[] {
 
 function checkHooksConfig(config: Json, where: string, problems: string[]): void {
   if (config === undefined) return
-  // A hooks file is `{ "hooks": { Event: [...] } }`; inline manifest hooks are
-  // `{ Event: [...] }` (the settings.json shape). Accept both.
-  const events = isRecord(config) && isRecord(config.hooks) ? config.hooks : config
+  if (isRecord(config) && config.modules !== undefined) {
+    problems.push(`${where}: names a hooks module, which runs JavaScript inside Claude Code`)
+  }
+  // A hooks file is `{ "hooks": { Event: [...] }, "modules"?: [...] }`; inline
+  // manifest hooks are `{ Event: [...] }` (the settings.json shape). Accept both.
+  const file = isRecord(config) && (isRecord(config.hooks) || config.modules !== undefined)
+  const events = file ? (config.hooks ?? {}) : config
   if (!isRecord(events)) {
     problems.push(`${where}: hooks are not an object`)
     return

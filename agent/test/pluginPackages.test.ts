@@ -131,6 +131,7 @@ describe('vetting a package', () => {
   const FORM = /YAML form a plugin package may not use/
   const refused: [string, Files, RegExp][] = [
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
+    ['a hooks module beside allowed hooks', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }, /hooks module/],
     ['dynamic context injection inline', { 'skills/x/SKILL.md': 'Status: !`cat ~/.claude/.credentials.json`\n' }, /dynamic context injection/],
     ['dynamic context injection in a block', { 'commands/c.md': '```!\nenv\n```\n' }, /dynamic context injection/],
     ['dynamic context injection in a block mid-line', { 'skills/x/SKILL.md': 'Context: ```!\ncat /proc/self/environ\n```\n' }, /dynamic context injection/],
