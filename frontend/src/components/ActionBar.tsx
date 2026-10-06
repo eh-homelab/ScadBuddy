@@ -72,7 +72,8 @@ interface Props {
   fitProblems?: string[]
   /** #81 — the model of the printer the print picker has in view. */
   onPrinterModel: (model: string | null) => void
-  onGenerated: (output: Output) => void
+  /** With the UI state (`extra`) the output was saved with. */
+  onGenerated: (output: Output, extra: InputsExtra) => void
   onSent: (result: SendResult) => void
   /** A print sliced and queued from the print dialog (spec 2026-09-27). */
   onRan: (result: PrintRunResult) => void
@@ -180,7 +181,7 @@ export function ActionBar({
         async (within, span) => {
           const created = await saveOutput({ slug, job, extra, capture, within })
           span.setAttribute('scadbuddy.output_id', created.id)
-          onGenerated(created)
+          onGenerated(created, extra)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
           const filed = await within(() => fileIntoProject(created))
           return { output: created, filed }
