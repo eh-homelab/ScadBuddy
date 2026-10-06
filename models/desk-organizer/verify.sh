@@ -77,6 +77,10 @@ CASES+=(
     'stacked-layout|tray_length=250;cup_width=130;shape="hex";tray_width=150;cup_height=120'
     'tall-thin-cup-clamped|pieces="cup";cup_width=50;cup_height=200;name="Pens"'
     'tall-thin-rings-clamped|pieces="cup";shape="stacked_rings";cup_width=50;cup_height=200;ring_height=6'
+    # #1616: a ring taller than about 14 mm at the default wall (8 mm at
+    # the thinnest) curved in past the cavity, which shaved the top ring
+    'tall-rings-default-wall|shape="stacked_rings";ring_height=20'
+    'thin-wall-rings|pieces="cup";shape="stacked_rings";wall=1.2;ring_height=12'
     'thin-wall-deep-inlay|wall=1.2;text_depth=2;shape="square"'
     'wide-tray-clamped|pieces="tray";tray_length=80;tray_width=150;shape="hex";tray_compartments=2'
     'no-name|name="";pattern="solid"'
