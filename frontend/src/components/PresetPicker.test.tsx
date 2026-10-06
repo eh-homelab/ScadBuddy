@@ -254,7 +254,7 @@ describe('PresetPicker', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(update).not.toHaveBeenCalled()
-    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth')
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('engrave_depth')
 
     await user.click(screen.getByRole('button', { name: 'Update' }))
     await user.click(
@@ -319,6 +319,22 @@ describe('PresetPicker', () => {
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
       inputs: { params: { name: 'Mummy', body_color: '#222222', text_color: '#FFFFFF' } },
     })
+  })
+
+  it('puts "Changed from" on its own line, truncated, as a status (#352)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+
+    const note = screen.getByTestId('preset-modified')
+    // Not squeezed into the buttons' row, where it wrapped word by word.
+    const update = screen.getByRole('button', { name: 'Update' })
+    expect(note.parentElement).not.toBe(update.parentElement)
+    // Above them, one line, the whole name kept for the eye that hovers.
+    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(note).toHaveClass('truncate')
+    expect(note).toHaveAttribute('title', 'Changed from Mum')
+    expect(screen.getByRole('status', { name: 'Changed from Mum' })).toBe(note)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
