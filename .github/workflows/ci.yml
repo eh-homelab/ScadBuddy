@@ -664,11 +664,17 @@ jobs:
       # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
       # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
       # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
+      #
+      # `-n auto`: pytest-xdist, one worker per vCPU (4 on ubuntu-latest). Serial,
+      # this step took ~33 min. Each worker gets a database of its own on the
+      # service (tests/conftest.py `_pg_database_url`), since advisory locks and
+      # NOTIFY channels are per database, and a Temporal dev server of its own (the
+      # session fixture runs once per worker), each well under the 1 GiB of shm.
       - name: pytest
         run: >-
           docker run --rm --network host --shm-size=1g
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest --durations=30
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto --durations=30
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7

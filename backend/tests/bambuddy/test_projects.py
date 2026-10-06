@@ -238,6 +238,33 @@ async def test_a_new_project_needs_a_name(bambuddy: BambuddyClient) -> None:
 
 
 @respx.mock
+@pytest.mark.parametrize("name", ["", "   ", "\t\n"])
+async def test_a_blank_name_is_refused_before_bambuddy_is_written_to(
+    bambuddy: BambuddyClient, name: str
+) -> None:
+    """#1332: a name of spaces made a blank project and folder in Bambuddy."""
+    created = respx.post(f"{API}/projects/").mock(return_value=httpx.Response(500))
+    with pytest.raises(ApiError) as raised:
+        await ensure_project(bambuddy, ProjectRequest(name=name))
+    assert raised.value.status == 400
+    assert not created.called
+
+
+@respx.mock
+async def test_a_new_project_name_is_trimmed(bambuddy: BambuddyClient) -> None:
+    created = respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json={"id": 7, "name": "Tags", "status": "active"})
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Tags", "project_id": 7})
+    )
+
+    await ensure_project(bambuddy, ProjectRequest(name="  Tags \n"))
+    assert json.loads(created.calls.last.request.content)["name"] == "Tags"
+
+
+@respx.mock
 async def test_a_project_with_no_folder_gets_one_created_and_linked(
     bambuddy: BambuddyClient,
 ) -> None:

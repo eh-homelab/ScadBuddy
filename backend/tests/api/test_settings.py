@@ -17,11 +17,14 @@ from google.protobuf.duration_pb2 import Duration
 from psycopg.types.json import Jsonb
 from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.client import connect, connect_lazily
+from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
@@ -436,3 +439,23 @@ def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
     assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
     assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
     assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200
+
+
+def test_an_operation_retention_temporal_refuses_to_check_is_a_500(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the check reads a failed `DescribeNamespace` as the routes and
+    the reconcilers do (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly"."""
+
+    async def refused(client: object) -> None:
+        raise TemporalRefusedError("default")
+
+    monkeypatch.setattr(settings_api, "namespace_retention", refused)
+    response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    # A describe starts nothing: no `may_have_started` to act on.
+    assert "may_have_started" not in response.json()
+    assert "try again shortly" not in response.text
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None

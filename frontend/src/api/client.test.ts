@@ -264,7 +264,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     const sent: number[] = []
     server.use(
       http.post('/api/v1/print/outputs/out-1/run', () => {
-        sent.push(Date.now())
+        sent.push(performance.now())
         return sent.length < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
       }),
       http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
@@ -313,6 +313,73 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
 
     await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
     expect(posts).toBe(2)
+  })
+
+  // Review #1316 (13) 1a: the backend's `may_have_started` says whether the start may
+  // have reached Temporal; true, only the same request_id may follow it.
+  const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
+    HttpResponse.json(
+      {
+        type: `https://scadbuddy.dev/problems/${type}`,
+        title: status === 500 ? 'Internal Server Error' : 'Service Unavailable',
+        status,
+        detail: 'Send the same request again shortly to follow it if it started.',
+        may_have_started: mayHaveStarted,
+      },
+      { status },
+    )
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('re-sends the same request_id after a %s that may have started it', async (type, status) => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const ids: unknown[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        ids.push(((await request.json()) as { request_id?: unknown }).request_id)
+        return ids.length < 2 ? temporalProblem(type, status, true) : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', { ...body, request_id: 'press-1' })).resolves.toEqual(result)
+    expect(ids).toEqual(['press-1', 'press-1'])
+  })
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('says a %s that may have started it, once it gives up, may have run', async (type, status) => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return temporalProblem(type, status, true)
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(posts).toBe(printRunPoll.reattempts + 1)
+    // The dialog says to check the queue instead of offering a press with a new key.
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('does not re-send a temporal-unavailable that started nothing', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return temporalProblem('temporal-unavailable', 503, false)
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(posts).toBe(1)
+    expect(mayHaveRun(error)).toBe(false)
   })
 
   it("follows a library file's run the same way (#742)", async () => {
@@ -819,6 +886,32 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('re-sends the same Idempotency-Key after a temporal-unavailable that may have started it (review #1316 (13) 1a)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'Temporal could not start this right now.',
+                may_have_started: true,
+              },
+              { status: 503 },
+            )
+          : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
   it("follows a 202 to the operation's result", async () => {
     printRunPoll.intervalMs = 1
     let reads = 0
@@ -849,6 +942,8 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect((caught as ApiError).problem.type).toBe(OPERATION_UNFINISHED)
     expect((caught as ApiError).problem.detail).toContain('op-1')
     expect((caught as ApiError).problem.detail).toContain('check before trying again')
+    // It may have been done: a caller must not offer the same press with a new key.
+    expect(mayHaveRun(caught)).toBe(true)
   })
 
   it("turns a failed operation into the route's ApiError", async () => {
