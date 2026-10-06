@@ -996,6 +996,9 @@ export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendere
 /** #408 — a name the mock fails the way a template drawing only a missing picture does. */
 export const PICTURELESS_NAME = 'nosvg'
 
+/** #361 — a name the mock renders, then fails to serve the preview of. */
+export const BROKEN_PREVIEW_NAME = 'noglb'
+
 export const FAILED_JOB_WARNINGS = ['OpenSCAD could not open pic.svg']
 
 export const OPENSCAD_LOG_TAIL = [
