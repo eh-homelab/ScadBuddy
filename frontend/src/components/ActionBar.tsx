@@ -300,12 +300,16 @@ export function ActionBar({
         <p className="sr-only" role="status" data-testid="action-status">
           {announcement}
         </p>
-        {/* A basis, so a crowded bar wraps its buttons below rather than squeezing "Saved …" to nothing. */}
-        <div className="flex min-w-0 grow basis-64 items-center gap-3">
+        {/*
+          Sized by its content (#934): when the status and the buttons do not both fit,
+          the buttons wrap to their own row instead of the status running under them,
+          and on a bar too narrow for even the status alone its pieces wrap in turn.
+        */}
+        <div className="flex min-w-0 grow flex-wrap items-center gap-x-3 gap-y-1">
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
-              <span className="text-[12px] text-muted">
+              <span className="whitespace-nowrap text-[12px] text-muted">
                 {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
               </span>
             </>

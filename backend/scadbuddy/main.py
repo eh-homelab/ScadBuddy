@@ -497,6 +497,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         store=state.print_runs.store,
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
+        links=state.print_links,
     )
     ops = state.components.get(OPERATIONS)
     activities = [
