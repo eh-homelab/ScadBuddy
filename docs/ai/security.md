@@ -220,7 +220,7 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
 
-The option semantics are quoted from the pinned SDK's `sdk.d.ts` 0.3.283 in that file.
+The option semantics are quoted from the pinned SDK's `sdk.d.ts` (0.3.283, and unchanged in 0.3.287) in that file.
 `run.ts` also sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, citing the
 [gateway docs](https://code.claude.com/docs/en/llm-gateway-connect) ("Turn off traffic
 outside the gateway path").
@@ -609,7 +609,7 @@ is refused, with every problem listed, if it has any of the following:
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
   skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
   Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
-  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
+  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead of running
   them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
   resulting Bash call.
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
@@ -1017,7 +1017,7 @@ From the merged code and PR bodies:
    declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
-   - `SessionStore` is `@alpha` in SDK 0.3.283;
+   - `SessionStore` is `@alpha` in SDK 0.3.283, and still in 0.3.287;
    - concurrent `append` under two project keys is not measured;
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;

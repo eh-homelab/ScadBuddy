@@ -276,8 +276,9 @@ jobs:
           fi
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
-      # The build runs the Dockerfile's CLAUDE_CODE_VERSION assertion once per
-      # platform, against that platform's bundled binary (arm64 under QEMU).
+      # The build runs the Dockerfile's Claude Code check (check-cli-version.js)
+      # once per platform, against that platform's bundled binary (arm64 under
+      # QEMU).
       #
       # `type=gha` on a hosted runner only, as above; `scope=agent` is the
       # scope ci.yml's `agent` job reads, so PRs start from main's layers.

@@ -1,9 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
@@ -67,7 +64,9 @@ describe('registry projections', () => {
     }
   })
 
-  it('fill an omitted default in-process (the SDK 0.3.283 server refused it given a raw shape)', async () => {
+  // The harness server gets each tool's raw shape (projections.ts). SDK 0.3.283
+  // refused this call ("expected nonoptional"); 0.3.287 fills the default.
+  it('fill an omitted default in-process', async () => {
     const bodies: unknown[] = []
     const backend = createBackendClient(BACKEND, async (request) => {
       bodies.push(await (request as Request).json())
@@ -103,21 +102,6 @@ describe('registry projections', () => {
     await client.close()
     expect(result.isError, JSON.stringify(result)).toBe(true)
     expect(called).toBe(false)
-  })
-
-  it('re-check the whole-z.object cast when the Agent SDK moves off 0.3.283', async () => {
-    // src/tools/projections.ts hands the SDK's tool() a z.object behind an
-    // `as unknown as` cast, because the 0.3.283 server mishandles a raw shape
-    // with `.default()` fields. The cast silences the types, so a bump must
-    // re-run the two tests above by hand, then drop the cast if the SDK now
-    // fills defaults from a raw shape, and move this pin either way.
-    const sdkEntry = fileURLToPath(import.meta.resolve('@anthropic-ai/claude-agent-sdk'))
-    const manifest = JSON.parse(await readFile(path.join(path.dirname(sdkEntry), 'package.json'), 'utf8')) as {
-      version: string
-    }
-    expect(manifest.version, 'the z.object cast in createHarnessServer was measured on 0.3.283; re-check it').toBe(
-      '0.3.283',
-    )
   })
 
   it('mark read tools readOnly and outward tools destructive', () => {
