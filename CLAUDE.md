@@ -274,8 +274,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
   badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts; a
-  browser_* call that finds no tab in such a session parks the same way as a
+  the one read of every parked call, approvals and answers, that the badge counts, and
+  `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
+  any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
+  a browser_* call that finds no tab in such a session parks the same way as a
   `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
   tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated

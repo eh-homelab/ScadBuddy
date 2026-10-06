@@ -193,6 +193,20 @@ export class QuestionService {
   }
 
   /**
+   * One row by id, pending or not, for the respond route (routes/pendingInput.ts):
+   * what it checks a response against before `answer()` takes it.
+   */
+  async entry(
+    id: string,
+  ): Promise<{ sessionId: string; kind: 'question' | 'attention'; questions: QuestionView[]; pending: boolean } | undefined> {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql<
+      { session_id: string; kind: 'question' | 'attention'; questions: QuestionView[]; outcome: Row['outcome'] }[]
+    >`SELECT session_id, kind, questions, outcome FROM ai_questions WHERE id = ${id}`
+    return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null }
+  }
+
+  /**
    * Every question and attention request still waiting for the user, oldest
    * first (at most PENDING_CAP), then the undismissed `done` summaries, newest
    * first (at most PENDING_CAP more). The summaries have their own cap: nothing
