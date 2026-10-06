@@ -114,6 +114,13 @@ LOST_UNQUEUED_DETAIL = (
 #: A pre-#1052 pod beat its run's ``heartbeat_at`` and expired it past this: its
 #: ``LOST_AFTER``.
 PRE_1052_LOST_AFTER = timedelta(seconds=60)
+#: A row a pre-#1052 pod inserted (no execution) whose heartbeat is older than
+#: ``PRE_1052_LOST_AFTER`` (twice, as parameters). Never beaten: the old pod died before
+#: its first beat, so the row kept the column's default (review #1316 3).
+_PRE_1052_STALE: LiteralString = (
+    "workflow_id IS NULL AND (heartbeat_at < now() - %s"
+    " OR (heartbeat_at = 'infinity' AND created_at < now() - %s))"
+)
 #: A run whose execution closed, or is gone, while its row still said ``running``: one
 #: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
 #: Never a pre-#1052 pod's row, which had no execution: that is ``UPGRADE_INTERRUPTED``.
@@ -334,22 +341,33 @@ class PrintRunStore:
         )
 
     def _fail_pre_1052(self, run_id: str) -> PrintRun:
+        # Still stale: a stalled pod that beat since the SELECT is alive, and goes on to
+        # queue (review #1316 (13) 4a).
         return self._end_running(
             run_id,
             "enqueue_attempted = true, error = %s",
             (Jsonb(UPGRADE_INTERRUPTED.model_dump(mode="json")),),
+            where=_PRE_1052_STALE,
+            where_params=(PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
         )
 
     def _end_running(
-        self, run_id: str, assignments: LiteralString, params: tuple[Jsonb, ...]
+        self,
+        run_id: str,
+        assignments: LiteralString,
+        params: tuple[Jsonb, ...],
+        *,
+        where: LiteralString = "true",
+        where_params: tuple[object, ...] = (),
     ) -> PrintRun:
-        """Fail a ``running`` run with ``assignments`` and announce it; one that has
-        ended is answered as it is."""
+        """Fail a ``running`` run that matches ``where`` with ``assignments`` and announce
+        it; any other is answered as it is."""
         with self._require().connection() as conn, conn.transaction():
             row = conn.execute(
                 f"UPDATE print_runs SET status = 'failed', finished_at = now(), {assignments}"
-                f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}, slug",
-                (*params, run_id),
+                f" WHERE id = %s AND status = 'running' AND {where}"
+                f" RETURNING {_COLUMNS}, slug",
+                (*params, run_id, *where_params),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
@@ -375,11 +393,7 @@ class PrintRunStore:
     def _stale_pre_1052_runs(self) -> list[str]:
         with self._require().connection() as conn:
             rows = conn.execute(
-                "SELECT id FROM print_runs WHERE status = 'running' AND workflow_id IS NULL"
-                " AND (heartbeat_at < now() - %s"
-                # Never beaten: the old pod died before its first beat, so the row kept
-                # the column's default (review #1316 3).
-                " OR (heartbeat_at = 'infinity' AND created_at < now() - %s))"
+                f"SELECT id FROM print_runs WHERE status = 'running' AND {_PRE_1052_STALE}"
                 " ORDER BY created_at",
                 (PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
             ).fetchall()

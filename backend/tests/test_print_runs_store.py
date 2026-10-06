@@ -414,6 +414,21 @@ async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
     assert (await store.get("alive")).status == "running"  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize("beaten", [timedelta(days=1), None], ids=["stalled", "never"])
+async def test_a_pre_1052_row_beaten_after_the_select_is_left_running(
+    store: PrintRunStore, jobs: JobProjection, beaten: timedelta | None
+) -> None:
+    """Review #1316 (13) 4a: a stalled pod that beats between the SELECT and the UPDATE
+    is alive, and goes on to queue: its row is not ended ``UPGRADE_INTERRUPTED``."""
+    _insert_pre_1052(jobs, "resumed", beaten, timedelta(days=2))
+    assert await store.stale_pre_1052_runs() == ["resumed"]
+    with jobs.pool.connection() as conn:
+        conn.execute("UPDATE print_runs SET heartbeat_at = now() WHERE id = 'resumed'")
+
+    assert (await store.fail_pre_1052("resumed")).status == "running"
+    assert (await store.get("resumed")).status == "running"  # type: ignore[union-attr]
+
+
 async def test_one_failing_row_does_not_stop_the_reconcile(
     store: PrintRunStore, jobs: JobProjection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

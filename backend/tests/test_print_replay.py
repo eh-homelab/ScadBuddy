@@ -36,6 +36,12 @@ cancel while ``print_start_enqueue`` runs). Recorded by the patched one, which w
 ``cancelled_during_first_enqueue`` (plate 1 is recorded, plate 2 never sliced) and
 ``cancelled_during_start_enqueue`` (no ``POST /queue/``, so recorded as queueing nothing;
 re-recorded for review #1316 (8) 2, before any deploy).
+
+``FAIL_PATCH`` (review #1316 (13) 3a) is the third. Both after a failed enqueue, with a
+cancel while ``print_fail`` runs: ``cancelled_during_fail_1061``, recorded by the
+workflow before it, which cancels the record and ends the execution cancelled, and
+``cancelled_during_fail``, recorded by the patched one, which waits for the record and
+completes.
 """
 
 from __future__ import annotations
@@ -82,6 +88,8 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "cancelled_during_start_enqueue_1061",
         "cancelled_during_first_enqueue",
         "cancelled_during_start_enqueue",
+        "cancelled_during_fail_1061",
+        "cancelled_during_fail",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:

@@ -304,15 +304,19 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
- * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
- * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice. A failed print run (#470) says so itself: its
+ * Or the backend said its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
+ * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
+ * upstream took it) and an offline browser all mean it did not. For a request with a
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print run (#470) says so itself: its
  * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   // Its run may be checking still, and will print once it is accepted (#1052).
   if (error.problem.type === STILL_ACCEPTING) return true
+  if (mayHaveStarted(error)) return true
+  if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -379,6 +383,16 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * A command's `temporal-unavailable` (503) or `temporal-refused` (500) whose start may
+ * have reached Temporal (`may_have_started`, review #1316 (13) 1a): only the same
+ * request (the same `request_id` or `Idempotency-Key`) may follow it. A new key would
+ * be a second print. False only when the backend's first connect failed.
+ */
+function mayHaveStarted(error: ApiError): boolean {
+  return error.problem.may_have_started === true
+}
+
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
 
@@ -390,6 +404,7 @@ export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-acc
 function unanswered(caught: unknown): boolean {
   if (!(caught instanceof ApiError)) return false
   if (caught.problem.type === STILL_ACCEPTING) return true
+  if (mayHaveStarted(caught)) return true
   return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
@@ -418,18 +433,20 @@ async function reattach<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
-  const began = Date.now()
+  const began = performance.now()
   for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
       if (signal?.aborted || !unanswered(caught)) throw caught
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      // The server's Retry-After paces a re-send it asked for (review #1061 4a): still
+      // accepting, or a start that may have reached Temporal. A proxy's page is not.
+      const asked = accepting || (caught instanceof ApiError && mayHaveStarted(caught))
+      const after = asked && caught instanceof ApiError ? caught.problem.retry_after : undefined
       await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
@@ -448,9 +465,9 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
-  const began = Date.now()
+  const began = performance.now()
   while (op.status === 'running') {
-    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
         type: OPERATION_UNFINISHED,
         title: 'Still running',
@@ -495,9 +512,9 @@ async function followPrintRun(
     signal,
     within,
   )
-  const began = Date.now()
+  const began = performance.now()
   while (run.status === 'running') {
-    if (Date.now() - began >= printRunPoll.followMs) {
+    if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
         type: 'urn:scadbuddy:print-run-unfinished',
         title: 'Still preparing',

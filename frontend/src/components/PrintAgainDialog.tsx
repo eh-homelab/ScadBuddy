@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, mayHaveRun } from '../api/client'
 import type { PrintAgain, PrintDetail } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { Button } from './ui/Button'
@@ -23,6 +23,11 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<PrintAgain | null>(null)
+  /**
+   * The answer never said whether it queued (review #1316 (13) 1a): Queue again would
+   * send a new key, so a second print. Closing the dialog is the way back to it.
+   */
+  const [unsure, setUnsure] = useState(false)
   const printer =
     print.outcome.printer_name ??
     print.printer_name ??
@@ -32,6 +37,7 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
     setSending(false)
     setError(null)
     setResult(null)
+    setUnsure(false)
     onClose()
   }
 
@@ -41,6 +47,11 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
     try {
       setResult(await api.reprint(print.archive_id))
     } catch (cause) {
+      if (mayHaveRun(cause)) {
+        setUnsure(true)
+        setError(`${(cause as ApiError).detail} It may have been queued anyway: check Bambuddy's queue before queueing it again.`)
+        return
+      }
       setError(cause instanceof ApiError ? cause.detail : 'Could not queue the print. Check the connection.')
     } finally {
       setSending(false)
@@ -64,12 +75,14 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
         ) : (
           <>
             <Button onClick={close} disabled={sending}>
-              Cancel
+              {unsure ? 'Close' : 'Cancel'}
             </Button>
-            <Button variant="primary" onClick={() => void queue()} disabled={sending} {...USER_ONLY}>
-              {sending && <Spinner />}
-              {sending ? 'Queueing' : 'Queue'}
-            </Button>
+            {!unsure && (
+              <Button variant="primary" onClick={() => void queue()} disabled={sending} {...USER_ONLY}>
+                {sending && <Spinner />}
+                {sending ? 'Queueing' : 'Queue'}
+              </Button>
+            )}
           </>
         )
       }

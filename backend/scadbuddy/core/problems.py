@@ -40,6 +40,9 @@ class Problem(BaseModel):
     status: int
     detail: str
     instance: str
+    #: On a command's ``temporal-unavailable`` or ``temporal-refused``: whether its start
+    #: may have reached Temporal, so the same request (never a new key) follows it.
+    may_have_started: bool | None = None
 
 
 class ApiError(Exception):

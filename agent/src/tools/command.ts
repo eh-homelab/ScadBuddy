@@ -32,16 +32,26 @@ function stillAccepting(result: FetchResult<unknown>): boolean {
   return response.status === 503 && problem.type === STILL_ACCEPTING
 }
 
+/** A `temporal-unavailable` or `temporal-refused` whose start may have reached Temporal. */
+function startedMaybe(result: FetchResult<unknown>): boolean {
+  const { error } = result
+  return typeof error === 'object' && error !== null && (error as { may_have_started?: unknown }).may_have_started === true
+}
+
 /**
  * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
  * from something in between, whose body is not one of the backend's problems (they
  * always carry a `detail`). Or the backend answered that it is still accepting the same
- * request. The same rule as the browser client's `unanswered`.
+ * request, or that its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`, review #1316 (13) 1a): only the same key
+ * may follow it, and a new one would do it twice. The same rule as the browser client's
+ * `unanswered`.
  */
 function unanswered(result: FetchResult<unknown>): boolean {
   const { error, response } = result
   const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
   if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
+  if (startedMaybe(result)) return true
   return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
 }
 
@@ -56,7 +66,7 @@ export async function answered<T>(
   what: string,
   gaveUp = '',
 ): Promise<FetchResult<T>> {
-  const began = Date.now()
+  const began = performance.now()
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
   for (let misses = 0; ; ) {
     let result: FetchResult<T>
@@ -70,11 +80,12 @@ export async function answered<T>(
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
-      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
+      // The backend's Retry-After paces a re-send it asked for (review #1061 4a): still
+      // accepting, or a start that may have reached Temporal. A proxy's page is not.
+      const after = accepting || startedMaybe(result) ? Number(result.response.headers.get('Retry-After')) : 0
       await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
       continue
     }
@@ -128,9 +139,9 @@ export async function command<T>(
   const first = await answered(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return ok(Promise.resolve(first), what)
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
+  const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
   for (let step = 1; op.status === 'running'; step++) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       return {
         status: 'running',
         operation_id: op.id,

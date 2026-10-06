@@ -164,20 +164,18 @@ async def _late(client: Client, id: str) -> Exception:
 
 async def namespace_retention(client: Client) -> timedelta:
     """How long the client's namespace keeps a closed execution (``DescribeNamespace``).
-    Raises ``TemporalUnavailableError`` when Temporal does not answer."""
+    A failure is raised as ``temporal_failure`` reads it (review #1316 (12) 1):
+    ``TemporalUnavailableError`` (or a subclass), or ``TemporalRefusedError``."""
     try:
         async with asyncio.timeout(DESCRIBE_SECONDS + CONNECT_MARGIN_SECONDS):
             described = await client.workflow_service.describe_namespace(
                 DescribeNamespaceRequest(namespace=client.namespace),
                 timeout=timedelta(seconds=DESCRIBE_SECONDS),
             )
-    except (TimeoutError, RPCError) as error:
-        raise TemporalUnavailableError(client.namespace) from error
-    except RuntimeError as error:
-        # How a lazy client's first connect fails (temporalio 1.33).
-        if str(error).startswith("Failed client connect"):
-            raise TemporalUnavailableError(client.namespace) from error
-        raise
+    except (TimeoutError, RPCError, RuntimeError) as error:
+        if (failure := temporal_failure(error, client.namespace)) is None:
+            raise
+        raise failure from error
     return described.config.workflow_execution_retention_ttl.ToTimedelta()
 
 

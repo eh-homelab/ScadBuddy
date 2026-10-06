@@ -223,6 +223,7 @@ class Fake:
         self.calls.append(
             f"fail:{input.error.status}:{input.error.detail}" + (":unqueued" * input.unqueued)
         )
+        await self._gate("fail")
         return self._run(
             "failed",
             error=input.error,
@@ -769,6 +770,19 @@ async def cancel_during(
         return finished
     finally:
         gate.set()
+
+
+async def test_a_cancel_during_print_fail_waits_for_the_record(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (13) 3a: ``print_fail`` is a record, shielded as the others are. A
+    cancel while it runs waits for it, so the run ends with its real error, and the
+    execution completes rather than ending cancelled with the row ``running``."""
+    error = PrintRunError(status=504, title="Gateway Timeout", detail="queue timed out")
+    fake.enqueue_error = ApplicationError(error.detail, error, type=FAILED, non_retryable=True)
+    finished = await cancel_during(client, worker, fake, "fail", window=600)
+    assert finished.status == "failed"
+    assert finished.error == error
 
 
 @pytest.mark.parametrize("activity_name", ["enqueue", "record", "finish", "succeed"])

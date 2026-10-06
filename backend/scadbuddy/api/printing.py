@@ -38,12 +38,12 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     STILL_ACCEPTING_PROBLEM,
-    TEMPORAL_REFUSED_PROBLEM,
-    TEMPORAL_UNAVAILABLE_PROBLEM,
     IdempotencyKey,
     operation_answer,
     run_operation,
+    temporal_problems,
     temporal_refused,
+    temporal_unavailable,
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
@@ -65,7 +65,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
-from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
@@ -120,35 +120,20 @@ STILL_CHECKING_DETAIL = (
     "ScadBuddy is still checking this print. Send the same request again to follow it."
 )
 
-#: Inline: a ``model`` would be documented as ``application/json``, the route's own type.
-PROBLEM_SCHEMA = Problem.model_json_schema()
 #: What a print run's routes answer beside the 200 and 202, built from the details the
 #: route sends (review #1316 (10) 3, (11) 1, (12) 2).
-PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = {
-    status.HTTP_500_INTERNAL_SERVER_ERROR: {
-        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
-        "description": f"`{TEMPORAL_REFUSED_PROBLEM}`: {TEMPORAL_REFUSED_DETAIL} Or "
-        f'`about:blank`: the check failed unexpectedly ("{UNEXPECTED_DETAIL}"), or'
-        " ScadBuddy did.",
-    },
-    status.HTTP_503_SERVICE_UNAVAILABLE: {
-        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
-        "description": f"`{TEMPORAL_UNAVAILABLE_PROBLEM}`, with `Retry-After`: Temporal did"
-        " not answer or could not start the run right now, one of: "
-        + "; ".join(
-            f'"{detail}"'
-            for detail in (TEMPORAL_UNREACHABLE_DETAIL, TEMPORAL_DOWN_DETAIL, TEMPORAL_BUSY_DETAIL)
-        )
-        + f'. Or `{STILL_ACCEPTING_PROBLEM}`, with `Retry-After`: "{STILL_CHECKING_DETAIL}"',
-    },
-    "default": {
-        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
-        "description": "Any other problem. The check's refusal passes through with its own"
-        " status and type (409, 422, or Bambuddy's own, such as 404 for a library file it no"
-        " longer has, 502 or 504); the route's own are 404 for an unknown output and 409 for"
-        " a run whose record expired.",
-    },
-}
+PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = temporal_problems(
+    refused=TEMPORAL_REFUSED_DETAIL,
+    unreachable=TEMPORAL_UNREACHABLE_DETAIL,
+    down=TEMPORAL_DOWN_DETAIL,
+    busy=TEMPORAL_BUSY_DETAIL,
+    still_checking=STILL_CHECKING_DETAIL,
+    unexpected=UNEXPECTED_DETAIL,
+    other="Any other problem. The check's refusal passes through with its own status and"
+    " type (409, 422, or Bambuddy's own, such as 404 for a library file it no longer has,"
+    " 502 or 504); the route's own are 404 for an unknown output and 409 for a run whose"
+    " record expired.",
+)
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -446,20 +431,20 @@ async def accept_run(
         ) from None
     except TemporalRefusedError:
         # A misconfiguration, not a blip (review #1061 (3) 3).
-        raise temporal_refused("a print run", TEMPORAL_REFUSED_DETAIL) from None
+        raise temporal_refused(
+            "to start a print run", TEMPORAL_REFUSED_DETAIL, may_have_started=True
+        ) from None
     except TemporalUnavailableError as error:
-        logger.warning("could not start a print run on Temporal", exc_info=True)
         if isinstance(error, TemporalUnreachableError):
             detail = TEMPORAL_UNREACHABLE_DETAIL
         elif isinstance(error, TemporalBusyError):
             detail = TEMPORAL_BUSY_DETAIL
         else:
             detail = TEMPORAL_DOWN_DETAIL
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
+        raise temporal_unavailable(
+            "a print run",
             detail,
-            type_=TEMPORAL_UNAVAILABLE_PROBLEM,
-            headers={"Retry-After": "5"},
+            may_have_started=not isinstance(error, TemporalUnreachableError),
         ) from None
     if answer.refusal is not None:
         refusal = answer.refusal

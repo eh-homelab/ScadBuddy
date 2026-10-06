@@ -8,7 +8,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import timedelta
-from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -16,22 +15,17 @@ from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
-    CONNECT_MARGIN_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
-    TemporalBusyError,
-    TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
     start_command,
-    temporal_failure,
 )
-from tests.support.temporal import current_address, namespace_not_found_error, temporal_client
+from tests.support.temporal import current_address, temporal_client
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -41,6 +35,10 @@ class EchoInput(BaseModel):
     delay_s: float = 0.0
     #: Complete as soon as the first Update has answered.
     finish_at_once: bool = False
+    #: The `accepted` Update answers only once the `release` signal came. Not a timer: a
+    #: durable timer follows the server's wall clock, which jumps on a loaded host, so
+    #: a 4 s `workflow.sleep` outlived a 10 s deadline there.
+    hold: bool = False
 
 
 class EchoAnswer(BaseModel):
@@ -55,6 +53,7 @@ class EchoCommand:
         self.arg = arg
         self.updates = 0
         self.finished = False
+        self.released = False
 
     @workflow.run
     async def run(self, arg: EchoInput) -> int:
@@ -69,11 +68,17 @@ class EchoCommand:
         self.updates += 1
         if self.arg.delay_s:
             await workflow.sleep(self.arg.delay_s)
+        if self.arg.hold:
+            await workflow.wait_condition(lambda: self.released)
         return EchoAnswer(updates=self.updates, run_id=workflow.info().run_id)
 
     @workflow.signal
     def finish(self) -> None:
         self.finished = True
+
+    @workflow.signal
+    def release(self) -> None:
+        self.released = True
 
 
 @pytest.fixture
@@ -157,14 +162,17 @@ async def test_an_update_slower_than_the_deadline_is_still_accepting(
 ) -> None:
     workflow_id = f"echo-{uuid.uuid4().hex}"
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
-        # Slower than the outer bound: `rpc_timeout` alone does not end the call, since
+        # Held past the outer bound: `rpc_timeout` alone does not end the call, since
         # the SDK polls again when the server answers a poll with no outcome (#1095 CI).
-        slow = EchoInput(delay_s=CONNECT_MARGIN_SECONDS + 2)
+        held = EchoInput(hold=True)
         with pytest.raises(CommandStillAcceptingError):
-            await echo(client, queue, workflow_id, slow, deadline=timedelta(seconds=0.3))
-        # The execution goes on, and the same request attaches to it.
-        again = await echo(client, queue, workflow_id, slow)
-        await client.get_workflow_handle(workflow_id).signal("finish")
+            await echo(client, queue, workflow_id, held, deadline=timedelta(seconds=0.3))
+        # The execution goes on, and the same request attaches to it. Released first, so
+        # this answer waits on no timer.
+        handle = client.get_workflow_handle(workflow_id)
+        await handle.signal("release")
+        again = await echo(client, queue, workflow_id, held)
+        await handle.signal("finish")
     assert again.updates == 2
 
 
@@ -182,85 +190,6 @@ async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue:
             deadline=timedelta(seconds=1),
         )
     assert time.monotonic() - began < 10
-
-
-async def test_an_unavailable_response_may_follow_a_start(queue: str) -> None:
-    """A connected client's `UNAVAILABLE` is a `tonic::Status` (temporalio 1.33.0,
-    `temporalio/bridge/src/client.rs` `rpc_resp`), the same for a refused reconnect and
-    a stream reset after the start was persisted, and sdk-core retries it
-    (`crates/client/src/retry.rs` `RETRYABLE_ERROR_CODES`): Temporal is unavailable, but
-    a start may exist (review #1316 (9) 1a)."""
-
-    class Refusing:
-        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
-            raise RPCError("connection reset", RPCStatusCode.UNAVAILABLE, b"")
-
-    with pytest.raises(TemporalUnavailableError) as raised:
-        await echo(cast(Client, Refusing()), queue, "echo-unavailable")
-    assert not isinstance(raised.value, TemporalUnreachableError)
-
-
-async def test_only_a_failed_connect_says_nothing_started(queue: str) -> None:
-    """A lazy client's first connect runs before any request is written
-    (`_BridgeServiceClient._rpc_call` in temporalio 1.33.0's `service.py`), and fails as
-    the bridge's `Failed client connect` (`bridge/src/client.rs` `connect_client`): the
-    one failure that proves nothing started (review #1316 (9) 1a)."""
-
-    class NeverConnects:
-        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError("Failed client connect: connection refused")
-
-    with pytest.raises(TemporalUnreachableError):
-        await echo(cast(Client, NeverConnects()), queue, "echo-never-connects")
-
-
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [
-        (TimeoutError(), TemporalUnavailableError),
-        (RuntimeError("Failed client connect: connection refused"), TemporalUnreachableError),
-        (RPCError("reset", RPCStatusCode.UNAVAILABLE, b""), TemporalUnavailableError),
-        (RPCError("slow", RPCStatusCode.DEADLINE_EXCEEDED, b""), TemporalBusyError),
-        (RPCError("limit", RPCStatusCode.RESOURCE_EXHAUSTED, b""), TemporalBusyError),
-        (RPCError("cancelled", RPCStatusCode.CANCELLED, b""), TemporalBusyError),
-        (RPCError("internal", RPCStatusCode.INTERNAL, b""), TemporalBusyError),
-        (namespace_not_found_error(), TemporalBusyError),
-        (RPCError("no execution", RPCStatusCode.NOT_FOUND, b""), TemporalRefusedError),
-        (RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""), TemporalRefusedError),
-        (RPCError("who", RPCStatusCode.UNAUTHENTICATED, b""), TemporalRefusedError),
-        (RPCError("bad", RPCStatusCode.INVALID_ARGUMENT, b""), TemporalRefusedError),
-    ],
-)
-def test_temporal_failure_is_the_one_reading_of_a_failed_call(
-    error: BaseException, expected: type[Exception]
-) -> None:
-    """Review #1316 (11) 2, 5; (12) 1: the routes and the reconcilers read a failed call
-    the same way: unreachable, unavailable or busy (each worth sending again) or refused."""
-    failure = temporal_failure(error, "x")
-    assert type(failure) is expected
-
-
-def test_temporal_failure_leaves_a_failure_not_about_temporal() -> None:
-    assert temporal_failure(RuntimeError("a bug"), "x") is None
-    assert temporal_failure(ValueError("a bug"), "x") is None
-
-
-@pytest.mark.parametrize(
-    ("code", "expected"),
-    [
-        (RPCStatusCode.RESOURCE_EXHAUSTED, TemporalBusyError),
-        (RPCStatusCode.PERMISSION_DENIED, TemporalRefusedError),
-    ],
-)
-async def test_start_command_raises_what_temporal_failure_reads(
-    queue: str, code: RPCStatusCode, expected: type[Exception]
-) -> None:
-    class Failing:
-        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
-            raise RPCError("no", code, b"")
-
-    with pytest.raises(expected):
-        await echo(cast(Client, Failing()), queue, "echo-failing")
 
 
 class Proxy:

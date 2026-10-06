@@ -518,6 +518,10 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert response.headers["Retry-After"] == "5"
+    # The lazy connect retries for minutes, so the route's bound ends it first, and a
+    # connect that outlived the bound cannot say whether a start got through: the client
+    # re-sends the same request_id (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
 
@@ -547,6 +551,7 @@ def test_only_a_failed_connect_says_nothing_was_queued(
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert "cannot reach Temporal" in response.text
     assert "Nothing was queued" in response.text
+    assert response.json()["may_have_started"] is False
 
 
 @pytest.mark.parametrize(
@@ -576,6 +581,8 @@ def test_an_unavailable_temporal_may_have_started_the_run(
     assert "cannot reach Temporal" in response.text
     assert "Nothing was queued" not in response.text
     assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
 
 
 @pytest.mark.parametrize(
@@ -613,6 +620,8 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
     assert "Nothing was queued" not in response.text
     assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
     # Temporal answered (or gRPC ended the call): not a network problem (review #1316
     # (9) 1b).
     assert "cannot reach" not in response.text
@@ -636,6 +645,7 @@ def test_a_missing_namespace_is_temporal_unavailable(
 
     assert response.status_code == 503, response.text
     assert response.json()["detail"] == printing_api.TEMPORAL_BUSY_DETAIL
+    assert response.json()["may_have_started"] is True
 
 
 @pytest.mark.parametrize(
@@ -674,6 +684,7 @@ def test_a_permanent_rpc_error_is_a_500_logged_at_error(
 
     assert response.status_code == 500, response.text
     assert response.json()["type"].endswith("/temporal-refused")
+    assert response.json()["may_have_started"] is True
     assert "permission denied" not in response.text
     # Some refusals come after the start was persisted (review #1316 4).
     assert "Nothing was queued" not in response.text
@@ -891,6 +902,8 @@ def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str
         printing_api.STILL_CHECKING_DETAIL,
     ):
         assert detail in responses["503"]["description"]
-    assert "did not answer or could not start the run" in responses["503"]["description"]
+    assert "did not answer or could not start it" in responses["503"]["description"]
+    assert "may_have_started" in responses["503"]["description"]
+    assert "may_have_started" in responses["500"]["description"]
     # The check's refusals pass through with their own status.
     assert "own status" in responses["default"]["description"]

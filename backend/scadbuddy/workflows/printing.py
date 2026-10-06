@@ -139,6 +139,11 @@ CANCEL_PATCH = "print-cancel-ends-window"
 #: queued is recorded, and the run stops before the next ``POST /queue/``. A history from
 #: before it cancels them, as ``CANCEL_PATCH`` alone did.
 PLATES_PATCH = "print-cancel-records-every-plate"
+#: ``workflow.patched`` id for review #1316 (13) 3a: ``print_fail`` is a record, and
+#: waits through a cancel as the others do, so the run ends with the error it records
+#: and its execution completes. A history from before it cancels ``print_fail`` and ends
+#: the execution cancelled (``cancelled_during_fail_1061``).
+FAIL_PATCH = "print-cancel-waits-for-fail"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -266,7 +271,7 @@ class PrintRunWorkflow:
     async def _fail(
         self, input: PrintRunInput, accepted: Accepted, error: PrintRunError
     ) -> PrintRun:
-        failed: PrintRun = await workflow.execute_activity(
+        record = workflow.start_activity(
             "print_fail",
             FailInput(
                 run_id=accepted.run.id,
@@ -278,7 +283,7 @@ class PrintRunWorkflow:
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
-        return failed
+        return await self._shielded(record, FAIL_PATCH)
 
     async def _refuse(self, refusal: PrintRunError) -> None:
         """Answer the Update with ``refusal``; nothing was written."""
