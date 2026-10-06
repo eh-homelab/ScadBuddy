@@ -274,8 +274,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
   badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts; a
-  browser_* call that finds no tab in such a session parks the same way as a
+  the one read of every parked call, approvals and answers, that the badge counts, and
+  `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
+  any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
+  a browser_* call that finds no tab in such a session parks the same way as a
   `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
   tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
@@ -465,10 +467,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
-- `claude-review` is a merge gate: the review runs after CI, then a classifier passes
-  only when every finding in the review for *this* commit is fixed or tracked in an
-  open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
-  to the PR files those `pr-feedback` issues automatically.
+- `claude-review` is a merge gate: the review runs after CI and sorts its findings into
+  `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
+  finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
+  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
+  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
+  `pr-feedback` issues automatically.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed
