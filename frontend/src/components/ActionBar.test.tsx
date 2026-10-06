@@ -91,6 +91,63 @@ describe("Generate's menu", () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
 
+  describe('menu button keyboard pattern (#968, WAI-ARIA APG Menu Button)', () => {
+    it('opens on Enter with focus on the first item, and Escape returns focus to the button', async () => {
+      const { user } = setup()
+      const toggle = screen.getByRole('button', { name: 'More to generate' })
+      toggle.focus()
+      await user.keyboard('{Enter}')
+      const item = screen.getByRole('menuitem', { name: /Rendered image/ })
+      expect(item).toHaveFocus()
+      expect(item).toHaveAttribute('tabindex', '-1')
+
+      await user.keyboard('{Escape}')
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(toggle).toHaveFocus()
+    })
+
+    it('opens on ArrowDown and ArrowUp too', async () => {
+      const { user } = setup()
+      const toggle = screen.getByRole('button', { name: 'More to generate' })
+      toggle.focus()
+      await user.keyboard('{ArrowDown}')
+      expect(screen.getByRole('menuitem', { name: /Rendered image/ })).toHaveFocus()
+      await user.keyboard('{Escape}')
+
+      await user.keyboard('{ArrowUp}')
+      expect(screen.getByRole('menuitem', { name: /Rendered image/ })).toHaveFocus()
+    })
+
+    it('keeps arrow keys on its items', async () => {
+      const { user } = setup()
+      screen.getByRole('button', { name: 'More to generate' }).focus()
+      await user.keyboard('{Enter}')
+      const item = screen.getByRole('menuitem', { name: /Rendered image/ })
+      for (const key of ['{ArrowDown}', '{ArrowUp}', '{Home}', '{End}']) {
+        await user.keyboard(key)
+        expect(item).toHaveFocus()
+      }
+    })
+
+    it('closes when Tab leaves it, rather than staying open behind', async () => {
+      const { user } = setup()
+      screen.getByRole('button', { name: 'More to generate' }).focus()
+      await user.keyboard('{Enter}')
+      await user.tab()
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(document.activeElement).not.toBe(document.body)
+    })
+
+    it('chooses an item with Enter', async () => {
+      const { user } = setup()
+      screen.getByRole('button', { name: 'More to generate' }).focus()
+      await user.keyboard('{Enter}')
+      await user.keyboard('{Enter}')
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(screen.getByRole('dialog', { name: 'Rendered image' })).toBeInTheDocument()
+    })
+  })
+
   it('cannot open while the preview is rendering', () => {
     setup(true)
     expect(screen.getByRole('button', { name: 'More to generate' })).toBeDisabled()
