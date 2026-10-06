@@ -160,6 +160,19 @@ describe('CustomizePage', () => {
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
   })
 
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+  })
+
   it('says the queue is full and renders anyway once the delay passes', async () => {
     server.use(
       http.post(
