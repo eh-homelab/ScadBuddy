@@ -393,6 +393,29 @@ test.describe('customizer at 200% zoom (#971)', () => {
     await expect(first).toBeInViewport()
   })
 
+  test('leaves full screen alone: the whole window is the view, and the flyout scrolls its parameters', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const canvas = page.getByTestId('preview-canvas')
+    await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit full screen' })).toBeVisible()
+
+    // Not capped at 60vh: full screen is the view, all of it.
+    await expect.poll(async () => (await canvas.boundingBox())?.height).toBe(450)
+
+    // The flyout's parameters can all be reached, by scrolling its own list.
+    await page.getByRole('button', { name: 'Parameters', exact: true }).click()
+    const section = page.getByRole('region', { name: 'Parameters' })
+    await expect(section).toBeVisible()
+    const list = section.getByRole('tabpanel')
+    // Inside the window: the list's box ends on screen, and what it holds scrolls in it.
+    const box = await list.evaluate((element) => element.parentElement?.getBoundingClientRect().bottom ?? 0)
+    expect(box).toBeLessThanOrEqual(450 + 1)
+    const last = list.locator('[data-param]').last()
+    await last.scrollIntoViewIfNeeded()
+    await expect(last).toBeInViewport()
+  })
+
   test("keeps the model's actions inside the window", async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible()

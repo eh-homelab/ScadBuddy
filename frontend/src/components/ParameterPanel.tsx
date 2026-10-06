@@ -23,6 +23,12 @@ interface Props {
    * change happens where the user can see it.
    */
   reveal?: { name: string }
+  /**
+   * #971 — on a short stacked window the page scrolls, so the list takes its full
+   * height rather than scrolling in a box. Off where the panel has a height of its own
+   * (the full-screen flyout).
+   */
+  growsWithPage?: boolean
 }
 
 export function ParameterPanel({
@@ -35,6 +41,7 @@ export function ParameterPanel({
   onReset,
   toolbar,
   reveal,
+  growsWithPage = false,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
@@ -96,7 +103,7 @@ export function ParameterPanel({
         })}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto short:flex-none">
+      <div className={`min-h-0 flex-1 overflow-y-auto ${growsWithPage ? 'short:flex-none' : ''}`}>
         {globalGroup && (
           <div className="border-b border-line bg-surface-2/40">
             <ul className="divide-y divide-line/60">
