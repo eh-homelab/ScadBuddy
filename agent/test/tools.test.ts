@@ -368,7 +368,10 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   const OUT = '0123456789abcdef0123456789abcdef'
   const FILAMENTS = {
     library_file_id: 5,
-    slots: [{ slot_id: 1 }, { slot_id: 2 }],
+    slots: [
+      { slot_id: 1, colour_matches: [10, 12] },
+      { slot_id: 2, colour_matches: [11, 12] },
+    ],
     spools: [{ spool_id: 10, material: 'PLA' }, { spool_id: 11, material: 'PETG' }, { spool_id: 12, material: 'PLA' }],
     suggested: [
       { slot_id: 1, spool_id: 10 },
@@ -662,6 +665,17 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       },
       choices: { nozzles: [{ size: '0.2', flow: 'standard' }], tier: null, process_name: '0.06mm Fine @BBL H2C 0.2 nozzle' },
     })
+  })
+
+  it('drops a remembered spool whose colour no longer fits the slot (#933)', async () => {
+    const run: { body?: unknown } = {}
+    server.use(
+      // Spool 10 is still in the inventory but no longer matches slot 2's colour.
+      choicesView({ filament_plan: [{ slot_id: 2, spool_id: 10 }] }),
+      ...capturedRun(run),
+    )
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(run.body).toMatchObject({ filament_plan: { slots: FILAMENTS.suggested } })
   })
 
   it('reads the filament step for all plates itself', async () => {
