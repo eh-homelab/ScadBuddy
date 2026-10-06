@@ -211,6 +211,21 @@ class PrintMedia(_Response):
     attachments: list[PrintAttachment] = []
 
 
+class PrintedRun(ArchiveRun):
+    """A run of the print, as Bambuddy recorded it, unless its filament reading
+    cannot be this print's (#950)."""
+
+    #: The run's grams are far over the archive's: a spool's weight, most likely,
+    #: not what the print used. Its ``cost`` is then the run's own price per gram
+    #: at the archive's grams, not the cost Bambuddy worked out from the reading.
+    filament_reading_suspect: bool = False
+
+
+#: How many times the archive's grams a run may read before it is not believed.
+#: A reprint uses about what the archive says; a spool's weight is 50x and more.
+SUSPECT_RUN_GRAMS_RATIO = 3.0
+
+
 class PrintOutcome(_Response):
     status: str
     failure_reason: str | None = None
@@ -224,7 +239,7 @@ class PrintOutcome(_Response):
     printer_id: int | None = None
     printer_name: str | None = None
     #: Every run of the archive: a reprint inside Bambuddy is a run, not an archive.
-    runs: list[ArchiveRun] = []
+    runs: list[PrintedRun] = []
 
 
 class PrintLinks(_Response):
@@ -626,11 +641,30 @@ async def _media(
     )
 
 
+def _run(run: ArchiveRun, archive_grams: float | None) -> PrintedRun:
+    grams = run.filament_used_grams
+    if not archive_grams or not grams or grams <= archive_grams * SUSPECT_RUN_GRAMS_RATIO:
+        return PrintedRun(**run.model_dump())
+    cost = None if run.cost is None else round(run.cost * archive_grams / grams, 2)
+    return PrintedRun(**run.model_dump(exclude={"cost"}), cost=cost, filament_reading_suspect=True)
+
+
 def _outcome(
     summary: PrintSummary, archive: ArchiveDetail | None, runs: list[ArchiveRun]
 ) -> PrintOutcome:
     if archive is None:
         return PrintOutcome(status=summary.status, printer_id=summary.printer_id)
+    shown = [_run(run, archive.filament_used_grams) for run in runs]
+    # Bambuddy's cost includes what it worked out from a suspect reading; take the
+    # overstatement back out, when the archive's cost is evidently carrying it.
+    overstated = sum(
+        (recorded.cost or 0.0) - (run.cost or 0.0)
+        for recorded, run in zip(runs, shown, strict=True)
+        if run.filament_reading_suspect
+    )
+    cost = archive.cost
+    if cost is not None and 0 < overstated <= cost:
+        cost = round(cost - overstated, 2)
     return PrintOutcome(
         status=summary.status,
         failure_reason=archive.failure_reason,
@@ -639,10 +673,10 @@ def _outcome(
         filament_used_grams=archive.filament_used_grams,
         filament_type=archive.filament_type,
         filament_color=archive.filament_color,
-        cost=archive.cost,
+        cost=cost,
         printer_id=summary.printer_id,
         printer_name=summary.printer_name,
-        runs=runs,
+        runs=shown,
     )
 
 
