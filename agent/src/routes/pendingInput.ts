@@ -85,7 +85,7 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
 export async function pendingInput(sessions: SessionManager): Promise<PendingInputPage> {
   const [approvals, { questions: answers, summariesTruncated }] = await Promise.all([
     sessions.approvals.list(BROWSER_USER, { pending: true }),
-    sessions.questions.listPending(),
+    sessions.questions.listPending(BROWSER_USER),
   ])
   const entries: PendingInputEntry[] = [
     ...approvals.map((a) => ({
