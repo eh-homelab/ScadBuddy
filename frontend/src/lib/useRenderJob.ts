@@ -117,8 +117,9 @@ export function useRenderJob(
 
     /** Wait out a refusal, but give up as soon as a newer submit supersedes this one. */
     async function waitUnlessStale(seconds: number) {
-      const until = Date.now() + seconds * 1000
-      while (Date.now() < until && !isStale()) {
+      // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+      const until = performance.now() + seconds * 1000
+      while (performance.now() < until && !isStale()) {
         await new Promise((resolve) => setTimeout(resolve, STALE_CHECK_MS))
       }
     }

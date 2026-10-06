@@ -192,18 +192,23 @@ def _unreachable() -> TemporalUnavailableError:
 
 
 @pytest.mark.parametrize(
-    ("error", "says"),
+    ("error", "says", "may_have_started"),
     [
         # Only a failed connect wrote nothing (review #1066 (8) 2).
-        (_unreachable(), "Nothing was queued"),
-        # The rest may follow a start Temporal persisted: the same request follows it.
-        (TemporalUnavailableError("render-x"), "to follow it if it started"),
-        (RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""), "to follow it if it started"),
-        (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started"),
+        (_unreachable(), "Nothing was queued", False),
+        # The rest may follow a start Temporal persisted: the same request follows it,
+        # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
+        (TemporalUnavailableError("render-x"), "to follow it if it started", True),
+        (
+            RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""),
+            "to follow it if it started",
+            True,
+        ),
+        (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started", True),
     ],
 )
 def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
-    client: TestClient, model: str, error: Exception, says: str
+    client: TestClient, model: str, error: Exception, says: str, may_have_started: bool
 ) -> None:
     down = mock.AsyncMock(side_effect=error)
     with mock.patch.object(RenderService, "submit", down):
@@ -211,6 +216,7 @@ def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
     assert response.status_code == 503
     assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
     assert says in response.json()["detail"]
+    assert response.json()["may_have_started"] is may_have_started
     assert response.headers["retry-after"] == "5"
 
 
@@ -235,6 +241,11 @@ def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
     assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
     assert "nope" not in response.json()["detail"]
     assert "retry-after" not in response.headers
+    # The start may have been persisted before Temporal refused: the detail's "send the
+    # same request again" is what the clients do on `may_have_started` (review #1066
+    # (10) 3).
+    assert response.json()["may_have_started"] is True
+    assert "to follow it if it started" in response.json()["detail"]
     assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
 
 
@@ -250,6 +261,9 @@ def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, 
     assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
     # The worker's failure text stays in the log (review #1066 5.1).
     assert "/srv/internal" not in response.json()["detail"]
+    # The run answered: no job was made, and nothing tells a client to send it again.
+    assert response.json()["may_have_started"] is False
+    assert "again" not in response.json()["detail"]
 
 
 def test_a_render_still_being_accepted_is_a_503_to_send_again(

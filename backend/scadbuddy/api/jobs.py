@@ -253,8 +253,10 @@ def require_job(render: RenderService, job_id: str) -> Job:
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
                 "limit is set); or Temporal, where renders run, is unreachable or could not "
-                "take the start now (`temporal-unavailable`: send the same request again; "
-                "the detail says whether a start may exist); or the render is "
+                "take the start now (`temporal-unavailable`; `may_have_started` is false "
+                "only when nothing reached Temporal, and true means send the same request "
+                "again with the same `Idempotency-Key` to follow a start it may hold); or "
+                "the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
                 "again, with the same `Idempotency-Key`, to follow it as one request; "
                 "without a key, each send is one more claim on the job). "
@@ -264,7 +266,10 @@ def require_job(render: RenderService, job_id: str) -> Job:
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": (
                 "The render's execution, or Temporal, refused it (`render-unstartable`: "
-                "a configuration error, see the logs)"
+                "a configuration error, see the logs). With `may_have_started` true "
+                "(Temporal refused, after a start it may have persisted), send the same "
+                "request again with the same `Idempotency-Key` to follow it; false, the "
+                "render's first step failed and no job exists"
             )
         },
     },
@@ -344,10 +349,12 @@ async def render_model(
     except WorkflowUpdateFailedError as error:
         # The worker's failure text is for the log, not the client (review #1066 5.1).
         logger.error("the render could not be started: %s", error.cause, exc_info=True)
+        # The run answered (`RENDER_UNSTARTABLE`, review #1066 (10) 1): no job exists.
         raise ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "the render could not be started",
             type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=False,
         ) from None
     except StoreFullError as error:
         # `submit` pins the template's snapshot in the blob store before the job exists.
@@ -368,19 +375,26 @@ async def render_model(
 def _temporal_problem(error: RPCError | TemporalUnavailableError) -> ApiError:
     """What the route answers when Temporal did not take the render's start, as the
     print route does: only a failed connect wrote nothing; any other may follow a start
-    Temporal persisted, which the same request sent again follows (review #1066 (8) 2)."""
+    Temporal persisted, which the same request sent again follows (review #1066 (8) 2).
+    ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
+    `Idempotency-Key` when it is true, so a detail tells a client to send again only
+    then (review #1066 (10) 3, 4)."""
     if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
-        # A wrong namespace or a denied permission: no re-send fixes it. Temporal's
-        # message stays in the log.
+        # A wrong namespace or a denied permission: configuration. Temporal's message
+        # stays in the log. The refusal may still follow a start it persisted.
         logger.error("Temporal refused to start a render", exc_info=error)
         return ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "Temporal refused to start this render; see ScadBuddy's logs. Send the same"
             " request again to follow it if it started.",
             type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=True,
         )
     logger.warning("could not start a render on Temporal", exc_info=error)
-    if isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError):
+    started = not (
+        isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError)
+    )
+    if not started:
         # The lazy client's first connect failed (`start_command`): nothing was sent.
         detail = (
             "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
@@ -401,6 +415,7 @@ def _temporal_problem(error: RPCError | TemporalUnavailableError) -> ApiError:
         detail,
         type_=TEMPORAL_UNAVAILABLE_PROBLEM,
         headers={"Retry-After": "5"},
+        may_have_started=started,
     )
 
 

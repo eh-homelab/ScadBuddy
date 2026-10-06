@@ -387,11 +387,13 @@ export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-una
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
- * Or ScadBuddy answered that the same request is still being accepted.
+ * Or ScadBuddy answered that the same request is still being accepted, or that Temporal
+ * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
   if (!(caught instanceof ApiError)) return false
   if (caught.problem.type === STILL_ACCEPTING) return true
+  if (caught.problem.may_have_started === true) return true
   return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
@@ -426,7 +428,8 @@ async function reattach<T>(
   finish = false,
   within?: Within,
 ): Promise<T> {
-  const began = Date.now()
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+  const began = performance.now()
   let last = false
   for (let tries = 0; ; ) {
     try {
@@ -439,11 +442,11 @@ async function reattach<T>(
         continue
       }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      // The server's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
       try {
         await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
       } catch (reason) {
@@ -467,9 +470,9 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
-  const began = Date.now()
+  const began = performance.now()
   while (op.status === 'running') {
-    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
         type: OPERATION_UNFINISHED,
         title: 'Still running',
@@ -515,9 +518,9 @@ async function followPrintRun(
     false,
     within,
   )
-  const began = Date.now()
+  const began = performance.now()
   while (run.status === 'running') {
-    if (Date.now() - began >= printRunPoll.followMs) {
+    if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
         type: 'urn:scadbuddy:print-run-unfinished',
         title: 'Still preparing',

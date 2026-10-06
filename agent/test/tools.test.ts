@@ -241,6 +241,53 @@ describe('render_model', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it.each([
+    [503, 'https://scadbuddy.dev/problems/temporal-unavailable'],
+    [500, 'https://scadbuddy.dev/problems/render-unstartable'],
+  ])('re-sends a %i that may have started, with the same key (review #1066 (10) 3)', async (status, type) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(
+              { type, title: 'Unavailable', status, detail: 'Send the same request again.', may_have_started: true },
+              { status },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not re-send a problem that started nothing (review #1066 (10) 3)', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'Nothing was queued; try again shortly.',
+            may_have_started: false,
+          },
+          { status: 503 },
+        )
+      }),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
