@@ -202,6 +202,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(Date.now() - started).toBeLessThan(5_000)
   })
 
+  // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit
+  // sends must not be lost while that read is in flight, or the wait sleeps a whole poll (here an hour).
+  it('a wake that lands while the wait reads its row ends the wait at once, not after a poll', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 3_600_000 })
+    const service = m.questions as unknown as { row(id: string): Promise<unknown> }
+    const real = service.row.bind(service)
+    let reading!: () => void
+    const inRead = new Promise<void>((resolve) => (reading = resolve))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let first = true
+    vi.spyOn(service, 'row').mockImplementation(async (id) => {
+      const row = await real(id)
+      if (first) {
+        // The row as read before the answer commits: still pending.
+        first = false
+        reading()
+        await held
+      }
+      return row
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await inRead
+    await m.questions.answer(browser, answer(session.id, await pending(session.id), ['Done']))
+    release()
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: true, answers: { [attentionCard(input()).question]: 'Done' } }])
+  })
+
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
@@ -1163,6 +1192,26 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toBe(1)
   })
 
+  // #1394: the typed-reply latch lasts for the rest of the turn, and later calls say that; they do not tell the
+  // model to act on a reply it already acted on (the call that carried the reply did).
+  it('after a typed reply, every later call that turn says the latch lasts for the rest of the turn', async () => {
+    let asked = 0
+    const wait = waitForTab((request) => {
+      asked += 1
+      return Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'reloaded, try now' } })
+    }, never, noop)
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })).toEqual({
+      back: false,
+      message: expect.stringMatching(/Act on their reply\.$/),
+    })
+    for (const toolUseId of ['t2', 't3', 't4']) {
+      const later = await wait({ tool: 'browser_click', toolUseId, signal: never, isBack: gone })
+      expect(later).toEqual({ back: false, message: expect.stringMatching(/for the rest of this turn\.$/) })
+      expect(later).not.toEqual({ back: false, message: expect.stringMatching(/Act on their reply/) })
+    }
+    expect(asked).toBe(1)
+  })
+
   it('a call that comes after every waiter withdrew opens a wait of its own, not the withdrawn one', async () => {
     const requests: QuestionRequest[] = []
     const gate: QuestionGate = (request) => {
@@ -1201,9 +1250,56 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toBe(TAB_WAITS_PER_TURN)
     expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true, why: 'reconnected' }))
     expect(results.slice(TAB_WAITS_PER_TURN)).toEqual([
-      { back: false, message: expect.stringMatching(/waited for 3 times this turn.*another agent replica/s) },
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) },
       { back: false, message: expect.stringMatching(/waited for 3 times this turn/) },
     ])
+  })
+
+  // #1393: the cap counts every wait of the turn however it ended, and this replica cannot tell whether a reconnect
+  // was to it or to another, so the cap names no cause: never a replica story.
+  it('words the per-turn cap neutrally, whatever ended the earlier waits', async () => {
+    const wait = waitForTab(() => Promise.resolve({ answered: false, message: 'The user did not answer: the turn stopped first.' }), never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: gone })).toMatchObject({ back: false })
+    }
+    const capped = await wait({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
+    expect(capped).toEqual({ back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) })
+    expect(capped).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
+
+    let n = 0
+    const mixed = waitForTab(() => {
+      n += 1
+      return Promise.resolve(n === 2 ? { answered: false, reconnected: true, message: 'x' } : { answered: false, message: 'x' })
+    }, never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await mixed({ tool: 'browser_snapshot', toolUseId: `m${i}`, signal: never, isBack: gone })
+    expect(await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })).not.toEqual({
+      back: false,
+      message: expect.stringMatching(/replica/),
+    })
+  })
+
+  // #1394: the reconnect check is handed the wait's signal, so a check that hangs is cancelled when the wait ends.
+  it('hands the reconnect check the signal that aborts once the wait stops waiting for it', async () => {
+    const seen: AbortSignal[] = []
+    const gate: QuestionGate = async (request) => {
+      const parked = new AbortController()
+      const attention = request.attention!
+      if (attention.reason === 'done') throw new Error('a tab wait is never a done summary')
+      void attention.onParked!(parked.signal)
+      parked.abort()
+      return { answered: false, timedOut: true, message: 'x' }
+    }
+    await waitForTab(gate, never, noop)({
+      tool: 'browser_snapshot',
+      toolUseId: 'toolu_1',
+      signal: never,
+      isBack: (signal) => {
+        seen.push(signal)
+        return new Promise<boolean>(() => undefined)
+      },
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.aborted).toBe(true)
   })
 
   it('a call already stopped opens no wait: no card, and none of the turn\'s waits used', async () => {

@@ -53,7 +53,8 @@ export interface BrowserTabs {
     args: Record<string, unknown>,
     options: { signal: AbortSignal; timeoutMs?: number },
   ): Promise<CallOutcome>
-  status(target: BrowserTarget): Promise<BrowserStatus>
+  /** `signal` cancels the lookup (a pairing read that waits on the pool or a lock). */
+  status(target: BrowserTarget, options?: { signal?: AbortSignal }): Promise<BrowserStatus>
   pair(principal: Principal): Promise<PairingRequest>
   /** The same tabs, with every call's target naming `sessionId` (tools/harness.ts binds each turn's). */
   forSession(sessionId: string): BrowserTabs
@@ -263,7 +264,7 @@ export class TabHub implements BrowserTabs {
   forSession(sessionId: string): BrowserTabs {
     return {
       call: (target, tool, args, options) => this.call({ ...target, sessionId }, tool, args, options),
-      status: (target) => this.status({ ...target, sessionId }),
+      status: (target, options) => this.status({ ...target, sessionId }, options),
       pair: (principal) => this.pair(principal),
       forSession: (other) => this.forSession(other),
     }
@@ -271,6 +272,7 @@ export class TabHub implements BrowserTabs {
 
   async #resolve(
     target: BrowserTarget,
+    signal?: AbortSignal,
   ): Promise<{ tab: TabConnection; via: 'session' | 'pairing'; pairing?: PairingView } | { problem: string }> {
     if (target.sessionId !== undefined) {
       const tabId = this.#sessionTabs.get(target.sessionId)
@@ -281,7 +283,7 @@ export class TabHub implements BrowserTabs {
     }
     if (target.principal.kind === 'browser') return { problem: NO_SESSION_TAB }
     if (!this.#pairings) return { problem: NO_STORE }
-    const paired = await this.#pairings.pairedTab(target.principal)
+    const paired = await this.#pairings.pairedTab(target.principal, signal)
     if (!paired) return { problem: NO_PAIRING }
     const tab = this.#tabs.get(paired.tabId)
     return tab ? { tab, via: 'pairing', pairing: paired } : { problem: NOT_CONNECTED }
@@ -327,8 +329,8 @@ export class TabHub implements BrowserTabs {
     })
   }
 
-  async status(target: BrowserTarget): Promise<BrowserStatus> {
-    const resolved = await this.#resolve(target)
+  async status(target: BrowserTarget, { signal }: { signal?: AbortSignal } = {}): Promise<BrowserStatus> {
+    const resolved = await this.#resolve(target, signal)
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
     return {
       attached: true,
