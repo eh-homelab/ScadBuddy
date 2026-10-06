@@ -97,6 +97,30 @@ describe('PresetPicker', () => {
     ])
   })
 
+  it('names the preset on Update, and says "Changed from" in a live region (#351)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Old engraving')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
+
+    expect(screen.getByRole('button', { name: 'Update preset Old engraving' })).toBeInTheDocument()
+    expect(screen.getByTestId('preset-modified').closest('[role="status"]')).toHaveTextContent(
+      'Changed from Old engraving',
+    )
+  })
+
+  it('opens Save as preset with its name field focused, and gives focus back on closing (#351)', async () => {
+    const { user } = render()
+    await picker()
+    const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
+    await user.click(saveAs)
+    const dialog = screen.getByRole('dialog')
+    const field = within(dialog).getAllByRole('textbox')[0]
+    expect(field).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(saveAs).toHaveFocus()
+  })
+
   it('applies a preset over the defaults and renders it', async () => {
     const renders = watchRenders()
     const { user } = render()
@@ -240,30 +264,6 @@ describe('PresetPicker', () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Old engraving')
     expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth = 2')
-  })
-
-  it('names the preset on Update, and says "Changed from" in a live region (#351)', async () => {
-    const { user } = render()
-    await user.selectOptions(await picker(), 'Old engraving')
-    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
-
-    expect(screen.getByRole('button', { name: 'Update preset Old engraving' })).toBeInTheDocument()
-    expect(screen.getByTestId('preset-modified').closest('[role="status"]')).toHaveTextContent(
-      'Changed from Old engraving',
-    )
-  })
-
-  it('opens Save as preset with its name field focused, and gives focus back on closing (#351)', async () => {
-    const { user } = render()
-    await picker()
-    const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
-    await user.click(saveAs)
-    const dialog = screen.getByRole('dialog')
-    const field = within(dialog).getAllByRole('textbox')[0]
-    expect(field).toHaveFocus()
-
-    await user.keyboard('{Escape}')
-    expect(saveAs).toHaveFocus()
   })
 
   it('asks before an Update drops the values this template no longer has (#358)', async () => {
