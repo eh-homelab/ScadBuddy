@@ -36,6 +36,9 @@ import { ready, type RouteModule } from './module.js'
 //                            the agent's AskUserQuestion
 //   approval.decision      → ApprovalService.decision (#258): the same decision
 //                            as POST /api/v1/ai/approvals/:id/approve|deny
+//                          (The panel now answers both through POST
+//                          /api/v1/ai/pending-input/{id}, #815; these two stay
+//                          for a panel loaded before that.)
 //   session.interrupt      → SessionManager.interrupt
 //   session.handoff        → SessionManager.handoff to the browser user (take over)
 //   tab.bind               → the tab this panel is in (#254): from then on each

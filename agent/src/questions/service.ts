@@ -193,13 +193,53 @@ export class QuestionService {
   }
 
   /**
+   * One row by id, pending or not, for the respond route (routes/pendingInput.ts):
+   * what it checks a response against before `answer()` takes it.
+   */
+  async entry(
+    id: string,
+  ): Promise<
+    | {
+        sessionId: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        pending: boolean
+        outcome: Row['outcome']
+        reason: string | null
+      }
+    | undefined
+  > {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql<
+      {
+        session_id: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        outcome: Row['outcome']
+        reason: string | null
+      }[]
+    >`SELECT session_id, kind, questions, outcome, reason FROM ai_questions WHERE id = ${id}`
+    return (
+      row && {
+        sessionId: row.session_id,
+        kind: row.kind,
+        questions: row.questions,
+        pending: row.outcome === null,
+        outcome: row.outcome,
+        reason: row.reason,
+      }
+    )
+  }
+
+  /**
    * Every question and attention request still waiting for the user, oldest
    * first (at most PENDING_CAP), then the undismissed `done` summaries, newest
    * first (at most PENDING_CAP more). The summaries have their own cap: nothing
    * expires them, so under one shared cap enough of them would push a question
-   * a turn is parked on off the badge.
+   * a turn is parked on off the badge. `summariesTruncated`: there were more
+   * summaries than that, so the oldest are not listed and the badge says so.
    */
-  async listPending(): Promise<PendingQuestion[]> {
+  async listPending(): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
     type Pending = {
       id: string
       session_id: string
@@ -220,8 +260,9 @@ export class QuestionService {
     const done = await this.deps.sql<Pending[]>`
       SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
       FROM ai_questions WHERE outcome IS NULL AND attention_reason = 'done' AND expires_at IS NULL
-      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP}`
-    return [...waiting, ...done].map((r) => ({
+      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP + 1}`
+    const summariesTruncated = done.length > PENDING_CAP
+    const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
       id: r.id,
       sessionId: r.session_id,
       kind: r.kind,
@@ -234,6 +275,7 @@ export class QuestionService {
       createdAt: r.created_at.toISOString(),
       expiresAt: r.expires_at?.toISOString() ?? null,
     }))
+    return { questions, summariesTruncated }
   }
 
   /**
