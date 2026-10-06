@@ -198,14 +198,28 @@ async def test_a_callers_deadline_is_its_own_timeout_not_still_accepting(queue: 
     could not tell that it expired (review #1066 (9), the render route's 503)."""
     from scadbuddy.workflows.client import connect_lazily
 
-    with pytest.raises(TimeoutError):
-        async with asyncio.timeout(1):
-            await echo(
-                connect_lazily("127.0.0.1:1", "default"),
-                queue,
-                "echo-caller-bound",
-                deadline=timedelta(seconds=5),
-            )
+    # A frontend that accepts and never answers: a refused port fails the connect at
+    # once, before the caller's bound, and tested nothing.
+    held: list[asyncio.StreamWriter] = []
+
+    async def silent(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(1):
+                await echo(
+                    connect_lazily(f"127.0.0.1:{port}", "default"),
+                    queue,
+                    "echo-caller-bound",
+                    deadline=timedelta(seconds=5),
+                )
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
 
 
 class Proxy:
