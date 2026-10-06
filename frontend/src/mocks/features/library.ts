@@ -39,7 +39,13 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
 ]
 
-function entry(id: number, filename: string, fileType: string, folderId: number | null): LibraryEntry {
+function entry(
+  id: number,
+  filename: string,
+  fileType: string,
+  folderId: number | null,
+  added: Pick<LibraryEntry, 'file_size' | 'created_at'> = {},
+): LibraryEntry {
   return {
     id,
     filename,
@@ -48,12 +54,21 @@ function entry(id: number, filename: string, fileType: string, folderId: number 
     has_thumbnail: fileType !== 'stl',
     print_count: 0,
     printable: ['3mf', 'stl'].includes(fileType.toLowerCase()),
+    file_size: added.file_size ?? 64_000,
+    created_at: added.created_at ?? '2026-09-20T12:00:00Z',
   }
 }
 
+/** #935 — two uploads of one output: the same name and size, three minutes apart. */
+const BAG_CLIP = 'bag-clip-3155628dc2bb43d4940fad6dba164efc'
+
 export const libraryFiles: LibraryEntry[] = [
-  entry(89, 'bag-clip.3mf', '3mf', null),
-  entry(104, 'bag-clip.gcode.3mf', 'gcode.3mf', null),
+  entry(89, `${BAG_CLIP}.3mf`, '3mf', null, { file_size: 109_795, created_at: '2026-09-26T17:05:45Z' }),
+  entry(91, `${BAG_CLIP}.3mf`, '3mf', null, { file_size: 109_795, created_at: '2026-09-26T17:08:42Z' }),
+  entry(104, `${BAG_CLIP}.gcode.3mf`, 'gcode.3mf', null, {
+    file_size: 864_242,
+    created_at: '2026-09-27T17:17:51Z',
+  }),
   entry(67, "Clara's Wand.3mf", '3mf', 1),
   entry(46, 'Desiccant_Box.stl', 'stl', 4),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
