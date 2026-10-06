@@ -73,7 +73,9 @@ export function ParameterPanel({
       <div
         role="tablist"
         aria-label="Parameter groups"
-        className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-line px-2 pt-2"
+        // #942 — wrapped onto rows, never scrolled: a template with many groups (Dollhouse
+        // Kit has 15) hid most of them past an edge with no scrollbar, fade or arrow.
+        className="flex shrink-0 flex-wrap gap-x-0.5 gap-y-1 border-b border-line px-2 pt-2"
       >
         {tabs.map((group) => {
           const selected = group.name === current?.name
