@@ -3,7 +3,7 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import type { BoundingBox, Job, Plate } from '../api/types'
+import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
@@ -82,6 +82,8 @@ interface Props {
    * move, so the camera's view stays as it was.
    */
   covered?: string
+  /** #937 — where OpenSCAD's warnings point the reader to fix them: the source editor. */
+  sourceLink?: ReactNode
 }
 
 export function Preview({
@@ -93,6 +95,7 @@ export function Preview({
   leading,
   controls,
   covered,
+  sourceLink,
 }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
@@ -104,6 +107,7 @@ export function Preview({
         colors: string[]
         notes: string[]
         warnings: string[]
+        diagnostics: Diagnostic[]
         plates: number
       }
     | undefined
@@ -117,6 +121,9 @@ export function Preview({
         colors: job.colors ?? [],
         notes: job.notes ?? [],
         warnings: job.warnings ?? [],
+        // A trace only says where an error was called from; a render that finished
+        // has its warnings to show, which OpenSCAD logs and goes on past (#937).
+        diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: Math.max(job.plates?.length ?? 0, 1),
       })
     }
@@ -233,6 +240,9 @@ export function Preview({
         {!failed && (
           <div className="flex flex-col items-start gap-2">
             {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
+            {shown && shown.diagnostics.length > 0 && (
+              <OpenScadWarnings diagnostics={shown.diagnostics} sourceLink={sourceLink} />
+            )}
             {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
           </div>
@@ -336,6 +346,45 @@ export function RenderNotes({ notes }: { notes: string[] }) {
         {/* An index key: a display-only list, and its text need not be unique. */}
         {notes.map((note, index) => (
           <li key={index}>{note}</li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/**
+ * #937 — what OpenSCAD logged about a render that still finished: a warning means it
+ * dropped or guessed at something (a child of `cube()`, an undefined variable), so
+ * the preview may be missing part of the model.
+ */
+function OpenScadWarnings({
+  diagnostics,
+  sourceLink,
+}: {
+  diagnostics: Diagnostic[]
+  sourceLink?: ReactNode
+}) {
+  return (
+    <section
+      aria-label="OpenSCAD warnings"
+      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+    >
+      <h3 className="flex items-center gap-2 text-[10px] tracking-wide text-warn">
+        From OpenSCAD
+        {sourceLink && <span className="text-[11px] tracking-normal underline">{sourceLink}</span>}
+      </h3>
+      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-warn">
+        {diagnostics.map((diagnostic, index) => (
+          <li key={index} className="flex gap-2">
+            <span className="sb-num shrink-0 text-faint">
+              {diagnostic.line == null
+                ? ''
+                : diagnostic.file && diagnostic.file !== 'model.scad'
+                  ? `${diagnostic.file}:${diagnostic.line}`
+                  : `Line ${diagnostic.line}`}
+            </span>
+            <span>{diagnostic.message}</span>
+          </li>
         ))}
       </ul>
     </section>

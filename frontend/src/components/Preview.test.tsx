@@ -163,6 +163,40 @@ describe('Preview', () => {
     expect(screen.getByTestId('bbox-readout')).toBeInTheDocument()
   })
 
+  it("shows OpenSCAD's warnings from a render that finished, with their lines (#937)", () => {
+    render(
+      <Preview
+        job={job({
+          diagnostics: [
+            {
+              severity: 'warning',
+              message: 'module cube() does not support child modules',
+              file: 'model.scad',
+              line: 6,
+            },
+            { severity: 'trace', message: "called by 'assert'", file: 'model.scad', line: 2 },
+          ],
+        })}
+        rendering={false}
+        sourceLink={<a href="/m/name-puzzle/source">Edit source</a>}
+      />,
+    )
+
+    const region = screen.getByRole('region', { name: 'OpenSCAD warnings' })
+    expect(within(region).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'Line 6module cube() does not support child modules',
+    ])
+    expect(within(region).getByRole('link', { name: 'Edit source' })).toHaveAttribute(
+      'href',
+      '/m/name-puzzle/source',
+    )
+  })
+
+  it('shows no OpenSCAD warnings box when the render logged none', () => {
+    render(<Preview job={job({ diagnostics: [] })} rendering={false} />)
+    expect(screen.queryByRole('region', { name: 'OpenSCAD warnings' })).not.toBeInTheDocument()
+  })
+
   it('shows no warnings box when the job has none', () => {
     render(<Preview job={job({ warnings: [] })} rendering={false} />)
     expect(screen.queryByTestId('render-warnings')).not.toBeInTheDocument()
