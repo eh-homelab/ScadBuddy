@@ -66,6 +66,26 @@ export function extrudersOf(schema: CustomizerSchema, values: ParamValues): Map<
   return extruders
 }
 
+/**
+ * #938 — each colour parameter's extruder as a finished render numbered them: its
+ * colour's place in the render's `colors`, which are in extruder order. A colour the
+ * geometry never used is in no extruder (null), whatever its place among the colour
+ * parameters, since a hard-coded colour can take the slot its position would suggest.
+ */
+export function extrudersIn(
+  schema: CustomizerSchema,
+  values: ParamValues,
+  colors: string[],
+): Map<string, number | null> {
+  const rendered = colors.map((colour) => normalizeHex(colour))
+  const extruders = new Map<string, number | null>()
+  for (const name of colorParamNames(schema)) {
+    const index = rendered.indexOf(normalizeHex(String(values[name] ?? '')))
+    extruders.set(name, index < 0 ? null : index + 1)
+  }
+  return extruders
+}
+
 export interface ParamDiff {
   name: string
   caption: string

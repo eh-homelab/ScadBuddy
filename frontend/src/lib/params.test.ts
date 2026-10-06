@@ -9,6 +9,7 @@ import {
   defaultValues,
   diffFromDefaults,
   extrudersOf,
+  extrudersIn,
 } from './params'
 
 describe('defaultValues', () => {
@@ -44,6 +45,30 @@ describe('colour order', () => {
         ['body_color', 1],
         ['text_color', 1],
         ['rim_color', 2],
+      ]),
+    )
+  })
+})
+
+// #938 — once a render has said which colours it used, that decides the extruders.
+describe('extrudersIn', () => {
+  const values = defaultValues(keychainSchema)
+
+  it("numbers each colour parameter by its colour's place in the render", () => {
+    expect(extrudersIn(keychainSchema, values, ['#E8532F', '#1b6ca8'])).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', 1],
+      ]),
+    )
+  })
+
+  it('marks a colour the render never used as in no extruder (null)', () => {
+    // A hard-coded colour took extruder 1; neither parameter was drawn with.
+    expect(extrudersIn(keychainSchema, values, ['#3366FF'])).toEqual(
+      new Map([
+        ['body_color', null],
+        ['text_color', null],
       ]),
     )
   })

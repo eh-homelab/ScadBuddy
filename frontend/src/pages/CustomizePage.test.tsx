@@ -16,7 +16,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockPlates } from '../mocks/handlers'
+import { setMockPlates, setMockRenderColors } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -152,6 +152,20 @@ describe('CustomizePage', () => {
     await user.click(screen.getByRole('button', { name: 'Duplicate' }))
     const duplicate = screen.getByRole('dialog', { name: /^Duplicate / })
     expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
+  })
+
+  // #938 — the extruder a colour parameter gets is the render's, not its place among
+  // the colour parameters: a hard-coded colour can take extruder 1, and an unused
+  // parameter takes none.
+  it("labels each colour parameter with the render's extruder, or as not in the render", async () => {
+    setMockRenderColors('name-keychain', ['#3366FF', '#E8532F'])
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const field = (name: string) => screen.getByRole('textbox', { name: `${name} hex` }).closest('[data-param]')!
+    await waitFor(() => expect(field('Text')).toHaveTextContent('extruder 2'))
+    expect(field('Plate')).toHaveTextContent('not in this render')
+    expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
   })
 
   it('renders the defaults without being asked', async () => {

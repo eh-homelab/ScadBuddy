@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
-import { diffFromDefaults, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
+import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
 
@@ -23,6 +23,12 @@ interface Props {
    * change happens where the user can see it.
    */
   reveal?: { name: string }
+  /**
+   * #938 — the colours the latest finished render used, in extruder order. With them a
+   * colour parameter is labelled with the extruder it actually got, or as not in the
+   * render; without them, by its place among the colour parameters.
+   */
+  renderedColors?: string[]
 }
 
 export function ParameterPanel({
@@ -35,6 +41,7 @@ export function ParameterPanel({
   onReset,
   toolbar,
   reveal,
+  renderedColors,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
@@ -51,7 +58,10 @@ export function ParameterPanel({
   }
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
-  const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
+  const extruders = useMemo<Map<string, number | null>>(
+    () => (renderedColors ? extrudersIn(schema, values, renderedColors) : extrudersOf(schema, values)),
+    [schema, values, renderedColors],
+  )
   const extruderOf = (name: string) => extruders.get(name)
 
   // The font picker previews what will actually be printed, so it needs the model's
