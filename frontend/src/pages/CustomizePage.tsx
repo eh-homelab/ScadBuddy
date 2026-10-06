@@ -780,8 +780,12 @@ export function CustomizePage() {
   )
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
+    // #362 — minmax(0, 1fr), not the implicit auto column: an auto track grows to its
+    // widest child's min-content (a long preset name, a row of slider boxes), which on a
+    // phone held every pane wider than the screen.
+    <div className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)]">
+      {/* #362 — the actions wrap under the name on a narrow screen rather than run off it. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
             Models
@@ -803,7 +807,7 @@ export function CustomizePage() {
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           {version && (
             <button
               type="button"
@@ -956,11 +960,11 @@ export function CustomizePage() {
           data-testid="workspace"
           // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
           // frame) the `window` mode is this element covering the window.
-          className={`grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] ${
+          className={`grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] ${
             full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
-          <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
             {uiPresets}
             {uiOrigin}
           </div>
@@ -971,7 +975,7 @@ export function CustomizePage() {
       <div
         ref={workspace}
         data-testid="workspace"
-        className={`grid min-h-0 grid-cols-1 ${
+        className={`grid min-h-0 grid-cols-[minmax(0,1fr)] ${
           full
             ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
                 fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
@@ -985,12 +989,12 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 min-w-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
                 {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                 {uiPresets}
                 {uiOrigin}
@@ -1026,7 +1030,7 @@ export function CustomizePage() {
           )}
         </div>
 
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+        <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto]">
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into
