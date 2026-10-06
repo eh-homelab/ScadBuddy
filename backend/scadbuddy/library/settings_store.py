@@ -587,17 +587,26 @@ class SettingsStore:
         ).fetchall()
         stored = {row["name"]: row["value"] for row in rows}
 
+        def deployment(name: str) -> Any:
+            # The environment's value, else the default. The inbox is not env-seeded,
+            # so the deployment's `Settings` has no such attribute (#1253).
+            if name in ENV_SEEDED:
+                return getattr(self.defaults, name)
+            return StoredSettings.model_fields[name].get_default(call_default_factory=True)
+
         def merged(name: str) -> Any:
             if name in changes:
                 return changes[name]
             if name in reset or name not in stored:
-                # The deployment's own value: the environment's, else the default.
-                return getattr(self.defaults, name)
+                return deployment(name)
+            if name not in ENV_SEEDED:
+                # Read as `snapshot` reads it: as stored, with no env check to pass.
+                return stored[name]
             try:
                 return check_value(name, stored[name])
             except ValueError:
                 # As `snapshot` reads it: a refused row follows the environment.
-                return getattr(self.defaults, name)
+                return deployment(name)
 
         backend = merged("store_backend") or "local"
         if backend == "bambuddy" and (

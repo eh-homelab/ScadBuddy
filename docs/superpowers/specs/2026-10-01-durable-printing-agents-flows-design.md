@@ -410,7 +410,7 @@ The rest:
     execution has closed starts a new execution under the same workflow ID
     (`ALLOW_DUPLICATE` reuse), with a new job id. Today, too, only an unfinished row
     coalesces.
-- **Superseding.** A request naming `supersedes: <job id>` (and `RenderService.cancel`, `render/submit.py:185`) looks
+- **Superseding.** A request naming `supersedes: <job id>` looks
   up that row's `workflow_id` and run id and sends that execution the `release` Update.
   - `release` takes off one claim. At zero the workflow writes `cancelled` through its
     projection activity and stops at the next activity boundary.
@@ -1516,6 +1516,14 @@ Each phase is its own implementation plan and ships alone.
      deadline, 202 past it); the client's key is the `Idempotency-Key` header; analyzer
      fix apply stays a request (Postgres only, §4.1); output delete's Bambuddy part goes
      with the library commands (phase 3). Renders (2b) and `FollowPrint` (2c) follow.
+   - As built (2b, #1053, plan `2026-10-03-durable-phase-2b-renders.md`): renders start
+     `render-<render_key>` with update-with-start, and the reconciler is gone. The route
+     still makes the revision, schema and parameter checks before Temporal (they need the
+     API's git and volume, §4.1 reads). The first step is the local activity
+     `render_accept` (the queue check and the insert), and claims are projected by
+     `render_claims`, so neither waits behind openscad for an activity slot. A full queue
+     stays today's 503. A supersede starts the new render first, then sends `release`.
+     A boot pass fails legacy pending rows that no workflow will run.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.

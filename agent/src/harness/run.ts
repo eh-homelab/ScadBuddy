@@ -300,15 +300,6 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | 
   })
 }
 
-function linkedController(signal: AbortSignal | undefined): AbortController {
-  const controller = new AbortController()
-  if (signal) {
-    if (signal.aborted) controller.abort(signal.reason)
-    else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
-  }
-  return controller
-}
-
 /** canUseTool with AskUserQuestion answered through the question gate (#940). */
 function answeringQuestions(questions: QuestionGate, inner: CanUseTool): CanUseTool {
   return (toolName, input, options) =>
@@ -338,12 +329,24 @@ const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
   ],
 }
 
-/** The full SDK options for one run. Pure apart from the AbortController; tests read it. */
+/**
+ * The full SDK options for one run. Pure apart from the AbortController,
+ * which `run.signal` aborts directly; tests read it. runHarness interrupts
+ * first instead (`stopFirst`).
+ */
 export function buildHarnessOptions(run: HarnessRun): Options {
-  return buildHarness(run).options
+  const { options, abort } = buildHarness(run)
+  if (run.signal) {
+    if (run.signal.aborted) abort.abort(run.signal.reason)
+    else run.signal.addEventListener('abort', () => abort.abort(run.signal?.reason), { once: true })
+  }
+  return options
 }
 
-function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
+/** How long an interrupted query may take to end on its own before it is aborted. */
+export const INTERRUPT_GRACE_MS = 5_000
+
+function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined; abort: AbortController } {
   const base = buildQueryOptions(run.paths)
   const harnessTiers = harnessTierOf(run)
   const questions = run.questionGate
@@ -420,6 +423,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     }
   }
   const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
+  const abort = new AbortController()
   const options: Options = {
     ...base,
     env: {
@@ -432,7 +436,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
-    abortController: linkedController(run.signal),
+    abortController: abort,
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
       mergeHooks(
@@ -498,7 +502,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     stderr = redactor
     options.stderr = (data) => redactor.write(data)
   }
-  return { options, stderr }
+  return { options, stderr, abort }
 }
 
 /**
@@ -507,19 +511,23 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
  * stderr line is flushed, redacted.
  */
 export function runHarness(run: HarnessRun): Query {
-  const { options, stderr } = buildHarness(run)
+  const { options, stderr, abort } = buildHarness(run)
   const q = query({ prompt: run.prompt, options })
-  if (!stderr) return q
+  const ended = stopFirst(q, run.signal, abort)
   const next = q.next.bind(q)
   const ret = q.return.bind(q)
   const thr = q.throw.bind(q)
+  const end = () => {
+    ended()
+    stderr?.flush()
+  }
   q.next = async (...args) => {
     try {
       const result = await next(...args)
-      if (result.done) stderr.flush()
+      if (result.done) end()
       return result
     } catch (err) {
-      stderr.flush()
+      end()
       throw err
     }
   }
@@ -527,15 +535,54 @@ export function runHarness(run: HarnessRun): Query {
     try {
       return await ret(value)
     } finally {
-      stderr.flush()
+      end()
     }
   }
   q.throw = async (err) => {
     try {
       return await thr(err)
     } finally {
-      stderr.flush()
+      end()
     }
   }
+  // The SDK's Query hands for-await its inner message stream, which bypasses
+  // the wrappers above (#1009). Iterate the Query itself.
+  q[Symbol.asyncIterator] = () => q
   return q
+}
+
+/**
+ * Stops the query when `signal` aborts (#1168): by interrupting it first, as
+ * Claude Code's own Esc does, and aborting it only if it has not ended within
+ * INTERRUPT_GRACE_MS. An abort alone closes the control stream, and a call
+ * parked in canUseTool (an approval, a question) then fails with "Tool
+ * permission request failed: AbortError: Tool permission stream closed
+ * before response received", which Claude Code hands the model as the tool's
+ * error and calls it again: a reply nobody asked for, and spend. Interrupted,
+ * it refuses the pending call and ends the turn with an
+ * `error_during_execution` result, and the model is not called. Measured on
+ * SDK 0.3.283 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
+ * Returns what the caller calls once the stream has ended.
+ */
+function stopFirst(q: Query, signal: AbortSignal | undefined, abort: AbortController): () => void {
+  let done = false
+  let grace: ReturnType<typeof setTimeout> | undefined
+  const stop = () => {
+    if (done) {
+      abort.abort(signal?.reason)
+      return
+    }
+    grace = setTimeout(() => abort.abort(signal?.reason), INTERRUPT_GRACE_MS)
+    grace.unref()
+    q.interrupt().catch(() => abort.abort(signal?.reason))
+  }
+  if (signal?.aborted) abort.abort(signal.reason)
+  else signal?.addEventListener('abort', stop, { once: true })
+  return () => {
+    done = true
+    clearTimeout(grace)
+    signal?.removeEventListener('abort', stop)
+    // Whatever stopped it, the process goes with the stream.
+    if (signal?.aborted) abort.abort(signal.reason)
+  }
 }

@@ -63,8 +63,16 @@ multi-colour rules, connecting Bambuddy and each feature.
 ```bash
 docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
   -e SCADBUDDY_DATABASE_URL=postgresql://scadbuddy:secret@db:5432/scadbuddy \
+  -e SCADBUDDY_PUBLIC_URL=http://<host>:8080 \
   ghcr.io/eh-homelab/scadbuddy:main
 ```
+
+**Set `SCADBUDDY_PUBLIC_URL` to the URL you open the UI at** (#962). Writes from a
+browser are only accepted from that origin, one in `SCADBUDDY_ALLOWED_ORIGINS`, or
+loopback (see "Realtime" below). Left unset, with no allowed origins either, the
+backend accepts a write from the page's own origin (its `Host`) so the install can
+still be configured from Settings, but that leaves it open to DNS rebinding until a
+public URL is saved.
 
 **A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
 the backend refuses to start and says so. Settings and the render jobs live
@@ -186,17 +194,26 @@ on shutdown.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
-  replaced before it started is cancelled, and identical waiting requests share
+  replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
   references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
-    supersedes a waiting preview, or matches one, is never refused.
+    matches a job still open (pending or running) joins it and is never refused, and
+    the waiting preview a request supersedes does not count against the limit.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
-    (`render_jobs`), so accepted renders survive a restart; a pending row whose
-    workflow never started is started by the API's reconciler.
+    (`render_jobs`), so accepted renders survive a restart. A row is written by its
+    workflow's first activity, so it exists only once Temporal has the render; with
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
+    every five minutes the API fails the rows nothing will settle: one whose workflow
+    closed without settling it (terminated by hand, say), and a pending or running one
+    an older release left with no workflow running. Each pass lists the open
+    `TemplatePipeline` runs from Visibility once and describes only rows over 30 s old
+    that the listing leaves out; `scadbuddy_render_settle_failed_total` and
+    `scadbuddy_render_settle_errors_total` count what it failed and the passes that
+    could not finish.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
@@ -237,9 +254,21 @@ is not the public URL in `SCADBUDDY_ALLOWED_ORIGINS`
 (`https://scadbuddy.internal.example,https://scadbuddy.sso.example`); otherwise
 the pages on the other hostname show "Live updates unavailable" while the same
 pages on the public URL work, and the backend log says
-`refused a realtime socket from origin ...`. REST calls carry no `Origin`, so
-they are not affected; only the socket is. The agent reads the same variable
-for its own origin check (below).
+`refused a realtime socket from origin ...`.
+
+**Writes** (#962) use the same rule. A `POST`, `PUT`, `PATCH` or `DELETE` whose
+`Origin` is not one of those origins gets a `403` problem whose detail names
+`SCADBUDDY_PUBLIC_URL` and `SCADBUDDY_ALLOWED_ORIGINS`, before its body is read, and
+the backend logs `refused a POST /api/v1/... from origin ...`. This is what stops a
+page on another site from creating models, restoring revisions or printing through
+a LAN user's browser. So a hostname missing from the list cannot save, render or
+print, not just lose live updates. A request with no `Origin` (curl, scripts, the
+agent's server-side calls) is not a browser page and is not affected. While neither
+a public URL nor `SCADBUDDY_ALLOWED_ORIGINS` is configured, a write from the
+request's own origin (`Origin` equal to its scheme and `Host`) is also accepted, so a
+fresh install can be configured; that gives up DNS-rebinding protection until one
+of the two is set. The agent reads the same variable for its own origin check
+(below).
 
 ## Deploying
 
@@ -255,7 +284,10 @@ The backend needs its database (#401): the manifest must set
 becomes ready and its log names the missing variable. The settings live in that
 database, so the Bambuddy connection a deployment needs from the first start
 comes from `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY` (from a Secret)
-and `SCADBUDDY_PUBLIC_URL`.
+and `SCADBUDDY_PUBLIC_URL`. Every hostname the UI is served under must be the
+public URL or listed in `SCADBUDDY_ALLOWED_ORIGINS`: from any other, browser writes
+are refused with a `403` and a `refused a ... from origin ...` log line (#962), and
+live updates are unavailable.
 
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
@@ -375,10 +407,19 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (or use a `Recreate` rollout) before the new API starts, and start the API before
   the render workers. At start the API fails every render the old queue left
   `running` (no workflow; nothing would finish it), with an error naming the
-  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  upgrade; its `pending` renders are failed too (#1053: nothing reconciles them). From a release
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading to the release with #1053** moves renders onto the command shape: the
+  workflow `render-<render key>` inserts its own row. Do not let an older API overlap a
+  new one: stop the old API pods (or use a `Recreate` rollout, as the manifest does)
+  before the new API starts. An older API beside it would restart this release's
+  waiting renders as its own (its reconciler) and count requests into them that the
+  workflow never sees (its insert). The older render workers may keep running: they
+  finish the renders pinned to their build. A pending row of the older API's that no
+  workflow will run is failed, once it is 30 s old, by the next render of its key or
+  the API's next pass over such rows.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
 
@@ -401,7 +442,8 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
   field, and while Temporal cannot be reached a changed value is refused with the
-  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save);
+  one Temporal refuses to describe (a denied permission) is a `temporal-refused` 500.
   A retry of an operation whose record was deleted while Temporal still holds its closed
   execution would answer 409 "may have been done" instead of its outcome. Raising the
   namespace's retention after the save is not re-checked.
@@ -735,8 +777,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
-  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
-  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a budget of its own (the panel's "Continue in a new chat", #790); counted like a start (`429`). With the headless browser's agent-actor marker, or through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any

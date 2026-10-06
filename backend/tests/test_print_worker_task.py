@@ -81,6 +81,7 @@ def _state() -> SimpleNamespace:
         print_runs=SimpleNamespace(store=None),
         print_progress=None,
         print_watcher=None,
+        print_links=None,
         components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else None),
     )
 

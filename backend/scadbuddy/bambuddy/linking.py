@@ -17,6 +17,7 @@ Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1-L3 and L8-L10)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection
 from datetime import timedelta
@@ -49,6 +50,12 @@ SCAN_AFTER = timedelta(days=14)
 #: And before its first upload, so a date filter in another time zone cannot cut the
 #: first print off.
 SCAN_BEFORE = timedelta(days=1)
+#: How long a library file's queue item is read for its archive (#976): as long as an
+#: output's print is looked for after its last slice.
+LIBRARY_LINK_WINDOW = SCAN_AFTER
+#: How many such items one call reads at most, and how many at once.
+LIBRARY_LINK_LIMIT = 50
+LIBRARY_LINK_CONCURRENCY = 8
 
 
 async def link_item(
@@ -174,3 +181,33 @@ async def link_by_hash(
             },
         )
     return found
+
+
+async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> None:
+    """Link the archives of the library files' queue items that have one now (#976).
+
+    A library-file run has no output, so no progress read follows it the way an
+    output's print is linked: the prints list calls this before it reads the links.
+    An item Bambuddy has dropped before naming an archive is marked gone and not read
+    again; any other failure is logged and leaves the item to the next call.
+    """
+    pending = await links.pending_library(LIBRARY_LINK_WINDOW, LIBRARY_LINK_LIMIT)
+    gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
+
+    async def link(queue_item_id: int) -> None:
+        async with gate:
+            try:
+                item = await client.queue_item(queue_item_id)
+            except ApiError as error:
+                if error.status == status.HTTP_404_NOT_FOUND:
+                    await links.library_gone(queue_item_id)
+                else:
+                    logger.warning(
+                        "could not read a library print's queue item",
+                        extra={"queue_item_id": queue_item_id, "status": error.status},
+                    )
+                return
+            if item.archive_id is not None:
+                await links.link_library(queue_item_id, item.archive_id, item.library_file_name)
+
+    await asyncio.gather(*(link(row.queue_item_id) for row in pending))
