@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as Monaco from 'monaco-editor/editor/editor.api'
@@ -12,6 +13,14 @@ interface Opener {
 const { URI } = await vi.hoisted(() =>
   vi.importActual<{ URI: typeof Monaco.Uri }>('monaco-editor/base/common/uri.js'),
 )
+
+/** Monaco's own key codes for the keys the editor binds. */
+const KEY = vi.hoisted(() => ({ CtrlCmd: 2048, Tab: 2, Shift: 4, Ctrl: 5, Alt: 6, Escape: 9, KeyS: 49, Meta: 57 }))
+/** A DOM key as Monaco's `KeyCode`; 0 for the ones nothing here binds. */
+const keyCode = (key: string): number =>
+  ({ Escape: KEY.Escape, Tab: KEY.Tab, Shift: KEY.Shift, Control: KEY.Ctrl, Alt: KEY.Alt, Meta: KEY.Meta, s: KEY.KeyS })[
+    key
+  ] ?? 0
 
 const dispose = vi.fn()
 /** URIs Monaco has no text model for. */
@@ -34,6 +43,8 @@ vi.mock('../lib/monaco', () => ({
   monaco: {
     editor: { getModel, setModelMarkers, registerEditorOpener },
     Uri: URI,
+    KeyMod: { CtrlCmd: KEY.CtrlCmd },
+    KeyCode: KEY,
   },
 }))
 
@@ -55,10 +66,27 @@ const instance = {
     }
     return model
   },
-  updateOptions: () => {},
+  options: {} as { tabFocusMode?: boolean },
+  updateOptions: (options: { tabFocusMode?: boolean }) => Object.assign(instance.options, options),
+  keyListeners: [] as ((event: { keyCode: number }) => void)[],
+  onKeyDown: (listener: (event: { keyCode: number }) => void) => {
+    instance.keyListeners.push(listener)
+    return { dispose: () => {} }
+  },
+  blurListeners: [] as (() => void)[],
+  onDidBlurEditorText: (listener: () => void) => {
+    instance.blurListeners.push(listener)
+    return { dispose: () => {} }
+  },
   onDidChangeModel: (listener: () => void) => {
     instance.changed = listener
     return { dispose: () => {} }
+  },
+  /** `addCommand`'s keybindings, run by the mocked editor's own keydown as Monaco would. */
+  commands: new Map<number, () => void>(),
+  addCommand: (keybinding: number, handler: () => void) => {
+    instance.commands.set(keybinding, handler)
+    return null
   },
   setSelection: vi.fn(),
   revealRangeInCenterIfOutsideViewport: vi.fn(),
@@ -91,11 +119,27 @@ vi.mock('@monaco-editor/react', () => ({
       instance.changed?.()
     }, [path])
     return (
-      <div
+      <textarea
         data-testid="monaco"
         data-path={path}
         data-value={value ?? '(held)'}
         data-readonly={String(!!options.readOnly)}
+        onBlur={() => instance.blurListeners.forEach((listener) => listener())}
+        onKeyDown={(event) => {
+          // As Monaco does: its own listeners first, then the keybindings.
+          const code = keyCode(event.key.length === 1 ? event.key.toLowerCase() : event.key)
+          instance.keyListeners.forEach((listener) => listener({ keyCode: code }))
+          // Tab indents, unless tab-focus mode lets the browser move focus.
+          if (code === KEY.Tab) {
+            if (!instance.options.tabFocusMode) event.preventDefault()
+            return
+          }
+          const command = instance.commands.get(code | (event.ctrlKey || event.metaKey ? KEY.CtrlCmd : 0))
+          if (command) {
+            event.preventDefault()
+            command()
+          }
+        }}
       />
     )
   },
@@ -128,6 +172,99 @@ describe('SourceEditor', () => {
     instance.setSelection.mockClear()
     instance.revealRangeInCenterIfOutsideViewport.mockClear()
     instance.setPosition.mockClear()
+    instance.commands.clear()
+    instance.keyListeners = []
+    instance.blurListeners = []
+    instance.options = {}
+  })
+
+  describe('keyboard (#997)', () => {
+    function renderBetween(extra: Partial<Parameters<typeof SourceEditor>[0]> = {}) {
+      return render(
+        <>
+          <button>Before</button>
+          <SourceEditor {...props} uri={MODEL} {...extra} />
+          <button>After</button>
+        </>,
+      )
+    }
+
+    it('is not a keyboard trap: Escape, then Tab, leaves the editor', async () => {
+      const user = userEvent.setup()
+      renderBetween()
+      const editor = screen.getByTestId('monaco')
+
+      await user.click(editor)
+      await user.tab()
+      expect(editor).toHaveFocus()
+
+      await user.keyboard('{Escape}')
+      await user.tab()
+      expect(screen.getByRole('button', { name: 'After' })).toHaveFocus()
+    })
+
+    it('indents again after any other key, and after leaving', async () => {
+      const user = userEvent.setup()
+      renderBetween()
+      const editor = screen.getByTestId('monaco')
+
+      await user.click(editor)
+      await user.keyboard('{Escape}a')
+      await user.tab()
+      expect(editor).toHaveFocus()
+
+      await user.keyboard('{Escape}')
+      await user.tab()
+      await user.click(editor)
+      await user.tab()
+      expect(editor).toHaveFocus()
+    })
+
+    it('leaves backwards with Escape, then Shift+Tab', async () => {
+      const user = userEvent.setup()
+      renderBetween()
+
+      await user.click(screen.getByTestId('monaco'))
+      await user.keyboard('{Escape}')
+      await user.tab({ shift: true })
+      expect(screen.getByRole('button', { name: 'Before' })).toHaveFocus()
+    })
+
+    it('says how to leave the editor', () => {
+      renderBetween()
+      expect(screen.getByText('Esc, then Tab, to leave the editor')).toBeVisible()
+    })
+
+    it('saves on Ctrl+S and Cmd+S', async () => {
+      const user = userEvent.setup()
+      const onSave = vi.fn()
+      renderBetween({ onSave })
+
+      await user.click(screen.getByTestId('monaco'))
+      await user.keyboard('{Control>}s{/Control}')
+      expect(onSave).toHaveBeenCalledTimes(1)
+      await user.keyboard('{Meta>}s{/Meta}')
+      expect(onSave).toHaveBeenCalledTimes(2)
+    })
+
+    it('calls the latest save, not the one it mounted with', async () => {
+      const user = userEvent.setup()
+      const first = vi.fn()
+      const second = vi.fn()
+      const { rerender } = renderBetween({ onSave: first })
+      rerender(
+        <>
+          <button>Before</button>
+          <SourceEditor {...props} uri={MODEL} onSave={second} />
+          <button>After</button>
+        </>,
+      )
+
+      await user.click(screen.getByTestId('monaco'))
+      await user.keyboard('{Control>}s{/Control}')
+      expect(first).not.toHaveBeenCalled()
+      expect(second).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('disposes the text model it opened when it unmounts', () => {

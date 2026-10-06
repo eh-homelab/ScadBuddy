@@ -50,6 +50,39 @@ test.describe('pasted source', () => {
     )
   })
 
+  test('the editor is no keyboard trap, saves on Ctrl+S and guards unsaved edits (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Keyboard Cube')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    await expect(editor).toBeFocused()
+
+    // Tab is still indentation...
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+    // ...and Escape is the way out, either way.
+    await expect(page.getByText('Esc, then Tab, to leave the editor')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Tab')
+    await expect(editor).not.toBeFocused()
+    await editor.focus()
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Shift+Tab')
+    await expect(editor).not.toBeFocused()
+
+    // Unsaved: leaving asks, and Stay keeps the edits.
+    await page.getByRole('main').getByRole('link', { name: 'Models' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Leave without saving?' })
+    await dialog.getByRole('button', { name: 'Stay' }).click()
+    await expect(page).toHaveURL(/\/new$/)
+
+    await expect(page.getByText(/^Parses cleanly/)).toBeVisible()
+    await editor.focus()
+    await page.keyboard.press('ControlOrMeta+s')
+    await expect(page).toHaveURL(/\/m\/keyboard-cube$/)
+    await expect(dialog).toBeHidden()
+  })
+
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
     await page.goto('/new')
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Half Cube')

@@ -16,17 +16,26 @@ vi.mock('../components/SourceEditor', () => ({
     onChange,
     label,
     readOnly,
+    onSave,
   }: {
     value: string
     onChange: (next: string) => void
     label: string
     readOnly?: boolean
+    onSave?: () => void
   }) => (
     <textarea
       aria-label={label}
       readOnly={readOnly}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      // The real editor binds Ctrl/Cmd+S to `onSave` (SourceEditor.test.tsx).
+      onKeyDown={(event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 's') {
+          event.preventDefault()
+          onSave?.()
+        }
+      }}
     />
   ),
 }))
@@ -254,6 +263,76 @@ describe('EditSourcePage', () => {
     await user.click(screen.getByRole('button', { name: 'Save source' }))
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
     expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false)
+    replace.mockRestore()
+  })
+})
+
+describe('EditSourcePage, unsaved edits (#997)', () => {
+  async function edit(user: ReturnType<typeof userEvent.setup>) {
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    return editor
+  }
+
+  it('asks before leaving with unsaved edits, and Stay keeps them', async () => {
+    const { user } = renderEdit()
+    const editor = await edit(user)
+
+    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(screen.queryByRole('heading', { name: 'Customizer' })).toBeNull()
+    expect(editor).toHaveValue('sphere(2);\n')
+
+    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+  })
+
+  it('leaves without asking when nothing was edited', async () => {
+    const { user } = renderEdit()
+    await screen.findByLabelText('OpenSCAD source')
+
+    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('does not ask once the edits are saved', async () => {
+    const { user } = renderEdit()
+    await edit(user)
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('saves on Ctrl+S from the editor', async () => {
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+    const editor = await edit(user)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save source' })).toBeEnabled())
+
+    editor.focus()
+    await user.keyboard('{Control>}s{/Control}')
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'sphere(2);\n', false)
+    replace.mockRestore()
+  })
+
+  it('does not save on Ctrl+S while Save is unavailable', async () => {
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit(encodeURIComponent(BUILTIN_SLUG))
+    const editor = await screen.findByLabelText('OpenSCAD source')
+
+    editor.focus()
+    await user.keyboard('{Control>}s{/Control}')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(replace).not.toHaveBeenCalled()
     replace.mockRestore()
   })
 })
