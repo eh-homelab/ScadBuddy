@@ -131,6 +131,9 @@ class SlotNeed(BaseModel):
     #: Grams this slot needs for one copy, or ``None`` when the 3MF carries no slice
     #: info — which is every ScadBuddy upload before it has been sliced.
     used_grams: float | None = None
+    #: The spools whose colour still fits this slot's (`colours_match`): only these
+    #: may keep a remembered choice for it (#933). Filled in by `build_options`.
+    colour_matches: list[int] = Field(default_factory=list)
 
 
 class FilamentWarning(BaseModel):
@@ -295,6 +298,36 @@ def ciede2000(first: Lab, second: Lab) -> float:
     return math.sqrt(lightness**2 + chroma**2 + hue**2 + r_t * chroma * hue)
 
 
+def colours_match(slot_colour: str | None, spool_colour: str | None) -> bool:
+    """Whether a spool's colour is close enough to a slot's for a remembered choice of
+    it to be kept: within ``COLOUR_MATCH_DISTANCE``, the cut-off the auto-match uses,
+    or with no colour on either side to tell them apart (#933)."""
+    distance = colour_distance(slot_colour, spool_colour)
+    return distance is None or distance <= COLOUR_MATCH_DISTANCE
+
+
+def seed_plan(options: FilamentOptions, remembered: Sequence[SlotChoice]) -> FilamentPlan:
+    """The picker's opening plan: a slot's remembered spool while it is still in the
+    inventory and its colour still fits the slot (#933), the auto-match otherwise.
+
+    The dialog seeds itself the same way (``seedPlan`` in ``frontend/src/lib/filaments.ts``),
+    reading each slot's ``colour_matches``.
+    """
+    chosen = {choice.slot_id: choice for choice in options.suggested}
+    for slot in options.slots:
+        kept = next(
+            (
+                choice
+                for choice in remembered
+                if choice.slot_id == slot.slot_id and choice.spool_id in slot.colour_matches
+            ),
+            None,
+        )
+        if kept is not None:
+            chosen[slot.slot_id] = kept
+    return FilamentPlan(slots=[chosen[slot_id] for slot_id in sorted(chosen)])
+
+
 def build_options(
     *,
     library_file_id: int,
@@ -360,7 +393,18 @@ def build_options(
         library_file_id=library_file_id,
         printer_id=printer.id if printer else None,
         printer_name=printer.name if printer else None,
-        slots=requirements,
+        slots=[
+            slot.model_copy(
+                update={
+                    "colour_matches": [
+                        option.spool_id
+                        for option in options
+                        if colours_match(slot.colour, option.colour)
+                    ]
+                }
+            )
+            for slot in requirements
+        ],
         spools=options,
     )
     built.suggested = suggested

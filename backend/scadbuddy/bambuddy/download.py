@@ -39,7 +39,7 @@ from fastapi.responses import FileResponse
 from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.extruders import RIGHT, fitted_size
-from scadbuddy.bambuddy.filaments import FilamentPlan, SlotNeed, build_options, normalise_colour
+from scadbuddy.bambuddy.filaments import SlotNeed, build_options, normalise_colour, seed_plan
 from scadbuddy.bambuddy.models import NozzleChoice, NozzleSize
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices, resolve
 from scadbuddy.bambuddy.send import target_for
@@ -241,17 +241,9 @@ async def _presets(
         printer=printer,
         slot_materials=(await client.inventory_remain(printer_id)).slot_materials,
     )
-    # The remembered spools where they are still in the inventory, the auto-match for
-    # the rest, as the picker opens.
-    offered = {option.spool_id for option in options.spools}
-    slot_ids = {slot.slot_id for slot in options.slots}
-    chosen = {choice.slot_id: choice for choice in options.suggested}
-    chosen.update(
-        (choice.slot_id, choice)
-        for choice in remembered.filament_plan
-        if choice.spool_id in offered and choice.slot_id in slot_ids
-    )
-    plan = FilamentPlan(slots=[chosen[slot_id] for slot_id in sorted(chosen)])
+    # The remembered spools where they still fit, the auto-match for the rest, as the
+    # picker opens.
+    plan = seed_plan(options, remembered.filament_plan)
     spool_presets = {
         spool_id: await client.spool_filament_presets(spool_id)
         for spool_id in sorted({slot.spool_id for slot in plan.slots})
