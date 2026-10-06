@@ -60,7 +60,7 @@ function detailOf(run: ToolRun): { detail?: string } {
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
 }
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283, harness/questions.ts). */
+/** What Claude Code puts in an MCP call's `_meta` (2.1.283 and 2.1.287, harness/questions.ts). */
 function toolUseIdFrom(extra: unknown): string | undefined {
   const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.['claudecode/toolUseId']
   return typeof id === 'string' && id ? id : undefined

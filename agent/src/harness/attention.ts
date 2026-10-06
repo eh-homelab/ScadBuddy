@@ -198,7 +198,7 @@ export const RECONNECTED_TEXT =
   'not run since, and the page may have reloaded or changed while the tab was away: re-check it (browser_status, ' +
   'then browser_snapshot) before calling a browser_* tool that changes it again.'
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
+/** What Claude Code puts in an MCP call's `_meta` (2.1.283 and 2.1.287; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
 const ExtraSchema = z.object({

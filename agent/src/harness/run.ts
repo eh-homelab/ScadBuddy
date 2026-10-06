@@ -47,7 +47,7 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 // CLAUDE_CONFIG_DIR (spec §4.4). This module adds, per query:
 //
 //   - the credential, through the SDK's `env` option only. `env` "REPLACES the
-//     subprocess environment entirely" (sdk.d.ts, 0.3.283), so the key reaches
+//     subprocess environment entirely" (sdk.d.ts, 0.3.287), so the key reaches
 //     that one Claude Code process and never the container environment
 //     (spec §4.4, "Credentials are passed per query through the SDK's `env`
 //     option"). Variable names, from
@@ -64,15 +64,19 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     telemetry, release notes" (same page, "Turn off traffic outside the
 //     gateway path"). The service has no use for any of it.
 //   - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (#946): an `Agent` call asked to
-//     `run_in_background` then runs inside the turn, as a foreground one does.
-//     Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
-//     input at a string prompt's first result, and after that Claude Code
-//     refused every permission request itself, with "The user doesn't want to
-//     take this action right now", asking neither canUseTool nor the user. Its
-//     calls, and those of the turn Claude Code starts when it reports back,
-//     were refused that way, read tools included (measured on Claude Code
-//     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
-//     through the permission seam below, and an outward one parks at the gate.
+//     `run_in_background` then runs inside the turn, as a foreground one does
+//     (Claude Code 2.1.283 and 2.1.287, test/harnessWiring.test.ts).
+//     Backgrounded, it outlived its parent's turn. SDK 0.3.283 closed Claude
+//     Code's input at a string prompt's first result, and after that Claude
+//     Code refused every permission request itself, with "The user doesn't
+//     want to take this action right now", asking neither canUseTool nor the
+//     user: its calls, and those of the turn Claude Code starts when it
+//     reports back, read tools included (measured on 2.1.283). 0.3.287 keeps
+//     the input open until the session is idle (at most 10 minutes, sdk.mjs),
+//     so those calls do reach canUseTool, but after the turn's result: the
+//     report-back turn comes as a second init and result in the same query
+//     (measured 2026-10-06). In the turn, every call goes through the
+//     permission seam below, and an outward one parks at the gate.
 //   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
 //     Claude Code's retries on one credential when there is another to fall
 //     back to (#1093);
@@ -242,16 +246,17 @@ export class PluginConfigError extends Error {
  * `disallowedTools`.
  *
  * - `{ type: 'http', url }` is the SDK's `McpHttpServerConfig` (sdk.d.ts
- *   0.3.283), the Streamable HTTP transport (spec D5); `'sse'` is the legacy
+ *   0.3.287), the Streamable HTTP transport (spec D5); `'sse'` is the legacy
  *   transport D5 rejects and is never produced. The URL is the loopback
  *   forwarder's, and no header is configured: the forwarder adds the plugin's
  *   own. The SDK passes this config on Claude Code's argv (`--mcp-config`,
- *   sdk.mjs 0.3.283), where the forwarder token is all there is to see.
+ *   sdk.mjs 0.3.287), where the forwarder token is all there is to see.
  * - `alwaysLoad: true`: "all tools from this server are always included in
- *   the prompt and never deferred behind tool search ... this also blocks
- *   startup until the server is connected (capped at the standard 5s connect
- *   timeout)" (sdk.d.ts). Without it MCP startup is non-blocking and the first
- *   turn may not see the plugin's tools.
+ *   the prompt and never deferred behind tool search, except a tool the server
+ *   itself lists with _meta anthropic/alwaysLoad set to false ... true also
+ *   blocks startup until the server is connected (capped at the standard 5s
+ *   connect timeout)" (sdk.d.ts 0.3.287). Without it MCP startup is
+ *   non-blocking and the first turn may not see the plugin's tools.
  * - disabled tools: `disallowedTools` "will be removed from the model's
  *   context and cannot be used" (sdk.d.ts), by the name Claude Code gives the
  *   tool (`harnessToolName`); the forwarder also hides them from tools/list.
@@ -460,7 +465,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     options.sessionStore = run.sessionStore
     // 'eager': every transcript frame is appended as it is written, not at the
     // turn's end ('batched', the default: "flush at end-of-turn or when pending
-    // thresholds are exceeded", sdk.d.ts 0.3.283 SessionStoreFlush). An aborted
+    // thresholds are exceeded", sdk.d.ts 0.3.287 SessionStoreFlush). An aborted
     // query still flushes its batch as it ends, if the process lives that long
     // (SessionManager.stopTurns waits for it; test/sessions.e2e.test.ts). One
     // that dies first (a SIGKILL, an OOM, the grace period running out) would
@@ -485,11 +490,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
     // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
     options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
-    // Measured on Claude Code 2.1.283: with `strictMcpConfig` a plugin's MCP
-    // servers are not started at all (the init message lists the plugin but no
-    // server). The option exists to ignore MCP configs from settings files,
-    // and `settingSources: []` already loads none: the e2e test plants a
-    // project `.mcp.json` in the session's cwd and asserts it is not started.
+    // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
+    // plugin's MCP servers are not started at all (the init message lists the
+    // plugin but no server). The option exists to ignore MCP configs from
+    // settings files, and `settingSources: []` already loads none: the e2e test
+    // plants a project `.mcp.json` in the session's cwd and asserts it is not
+    // started.
     options.strictMcpConfig = false
   }
   if (run.systemPromptAppend !== undefined) {
@@ -561,7 +567,7 @@ export function runHarness(run: HarnessRun): Query {
  * error and calls it again: a reply nobody asked for, and spend. Interrupted,
  * it refuses the pending call and ends the turn with an
  * `error_during_execution` result, and the model is not called. Measured on
- * SDK 0.3.283 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
+ * SDK 0.3.283 and 0.3.287 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
  * Returns what the caller calls once the stream has ended.
  */
 function stopFirst(q: Query, signal: AbortSignal | undefined, abort: AbortController): () => void {

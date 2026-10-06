@@ -213,14 +213,15 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - `settingSources: []`, so nothing is read from a host `~/.claude` or a project
   `.claude/`.
 - `strictMcpConfig: true` and `mcpServers: {}`. A query with the headless browser
-  sets `strictMcpConfig: false`, because with it Claude Code 2.1.283 starts no plugin
-  MCP server at all (measured, #349); `settingSources: []` still keeps settings-file
-  MCP configs out, which the e2e test checks with a planted `.mcp.json`.
+  sets `strictMcpConfig: false`, because with it Claude Code starts no plugin MCP server
+  at all (measured on 2.1.283, #349, and on 2.1.287, #1540); `settingSources: []` still
+  keeps settings-file MCP configs out, which the e2e test checks with a planted
+  `.mcp.json`.
 - A service-owned `CLAUDE_CONFIG_DIR` and `cwd`.
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
 
-The option semantics are quoted from the pinned SDK's `sdk.d.ts` 0.3.283 in that file.
+The option semantics are quoted from the pinned SDK's `sdk.d.ts` 0.3.287 in that file.
 `run.ts` also sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, citing the
 [gateway docs](https://code.claude.com/docs/en/llm-gateway-connect) ("Turn off traffic
 outside the gateway path").
@@ -609,9 +610,9 @@ is refused, with every problem listed, if it has any of the following:
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
   skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
   Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
-  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
-  them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
-  resulting Bash call.
+  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead
+  of running them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness
+  denied the resulting Bash call (2.1.283).
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
   in the vetted files and in the review. So that no key can hide from this check,
   frontmatter must be plain YAML (`frontmatter()`): the block is cut where the CLI cuts
@@ -638,10 +639,11 @@ is refused, with every problem listed, if it has any of the following:
   `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
   `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
   `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
-  type is refused. In CLI 2.1.283 it races the host's `can_use_tool` answer, and its
-  `behavior: "allow"` wins, so it would approve an outward tool before a human could
-  (spec §8.2). `PreToolUse` is refused too (`permissionDecision`, `updatedInput`), and so
-  is any event not on the list, including one a later CLI adds.
+  type is refused. In CLI 2.1.283, and still in 2.1.287's bundle, it races the host's
+  `can_use_tool` answer, and its `behavior: "allow"` wins, so it would approve an
+  outward tool before a human could (spec §8.2). `PreToolUse` is refused too
+  (`permissionDecision`, `updatedInput`), and so is any event not on the list,
+  including one a later CLI adds.
 - **Manifest fields** that a headless run cannot honour: `dependencies`, `userConfig`,
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
@@ -1017,7 +1019,7 @@ From the merged code and PR bodies:
    declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
-   - `SessionStore` is `@alpha` in SDK 0.3.283;
+   - `SessionStore` is `@alpha` in SDK 0.3.283, and still in 0.3.287;
    - concurrent `append` under two project keys is not measured;
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;

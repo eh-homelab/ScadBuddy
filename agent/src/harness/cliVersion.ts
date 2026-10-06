@@ -11,12 +11,13 @@ import { promisify } from 'node:util'
 // SDK declares (#261, spec §4.4; check-cli-version.ts, #1540), and these
 // helpers are how the build and the tests read both.
 //
-// Measured on @anthropic-ai/claude-agent-sdk 0.3.283, 2026-09-27:
-//   - the SDK's package.json declares `"claudeCodeVersion": "2.1.283"`;
+// Measured on @anthropic-ai/claude-agent-sdk 0.3.283, 2026-09-27, and again on
+// 0.3.287, 2026-10-06 (the values below are 0.3.287's):
+//   - the SDK's package.json declares `"claudeCodeVersion": "2.1.287"`;
 //   - the SDK resolves the binary as
 //     `@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]/claude`
 //     relative to itself (read from its bundled sdk.mjs);
-//   - `claude --version` prints `2.1.283 (Claude Code)` on STDOUT and exits 0.
+//   - `claude --version` prints `2.1.287 (Claude Code)` on STDOUT and exits 0.
 
 const execFileAsync = promisify(execFile)
 

@@ -36,7 +36,7 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 // MID-TURN FAILURES RESUME, THEY DO NOT RESTART. Claude Code writes the
 // session transcript as the turn goes: the user's prompt before the first
 // model request, then every tool call and result. Measured on Claude Code
-// 2.1.283 against the fake endpoint (test/fallback.e2e.test.ts): after a
+// 2.1.283 and 2.1.287 against the fake endpoint (test/fallback.e2e.test.ts): after a
 // failed request, a query with `resume` and the prompt CONTINUE_PROMPT sends
 // the model the original prompt, every finished tool call and its result,
 // and then CONTINUE_PROMPT; the synthetic "API Error" message is left out.
@@ -187,8 +187,8 @@ function apiFailure(
 }
 
 /**
- * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
- * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * Costs across attempts. Measured on Claude Code 2.1.283 and 2.1.287 against
+ * the fake endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
  * already includes everything the session spent before it, restored from the
  * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
  * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check
@@ -335,7 +335,7 @@ export async function* runWithFallback(
             refused = evidence
             // Before `break`, whose return() would wait on the process. The
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
-            // (sdk.mjs 0.3.283), so a retry or two may still go out in that
+            // (sdk.mjs 0.3.287), so a retry or two may still go out in that
             // grace; they are refused like the first and cost nothing.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
