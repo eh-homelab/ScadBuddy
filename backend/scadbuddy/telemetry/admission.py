@@ -14,8 +14,9 @@ user's browser, to spend its budget or inject spans. In order, before the body i
 The ``Origin`` check is the one that matters: a cross-origin page can skip the
 preflight (``mode: 'no-cors'`` with a ``text/plain`` body), and that request still
 carries its foreign ``Origin``. The route sends no CORS headers and answers no
-preflight, but that is not relied on to stop a request. These are the checks #962
-calls for every write; when it lands, the relay uses its shared guard instead.
+preflight, but that is not relied on to stop a request. Every other write gets the
+``Origin`` check alone (`api/cross_site.py`, #962), which lets a request with none
+through; the relay is stricter.
 
 **Rate limits**, in memory: a per-process bucket caps what one pod sends the collector
 whatever the client, and a per-client bucket sits under it. The client is the peer,

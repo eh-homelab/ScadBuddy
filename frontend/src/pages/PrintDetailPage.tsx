@@ -478,9 +478,17 @@ function RunRow({ run }: { run: Run }) {
       {run.duration_seconds != null && (
         <span className="sb-num text-faint">{duration(run.duration_seconds)}</span>
       )}
-      {run.filament_used_grams != null && (
-        <span className="sb-num text-faint">{run.filament_used_grams} g</span>
-      )}
+      {run.filament_used_grams != null &&
+        (run.filament_reading_suspect ? (
+          <span
+            className="sb-num text-warn"
+            title="Far more than this print used, most likely a spool's weight; not used for the cost"
+          >
+            {`${run.filament_used_grams} g, not this print's`}
+          </span>
+        ) : (
+          <span className="sb-num text-faint">{run.filament_used_grams} g</span>
+        ))}
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
   )
