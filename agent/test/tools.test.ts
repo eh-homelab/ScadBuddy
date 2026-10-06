@@ -1539,6 +1539,23 @@ describe('library pins as operations (#1054)', () => {
     expect(answer).toMatchObject(expected)
     expect(answer).not.toHaveProperty('status')
   })
+
+  it('remove_library_checkout hands back a removal still running past the follow, not "removed" (review #1119)', async () => {
+    const removing = { ...op, kind: 'library_remove', subject: 'library:BOSL2' }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/libraries/BOSL2`, () => HttpResponse.json(removing, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json(removing)),
+    )
+    const result = await runTool(
+      { ...tool('remove_library_checkout'), gated: false },
+      { name: 'BOSL2' },
+      ctx({ commandFollowMs: 50 }),
+    )
+    expect(result.isError).toBeFalsy()
+    const answer = firstText(result)
+    expect(answer).toMatchObject({ status: 'running', operation_id: 'op-7' })
+    expect(answer).not.toHaveProperty('removed')
+  })
 })
 
 describe('get_output_preview (#308)', () => {
