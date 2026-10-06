@@ -75,8 +75,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
       yield { ...result, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
     })()
 
-  async function setUp() {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
+  /** The app over `m`, and a POST to its respond route. */
+  function respondTo(m: SessionManager) {
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -88,12 +88,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
       approvals: m.approvals,
       sessions: m,
     })
+    return (id: string, body: unknown, headers: Record<string, string> = UI) =>
+      app.request(`/api/v1/ai/pending-input/${id}`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  }
+
+  async function setUp() {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
+    const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
     await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
     const ids = await ids_(m)
-    const post = (id: string, body: unknown, headers: Record<string, string> = UI) =>
-      app.request(`/api/v1/ai/pending-input/${id}`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) })
     return { m, session, turn: turn!, ids, post }
   }
 
@@ -232,6 +237,41 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
     await turn.done
+  })
+
+  // A `done` summary (#1379) outlives its turn: nothing is parked on it, and the panel's
+  // Dismiss answers it through this route after the turn has ended.
+  it('dismisses a done summary after its turn ended, with its Dismiss choice only', async () => {
+    const done = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const parsed = parseAttention({ reason: 'done', message: 'Rendered the sign.' })
+        if (!parsed.ok) throw new Error(parsed.error)
+        verdicts.push(
+          await run.questionGate!({
+            tool: ATTENTION_TOOL,
+            questions: [attentionCard(parsed.input)],
+            toolUseId: 'toolu_done',
+            signal: new AbortController().signal,
+            attention: { reason: 'done' },
+          }),
+        )
+        yield { ...result, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: done, approvalPollMs: 20 })
+    const post = respondTo(m)
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
+    await turn!.done
+    expect(verdicts).toEqual([expect.objectContaining({ posted: true })])
+    const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`
+    const id = `question:${row!.id}`
+
+    expect((await post(id, { kind: 'answer', choice: 'Print it' })).status).toBe(400)
+    const dismissed = await post(id, { kind: 'answer', choice: 'Dismiss' })
+    expect(dismissed.status).toBe(200)
+    expect(await dismissed.json()).toEqual({ id, kind: 'answer', outcome: 'answered' })
+    expect(await m.questions.listPending()).toEqual([])
+    expect((await post(id, { kind: 'answer', choice: 'Dismiss' })).status).toBe(409)
   })
 
   it('takes answers of ANSWER_MAX, which are larger than 16 KiB as JSON (the socket path took them)', async () => {

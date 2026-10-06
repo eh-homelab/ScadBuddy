@@ -14,7 +14,7 @@ import { mockAgentSessions } from '../agent'
  * (`respondRequests`).
  */
 
-const state = { approvals: 0, questions: 0, attention: 0 }
+const state = { approvals: 0, questions: 0, attention: 0, done: 0 }
 let responses: { id: string; body: RespondBody }[] = []
 
 /** Tests: every respond the panel sent, in order. */
@@ -27,10 +27,11 @@ export function setPendingApprovals(n: number): void {
   state.approvals = n
 }
 
-/** Tests: how many questions and attention requests the agent says are waiting. */
-export function setPendingAnswers(questions: number, attention = 0): void {
+/** Tests: how many questions, attention requests and `done` summaries the agent lists. */
+export function setPendingAnswers(questions: number, attention = 0, done = 0): void {
   state.questions = questions
   state.attention = attention
+  state.done = done
 }
 
 export function reset(): void {
@@ -38,6 +39,7 @@ export function reset(): void {
   state.questions = 0
   state.attention = 0
   responses = []
+  state.done = 0
 }
 
 const at = (i: number) => new Date(Date.UTC(2026, 9, 1, 9, 0) + i * 1000).toISOString()
@@ -59,7 +61,7 @@ function approval(i: number) {
   }
 }
 
-function answer(i: number, attention: boolean) {
+function answer(i: number, attention: boolean, done = false) {
   return {
     id: `question:${id(1000 + i)}`,
     kind: 'answer',
@@ -71,8 +73,12 @@ function answer(i: number, attention: boolean) {
     requested_by: null,
     responders: ['browser'],
     created_at: at(i),
-    expires_at: attention ? at(i + 300) : null,
-    ...(attention ? { attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } } : {}),
+    expires_at: attention && !done ? at(i + 300) : null,
+    ...(done
+      ? { attention: { reason: 'done', on_timeout: null, summary: '**What this turn changed**\n- nothing' } }
+      : attention
+        ? { attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } }
+        : {}),
   }
 }
 
@@ -95,6 +101,7 @@ export const handlers = [
         ...Array.from({ length: state.approvals }, (_, i) => approval(i)),
         ...Array.from({ length: state.questions }, (_, i) => answer(i, false)),
         ...Array.from({ length: state.attention }, (_, i) => answer(state.questions + i, true)),
+        ...Array.from({ length: state.done }, (_, i) => answer(state.questions + state.attention + i, true, true)),
       ],
     }),
   ),

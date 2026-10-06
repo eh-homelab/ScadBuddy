@@ -528,7 +528,14 @@ server carries `request_user_attention` (#815,
 too and is answered the same way. It is the one entry with a timer, and the timer never
 answers for the user: on `proceed` the call returns `timed_out` and every outward call the
 agent then makes still parks for its own approval; `wait` and `stop` end the turn. The
-`approval_pending` reason is refused, so an approval can never time out to proceed. A query
+`approval_pending` reason is refused, so an approval can never time out to proceed. The
+`done` reason (#815 §4) is the one that does not wait: the call returns at once, takes no
+quick replies or timer, and the row outlives its turn on the badge until the user dismisses
+it. Beside the agent's message its card shows ScadBuddy's own list of what the turn created,
+changed or deleted, read from `ai_session_resources` rather than from the model
+([`agent/src/questions/doneSummary.ts`](../../agent/src/questions/doneSummary.ts)), with what
+was done while an attention request went unanswered listed first, so an outward write made
+unattended would be visible there. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 

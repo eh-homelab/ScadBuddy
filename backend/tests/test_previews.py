@@ -3,6 +3,7 @@ place in the catalogue."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -33,7 +34,7 @@ from scadbuddy.library.previews import (
     sweep_work_dirs,
 )
 from scadbuddy.render import previews as previews_module
-from scadbuddy.render.jobs import ModelSource, SnapshotUnavailableError
+from scadbuddy.render.jobs import ModelSource, SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.previews import PreviewFailedError, is_render_error, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
@@ -495,6 +496,36 @@ def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -
 def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
     """Infrastructure: the scheduler tries again rather than blaming the source."""
     assert not is_render_error(error)
+
+
+async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> None:
+    """#1419 review: `pin` now stops waiting after `PIN_TIMEOUT`. The scheduler must
+    come back for the slug once the snapshot should be stored; nothing else would
+    before the model's next edit or the next boot."""
+    calls = 0
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SnapshotPendingError("still uploading", retry_after=1)
+        return b"png"
+
+    store = mock.MagicMock()
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), store, runner, timeout=1.0, debounce=0, interval=0
+    )
+    with mock.patch.object(scheduler, "_plan", return_value="key"):
+        scheduler.start()
+        scheduler.request(SLUG)
+        for _ in range(300):
+            if store.write.called:
+                break
+            await asyncio.sleep(0.01)
+        await scheduler.aclose()
+    assert calls == 2
+    assert store.write.called
+    store.record_failure.assert_not_called()
 
 
 async def test_a_preview_render_starts_a_root_span_its_workflow_joins(
