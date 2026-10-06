@@ -11,7 +11,7 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 //
 // WHAT A PLUGIN IS HERE. A remote MCP server: a Streamable HTTP URL plus an
 // optional auth header. The harness registers it as an Agent SDK
-// `McpHttpServerConfig` (`{ type: 'http', url }`, sdk.d.ts 0.3.283) under the
+// `McpHttpServerConfig` (`{ type: 'http', url }`, sdk.d.ts 0.3.283 and 0.3.287) under the
 // plugin's name, so its tools reach the model as `mcp__<name>__<tool>` ("MCP
 // tools follow the naming pattern mcp__{server_name}__{tool_name}",
 // https://code.claude.com/docs/en/agent-sdk/mcp). The URL Claude Code gets is
@@ -62,8 +62,9 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
  * Names a plugin may not take: the in-process ScadBuddy server (#251's
  * `mcp__scadbuddy__*`) and the headless browser plugin (#349), whose tools have
  * tiers of their own, plus the vendor names, plus the server names Claude Code
- * 2.1.283 treats specially and drops or never offers tools from (`workspace`,
- * `computer-use`, `claude-in-chrome`, `hearthbot`, `ide`).
+ * 2.1.283 and 2.1.287 treat specially and drop or never offer tools from
+ * (`workspace`, `computer-use`, `claude-in-chrome`, `hearthbot`, `ide`; 2.1.287
+ * also reserves `widgets`, but only in a hosted or CLAUDE_CODE_REMOTE run).
  */
 export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
   'scadbuddy',
@@ -80,7 +81,7 @@ export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
 
 /**
  * A tool name as Claude Code puts it in `mcp__<server>__<tool>`: every
- * character outside [A-Za-z0-9_-] becomes `_` (CLI 2.1.283; spec §3.1).
+ * character outside [A-Za-z0-9_-] becomes `_` (CLI 2.1.283 and 2.1.287; spec §3.1).
  */
 export function harnessToolName(tool: string): string {
   return tool.replace(/[^a-zA-Z0-9_-]/g, '_')

@@ -637,7 +637,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     - The remedy is a reviewed bump to the PR's new head, or to the PyPI release.
     - Vendoring was ruled out by the user (§9).
   - The Dockerfile asserts the Claude Code version the Python `claude-agent-sdk` bundles,
-    as it does `CLAUDE_CODE_VERSION` for the TypeScript SDK.
+    as it does for the TypeScript SDK (`agent/src/check-cli-version.ts`).
   - The two are bumped together.
 - **`SessionStore`** is implemented on Postgres, following the SDK's Postgres example.
   If its shape is `ai_session_entries`' (which already mirrors the SDK transcript), it

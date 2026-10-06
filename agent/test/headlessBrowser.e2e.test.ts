@@ -187,7 +187,7 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
     expect(existsSync(path.join(stateDir, 'work', 'sessions', sessionId, 'planted-ran'))).toBe(false)
     const browserTools = (i?.tools ?? []).filter((t) => t.startsWith(TOOL_PREFIX))
     expect(browserTools).toContain(`${TOOL_PREFIX}browser_navigate`)
-    // Measured on Claude Code 2.1.283: exactly the 21 core tools the server
+    // Measured on Claude Code 2.1.283 and 2.1.287: exactly the 21 core tools the server
     // offers minus the four disallowed ones (test/headlessBrowser.server.test.ts).
     expect(browserTools.map((t) => t.slice(TOOL_PREFIX.length)).sort()).toEqual(Object.keys(BROWSER_TOOL_TIERS).sort())
   })

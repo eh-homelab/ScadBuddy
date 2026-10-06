@@ -36,7 +36,7 @@ import { redact } from '../secrets.js'
 //     refuses command hooks because the process would inherit the credential
 //     env, and the Python package is not usable here.
 //   - Recall is injected as `hookSpecificOutput.additionalContext`, not
-//     `systemMessage`. sdk.d.ts (0.3.283) types `additionalContext` on
+//     `systemMessage`. sdk.d.ts (0.3.283 and 0.3.287) types `additionalContext` on
 //     `UserPromptSubmitHookSpecificOutput`, which Claude Code adds to the
 //     model's context; `systemMessage` is, per Claude Code's hooks reference,
 //     a message shown to the user. The memories are untrusted data (#258,
@@ -582,7 +582,7 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       // transcript file does not hold the turn's final assistant message yet.
       // The SDK hands it over as `last_assistant_message` ("Text content of the
       // last assistant message before stopping. Avoids the need to read and
-      // parse the transcript file", sdk.d.ts 0.3.283), so it is used for the
+      // parse the transcript file", sdk.d.ts 0.3.283 and 0.3.287), so it is used for the
       // last reply; the next turn's retain finds it in the file.
       const last = input.last_assistant_message?.trim() ?? ''
       const refId = `conversation:${sessionId}`
