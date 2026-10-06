@@ -146,9 +146,9 @@ export class PgEventListener implements EventSource {
 
   /** Waits until LISTEN is in place (tests). */
   async ready(timeoutMs = 10_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
+    const deadline = performance.now() + timeoutMs
     while (!this.#listening) {
-      if (Date.now() > deadline) throw new Error('the event listener did not connect in time')
+      if (performance.now() > deadline) throw new Error('the event listener did not connect in time')
       await (this.#connecting ?? sleep(20))
     }
   }

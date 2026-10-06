@@ -118,6 +118,8 @@ export function sameValues(a: ParamValues, b: ParamValues): boolean {
 
 export type CheckedValue = { ok: true; value: ParamValue } | { ok: false; message: string }
 
+/** A plain decimal number, as a model writes one into a string (#948). */
+const NUMERIC = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i
 const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 /** An uploaded asset's id: the sha256 of its content (#204). */
 const ASSET_ID = /^[0-9a-f]{64}$/
@@ -128,6 +130,27 @@ const ASSET_ID = /^[0-9a-f]{64}$/
  */
 export function textLength(value: string): number {
   return Array.from(value).length
+}
+
+/**
+ * #921 — why a number field's value is outside the range the model declares, in the
+ * field's own words, or null when it is inside (or the parameter is not a number).
+ * The render would refuse it with a 422; the field says so before any request goes out.
+ */
+export function rangeProblem(param: Param, value: ParamValue | undefined): string | null {
+  if (param.type !== 'number' && param.type !== 'integer' && param.type !== 'slider') return null
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const below = param.min != null && value < param.min
+  const above = param.max != null && value > param.max
+  if (!below && !above) return null
+  const label = param.caption || param.name
+  if (param.min != null && param.max != null) return `${label} must be between ${param.min} and ${param.max}.`
+  return below ? `${label} must be at least ${param.min}.` : `${label} must be at most ${param.max}.`
+}
+
+/** #921 — the first parameter whose value is out of its declared range: nothing renders or generates while there is one. */
+export function outOfRange(schema: CustomizerSchema, values: ParamValues): Param | undefined {
+  return allParams(schema).find((param) => param.name in values && rangeProblem(param, values[param.name]) !== null)
 }
 
 /**
@@ -142,6 +165,9 @@ export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
     case 'number':
     case 'integer':
     case 'slider': {
+      // #948: a model can send set_param's top-level value as "30"; read it as the
+      // number it plainly is rather than make the agent retry.
+      if (typeof value === 'string' && NUMERIC.test(value.trim())) value = Number(value)
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         return { ok: false, message: `${label} takes a number.` }
       }

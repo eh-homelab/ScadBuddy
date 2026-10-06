@@ -18,7 +18,7 @@ cd backend
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy              # strict; files = scadbuddy, tests
-uv run --frozen pytest
+uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
@@ -35,6 +35,12 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+Under pytest-xdist each worker makes its schemas in a database of its own
+(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+because advisory locks and NOTIFY channels are per database: workers sharing one would
+serialise every `migrate` and hear each other's events. So the test role needs
+`CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
+Temporal dev server.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -142,8 +148,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages the worker's activities run; `render_job` runs them in one
   process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
-  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
-  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
+  workflow's first (local) activity inserts the row, identical requests join it as
+  claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob

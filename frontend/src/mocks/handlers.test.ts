@@ -1222,7 +1222,7 @@ describe('library print', () => {
   it('lists the root 3MFs, and every file under all', async () => {
     const plain = await api.listLibrary({ folderId: null, all: false })
     const every = await api.listLibrary({ folderId: null, all: true })
-    expect(plain.files?.map((file) => file.id)).toEqual([89])
+    expect(plain.files?.map((file) => file.id)).toEqual([89, 91])
     expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
     expect(plain.hidden).toBe(1)
   })

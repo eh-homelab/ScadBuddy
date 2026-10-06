@@ -63,6 +63,29 @@ function setup(overrides: Partial<AppDeps> = {}) {
   return { app, credentials, tested, audited, call, create }
 }
 
+describe('/api/v1/ai/credentials reads (#989)', () => {
+  it('answer only the UI, like every sibling read', async () => {
+    const { call, create } = setup()
+    await create({ kind: 'anthropic_api_key', secret: KEY_A })
+    const https = { 'x-forwarded-proto': 'https' }
+    for (const path of ['', '/entries']) {
+      for (const headers of [
+        { ...UI, origin: 'https://evil.example' },
+        { ...https, host: 'scadbuddy.example', 'sec-fetch-site': 'cross-site' },
+        // DNS rebinding: the attacker's name in Host, and no Origin on a same-origin GET.
+        { ...https, host: 'evil.example' },
+      ]) {
+        const res = await call<{ detail: string }>('GET', path, undefined, headers)
+        expect(res.status, `${path} ${JSON.stringify(headers)}`).toBe(403)
+        expect(JSON.stringify(res.body)).not.toContain('aaaa')
+      }
+      // The UI's own same-origin GET sends no Origin.
+      const own = { ...https, host: 'scadbuddy.example', 'sec-fetch-site': 'same-origin' }
+      expect((await call('GET', path, undefined, own)).status, path).toBe(200)
+    }
+  })
+})
+
 describe('/api/v1/ai/credentials/entries (#1093)', () => {
   it('lists nothing, then each created credential in order, never with its secret', async () => {
     const { call, create } = setup()

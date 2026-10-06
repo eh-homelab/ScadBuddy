@@ -10,11 +10,14 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -22,7 +25,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
-from scadbuddy.render.job_models import Job, JobNotFoundError, now
+from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, now
 from scadbuddy.render.jobs import (
     Prepared,
     finish_piece_stage,
@@ -33,7 +36,7 @@ from scadbuddy.render.jobs import (
     timed_stage,
 )
 from scadbuddy.render.previews import PreviewFailedError, render_preview
-from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
@@ -41,6 +44,12 @@ from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
+    ACCEPT_ACTIVITY,
+    ACCEPT_TRANSIENT,
+    CLAIMS_ACTIVITY,
+    LEGACY_PENDING,
+    QUEUE_FULL,
+    AcceptRender,
     Failure,
     PieceRequest,
     PieceResult,
@@ -53,6 +62,8 @@ logger = logging.getLogger(__name__)
 
 #: The finished piece, written last: a blob that has it is never rendered again.
 PIECE_NAME = "piece.json"
+#: How long `render_accept` asks Temporal about an older build's row holding its key.
+LEGACY_DESCRIBE = timedelta(seconds=5)
 
 
 @dataclass
@@ -245,6 +256,8 @@ class RenderActivities:
             self.finish_piece,
             self.project,
             self.render_preview_png,
+            self.render_accept,
+            self.render_claims,
         ]
 
     def _config(self, prepared: PrepareResult) -> Config:
@@ -467,12 +480,79 @@ class RenderActivities:
                 str(error), Failure(error=str(error)), type="PreviewFailedError", non_retryable=True
             ) from None
 
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        """`TemplatePipeline`'s first step (#1053): the execution's row, or the full
+        queue's refusal with nothing written."""
+        start = accept.start
+        job = Job(
+            id=uuid.uuid4().hex,
+            slug=start.slug,
+            params=dict(start.params),
+            inputs=dict(start.inputs),
+            model_version=start.model_version,
+            kind=start.kind,
+            created_at=now(),
+            traceparent=start.traceparent,
+        )
+        orphaned: str | None = None
+        try:
+            try:
+                return await asyncio.to_thread(
+                    self.deps.projection.accept,
+                    job,
+                    start.render_key,
+                    workflow_id=accept.workflow_id,
+                    run_id=accept.run_id,
+                    max_pending=start.max_pending,
+                    supersedes=start.supersedes,
+                )
+            except LegacyPendingError as waiting:
+                # An older build's row holds the key: retried until that build runs it,
+                # unless no workflow ever will (it would block the key for good). A local
+                # activity has a client too when it is `async def` (temporalio 1.33,
+                # worker/_activity.py: `client=... if not running_activity.sync`;
+                # review #1066 (2) 1.1), and test_submit's legacy_unrun tests run it.
+                if not await legacy_unrun(
+                    activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
+                ):
+                    raise ApplicationError(str(waiting), type=LEGACY_PENDING) from None
+                orphaned = waiting.job.id
+            return await asyncio.to_thread(
+                self.deps.projection.accept,
+                job,
+                start.render_key,
+                workflow_id=accept.workflow_id,
+                run_id=accept.run_id,
+                max_pending=start.max_pending,
+                supersedes=start.supersedes,
+                orphaned=orphaned,
+            )
+        except QueueFullError as error:
+            raise ApplicationError(
+                str(error), error.depth, type=QUEUE_FULL, non_retryable=True
+            ) from None
+        except (psycopg.OperationalError, RPCError) as error:
+            # Postgres out of reach (a pool timeout is one too), or Temporal unable to
+            # say whether the older row's workflow runs: states that pass (review #1066
+            # (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
+
+    @activity.defn(name=CLAIMS_ACTIVITY)
+    async def render_claims(self, job_id: str, claims: int) -> None:
+        await asyncio.to_thread(self.deps.projection.set_claims, job_id, claims)
+
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:
         """Move the row forward; a no-op when it is already past this state or gone."""
         p = self.deps.projection
         if projection.state == "running":
-            await asyncio.to_thread(p.mark_started, projection.job_id)
+            started = await asyncio.to_thread(p.mark_started, projection.job_id)
+            # Only the call that moved the row records it: a retry finds it running.
+            if started is not None and started.started_at is not None and self.deps.metrics:
+                self.deps.metrics.queue_wait.observe(
+                    max(0.0, (started.started_at - started.created_at).total_seconds())
+                )
             return
         if projection.state is None:
             if projection.steps is not None:

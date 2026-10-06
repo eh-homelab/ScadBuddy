@@ -34,6 +34,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     Field,
@@ -82,7 +83,12 @@ class PresetNotFoundError(KeyError):
 
 
 class PresetExistsError(ValueError):
-    """Another preset of the same template already has that name."""
+    """Another preset of the same template already has that name. ``args`` is the
+    name asked for; ``existing`` is the other preset's, as it is spelled (#357)."""
+
+    def __init__(self, name: str, existing: str | None = None) -> None:
+        super().__init__(name)
+        self.existing = name if existing is None else existing
 
 
 class TooManyPresetsError(ValueError):
@@ -93,7 +99,15 @@ class SavedPresetsUnavailableError(RuntimeError):
     """Saved presets live in Postgres, and this server has no database."""
 
 
+def _refuse_nul(text: str) -> str:
+    """Postgres text cannot hold a NUL (#965): a 422 here, not a 500 at the insert."""
+    if "\x00" in text:
+        raise ValueError("contains a NUL byte")
+    return text
+
+
 def _clean_name(name: str) -> str:
+    _refuse_nul(name)
     cleaned = " ".join(name.split())
     if not cleaned:
         raise ValueError("a preset needs a name")
@@ -124,7 +138,13 @@ def _clean_tags(value: object) -> object:
 #: is written from now on; a template's file written before it is read as
 #: :func:`_details_as_written` reads it.
 PresetTags = Annotated[
-    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
+    list[
+        Annotated[
+            str,
+            StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$"),
+            AfterValidator(_refuse_nul),
+        ]
+    ],
     BeforeValidator(_clean_tags),
     Field(max_length=MAX_PRESET_TAGS),
 ]
@@ -170,7 +190,9 @@ def _details_as_written(raw: Any) -> Any:
 
 #: A preset's description (#327): short Markdown, trimmed.
 PresetDescription = Annotated[
-    str, StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION)
+    str,
+    StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION),
+    AfterValidator(_refuse_nul),
 ]
 
 
@@ -558,16 +580,18 @@ class PresetStore:
         with self._locked(model_id) as conn:
             saved = [row["name"] for row in self._saved(conn, model_id)]
             for name in names:
-                if any(_same_name(name, other) for other in saved):
-                    raise PresetExistsError(name)
+                for other in saved:
+                    if _same_name(name, other):
+                        raise PresetExistsError(name, other)
             return write()
 
     def _require_free(self, model_id: str, saved: list[DictRow], name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""
         taken = [row["name"] for row in saved if row["id"] != own]
         taken += [p.name for p in self.template_presets(model_id)]
-        if any(_same_name(name, other) for other in taken):
-            raise PresetExistsError(name)
+        for other in taken:
+            if _same_name(name, other):
+                raise PresetExistsError(name, other)
 
     def create(self, model_id: str, body: ParamPresetCreate) -> ParamPreset:
         with self._locked(model_id) as conn:

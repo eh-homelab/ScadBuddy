@@ -26,7 +26,7 @@ line1 = "Elan"; // 30
 // Second line, smaller, under the first (leave empty for one line)
 line2 = ""; // 30
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 // Letter height of the first line in mm; auto-fit only ever shrinks it
