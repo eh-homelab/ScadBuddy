@@ -44,6 +44,7 @@ from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
+    LEGACY_PENDING,
     QUEUE_FULL,
     AcceptRender,
     Failure,
@@ -512,7 +513,7 @@ class RenderActivities:
                 if not await legacy_unrun(
                     activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
                 ):
-                    raise
+                    raise ApplicationError(str(waiting), type=LEGACY_PENDING) from None
                 orphaned = waiting.job.id
             return await asyncio.to_thread(
                 self.deps.projection.accept,
