@@ -465,13 +465,12 @@ class CheckoutLeases:
 
     @contextlib.contextmanager
     def removing(self) -> Iterator[None]:
-        """Hold :data:`REMOVAL_LOCK` exclusively: no lease is inserted meanwhile."""
-        with self.pool.connection() as conn:
-            conn.execute("SELECT pg_advisory_lock(%s)", (REMOVAL_LOCK,))
-            try:
-                yield
-            finally:
-                conn.execute("SELECT pg_advisory_unlock(%s)", (REMOVAL_LOCK,))
+        """Hold :data:`REMOVAL_LOCK` exclusively: no lease is inserted meanwhile. A
+        transaction's lock, so however the block ends it goes with the transaction and
+        never back to the pool on its connection."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
+            yield
 
 
 def _first_column(row: Any) -> str:
