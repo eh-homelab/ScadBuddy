@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 from temporalio import activity, workflow
 from temporalio.client import Client
 
+from scadbuddy_durable import runner as runner_module
 from scadbuddy_durable import worker as worker_module
 from scadbuddy_durable.codec import SubjectPayloadCodec
 from scadbuddy_durable.secrets import Kek
@@ -77,9 +78,20 @@ async def test_build_worker_registers_the_workflow_and_two_activities(
     assert isinstance(codec, SubjectPayloadCodec)
 
 
-def test_segments_run_in_the_workers_working_directory(
+def test_segments_run_in_srv_agent_when_it_exists(
     unused_pool: AsyncConnectionPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    image = tmp_path / "srv-agent"
+    image.mkdir()
+    monkeypatch.setattr(runner_module, "CWD", str(image))
+    monkeypatch.chdir(tmp_path)
+    assert WorkerDeps(pool=unused_pool, keks=[KEK], prompt_append="policy").cwd == str(image)
+
+
+def test_segments_run_in_the_working_directory_without_srv_agent(
+    unused_pool: AsyncConnectionPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "CWD", str(tmp_path / "none"))
     monkeypatch.chdir(tmp_path)
     assert WorkerDeps(pool=unused_pool, keks=[KEK], prompt_append="policy").cwd == str(tmp_path)
 

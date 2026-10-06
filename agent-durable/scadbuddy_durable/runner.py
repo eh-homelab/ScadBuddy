@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import warnings
 from collections.abc import Callable
@@ -18,6 +19,15 @@ from scadbuddy_durable.credentials import CredentialSource, NoUsableCredential, 
 from scadbuddy_durable.segments import Segments
 
 CWD = "/srv/agent"
+
+
+def segments_cwd() -> str:
+    """Where every segment runs: /srv/agent, the image's, when it exists, else the
+    worker's working directory (a worker outside the image). store.py keys transcripts by
+    a project key derived from it, so replicas resume each other's sessions only while
+    they agree on it: in the image they all use /srv/agent."""
+    return CWD if os.path.isdir(CWD) else os.getcwd()
+
 
 _SESSION_ID = re.compile(r"session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -48,12 +58,12 @@ class SessionRunner:
         *,
         plugin_dir: str,
         prompt_append: str,
-        cwd: str = CWD,
+        cwd: str | None = None,
         runner_factory: Callable[..., SegmentRunner] = ClaudeAgentSdkRunner,
     ) -> None:
         self._credentials, self._segments, self._store = credentials, segments, store
         self._extra = extra_options(plugin_dir, prompt_append)
-        self._cwd, self._factory = cwd, runner_factory
+        self._cwd, self._factory = cwd or segments_cwd(), runner_factory
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
         session_id = session_of(activity.info().workflow_id or "")

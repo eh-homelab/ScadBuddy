@@ -12,7 +12,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy_durable.credentials import Credential, NoUsableCredential, credential_env
-from scadbuddy_durable.runner import CWD, SessionRunner, extra_options, session_of
+from scadbuddy_durable.runner import SessionRunner, extra_options, segments_cwd, session_of
 from scadbuddy_durable.segments import SessionLimits
 
 SECRET = "sk-ant-very-secret"
@@ -105,7 +105,7 @@ async def test_builds_runner_with_credential_and_remaining_budget() -> None:
     assert kwargs["env"] == credential_env(Credential("anthropic_api_key", SECRET))
     assert kwargs["max_budget_usd"] == 3.5
     assert kwargs["session_store"] is store
-    assert kwargs["cwd"] == "/srv/agent" == CWD
+    assert kwargs["cwd"] == segments_cwd()  # /srv/agent in the image
     assert kwargs["extra_options"] == {
         "plugins": [{"type": "local", "path": PLUGIN}],
         "system_prompt": {"type": "preset", "preset": "claude_code", "append": "APPEND"},
