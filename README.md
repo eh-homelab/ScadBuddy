@@ -440,6 +440,10 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
+  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
+  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
+  trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
@@ -760,7 +764,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
-  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  and the agent's questions are answered through
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
+  still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.

@@ -110,11 +110,37 @@ describe('string', () => {
     max_length: 20,
   }
 
-  it('enforces maxLength and shows the count', () => {
+  it('shows the count', () => {
     setup(param, 'Reagan')
-    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
-    expect(input).toHaveAttribute('maxlength', '20')
     expect(screen.getByText('6/20')).toBeInTheDocument()
+  })
+
+  it('counts characters as OpenSCAD does, an emoji as one (#920)', () => {
+    setup(param, 'Zoë 🦄 ß')
+    expect(screen.getByText('7/20')).toBeInTheDocument()
+  })
+
+  it('stops at max_length characters, not UTF-16 units (#920)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 3 }, '')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    expect(input).not.toHaveAttribute('maxlength')
+    // Four UTF-16 units, two characters: under a maxlength of 3 only one would fit.
+    await user.type(input, '🦄🦄')
+    expect(onChange).toHaveBeenLastCalledWith('🦄🦄')
+    await user.type(input, '🦄🦄')
+    expect(onChange).toHaveBeenLastCalledWith('🦄🦄🦄')
+    expect(input).toHaveValue('🦄🦄🦄')
+  })
+
+  it('refuses an edit past max_length wherever the caret is, keeping the name whole (#920)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 6 }, 'Reagan')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.click(input)
+    await user.keyboard('{Home}X')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(input).toHaveValue('Reagan')
+    await user.paste('XY')
+    expect(input).toHaveValue('Reagan')
   })
 
   it('reports each keystroke', async () => {

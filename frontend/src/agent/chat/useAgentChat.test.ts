@@ -1,5 +1,7 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { server } from '../../mocks/server'
 import { installTestTracing } from '../../test/tracing'
 import { PROTOCOL_VERSION, type ClientMessage } from './protocol'
 import type { ChatTransport, SendResult, TransportHandlers } from './transport'
@@ -33,6 +35,18 @@ function scripted(answer: () => SendResult = () => 'sent') {
 }
 
 const frame = (body: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...body })
+
+/** Answers the respond route (#815) with `status`, keeping what the panel posted. */
+function capture(status = 200, detail = '') {
+  const posted: { id: string; body: unknown }[] = []
+  server.use(
+    http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
+      posted.push({ id: String(params.id), body: await request.json() })
+      return status === 200 ? HttpResponse.json({}) : HttpResponse.json({ detail }, { status })
+    }),
+  )
+  return posted
+}
 
 /** A session parked on approval `a1`, as the server would stream it. */
 function parked(h: TransportHandlers) {
@@ -76,7 +90,8 @@ describe('useAgentChat', () => {
     expect(result.current.state.activeId).toBe('s1')
   })
 
-  it('shows a sent decision as sending, then as the server confirms it', () => {
+  it('sends a decision to the respond route, and shows it decided once the route takes it (#815)', async () => {
+    const posted = capture()
     const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
     act(() => {
@@ -85,42 +100,152 @@ describe('useAgentChat', () => {
     })
     act(() => result.current.decide('s1', 'a1', true))
     expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved', by: owner }))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
+    // Nothing rides the socket.
+    expect(t.chat()).toEqual([])
+    // The resolve frame that follows changes nothing.
     act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: owner })))
     expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
   })
 
-  it('sends the answer to a question and shows it sending until the server confirms it (#940)', () => {
-    let answer: SendResult = 'sent'
-    const t = scripted(() => answer)
+  it('keeps a card sending across a reconnect replay while its response is in flight, and applies the 200 when it lands (#1395)', async () => {
+    let release!: () => void
+    const landed = new Promise<void>((r) => (release = r))
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', async () => {
+        await landed
+        return HttpResponse.json({ id: 'approval:a1', kind: 'approval', outcome: 'approved' })
+      }),
+    )
+    const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
-    const asked = {
-      type: 'question.asked',
-      sessionId: 's1',
-      id: 'q1',
-      tool: 't2',
-      questions: [{ question: 'Colour?', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] }],
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'chat', owner, status: 'waiting_approval' }] }))
+    })
+    act(() => result.current.select('s1'))
+    act(() => parked(t.h()))
+    act(() => result.current.decide('s1', 'a1', true))
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+
+    // The socket drops and comes back before the POST returns: the feed is cleared and replayed.
+    act(() => {
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+      t.h().onOpen?.()
+    })
+    expect(result.current.state.sessions.s1?.items).toEqual([])
+    act(() => parked(t.h()))
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+
+    release()
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved', by: owner }))
+  })
+
+  it('decides while the socket is down: the route does not need it, and the card does not wait for it', async () => {
+    const posted = capture()
+    const t = scripted(() => 'queued')
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.decide('s1', 'a1', false))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'denied' }))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'deny' } }])
+  })
+
+  it('puts the card back, with the reason, when the route refuses the decision', async () => {
+    capture(400, 'approval:a1 is an approval')
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+    })
+    act(() => result.current.decide('s1', 'a1', true))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'pending' }))
+    expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
+      kind: 'error',
+      message: 'Your decision was not taken: approval:a1 is an approval',
+    })
+  })
+
+  it('ends the card with the reason when the entry was already decided or expired (409/410), without waiting on the socket (#1385)', async () => {
+    for (const [status, reason] of [
+      [409, 'Your decision was not taken: it was already resolved elsewhere.'],
+      [410, 'Your decision was not taken: it expired before your response arrived.'],
+    ] as const) {
+      capture(status, 'approval a1 is no longer waiting')
+      const t = scripted(() => 'queued')
+      const { result, unmount } = renderHook(() => useAgentChat(t.factory))
+      act(() => {
+        t.h().onOpen?.()
+        parked(t.h())
+        // No resolve frame can arrive while the socket is down.
+        t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+      })
+      const before = result.current.state.sessions.s1?.items.length
+      act(() => result.current.decide('s1', 'a1', true))
+      await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'closed' }))
+      expect(`Your decision was not taken: ${(approval(result.current.state) as { reason?: string }).reason}.`).toBe(reason)
+      // The card says it; no separate error row.
+      expect(result.current.state.sessions.s1?.items.length).toBe(before)
+      // A resolve frame that still arrives says how it really ended.
+      act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: owner })))
+      expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
+      unmount()
     }
+  })
+
+  it('sends a question\'s answers keyed by question, and an attention request\'s as its choice or text (#815)', async () => {
+    const posted = capture()
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    const options = [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }]
     act(() => {
       t.h().onOpen?.()
       t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 't' }))
-      t.h().onFrame(frame(asked))
+      t.h().onFrame(
+        frame({
+          type: 'question.asked',
+          sessionId: 's1',
+          id: 'q1',
+          tool: 't2',
+          questions: [
+            { question: 'Colour?', header: '', multiSelect: false, options },
+            { question: 'Parts?', header: '', multiSelect: true, options: [{ label: 'Lid', description: '' }, { label: 'Base', description: '' }] },
+          ],
+        }),
+      )
+      t.h().onFrame(
+        frame({
+          type: 'question.asked',
+          sessionId: 's1',
+          id: 'q2',
+          tool: 't3',
+          questions: [{ question: 'Tab closed', header: '', multiSelect: false, options: [{ label: "I'm here", description: '' }, { label: 'Carry on without me', description: '' }] }],
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: '2026-10-04T10:00:00.000Z' },
+        }),
+      )
     })
-    const question = () => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question')
-    // Refused: nothing left, and the card stays answerable.
-    answer = 'refused'
-    act(() => result.current.answer('s1', 'q1', ['Blue']))
-    expect(question()).toMatchObject({ state: 'pending' })
-    expect(result.current.state.notice).toMatch(/Your answer was not sent/)
-    answer = 'sent'
-    act(() => result.current.answer('s1', 'q1', ['Blue']))
-    expect(t.chat()).toContainEqual({ v: 1, type: 'question.answer', sessionId: 's1', id: 'q1', answers: ['Blue'] })
-    expect(question()).toMatchObject({ state: 'sent' })
-    act(() => t.h().onFrame(frame({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Blue'], by: owner })))
-    expect(question()).toMatchObject({ state: 'answered', answers: ['Blue'] })
+    const question = (id: string) => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question' && i.id === id)
+    act(() => result.current.answer('s1', 'q1', ['Blue', 'Lid, Base']))
+    expect(question('q1')).toMatchObject({ state: 'sent' })
+    act(() => result.current.answer('s1', 'q2', ["I'm here"]))
+    await waitFor(() => expect(question('q2')).toMatchObject({ state: 'answered', answers: ["I'm here"] }))
+    expect(question('q1')).toMatchObject({ state: 'answered', answers: ['Blue', 'Lid, Base'], by: owner })
+    expect(posted).toEqual([
+      { id: 'question:q1', body: { kind: 'answer', answers: { 'Colour?': 'Blue', 'Parts?': 'Lid, Base' } } },
+      { id: 'question:q2', body: { kind: 'answer', choice: "I'm here" } },
+    ])
+    expect(t.chat()).toEqual([])
   })
 
-  it('shows an answer given while disconnected as queued, until the server confirms it (#940)', () => {
-    const t = scripted(() => 'queued')
+  it('puts a question back, with the reason, when the route refuses the answer; own words go as text', async () => {
+    const posted = capture(400, '"choice" must be one of ["I\'m here"]')
+    const t = scripted()
     const { result } = renderHook(() => useAgentChat(t.factory))
     act(() => {
       t.h().onOpen?.()
@@ -131,76 +256,19 @@ describe('useAgentChat', () => {
           sessionId: 's1',
           id: 'q1',
           tool: 't2',
-          questions: [{ question: 'Colour?', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] }],
+          questions: [{ question: 'Tab closed', header: '', multiSelect: false, options: [{ label: "I'm here", description: '' }, { label: 'Carry on without me', description: '' }] }],
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: '2026-10-04T10:00:00.000Z' },
         }),
       )
-      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
     })
-    act(() => result.current.answer('s1', 'q1', ['Red']))
+    act(() => result.current.answer('s1', 'q1', ['back in five']))
     const question = () => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question')
-    expect(question()).toMatchObject({ state: 'queued' })
-    expect(t.sent).toContainEqual({ v: 1, type: 'question.answer', sessionId: 's1', id: 'q1', answers: ['Red'] })
-    act(() => t.h().onFrame(frame({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Red'], by: owner })))
-    expect(question()).toMatchObject({ state: 'answered' })
-  })
-
-  it('shows a decision made while disconnected as queued, until the server confirms it after the reconnect', () => {
-    let answer: SendResult = 'queued'
-    const t = scripted(() => answer)
-    const { result } = renderHook(() => useAgentChat(t.factory))
-    act(() => {
-      t.h().onOpen?.()
-      parked(t.h())
-      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    await waitFor(() => expect(question()).toMatchObject({ state: 'pending' }))
+    expect(posted).toEqual([{ id: 'question:q1', body: { kind: 'answer', text: 'back in five' } }])
+    expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({
+      kind: 'error',
+      message: 'Your answer was not taken: "choice" must be one of ["I\'m here"]',
     })
-    act(() => result.current.decide('s1', 'a1', false))
-    expect(approval(result.current.state)).toMatchObject({ state: 'queued' })
-    expect(t.sent).toContainEqual({ v: 1, type: 'approval.decision', sessionId: 's1', id: 'a1', approve: false })
-    answer = 'sent'
-    act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: owner })))
-    expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
-  })
-
-  it('keeps a queued decision decided through the reconnect replay', () => {
-    let answer: SendResult = 'queued'
-    const t = scripted(() => answer)
-    const { result } = renderHook(() => useAgentChat(t.factory))
-    act(() => {
-      t.h().onOpen?.()
-      parked(t.h())
-      result.current.select('s1')
-    })
-    act(() => {
-      parked(t.h())
-      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
-    })
-    act(() => result.current.decide('s1', 'a1', true))
-    expect(approval(result.current.state)).toMatchObject({ state: 'queued' })
-    answer = 'sent'
-    // The reconnect clears the feed and the attach replays the parked approval.
-    act(() => t.h().onOpen?.())
-    act(() => parked(t.h()))
-    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
-    act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: owner })))
-    expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
-  })
-
-  it('keeps the card pending, and says so, when the decision is refused', () => {
-    let answer: SendResult = 'refused'
-    const t = scripted(() => answer)
-    const { result } = renderHook(() => useAgentChat(t.factory))
-    act(() => {
-      t.h().onOpen?.()
-      parked(t.h())
-    })
-    act(() => result.current.decide('s1', 'a1', true))
-    expect(approval(result.current.state)).toMatchObject({ state: 'pending' })
-    expect(result.current.state.notice).toMatch(/^Your decision was not sent\./)
-    expect(t.sent).toEqual([])
-    // The user can decide again.
-    answer = 'sent'
-    act(() => result.current.decide('s1', 'a1', true))
-    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
   })
 
   it('says a message sent while disconnected is queued, keeps waiting for its session, and clears that on reconnect', () => {

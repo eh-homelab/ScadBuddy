@@ -54,7 +54,7 @@ from scadbuddy.render.job_models import (
     PlateInfo,
     QueueFullError,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -249,6 +249,11 @@ def require_job(render: RenderService, job_id: str) -> Job:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "the Bambuddy blob store has no commit of the template to snapshot for the render"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
@@ -259,8 +264,9 @@ def require_job(render: RenderService, job_id: str) -> Job:
                 "the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
                 "again, with the same `Idempotency-Key`, to follow it as one request; "
-                "without a key, each send is one more claim on the job). "
-                "Retry after `Retry-After` seconds"
+                "without a key, each send is one more claim on the job); or, on the "
+                "Bambuddy blob store, the revision's first snapshot is still uploading "
+                "(problem `code` `snapshot_pending`). Retry after `Retry-After` seconds"
             )
         },
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
@@ -271,6 +277,9 @@ def require_job(render: RenderService, job_id: str) -> Job:
                 "request again with the same `Idempotency-Key` to follow it; false, the "
                 "render's first step failed and no job exists"
             )
+        },
+        status.HTTP_507_INSUFFICIENT_STORAGE: {
+            "description": "the blob store has no room for the template's source snapshot"
         },
     },
 )
@@ -365,6 +374,15 @@ async def render_model(
     except SnapshotUnavailableError as error:
         # The bambuddy store renders from a snapshot of a commit, and there is none.
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    except SnapshotPendingError as error:
+        # The revision's first snapshot is still uploading (#686); it carries on.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+            code="snapshot_pending",
+        ) from None
     return RenderAccepted(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,

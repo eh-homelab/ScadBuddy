@@ -44,6 +44,12 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: covers one or two slow archives; it can cut the hook off mid-write, and that
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
+#: The whole budget of a settle's settings read, its wait for a connection included (#1111):
+#: well inside the watcher's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
+#: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
+#: off records nothing: its archives are recorded only by that output's next settle,
+#: which a one-off output may never have. That loss is the price of freeing the thread.
+SETTINGS_READ_TIMEOUT = 10.0
 
 #: What each advisory store write or read below logs when it swallows an exception, by
 #: type (#1112). Named so the tests' programming-error guard reads the same strings.
@@ -461,7 +467,7 @@ async def record_settled(
 
 
 def settle_hook(
-    store: RackUsage, links: PrintLinkStore, load: Callable[[], StoredSettings]
+    store: RackUsage, links: PrintLinkStore, load: Callable[[float], StoredSettings]
 ) -> SettledHook:
     """The watcher's ``on_settled`` hook for the rack (spec §4).
 
@@ -474,10 +480,10 @@ def settle_hook(
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the watcher stops
-        # waiting on it at its timeout (#1083). The thread itself runs on: the settings
-        # pool has no statement timeout (only this store's queries do), so a stuck
-        # settings read holds its thread and connection until Postgres answers.
-        settings = await asyncio.to_thread(load)
+        # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
+        # stuck on a slow Postgres gives its thread back to the shared executor rather
+        # than holding it until Postgres answers.
+        settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 

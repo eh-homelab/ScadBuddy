@@ -1,5 +1,6 @@
 import type { components } from '../api/schema.js'
 import { OPENSCAD_COLOUR_NAMES } from './colours.js'
+import { codePoints } from './sourceFiles.js'
 
 // Checking a parameter set against a model's customizer schema
 // (`backend/scadbuddy/render/schema.py` builds the schema; `// color` and
@@ -82,7 +83,7 @@ function checkOne(p: Parameter, value: Value): string | undefined {
     case 'font':
     case 'file': {
       if (typeof value !== 'string') return 'must be a string'
-      if (p.max_length !== null && p.max_length !== undefined && value.length > p.max_length) {
+      if (p.max_length !== null && p.max_length !== undefined && codePoints(value) > p.max_length) {
         return `must be at most ${p.max_length} characters`
       }
       return p.type === 'file' ? fileProblem(p, value) : undefined

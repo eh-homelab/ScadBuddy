@@ -1,4 +1,5 @@
 import type { Param } from '../../api/types'
+import { textLength } from '../../lib/params'
 import { Field } from './Field'
 
 export function TextWidget({
@@ -12,9 +13,10 @@ export function TextWidget({
 }) {
   const id = `p-${param.name}`
   const maxLength = param.max_length ?? undefined
+  const length = textLength(value)
   const readout = maxLength ? (
-    <span className={value.length >= maxLength ? 'text-accent' : undefined}>
-      {value.length}/{maxLength}
+    <span className={length >= maxLength ? 'text-accent' : undefined}>
+      {length}/{maxLength}
     </span>
   ) : undefined
 
@@ -24,8 +26,15 @@ export function TextWidget({
         id={id}
         type="text"
         value={value}
-        maxLength={maxLength}
-        onChange={(event) => onChange(event.target.value)}
+        // Not the maxLength attribute: it counts UTF-16 units, so an emoji takes two (#920).
+        // An edit past the limit is refused whole. That differs from maxlength, which
+        // truncates a paste to fit, but trimming the result from the end would drop the
+        // name's last letters wherever the caret is.
+        onChange={(event) => {
+          const next = event.target.value
+          if (maxLength && textLength(next) > maxLength && textLength(next) > length) return
+          onChange(next)
+        }}
         className="sb-field"
       />
     </Field>

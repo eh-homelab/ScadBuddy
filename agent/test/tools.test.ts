@@ -88,6 +88,13 @@ describe('validateParams', () => {
   })
 })
 
+describe('validateParams: max_length counts characters as the backend and the customizer do (#920)', () => {
+  it('counts an emoji as one character, not two UTF-16 units', () => {
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cd' }).valid).toBe(true)
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cde' }).valid).toBe(false)
+  })
+})
+
 describe('validateParams: file values the backend accepts (assets.py file_assets)', () => {
   const ok = (logo: string) => validateParams(SCHEMA as never, { logo }).valid
   it('accepts "", the non-empty default, a shipped sample and an uploaded asset id', () => {

@@ -3,6 +3,7 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
+import { isDone } from '../../agent/chat/protocol'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
@@ -110,7 +111,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
-  const pendingAttention = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention) ?? false
+  // A `done` summary (#815 §4) asks nothing of the user: it is not announced as needing them.
+  const pendingAttention =
+    active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention && !isDone(i.attention)) ?? false
   const itemCount = active?.items.length ?? 0
   const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 

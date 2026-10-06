@@ -21,6 +21,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
 from scadbuddy.render.job_models import Job, QueueFullError
+from scadbuddy.render.jobs import SnapshotPendingError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
@@ -314,6 +315,22 @@ def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
     assert response.status_code == 507
     assert response.headers["content-type"] == "application/problem+json"
     assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
+
+
+def test_a_render_whose_snapshot_is_still_uploading_is_a_coded_503(
+    client: TestClient, model: str
+) -> None:
+    """#686: past `pin`'s wait, a 503 with Retry-After and a `code` that tells it apart
+    from a full queue."""
+    pending = mock.AsyncMock(side_effect=SnapshotPendingError("still uploading", retry_after=30))
+    with mock.patch.object(RenderService, "submit", pending):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "30"
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["retry_after"] == 30
+    assert body["code"] == "snapshot_pending"
 
 
 class _NoCommit:
