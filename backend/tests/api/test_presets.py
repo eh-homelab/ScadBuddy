@@ -263,6 +263,36 @@ def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
     assert client.patch(_url(model, missing), json={"name": "X"}).status_code == 404
 
 
+def test_problems_read_for_people(client: TestClient, model: str) -> None:
+    """#357: no internal ids, no Python quoting, and a clash names the preset that
+    has the name, as it is spelled, not the spelling just typed."""
+    saved = _save(client, model, "C· d6 Numbers - Red team", {"width": 25})
+    clash = client.post(_url(model), json={"name": "c· d6 numbers - red TEAM", "params": {}})
+    assert clash.status_code == 409
+    assert clash.json()["detail"] == 'A preset named "C· d6 Numbers - Red team" already exists.'
+    assert clash.json()["existing"] == "C· d6 Numbers - Red team"
+    other = _save(client, model, "Small", {"width": 5})
+    rename = client.patch(_url(model, other["id"]), json={"name": "C· D6 NUMBERS - RED TEAM"})
+    assert rename.json()["detail"] == clash.json()["detail"]
+
+    assert client.delete(_url(model, saved["id"])).status_code == 204
+    for gone in (
+        client.delete(_url(model, saved["id"])),
+        client.patch(_url(model, saved["id"]), json={"name": "X"}),
+        _duplicate(client, model, saved["id"], "Copy"),
+    ):
+        assert gone.status_code == 404
+        detail = gone.json()["detail"]
+        assert detail == "That preset no longer exists; it may have been deleted elsewhere."
+        assert gone.json()["preset_id"] == saved["id"]
+
+
+def test_an_unknown_template_preset_is_a_404_not_read_only(client: TestClient, model: str) -> None:
+    """#357: a `template-*` id the template does not have was refused as read-only."""
+    assert client.delete(_url(model, "template-0")).status_code == 404
+    assert client.patch(_url(model, "template-0"), json={"name": "X"}).status_code == 404
+
+
 def test_an_unknown_model_is_a_404(client: TestClient) -> None:
     assert client.get(_url("nope")).status_code == 404
     assert client.post(_url("nope"), json={"name": "X", "params": {}}).status_code == 404
