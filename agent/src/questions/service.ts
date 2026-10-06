@@ -198,12 +198,37 @@ export class QuestionService {
    */
   async entry(
     id: string,
-  ): Promise<{ sessionId: string; kind: 'question' | 'attention'; questions: QuestionView[]; pending: boolean } | undefined> {
+  ): Promise<
+    | {
+        sessionId: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        pending: boolean
+        outcome: Row['outcome']
+        reason: string | null
+      }
+    | undefined
+  > {
     if (!isUuid(id)) return undefined
     const [row] = await this.deps.sql<
-      { session_id: string; kind: 'question' | 'attention'; questions: QuestionView[]; outcome: Row['outcome'] }[]
-    >`SELECT session_id, kind, questions, outcome FROM ai_questions WHERE id = ${id}`
-    return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null }
+      {
+        session_id: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        outcome: Row['outcome']
+        reason: string | null
+      }[]
+    >`SELECT session_id, kind, questions, outcome, reason FROM ai_questions WHERE id = ${id}`
+    return (
+      row && {
+        sessionId: row.session_id,
+        kind: row.kind,
+        questions: row.questions,
+        pending: row.outcome === null,
+        outcome: row.outcome,
+        reason: row.reason,
+      }
+    )
   }
 
   /**
