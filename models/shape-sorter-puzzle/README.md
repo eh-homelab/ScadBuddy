@@ -13,7 +13,7 @@ chunky, with a knob on top to lift them by. Pick one of four sets:
 Every piece has its own colour. The floor of each hole carries a flush inlay of
 its piece's shape in the piece's colour, so matching colours helps with
 matching shapes. The tray and the pieces print together on one plate when they
-fit.
+fit, and on two plates of the same 3MF when they do not.
 
 It is inspired by the most-downloaded toddler peg puzzles on Printables when
 this was written (2026-09-27): "educational baby/toddler puzzle" by Bas (761
@@ -50,10 +50,15 @@ them and round the edge. It has as many columns as the 300 mm plate allows, and
 balanced rows. If the tray would be deeper than 320 mm, `piece_size` is reduced
 until it fits.
 
-With `layout = both`, the pieces go beside the tray on the same plate, 5 mm
-apart. If they do not fit, the tray prints alone, and the log says to print the
-pieces with `layout = pieces`. That happens with twelve letters, or with
-the numbers at the largest sizes.
+The pieces go beside the tray on the same plate, 5 mm apart, when they fit.
+When they do not, they go on a second plate of the same 3MF: the model echoes
+`plates = 2`, ScadBuddy renders the tray on plate 1 and every piece on plate 2,
+and the render log says so with a `NOTE:`. That happens with twelve letters,
+with the numbers at the largest sizes, and with the shapes at 80 mm. Nothing is
+ever left out of the print. (Before #512 a `layout` parameter chose the tray,
+the pieces or both, and a tray and pieces that did not fit together printed the
+tray alone. A preset that still sets it applies without it: the preset picker
+skips a parameter the template no longer has, and says so.)
 
 ## Parameters
 
@@ -64,7 +69,6 @@ the numbers at the largest sizes.
 | `set` | `shapes` | `shapes` (6 pieces), `animals` (6), `numbers` (0–9, 10 pieces) or `letters` (one piece per character of `letters`). |
 | `letters` | `ANNA` | The word for the letters set, up to 12 characters. Repeated letters get a piece and a hole each. An empty word makes one `A`. |
 | `piece_size` | `55` | Each piece's cell in mm, 35–80. A piece is this size less the clearance. |
-| `layout` | `both` | `both`: the tray and the pieces. `tray`: the tray only. `pieces`: the pieces only. |
 
 ### Pieces
 
@@ -126,32 +130,32 @@ young children. Narrow knobs, 8 mm or less, are the easiest to break.
 ./verify.sh
 ```
 
-It renders the defaults and eighteen variations in `scadbuddy-verify:local`:
+It renders the defaults and twenty variations in `scadbuddy-verify:local`:
 
 - every set;
-- a twelve-letter word, both together (where the tray has to print alone) and
-  as pieces only;
+- a twelve-letter word, where the pieces go on plate 2;
 - a word with lower case, spaces and punctuation, and an empty word;
 - all 36 letters and digits, at the smallest piece size with the biggest knob,
-  and as trays at three clearances;
-- numbers at the largest size, where the pieces shrink and the tray prints
-  alone;
+  and at the full size at three clearances;
+- numbers at the largest size, where the pieces shrink and go on plate 2;
 - the loosest, deepest tray with no knobs and no hints;
-- pieces alone with no knobs;
+- numbers at the largest size with no knobs, so plate 2 is exactly
+  `piece_thickness` tall;
 - the smallest animals at the tightest clearance with the tallest knobs;
 - the largest shapes.
 
 For each one it checks:
 
-- the plate has exactly the colour parts the set implies, nothing on the
-  `Default` material, and sits on z=0;
-- it is as tall as a piece and its knob (or the tray), and fits the 300 × 320
-  bed;
+- the print has exactly the colour parts the set implies, nothing on the
+  `Default` material, sits on z=0, and is as tall as a piece and its knob;
+- it echoes `plates = 2` exactly when the tray and the pieces do not fit
+  together. Each plate, rendered on its own with `$plate` as ScadBuddy renders
+  it, fits the 300 × 320 bed: plate 1 is the tray, plate 2 is every piece;
 - the tray is exactly the size of its grid, and is full height to its top
   edge;
 - the render log carries the `NOTE:` lines the case expects, and no others;
-- the print is exactly the tray plus one separate piece per hole, or either
-  alone;
+- the print is exactly the tray plus one separate piece per hole, so no piece
+  is ever left out;
 - **every piece fits its hole at the set clearance.** A hidden `probe_fit`
   render sits each piece in its hole, grows it and intersects it with the
   tray. Grown by `clearance - 0.03` it must touch nothing. Grown by

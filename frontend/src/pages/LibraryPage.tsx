@@ -67,6 +67,7 @@ export function LibraryPage() {
             type="button"
             data-testid="library-folder-root"
             onClick={() => setFolderId(null)}
+            aria-current={folderId === null ? 'true' : undefined}
             className={`block w-full rounded-[6px] px-2 py-1 text-left ${folderId === null ? 'bg-accent/8 text-ink' : 'text-muted'}`}
           >
             Top level
@@ -77,6 +78,13 @@ export function LibraryPage() {
               type="button"
               data-testid={`library-folder-${folder.id}`}
               onClick={() => setFolderId(folder.id)}
+              aria-current={folderId === folder.id ? 'true' : undefined}
+              // #975 — "MakerWorld, 49 files", not "MakerWorld49" run together.
+              aria-label={
+                folder.file_count
+                  ? `${folder.name}, ${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`
+                  : undefined
+              }
               style={{ paddingLeft: `${8 + (folder.depth ?? 0) * 12}px` }}
               className={`block w-full rounded-[6px] py-1 pr-2 text-left ${folderId === folder.id ? 'bg-accent/8 text-ink' : 'text-muted'}`}
             >
@@ -153,7 +161,12 @@ export function LibraryPage() {
                   {file.filename}
                 </p>
                 {file.printable ? (
-                  <Button variant="primary" data-testid={`library-print-${file.id}`} onClick={() => setPrinting(file)}>
+                  <Button
+                    variant="primary"
+                    data-testid={`library-print-${file.id}`}
+                    aria-label={`Print ${file.filename}`}
+                    onClick={() => setPrinting(file)}
+                  >
                     Print
                   </Button>
                 ) : (

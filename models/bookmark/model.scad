@@ -157,7 +157,7 @@ overlay_invert = false;
 // Text on the bookmark (empty = none)
 label = "Keep reading"; // 40
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "Lobster Two:style=Bold"; // font
 
 // Text direction
@@ -589,9 +589,14 @@ module overlay_raw() {
 T_ACROSS = W - 2 * (BW + TEXT_PAD);
 // Along the strip the text keeps clear of the ends and of the cord hole; the
 // box is as long as fits on both sides of text_y, and text_y is pulled back
-// onto the strip if it would put the text off it.
-T_BOT = -L / 2 + BW + TEXT_PAD + 1;
-T_TOP = min(L / 2 - (BW + TEXT_PAD + 1), HOLE ? HOLE_Y - hole_diameter / 2 - TEXT_PAD : L);
+// onto the strip if it would put the text off it. The ends are where the
+// strip stops being full width: above a pointed / ribbon end's point or notch,
+// below a rounded tab's round and below a star / heart topper. Text placed in
+// those would be clipped by the outline or land in the topper.
+END_BOT = shape == "pointed" || shape == "ribbon" ? min(end_length, L / 2) : 0;
+END_TOP = shape == "rounded_tab" ? min(W / 2, L / 2) : TOPPER ? TH : 0;
+T_BOT = -L / 2 + END_BOT + BW + TEXT_PAD + 1;
+T_TOP = min(L / 2 - END_TOP - (BW + TEXT_PAD + 1), HOLE ? HOLE_Y - hole_diameter / 2 - TEXT_PAD : L);
 TY = T_TOP - T_BOT < 5 ? (T_TOP + T_BOT) / 2 : min(T_TOP - 2.5, max(T_BOT + 2.5, text_y));
 T_ALONG = 2 * min(T_TOP - TY, TY - T_BOT);
 if (TEXT_ON && !CORNER && abs(TY - text_y) > 1e-6)

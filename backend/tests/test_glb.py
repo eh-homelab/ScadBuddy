@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -41,16 +43,60 @@ def test_write_glb_emits_one_mesh_per_colour(tmp_path: Path) -> None:
     assert sorted(scene.geometry) == ["Color 1", "Color 2"]
 
 
-def test_glb_materials_carry_the_part_colour(tmp_path: Path) -> None:
+def _srgb_to_linear(byte: int) -> float:
+    channel = byte / 255
+    return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+
+def _material_factors(glb: Path) -> dict[str, list[float]]:
+    """Each mesh's `baseColorFactor` as the file holds it, read off the JSON chunk."""
+    data = glb.read_bytes()
+    length = struct.unpack("<I", data[12:16])[0]
+    tree = json.loads(data[20 : 20 + length])
+    return {
+        mesh["name"]: tree["materials"][mesh["primitives"][0]["material"]]["pbrMetallicRoughness"][
+            "baseColorFactor"
+        ]
+        for mesh in tree["meshes"]
+    }
+
+
+def test_glb_materials_carry_the_part_colour_as_linear(tmp_path: Path) -> None:
+    """#1319: glTF's `baseColorFactor` is linear; the hex a template picks is sRGB."""
     out = tmp_path / "preview.glb"
     write_glb(_parts(), out)
-    scene = trimesh.load(out, file_type="glb")
-    assert isinstance(scene, trimesh.Scene)
-    colours = {
-        name: tuple(int(c) for c in mesh.visual.material.baseColorFactor[:3])
-        for name, mesh in scene.geometry.items()
-    }
-    assert colours == {"Color 1": (255, 106, 193), "Color 2": (31, 111, 235)}
+
+    factors = _material_factors(out)
+
+    expected = {"Color 1": (255, 106, 193), "Color 2": (31, 111, 235)}
+    for name, rgb in expected.items():
+        assert factors[name][:3] == pytest.approx(
+            [_srgb_to_linear(byte) for byte in rgb], abs=1 / 255
+        )
+        assert factors[name][3] == 1.0
+
+
+def test_a_dark_colour_reads_back_exactly(tmp_path: Path) -> None:
+    """Linear light crushes the darks into a few 8-bit steps; the hex must survive."""
+    out = tmp_path / "preview.glb"
+    parts = [ColourPart(1, "Color 1", "#0A0B0C", trimesh.creation.box(extents=(1, 1, 1)))]
+    write_glb(parts, out)
+
+    assert [part.colour for part in read_glb(out)] == ["#0A0B0C"]
+
+
+def test_a_preview_written_before_1319_reads_back_its_srgb_colour(tmp_path: Path) -> None:
+    """A saved output's GLB from before the fix holds the sRGB bytes as the factor."""
+    out = tmp_path / "preview.glb"
+    scene = trimesh.Scene()
+    mesh = trimesh.creation.box(extents=(1, 1, 1))
+    mesh.visual = trimesh.visual.TextureVisuals(
+        material=trimesh.visual.material.PBRMaterial(baseColorFactor=[0, 71, 187, 255])
+    )
+    scene.add_geometry(mesh, geom_name="Color 1")
+    out.write_bytes(scene.export(file_type="glb"))
+
+    assert [part.colour for part in read_glb(out)] == ["#0047BB"]
 
 
 def test_glb_is_y_up(tmp_path: Path) -> None:

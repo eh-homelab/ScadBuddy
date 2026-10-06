@@ -22,7 +22,7 @@
 // Characters to make tiles for, one tile each (spaces are skipped)
 text = "ABC123"; // 24
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 // Letter height as a percentage of the room inside the tile (wide letters like W shrink to fit)
