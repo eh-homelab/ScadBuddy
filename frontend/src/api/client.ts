@@ -308,14 +308,16 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
  * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
  * upstream took it) and an offline browser all mean it did not. For a request with a
- * physical effect (a print), retrying one of these blind can do it twice. A failed print run (#470) says so itself: its
- * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print
+ * run (#470) says so itself: its `may_have_queued` is whether it had tried to queue,
+ * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   // Its run may be checking still, and will print once it is accepted (#1052).
   if (error.problem.type === STILL_ACCEPTING) return true
-  if (mayHaveStarted(error)) return true
+  // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
+  if (error.problem.may_have_started === true) return true
   if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
@@ -383,28 +385,19 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/**
- * A command's `temporal-unavailable` (503) or `temporal-refused` (500) whose start may
- * have reached Temporal (`may_have_started`, review #1316 (13) 1a): only the same
- * request (the same `request_id` or `Idempotency-Key`) may follow it. A new key would
- * be a second print. False only when the backend's first connect failed.
- */
-function mayHaveStarted(error: ApiError): boolean {
-  return error.problem.may_have_started === true
-}
-
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
- * Or ScadBuddy answered that the same request is still being accepted.
+ * Or ScadBuddy answered that the same request is still being accepted, or that Temporal
+ * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
   if (!(caught instanceof ApiError)) return false
   if (caught.problem.type === STILL_ACCEPTING) return true
-  if (mayHaveStarted(caught)) return true
+  if (caught.problem.may_have_started === true) return true
   return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
@@ -433,6 +426,7 @@ async function reattach<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
   const began = performance.now()
   for (let tries = 0; ; ) {
     try {
@@ -443,10 +437,8 @@ async function reattach<T>(
       if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      // The server's Retry-After paces a re-send it asked for (review #1061 4a): still
-      // accepting, or a start that may have reached Temporal. A proxy's page is not.
-      const asked = accepting || (caught instanceof ApiError && mayHaveStarted(caught))
-      const after = asked && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      // The server's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
       await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }

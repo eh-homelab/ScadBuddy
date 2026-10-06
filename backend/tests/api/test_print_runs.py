@@ -518,10 +518,16 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert response.headers["Retry-After"] == "5"
-    # The lazy connect retries for minutes, so the route's bound ends it first, and a
-    # connect that outlived the bound cannot say whether a start got through: the client
-    # re-sends the same request_id (review #1316 (13) 1a).
-    assert response.json()["may_have_started"] is True
+    # Which failure it is depends on the host: a refused port fails the first connect at
+    # once (CI: `TemporalUnreachableError`, nothing written), while one that hangs runs
+    # into the route's bound, which cannot say whether a start got through. Either way
+    # the flag and the detail agree (review #1316 (13) 1a); each path is pinned by the
+    # stub tests below.
+    problem = response.json()
+    if problem["may_have_started"]:
+        assert problem["detail"] == printing_api.TEMPORAL_DOWN_DETAIL
+    else:
+        assert problem["detail"] == printing_api.TEMPORAL_UNREACHABLE_DETAIL
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
 
