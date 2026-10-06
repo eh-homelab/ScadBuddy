@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
 import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -500,6 +501,44 @@ describe('waiting for the tab (#815)', () => {
     expect(result.isError).toBe(true)
     expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
     expect(back!.calls()).toEqual([])
+  })
+
+  // #1393: reconnected() runs on whichever replica saw the tab, so a write call is not told to try again when
+  // this replica still has none: that retry could only open a wait that never ends reconnected here.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call whose wait ended reconnected on another replica says the tab is not here, not "call again"', async (_tier, name, args) => {
+    const hub = new TabHub()
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toMatch(/^no browser attached: .*The tab reconnected, but not to this agent replica, so it cannot be reached from here\.$/s)
+    expect(text(result)).not.toContain(`call ${name} again`)
+  })
+
+  // #1394: the check for a tab already back takes the wait's signal down to the pairing lookup it awaits.
+  it("hands the tab check's signal to the pairing lookup, so a hung lookup can be cancelled", async () => {
+    const seen: (AbortSignal | undefined)[] = []
+    const pairings: PairingStore = new InMemoryPairingStore()
+    pairings.pairedTab = (_principal, signal) => {
+      seen.push(signal)
+      return Promise.resolve(undefined)
+    }
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const parked = new AbortController()
+    await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), agent),
+      waitForTab: async ({ isBack }) => {
+        await isBack(parked.signal)
+        return { back: false, message: 'x' }
+      },
+    })
+    expect(seen).toContain(parked.signal)
   })
 
   it("words the not-run error by why the wait ended: the user's word is not a connected tab", async () => {

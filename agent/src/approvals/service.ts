@@ -242,6 +242,12 @@ export type GateContext = {
   signal: AbortSignal
   /** The turn's trace (telemetry/turn.ts TurnTrace): told when a call parks and when it is decided. */
   trace?: GateTrace
+  /**
+   * Resolves once the turn's log has the call's `tool.call`, logging it if the turn
+   * has not (sessions/sdkEvents.ts ShownCalls, #881), so its `approval.required` is
+   * logged after it. Not asked for a subagent's call, which is never shown.
+   */
+  shown?: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
 }
 
 /**
@@ -1171,6 +1177,10 @@ export class ApprovalService {
       // This turn resumes an orphan approved for this very call: use it once.
       const resumed = await this.consume(context.sessionId, context.turnId, request.toolName, hash)
       if (resumed) return { approved: true, input, approvalId: resumed.id, decision: 'approved' }
+
+      if (context.shown && request.agentId === undefined) {
+        await context.shown(request.toolUseId, request.toolName, request.input)
+      }
 
       // The turn's trace (#988): the call's span context goes on the row, and
       // the span and the turn's open segment end as soon as the row exists.

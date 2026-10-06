@@ -76,6 +76,29 @@ describe('PrintDetailPage (#311)', () => {
     expect(runs).toHaveTextContent('Cancelled')
   })
 
+  it('marks a run whose filament reading is not believed (#950)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    const [, last] = done.outcome.runs
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          outcome: {
+            ...done.outcome,
+            runs: [{ ...last!, filament_used_grams: 1004.2, cost: 0.43, filament_reading_suspect: true }],
+          },
+        }),
+      ),
+    )
+    render(35)
+    const outcome = await section('Outcome')
+    const runs = within(outcome).getByRole('list', { name: 'Runs' })
+    expect(within(runs).getByText('1004.2 g, not this print\'s')).toHaveAttribute(
+      'title',
+      expect.stringContaining('not used for the cost'),
+    )
+  })
+
   it('shows why a failed print failed', async () => {
     render(36)
     const outcome = await section('Outcome')

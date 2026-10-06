@@ -26,9 +26,19 @@ class BoundingBox(BaseModel):
     size: tuple[float, float, float]
 
 
-def _rgba(colour: str) -> list[int]:
+#: The mesh extra holding a part's sRGB hex. ``baseColorFactor`` is linear, and
+#: trimesh stores it in 8 bits, so the darks cannot be read back from it (#1319).
+COLOUR_EXTRA = "scadbuddy_colour"
+
+
+def _srgb_to_linear(channel: float) -> float:
+    return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+
+def _linear_rgba(colour: str) -> list[float]:
+    """``colour``, an sRGB hex, as the linear factor glTF's ``baseColorFactor`` is."""
     value = colour.lstrip("#")
-    return [int(value[i : i + 2], 16) for i in (0, 2, 4)] + [255]
+    return [_srgb_to_linear(int(value[i : i + 2], 16) / 255) for i in (0, 2, 4)] + [1.0]
 
 
 def bounding_box(parts: Sequence[ColourPart]) -> BoundingBox:
@@ -49,10 +59,11 @@ def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
     for part in parts:
         mesh = part.mesh.copy()
         mesh.apply_transform(Z_UP_TO_Y_UP)
+        mesh.metadata[COLOUR_EXTRA] = part.colour
         mesh.visual = trimesh.visual.TextureVisuals(
             material=trimesh.visual.material.PBRMaterial(
                 name=part.name,
-                baseColorFactor=_rgba(part.colour),
+                baseColorFactor=_linear_rgba(part.colour),
                 metallicFactor=0.0,
                 roughnessFactor=0.8,
             )
@@ -64,6 +75,10 @@ def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
 
 
 def _colour_of(mesh: trimesh.Trimesh) -> str:
+    colour = mesh.metadata.get(COLOUR_EXTRA)
+    if isinstance(colour, str):
+        return colour
+    # A preview from before #1319, which wrote the sRGB bytes as the factor.
     material = getattr(mesh.visual, "material", None)
     factor = getattr(material, "baseColorFactor", None)
     if factor is None:

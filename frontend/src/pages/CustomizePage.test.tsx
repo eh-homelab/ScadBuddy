@@ -103,6 +103,23 @@ async function firstRender() {
 }
 
 describe('CustomizePage', () => {
+  it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
+    // The schema's title is the .scad file's name, "model" for every model.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...fixtures.keychainSchema, title: 'model' }),
+      ),
+      http.get('/api/v1/models/:slug', async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      }),
+    )
+    render()
+    const heading = await screen.findByRole('heading', { level: 1 })
+    expect(heading).not.toHaveTextContent(/^model$/)
+    expect(heading).toHaveTextContent('name-keychain')
+  })
+
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -158,6 +175,19 @@ describe('CustomizePage', () => {
     render()
     await firstRender()
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
   })
 
   it('says the queue is full and renders anyway once the delay passes', async () => {
@@ -474,6 +504,25 @@ describe('CustomizePage', () => {
       if (body.inputs.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
     }
     // Two debounced renders and a schema refetch do not fit the default budget.
+  }, 20000)
+
+  it('renders a retyped number once, never the empty field as 0 (#1323)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    await user.clear(padding)
+    // Longer than the debounce: an empty field that committed 0 would render it now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    await user.type(padding, '-12')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(before), { timeout: 4000 })
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
+    expect(sent).toEqual([-12])
   }, 20000)
 
   it('links to the versions panel', async () => {

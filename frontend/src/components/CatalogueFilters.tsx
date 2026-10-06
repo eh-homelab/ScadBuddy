@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { activeDialog } from '../agent/dom'
 import { useLatest } from '../agent/useAgentHandlers'
 import {
@@ -55,6 +55,8 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const latest = useLatest(query)
   const input = useRef<HTMLInputElement>(null)
+  const [tagsOpen, setTagsOpen] = useState(false)
+  const tagsId = useId()
 
   // A search that changed from outside (Clear filters, back/forward) replaces the text.
   useEffect(() => {
@@ -163,22 +165,44 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
         />
       </div>
 
+      {/* Folded by default (#932): a catalogue has a hundred-odd tags, and laid out in
+          full they pushed the first model a screen and a half down on a phone and put
+          120 tab stops before it. A selected tag stays in view so it can be cleared. */}
       {tags.length > 0 && (
-        <div role="group" aria-label="Tags" className="flex flex-wrap gap-1.5">
-          {tags.map(({ tag, count }) => {
-            const selected = query.tags.includes(tag)
-            return (
-              <button
-                key={tag}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => toggleTag(tag)}
-                className={chipClass(selected)}
-              >
-                {tag} <span className="sb-num text-faint">{count}</span>
-              </button>
-            )
-          })}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            aria-expanded={tagsOpen}
+            aria-controls={tagsId}
+            onClick={() => setTagsOpen((open) => !open)}
+            className="flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-[12px] text-muted transition-colors hover:text-ink"
+          >
+            <span
+              aria-hidden="true"
+              className={`inline-block transition-transform ${tagsOpen ? 'rotate-90' : ''}`}
+            >
+              ›
+            </span>
+            Tags <span className="sb-num text-faint">{tags.length}</span>
+          </button>
+          <div id={tagsId} role="group" aria-label="Tags" className="flex flex-wrap gap-1.5">
+            {tags
+              .filter(({ tag }) => tagsOpen || query.tags.includes(tag))
+              .map(({ tag, count }) => {
+                const selected = query.tags.includes(tag)
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleTag(tag)}
+                    className={chipClass(selected)}
+                  >
+                    {tag} <span className="sb-num text-faint">{count}</span>
+                  </button>
+                )
+              })}
+          </div>
         </div>
       )}
 
