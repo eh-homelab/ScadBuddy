@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep
 from scadbuddy.api.outputs import OutputPlate
-from scadbuddy.api.printing import accept_run
+from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
@@ -165,6 +165,7 @@ async def get_library_filaments(
             "description": "A repeat of a run in flight, or one that succeeded (or failed "
             "after it tried to queue) within the last ten minutes: that run, and no new print.",
         },
+        **PRINT_RUN_PROBLEMS,
     },
     summary="Slice this library file with the dialog's choices and queue it, in the background",
 )

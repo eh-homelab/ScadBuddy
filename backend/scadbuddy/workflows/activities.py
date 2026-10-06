@@ -14,8 +14,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -43,6 +45,7 @@ from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
     LEGACY_PENDING,
     QUEUE_FULL,
@@ -529,6 +532,11 @@ class RenderActivities:
             raise ApplicationError(
                 str(error), error.depth, type=QUEUE_FULL, non_retryable=True
             ) from None
+        except (psycopg.OperationalError, RPCError) as error:
+            # Postgres out of reach (a pool timeout is one too), or Temporal unable to
+            # say whether the older row's workflow runs: states that pass (review #1066
+            # (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)
     async def render_claims(self, job_id: str, claims: int) -> None:
