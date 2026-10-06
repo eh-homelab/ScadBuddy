@@ -83,11 +83,20 @@ const instance = {
     return { dispose: () => {} }
   },
   /** `addCommand`'s keybindings, run by the mocked editor's own keydown as Monaco would. */
-  commands: new Map<number, () => void>(),
-  addCommand: (keybinding: number, handler: () => void) => {
-    instance.commands.set(keybinding, handler)
+  commands: new Map<number, { handler: () => void; context?: string }>(),
+  addCommand: (keybinding: number, handler: () => void, context?: string) => {
+    instance.commands.set(keybinding, { handler, context })
     return null
   },
+  /** Monaco's context keys that are true now, by Monaco's own names. */
+  contextKeys: new Set<string>(),
+  /** A `!a && b` context expression against `contextKeys`, as Monaco's keybinding service reads it. */
+  holds: (context?: string) =>
+    !context ||
+    context.split('&&').every((term) => {
+      const key = term.trim()
+      return key.startsWith('!') ? !instance.contextKeys.has(key.slice(1)) : instance.contextKeys.has(key)
+    }),
   setSelection: vi.fn(),
   revealRangeInCenterIfOutsideViewport: vi.fn(),
   setPosition: vi.fn(),
@@ -135,9 +144,9 @@ vi.mock('@monaco-editor/react', () => ({
             return
           }
           const command = instance.commands.get(code | (event.ctrlKey || event.metaKey ? KEY.CtrlCmd : 0))
-          if (command) {
+          if (command && instance.holds(command.context)) {
             event.preventDefault()
-            command()
+            command.handler()
           }
         }}
       />
@@ -173,6 +182,7 @@ describe('SourceEditor', () => {
     instance.revealRangeInCenterIfOutsideViewport.mockClear()
     instance.setPosition.mockClear()
     instance.commands.clear()
+    instance.contextKeys.clear()
     instance.keyListeners = []
     instance.blurListeners = []
     instance.options = {}
@@ -218,6 +228,20 @@ describe('SourceEditor', () => {
       await user.click(editor)
       await user.tab()
       expect(editor).toHaveFocus()
+    })
+
+    it("leaves Escape to Monaco with several cursors: it collapses them, and Tab still indents", async () => {
+      const user = userEvent.setup()
+      renderBetween()
+      const editor = screen.getByTestId('monaco')
+      await user.click(editor)
+      // Monaco's own key for it; Escape is then its "remove secondary cursors".
+      instance.contextKeys.add('editorHasMultipleSelections')
+
+      await user.keyboard('{Escape}')
+      await user.tab()
+      expect(editor).toHaveFocus()
+      expect(instance.options.tabFocusMode).not.toBe(true)
     })
 
     it('leaves backwards with Escape, then Shift+Tab', async () => {

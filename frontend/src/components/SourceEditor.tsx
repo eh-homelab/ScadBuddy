@@ -273,7 +273,7 @@ export function SourceEditor({
               monaco.KeyCode.Escape,
               () => instance.updateOptions({ tabFocusMode: true }),
               '!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && ' +
-                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !hasMultipleSelections',
+                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections',
             )
             const passing = new Set([
               monaco.KeyCode.Escape,

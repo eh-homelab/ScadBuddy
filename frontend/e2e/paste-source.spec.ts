@@ -83,6 +83,23 @@ test.describe('pasted source', () => {
     await expect(dialog).toBeHidden()
   })
 
+  test('Escape with several cursors collapses them, and leaves Tab indenting (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    const lines = page.locator('.monaco-editor .view-line')
+    await lines.nth(1).click()
+    await lines.nth(3).click({ modifiers: ['Alt'] })
+    const cursors = page.locator('.monaco-editor .cursors-layer .cursor')
+    await expect(cursors).toHaveCount(2)
+
+    await page.keyboard.press('Escape')
+    await expect(cursors).toHaveCount(1)
+    // The Escape was Monaco's, not the way out: Tab still indents.
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+  })
+
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
     await page.goto('/new')
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Half Cube')
