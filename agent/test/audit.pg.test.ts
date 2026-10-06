@@ -129,15 +129,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
   })
 
   // #893: ids are returned as text, and ordering by that text sorted "99" above
-  // "1010". Ids crossing 9→10, 99→100 and 999→1000 make the two orders differ.
+  // "1010". 1010 rows cross 99→100 and 999→1000, so the two orders differ.
   it('pages newest first by numeric id across digit boundaries, every row once', async () => {
-    const total = 1010
     await db.sql`
       INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, outcome)
       SELECT CASE WHEN g % 2 = 0 THEN 'tool_call' ELSE 'approval' END, 'a' || g, 'mcp', 'bearer', 't', 't', 'ok'
-      FROM generate_series(1, ${total}) g`
-    const numericDesc = (n: number, step = 1) =>
-      Array.from({ length: Math.floor((n - 1) / step) + 1 }, (_, i) => String(n - i * step))
+      FROM generate_series(1, 1010) g`
+    // Expected from the ids Postgres actually assigned (and any row written
+    // before this test), newest first by number, sorted here rather than in SQL.
+    const rows = await db.sql<{ id: string; kind: string }[]>`SELECT id::text AS id, kind FROM ai_audit`
+    const byNumberDesc = (list: { id: string }[]) =>
+      list.map((r) => r.id).sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : BigInt(b) < BigInt(a) ? -1 : 0))
+    const all = byNumberDesc(rows)
+    const toolCalls = byNumberDesc(rows.filter((r) => r.kind === 'tool_call'))
+    // The ids cross a digit boundary, so text order differs from numeric order.
+    expect([...all].sort().reverse()).not.toEqual(all)
 
     const pageAll = async (filter: Pick<AuditFilter, 'kind'>) => {
       const ids: string[] = []
@@ -152,11 +158,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     }
 
     const first = await audit.list({ limit: 25 })
-    expect(first.entries.map((e) => e.id)).toEqual(numericDesc(total).slice(0, 25))
-    expect(first.next).toBe('986')
+    expect(first.entries.map((e) => e.id)).toEqual(all.slice(0, 25))
+    expect(first.next).toBe(all[24])
 
-    expect(await pageAll({})).toEqual(numericDesc(total))
-    expect(await pageAll({ kind: 'tool_call' })).toEqual(numericDesc(total, 2))
+    expect(await pageAll({})).toEqual(all)
+    expect(await pageAll({ kind: 'tool_call' })).toEqual(toolCalls)
   })
 
   it('prunes past the retention setting, and records the setting change', async () => {

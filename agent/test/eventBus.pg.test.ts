@@ -164,6 +164,29 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(heard.filter((h) => mine.has(h.id)).map((h) => h.id)).toEqual(missed.map((m) => m.id))
     })
 
+    // #893: past the replay limit the listener adopts the newest seq; sorted as
+    // text it adopted "9" of 8..12, and the next drop replayed 10..12 again.
+    it('after a gap over the replay limit that crosses a digit boundary, resumes from the newest seq', async () => {
+      await db.sql`
+        INSERT INTO events (event_id, kind, at, payload)
+        SELECT ${randomUUID()} || g, 'print.progress', now(), '{}'::jsonb FROM generate_series(1, 7) g`
+      const { listener, heard, resyncs } = await listen({ replayLimit: 3 })
+      const missed = Array.from({ length: 5 }, (_, i) => event({ kind: 'print.progress', output_id: `o${i}`, slug: 'k' }))
+      for (const e of missed) await publish(db, e, { notify: false })
+      await listener.dropConnectionForTest()
+      await until(() => resyncs() === 1, 'the resync')
+      expect(listener.replayed).toBe(0)
+
+      const later = event({ kind: 'print.progress', output_id: 'later', slug: 'k' })
+      await publish(db, later, { notify: false })
+      await listener.dropConnectionForTest()
+      await until(() => heard.some((h) => h.id === later.id), 'the event after the resync')
+      expect(listener.replayed).toBe(1)
+      expect(resyncs()).toBe(1)
+      const stale = new Set(missed.map((m) => m.id))
+      expect(heard.filter((h) => stale.has(h.id))).toEqual([])
+    })
+
     it('resyncs after replaying a row whose transaction was open longer than the check interval', async () => {
       const { listener, heard, resyncs, logs } = await listen()
       // logged_at is the transaction's start (DEFAULT now()): an hour before the
