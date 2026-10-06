@@ -4,6 +4,7 @@ served with Range support, written through their own upload gate."""
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.types import Message
 
 from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
@@ -196,6 +198,109 @@ def test_an_image_has_no_poster(client: TestClient, model: str) -> None:
 
     assert _upload(client, model, PNG, poster=JPEG).status_code == 422
     assert client.get(f"/api/v1/models/{model}/media/{image['id']}/poster").status_code == 404
+
+
+def _real_image(size: tuple[int, int], fmt: str) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", size, (200, 40, 40)).save(out, fmt)
+    return out.getvalue()
+
+
+def test_a_thumbnail_is_a_small_copy_of_the_image(client: TestClient, model: str) -> None:
+    original = _real_image((2000, 1500), "PNG")
+    item = _upload(client, model, original).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/webp"
+    assert "immutable" in response.headers["cache-control"]
+    assert len(response.content) < len(original)
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (192, 144)
+
+
+def test_a_videos_thumbnail_is_its_poster_shrunk(client: TestClient, model: str) -> None:
+    item = _upload(client, model, WEBM, poster=_real_image((800, 600), "JPEG")).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200, response.text
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (192, 144)
+
+
+def test_a_thumbnail_is_turned_upright_by_its_exif_orientation(
+    client: TestClient, model: str
+) -> None:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to view.
+    out = io.BytesIO()
+    Image.new("RGB", (400, 200), (200, 40, 40)).save(out, "JPEG", exif=exif.tobytes())
+    item = _upload(client, model, out.getvalue()).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200, response.text
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (96, 192)
+
+
+def test_a_video_with_no_poster_has_no_thumbnail(client: TestClient, model: str) -> None:
+    item = _upload(client, model, WEBM).json()["media"][0]
+
+    assert client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail").status_code == 404
+
+
+def test_an_undecodable_image_is_its_own_thumbnail(client: TestClient, model: str) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200
+    assert response.content == PNG
+
+
+def test_an_image_too_large_to_decode_cheaply_is_its_own_thumbnail(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scadbuddy.api.media.MAX_THUMBNAIL_SOURCE_PIXELS", 100 * 100)
+    original = _real_image((101, 100), "PNG")
+    item = _upload(client, model, original).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200
+    assert response.content == original
+
+
+def test_a_large_jpeg_that_draft_makes_cheap_is_still_shrunk(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1600x1600 is over the cap, but a JPEG drafts at 1/8 to 200x200, which is under it.
+    monkeypatch.setattr("scadbuddy.api.media.MAX_THUMBNAIL_SOURCE_PIXELS", 250 * 250)
+    item = _upload(client, model, _real_image((1600, 1600), "JPEG")).json()["media"][0]
+
+    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/webp"
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (192, 192)
+
+
+def test_a_legacy_file_in_another_format_is_not_decoded(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # A GIF Pillow can read, mislabeled as the legacy thumbnail.png: only PNG, JPEG and
+    # WebP decoders may run, so it is served as it is, not shrunk.
+    gif = _real_image((400, 300), "GIF")
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(gif)
+
+    response = client.get(f"/api/v1/models/{model}/media/thumbnail/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.content == gif
 
 
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:
