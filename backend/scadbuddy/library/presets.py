@@ -83,7 +83,12 @@ class PresetNotFoundError(KeyError):
 
 
 class PresetExistsError(ValueError):
-    """Another preset of the same template already has that name."""
+    """Another preset of the same template already has that name. ``args`` is the
+    name asked for; ``existing`` is the other preset's, as it is spelled (#357)."""
+
+    def __init__(self, name: str, existing: str | None = None) -> None:
+        super().__init__(name)
+        self.existing = name if existing is None else existing
 
 
 class TooManyPresetsError(ValueError):
@@ -575,16 +580,18 @@ class PresetStore:
         with self._locked(model_id) as conn:
             saved = [row["name"] for row in self._saved(conn, model_id)]
             for name in names:
-                if any(_same_name(name, other) for other in saved):
-                    raise PresetExistsError(name)
+                for other in saved:
+                    if _same_name(name, other):
+                        raise PresetExistsError(name, other)
             return write()
 
     def _require_free(self, model_id: str, saved: list[DictRow], name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""
         taken = [row["name"] for row in saved if row["id"] != own]
         taken += [p.name for p in self.template_presets(model_id)]
-        if any(_same_name(name, other) for other in taken):
-            raise PresetExistsError(name)
+        for other in taken:
+            if _same_name(name, other):
+                raise PresetExistsError(name, other)
 
     def create(self, model_id: str, body: ParamPresetCreate) -> ParamPreset:
         with self._locked(model_id) as conn:

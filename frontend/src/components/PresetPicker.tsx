@@ -12,6 +12,7 @@ import {
   presetTagsProblem,
 } from '../lib/presets'
 import { splitInputs, type InputsExtra } from '../lib/inputs'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -50,6 +51,13 @@ function describeSkipped(skipped: readonly Skipped[]): string {
 
 function message(caught: unknown): string {
   return caught instanceof ApiError ? caught.detail : String(caught)
+}
+
+/** #357 — what a preset deleted in another tab, or by the assistant, leaves to say. */
+const DELETED_ELSEWHERE = 'That preset was deleted elsewhere.'
+
+function gone(caught: unknown): boolean {
+  return caught instanceof ApiError && caught.status === 404
 }
 
 /** The server's longest preset name (`library/presets.py`), in code points as it counts. */
@@ -103,6 +111,35 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
   const [pending, setPending] = useState<ParamPreset | null>(null)
   /** #358 — an Update would drop the skipped values for good, so it asks first. */
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
+
+  /**
+   * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
+   * The selected one follows its new details; gone, it is let go, with the values it
+   * put on screen kept. A resync means changes may have been missed, so it reads too.
+   */
+  useSubscription(`model:${slug}`, (signal) => {
+    if (signal !== 'resync' && signal.kind !== 'presets.changed') return
+    presetsState.refresh((list) => {
+      setSelection((current) => {
+        if (!current) return current
+        const now = list.find((preset) => preset.id === current.preset.id)
+        if (now) return now === current.preset ? current : { ...current, preset: now }
+        setSkipped([])
+        setError(DELETED_ELSEWHERE)
+        return null
+      })
+      return true
+    })
+  })
+
+  /** #357 — a write found the selected preset gone: drop it and say why. */
+  function lost(id: string) {
+    presetsState.setData(presets.filter((preset) => preset.id !== id), { supersede: true })
+    setSelection(null)
+    setSkipped([])
+    setNaming(null)
+    setError(DELETED_ELSEWHERE)
+  }
 
   // #350 — a reset puts the defaults on screen: no preset's values any more.
   const [seenReset, setSeenReset] = useState(resetKey)
@@ -271,7 +308,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
       setSelection({ preset: copy, applied: applyPreset(schema, copy).values })
       setNaming(null)
     } catch (caught) {
-      refused(caught)
+      if (gone(caught)) lost(selected.id)
+      else refused(caught)
     } finally {
       setBusy(false)
     }
@@ -296,7 +334,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
       setSelection((current) => (current ? { ...current, preset: updated } : current))
       setNaming(null)
     } catch (caught) {
-      refused(caught)
+      if (gone(caught)) lost(selected.id)
+      else refused(caught)
     } finally {
       setBusy(false)
     }
@@ -327,7 +366,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
       setSelection({ preset: updated, applied: values })
       setSkipped([])
     } catch (caught) {
-      setError(message(caught))
+      if (gone(caught)) lost(selected.id)
+      else setError(message(caught))
     } finally {
       setBusy(false)
     }
@@ -344,7 +384,9 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
       setSkipped([])
       setConfirmingDelete(false)
     } catch (caught) {
-      setError(message(caught))
+      // Deleted already: what was asked for is done, and the list says so.
+      if (gone(caught)) lost(selected.id)
+      else setError(message(caught))
       setConfirmingDelete(false)
     } finally {
       setBusy(false)

@@ -216,6 +216,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "library.changed",
         "library.removed",
         "font.installed",
+        "presets.changed",
         "settings.changed",
         "analyzer.decision",
         # The agent service's own (#300, agent/src/sessions/busEvents.ts).
