@@ -3,7 +3,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions } from '../src/approvals/mcp.js'
 import { ApprovalService } from '../src/approvals/service.js'
-import { AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
+import { type AuditFilter, AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
@@ -126,6 +126,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect((await audit.list({ outcome: 'refused' })).entries.map((e) => e.action)).toEqual(['a4'])
     expect((await audit.list({ principal: 'token:1', action: 'a1' })).entries.map((e) => e.action)).toEqual(['a1'])
     expect((await audit.list({ since: new Date(Date.now() + 60_000) })).entries).toEqual([])
+  })
+
+  // #893: ids are returned as text, and ordering by that text sorted "99" above
+  // "1010". 1010 rows cross 99→100 and 999→1000, so the two orders differ.
+  it('pages newest first by numeric id across digit boundaries, every row once', async () => {
+    await db.sql`
+      INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, outcome)
+      SELECT CASE WHEN g % 2 = 0 THEN 'tool_call' ELSE 'approval' END, 'a' || g, 'mcp', 'bearer', 't', 't', 'ok'
+      FROM generate_series(1, 1010) g`
+    // Expected from the ids Postgres actually assigned (and any row written
+    // before this test), newest first by number, sorted here rather than in SQL.
+    const rows = await db.sql<{ id: string; kind: string }[]>`SELECT id::text AS id, kind FROM ai_audit`
+    const byNumberDesc = (list: { id: string }[]) =>
+      list.map((r) => r.id).sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : BigInt(b) < BigInt(a) ? -1 : 0))
+    const all = byNumberDesc(rows)
+    const toolCalls = byNumberDesc(rows.filter((r) => r.kind === 'tool_call'))
+    // The ids cross a digit boundary, so text order differs from numeric order.
+    expect([...all].sort().reverse()).not.toEqual(all)
+
+    const pageAll = async (filter: Pick<AuditFilter, 'kind'>) => {
+      const ids: string[] = []
+      let before: string | undefined
+      for (let page = 0; page < 20; page += 1) {
+        const { entries, next } = await audit.list({ ...filter, limit: 200, ...(before ? { before } : {}) })
+        ids.push(...entries.map((e) => e.id))
+        if (!next) return ids
+        before = next
+      }
+      throw new Error('did not reach the last page')
+    }
+
+    const first = await audit.list({ limit: 25 })
+    expect(first.entries.map((e) => e.id)).toEqual(all.slice(0, 25))
+    expect(first.next).toBe(all[24])
+
+    expect(await pageAll({})).toEqual(all)
+    expect(await pageAll({ kind: 'tool_call' })).toEqual(toolCalls)
   })
 
   it('prunes past the retention setting, and records the setting change', async () => {

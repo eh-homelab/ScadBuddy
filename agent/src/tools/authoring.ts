@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { commandAnswer } from './command.js'
+import { commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
@@ -60,6 +60,7 @@ export const authoringTools: Tool[] = [
           headers,
         }),
       )
+      if (isRunning(answered)) return json(answered)
       if (answered.response.status === 409) {
         const current = currentOf(answered.error)
         if (current !== null) {

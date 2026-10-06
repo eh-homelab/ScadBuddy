@@ -68,7 +68,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
-from scadbuddy.operations.store import Operation
+from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -792,6 +792,6 @@ async def pull_timelapse(
         request={"archive_id": archive_id, "filename": body.filename},
         idempotency_key=idempotency_key,
     )
-    if isinstance(result, Operation):
+    if isinstance(result, OperationAccepted):
         return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

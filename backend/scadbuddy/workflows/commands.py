@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
+from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import (
     Client,
     WithStartWorkflowOperation,
@@ -69,9 +70,12 @@ class AlreadyClosedError(Exception):
 DESCRIBE_SECONDS = 2.0
 
 
-async def _late(client: Client, id: str) -> Exception:
-    """What a call that outlived its bound means: the execution exists, so it is still
-    accepting (a slow Update, a busy loop); or Temporal cannot say, so it is down."""
+async def late_answer(client: Client, id: str) -> Exception:
+    """What a command call that outlived its bound means, for the caller to raise.
+    Describes ``id`` within `DESCRIBE_SECONDS`: returns `CommandStillAcceptingError`
+    when the execution exists (a slow Update, a busy loop: the same request follows
+    it), and `TemporalUnavailableError` when the describe fails for any reason (no
+    such execution, or Temporal does not answer). Never raises."""
     try:
         async with asyncio.timeout(DESCRIBE_SECONDS):
             await client.get_workflow_handle(id).describe(
@@ -80,6 +84,25 @@ async def _late(client: Client, id: str) -> Exception:
     except Exception:
         return TemporalUnavailableError(id)
     return CommandStillAcceptingError(id)
+
+
+async def namespace_retention(client: Client) -> timedelta:
+    """How long the client's namespace keeps a closed execution (``DescribeNamespace``).
+    Raises ``TemporalUnavailableError`` when Temporal does not answer."""
+    try:
+        async with asyncio.timeout(DESCRIBE_SECONDS + CONNECT_MARGIN_SECONDS):
+            described = await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=client.namespace),
+                timeout=timedelta(seconds=DESCRIBE_SECONDS),
+            )
+    except (TimeoutError, RPCError) as error:
+        raise TemporalUnavailableError(client.namespace) from error
+    except RuntimeError as error:
+        # How a lazy client's first connect fails (temporalio 1.33).
+        if str(error).startswith("Failed client connect"):
+            raise TemporalUnavailableError(client.namespace) from error
+        raise
+    return described.config.workflow_execution_retention_ttl.ToTimedelta()
 
 
 async def start_command[T](
@@ -125,7 +148,7 @@ async def start_command[T](
                 rpc_timeout=deadline,
             )
     except TimeoutError as error:
-        raise await _late(client, id) from error
+        raise await late_answer(client, id) from error
     except RPCError as error:
         # The frontend refused the connection outright.
         if error.status == RPCStatusCode.UNAVAILABLE:
@@ -139,7 +162,12 @@ async def start_command[T](
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
         # The SDK reports the outer bound's cancellation as this error too.
         if bound.expired():
-            raise await _late(client, id) from error
+            raise await late_answer(client, id) from error
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            # A caller's cancel (its own deadline): never swallowed, or its
+            # `asyncio.timeout` cannot tell that it expired.
+            raise asyncio.CancelledError from error
         raise CommandStillAcceptingError(id) from error
     except WorkflowAlreadyStartedError as error:
         raise AlreadyClosedError(id) from error

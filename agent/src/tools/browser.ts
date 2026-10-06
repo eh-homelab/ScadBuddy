@@ -104,10 +104,37 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
     handler: async (args, ctx) => {
       const input = args as Record<string, unknown>
       const wait = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : undefined
-      const outcome = await tabs(ctx).call(target(ctx), spec.tool, input, {
-        signal: ctx.signal,
-        ...(wait === undefined ? {} : { timeoutMs: wait }),
-      })
+      const call = () =>
+        tabs(ctx).call(target(ctx), spec.tool, input, { signal: ctx.signal, ...(wait === undefined ? {} : { timeoutMs: wait }) })
+      let outcome = await call()
+      // #815 §2: in a session the user owns, a call that finds no tab waits for
+      // it as an attention request. When the tab is back, a read runs once more
+      // (once only: a tab that came back on another replica is still not here).
+      // A write or outward call is never re-run: the page may have reloaded or
+      // changed while the tab was away, and an outward call's approval was given
+      // for the page as it was. The model re-checks the page and calls again.
+      if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
+        const waited = await ctx.waitForTab({
+          tool: `browser_${spec.tool}`,
+          toolUseId: ctx.toolUseId,
+          signal: ctx.signal,
+          isBack: async (signal) => (await tabs(ctx).status(target(ctx), { signal })).attached,
+        })
+        if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
+        if (spec.risk !== 'read') {
+          // reconnected() runs on whichever replica saw the tab, so "reconnected"
+          // here does not mean this replica has it. Inviting a retry would only
+          // open a wait that cannot end reconnected here (#1393): say so instead.
+          if (waited.why === 'reconnected' && !(await tabs(ctx).status(target(ctx), { signal: ctx.signal })).attached) {
+            throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE.reconnected}`)
+          }
+          throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
+        }
+        outcome = await call()
+        if (!outcome.ok && outcome.error.code === 'no_browser') {
+          throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
+        }
+      }
       if (outcome.ok) return json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).
@@ -116,6 +143,22 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       throw new ToolError(`the tab answered ${spec.tool} with ${code}`, undefined, detail)
     },
   })
+}
+
+/** #815 §2: a write or outward call that waited for the tab is not re-run when it is back. */
+export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): string {
+  const ended =
+    why === 'reconnected' ? 'the session has a connected tab again' : 'the user said they are back (a tab may not be attached yet)'
+  return (
+    `${ended}, but ${tool} was not run: the page may have reloaded or changed while the tab was away. ` +
+    `Re-check the page (browser_status, then browser_snapshot) and call ${tool} again if it is still what you want.`
+  )
+}
+
+/** Why a read retried after a tab wait can still find no tab here. */
+const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
+  reconnected: 'The tab reconnected, but not to this agent replica, so it cannot be reached from here.',
+  user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */
