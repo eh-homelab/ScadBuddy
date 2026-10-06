@@ -111,7 +111,7 @@ export async function testPlugin(
   forwarder: PluginForwarder,
   options: PluginTestOptions = {},
 ): Promise<PluginTest> {
-  const started = Date.now()
+  const started = performance.now()
   const timeoutMs = options.timeoutMs ?? DEFAULT_PLUGIN_TEST_TIMEOUT_MS
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('timed out')), timeoutMs)
@@ -120,7 +120,7 @@ export async function testPlugin(
   const done = (ok: boolean, detail: string, tools: PluginToolView[] = [], truncated = false): PluginTest => ({
     ok,
     detail: redact(detail, secrets),
-    duration_ms: Date.now() - started,
+    duration_ms: Math.round(performance.now() - started),
     server,
     tools,
     truncated,

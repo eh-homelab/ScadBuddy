@@ -219,7 +219,7 @@ describe('speech to text', () => {
     installSpeech()
     const { user } = await openPanel()
     const mic = screen.getByRole('button', { name: 'Voice input' })
-    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1_000)
     await user.pointer({ keys: '[MouseLeft>]', target: mic })
     expect(mic).toHaveAttribute('aria-pressed', 'true')
     now.mockReturnValue(2_000)

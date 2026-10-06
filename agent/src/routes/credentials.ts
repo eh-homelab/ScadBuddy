@@ -191,7 +191,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   const entries = `${base}/entries`
   const resolveHost = deps.resolveHost ?? systemResolver
   const cooldownMs = deps.testCooldownMs ?? DEFAULT_TEST_COOLDOWN_MS
-  const now = deps.now ?? Date.now
+  const now = deps.now ?? (() => performance.now())
   const kek = deps.kek
 
   /** The store once migrations are current, or a 503 response. */
@@ -367,7 +367,7 @@ declare module '../app.js' {
     testConnection: (credential: Credential) => Promise<ConnectionTest>
     /** Connection-test cooldown; this file's default when omitted. */
     testCooldownMs?: number
-    /** Clock for the connection-test cooldown; Date.now when omitted. */
+    /** Clock for the connection-test cooldown; performance.now when omitted. */
     now?: () => number
   }
 }

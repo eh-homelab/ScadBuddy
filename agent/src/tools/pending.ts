@@ -71,7 +71,9 @@ export class PendingStoreFullError extends Error {
 export const PENDING_STORE_FULL =
   'too many actions are waiting for approval right now; try again once some are approved or expire'
 
-type MemoryAction = PreparedAction & { principalId: string }
+// `expiresAt` is what callers are shown; `dueAt` (performance.now) is what expires it,
+// so a wall-clock step neither ends nor stretches the TTL (#1485).
+type MemoryAction = PreparedAction & { principalId: string; dueAt: number }
 
 /** The no-database store: prepares and lists, and never confirms. */
 export class PendingActionStore implements OutwardActions {
@@ -101,6 +103,7 @@ export class PendingActionStore implements OutwardActions {
       summary: call.summary,
       principalId: principal.id,
       expiresAt: new Date(Date.now() + this.#ttlMs),
+      dueAt: performance.now() + this.#ttlMs,
     }
     this.#actions.set(action.id, action)
     return strip(action)
@@ -128,13 +131,13 @@ export class PendingActionStore implements OutwardActions {
     }
   }
 
-  #sweep(now = Date.now()): void {
+  #sweep(now = performance.now()): void {
     for (const [id, action] of this.#actions) {
-      if (action.expiresAt.getTime() <= now) this.#actions.delete(id)
+      if (action.dueAt <= now) this.#actions.delete(id)
     }
   }
 }
 
-function strip({ principalId: _p, ...action }: MemoryAction): PreparedAction {
+function strip({ principalId: _p, dueAt: _d, ...action }: MemoryAction): PreparedAction {
   return action
 }

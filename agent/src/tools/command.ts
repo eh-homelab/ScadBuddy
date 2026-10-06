@@ -56,7 +56,7 @@ export async function answered<T>(
   what: string,
   gaveUp = '',
 ): Promise<FetchResult<T>> {
-  const began = Date.now()
+  const began = performance.now()
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
   for (let misses = 0; ; ) {
     let result: FetchResult<T>
@@ -70,7 +70,7 @@ export async function answered<T>(
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
@@ -128,9 +128,9 @@ export async function command<T>(
   const first = await answered(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return ok(Promise.resolve(first), what)
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
+  const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
   for (let step = 1; op.status === 'running'; step++) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       return {
         status: 'running',
         operation_id: op.id,

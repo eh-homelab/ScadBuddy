@@ -418,14 +418,14 @@ async function reattach<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
-  const began = Date.now()
+  const began = performance.now()
   for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
       if (signal?.aborted || !unanswered(caught)) throw caught
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
       // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
@@ -448,9 +448,9 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
-  const began = Date.now()
+  const began = performance.now()
   while (op.status === 'running') {
-    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
         type: OPERATION_UNFINISHED,
         title: 'Still running',
@@ -495,9 +495,9 @@ async function followPrintRun(
     signal,
     within,
   )
-  const began = Date.now()
+  const began = performance.now()
   while (run.status === 'running') {
-    if (Date.now() - began >= printRunPoll.followMs) {
+    if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
         type: 'urn:scadbuddy:print-run-unfinished',
         title: 'Still preparing',

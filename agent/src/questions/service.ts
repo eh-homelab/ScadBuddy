@@ -474,7 +474,7 @@ export class QuestionService {
 
   /**
    * Waits until the question is resolved; undefined once `signal` aborts first,
-   * 'due' once `deadline` (epoch ms, an attention request's timer) passes first.
+   * 'due' once `deadline` (performance.now ms, an attention request's timer) passes first.
    */
   private async waitFor(id: string, signal: AbortSignal, deadline?: number): Promise<Row | 'due' | undefined> {
     for (;;) {
@@ -482,7 +482,7 @@ export class QuestionService {
       const row = await this.row(id)
       if (!row) throw new Error(`question ${id} no longer exists`)
       if (row.outcome !== null) return row
-      const left = deadline === undefined ? this.pollMs : deadline - Date.now()
+      const left = deadline === undefined ? this.pollMs : deadline - performance.now()
       if (left <= 0) return 'due'
       await this.pause(id, signal, Math.min(this.pollMs, left))
     }
@@ -679,7 +679,7 @@ export class QuestionService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
-      const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
+      const deadline = attention ? performance.now() + attention.timeoutS * 1000 : undefined
       const waited = await this.waitFor(id, signal, deadline)
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {

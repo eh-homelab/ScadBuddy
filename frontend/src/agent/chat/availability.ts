@@ -136,7 +136,7 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
 // One read shared by every caller in the tab (the shell, Settings).
 let current: AiAvailability & { state: AiState } = { available: false, state: 'checking' }
 let inflight: Promise<AiAvailability & { state: AiState }> | null = null
-let lastRead = 0
+let lastRead = Number.NEGATIVE_INFINITY
 /** Bumped by `resetAiAvailability`, so a read started before it is dropped. */
 let generation = 0
 const listeners = new Set<() => void>()
@@ -166,7 +166,7 @@ export function recheckAiAvailability(
   const read: Promise<AiAvailability & { state: AiState }> = fetchAiAvailability()
     .then((next) => {
       if (started !== generation) return current
-      lastRead = Date.now()
+      lastRead = performance.now()
       publish(next)
       return next
     })
@@ -182,7 +182,7 @@ export function resetAiAvailability(next: AiAvailability & { state: AiState } = 
   generation += 1
   current = next
   inflight = null
-  lastRead = 0
+  lastRead = Number.NEGATIVE_INFINITY
 }
 
 function subscribe(listener: () => void) {
@@ -194,7 +194,7 @@ export function useAiAvailability(): AiAvailability {
   const value = useSyncExternalStore(subscribe, () => current)
   useEffect(() => {
     if (current.state === 'checking' && !inflight) void recheckAiAvailability()
-    const stale = () => !current.available && Date.now() - lastRead >= RECHECK_MS / 2
+    const stale = () => !current.available && performance.now() - lastRead >= RECHECK_MS / 2
     const onFocus = () => {
       if (stale()) void recheckAiAvailability()
     }
