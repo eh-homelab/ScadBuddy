@@ -87,3 +87,31 @@ def test_the_spa_is_served_with_a_fallback_for_client_routes(
 def test_without_a_bundle_the_api_is_served_alone(client: TestClient) -> None:
     assert client.get("/").status_code == 404
     assert client.get("/api/v1/models").status_code == 200
+
+
+def test_an_unknown_api_path_is_a_problem_404_in_the_composed_app(
+    frontend: Path, settings: Settings
+) -> None:
+    """#365, through create_app's routers, middleware and instrumentation, not a bare mount."""
+    settings = settings.model_copy(update={"frontend_dir": frontend})
+    with TestClient(create_app(settings)) as client:
+        for method, path in (
+            ("GET", "/api/v1/jobs"),
+            ("GET", "/api/v1/healthz"),
+            ("POST", "/api/v1/nonsense"),
+        ):
+            response = client.request(method, path)
+            assert response.status_code == 404, path
+            assert response.headers["content-type"] == "application/problem+json", path
+            assert "did you mean" not in response.json().get("detail", ""), path
+
+        wrong = client.post("/api/v1/models/demo/schema")
+        assert wrong.status_code == 405
+        assert wrong.headers["allow"] == "GET"
+        assert wrong.headers["content-type"] == "application/problem+json"
+
+        slash = client.get("/api/v1/models/", follow_redirects=False)
+        assert slash.status_code == 404
+        assert slash.json()["detail"].endswith("did you mean /api/v1/models?")
+
+        assert client.get("/models/demo").text == INDEX
