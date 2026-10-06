@@ -16,7 +16,7 @@ import {
 import { PROBE_FALLBACK_MODEL } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
-import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 // #1093 end to end: runWithFallback over the real SDK and its bundled Claude
 // Code binary, against one fake Anthropic endpoint that answers each
@@ -148,11 +148,15 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
   it('does not fall back on a bad request: the next key would fail the same way', async () => {
     forA = () => ({ error: { status: 400, type: 'invalid_request_error', message: 'messages: bad' } })
     forB = () => ({ text: 'never' })
-    const { result, error, reports } = await turn()
-    expect(result).toMatchObject({ is_error: true, api_error_status: 400 })
+    const { result, error, reports, messages } = await turn()
+    expect(result).toMatchObject({ is_error: true, api_error_status: 400, num_turns: 1, total_cost_usd: 0 })
     expect(error).toBeInstanceOf(Error)
     expect(callsWith(TOKEN_B)).toHaveLength(0)
     expect(reports.map((r) => r.outcome.class)).toEqual(['ok'])
+    // Claude Code 2.1.287 sent it once more without the display beta, on the
+    // same credential, and its messages do not show it: no `api_retry`.
+    expect(callsWith(TOKEN_A).map(displayUpdates)).toEqual([true, false])
+    expect(messages.filter((m) => m.type === 'system' && m.subtype === 'api_retry')).toEqual([])
   }, 60_000)
 
   it('disables nothing when every key is refused the turn’s model but the probe is answered', async () => {
@@ -181,6 +185,9 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const { result, reports } = await turn()
     expect(result).toMatchObject({ subtype: 'success', is_error: false })
     expect(reports[0]).toMatchObject({ id: 'a', outcome: { class: 'permanent' }, next: 'b' })
+    // Claude Code knows a billing refusal is the account's and does not send it
+    // again without the display beta; A's only other request is the probe.
+    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map(displayUpdates)).toEqual([true])
   }, 60_000)
 
   it('resumes a turn that is rate limited after a tool ran, without running the tool again', async () => {

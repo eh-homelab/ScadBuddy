@@ -1582,7 +1582,7 @@ export class SessionManager {
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
     // `total_cost_usd` of a RESUMED query already includes the earlier
-    // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
+    // turns: measured on SDK 0.3.283 and 0.3.287 (0.000105 after turn 1, 0.00021 after
     // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
     // SDK restores it from the transcript's `cost-state` entry, which holds
     // only what Claude Code priced: not the session's unpriced spend (#991),

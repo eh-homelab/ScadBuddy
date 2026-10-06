@@ -2,7 +2,6 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkToo
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
-import { z } from 'zod'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { toolContextFor, withSpan } from '../telemetry/trace.js'
@@ -61,7 +60,7 @@ function detailOf(run: ToolRun): { detail?: string } {
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
 }
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283, harness/questions.ts). */
+/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287, harness/questions.ts). */
 function toolUseIdFrom(extra: unknown): string | undefined {
   const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.['claudecode/toolUseId']
   return typeof id === 'string' && id ? id : undefined
@@ -95,19 +94,15 @@ export function createHarnessServer(
       sdkTool(
         t.name,
         t.description,
-        // A whole z.object, not the raw shape the SDK's types ask for. Given a
-        // raw shape, the server bundled in @anthropic-ai/claude-agent-sdk
-        // 0.3.283 rebuilds the object with its own copy of zod, and that copy
-        // refuses an omitted `.default()` field ("expected nonoptional,
-        // received undefined") instead of filling the default, so e.g.
-        // update_source without `force` never ran. Measured 2026-09-28 by the
-        // eval harness (evals/, test/evals.test.ts); test/projections.test.ts
-        // keeps it fixed. The server accepts any zod schema at runtime
-        // (it validates with the schema's own `safeParseAsync`), and the
-        // listed JSON Schema is unchanged (same test). The cast hides that
-        // from the types, so the same file pins the SDK version: a bump fails
-        // there until someone re-checks this (and drops it if fixed).
-        z.object(t.shape) as unknown as typeof t.shape,
+        // The raw shape, as the SDK's types ask. The server rebuilds the object
+        // with the zod it bundles. On SDK 0.3.283 (zod 4.4.3) that copy refused
+        // an omitted `.default()` field of ours ("expected nonoptional,
+        // received undefined"), so update_source without `force` never ran,
+        // and this passed a whole z.object behind a cast instead. 0.3.287
+        // (zod 4.5.4) marks such a field defaulted before rebuilding, and fills
+        // the default: measured 2026-10-06 (#1540). test/projections.test.ts
+        // fails if a bump brings the refusal back.
+        t.shape,
         (args, extra) =>
           // In the call's own span (telemetry/turn.ts TurnTrace), found by the
           // tool_use id Claude Code sends in `_meta`: the SDK runs this handler

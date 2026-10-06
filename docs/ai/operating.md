@@ -39,8 +39,10 @@ covers the same ground more briefly.
   `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
   writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
-- **Pinned Claude Code.** The build runs `node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"`
-  (currently `2.1.283`) and fails when the SDK's bundled binary differs
+- **Pinned Claude Code.** `agent/package.json` pins the Agent SDK exactly and its lockfile
+  pins the Claude Code binary the SDK bundles, for each platform. The build runs
+  `node dist/check-cli-version.js`, which fails when that binary is missing or its
+  `--version` differs from the version the SDK declares
   ([`Dockerfile`](../../Dockerfile); [`agent/src/check-cli-version.ts`](../../agent/src/check-cli-version.ts)).
   The measurement behind this is in spec §3.1 ("Measured in PR #319").
 - **Container healthcheck.** `HEALTHCHECK` fetches `http://127.0.0.1:8081/healthz`
@@ -163,8 +165,8 @@ as unset (`present()`).
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
 
-Variables set in the image, not read by `config.ts`: `HOME`, `CLAUDE_CONFIG_DIR`,
-`CLAUDE_CODE_VERSION` and `NODE_ENV` ([`Dockerfile`](../../Dockerfile)). The Claude Code
+Variables set in the image, not read by `config.ts`: `HOME`, `CLAUDE_CONFIG_DIR` and
+`NODE_ENV` ([`Dockerfile`](../../Dockerfile)). The Claude Code
 subprocess never inherits the service's environment. `buildQueryOptions()` in
 [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts) passes an explicit
 `env` holding only `CLAUDE_CONFIG_DIR`, `HOME` and `PATH`. The pinned SDK's `sdk.d.ts`
