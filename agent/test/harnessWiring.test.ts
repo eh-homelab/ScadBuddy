@@ -246,12 +246,13 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     }, 60_000)
 
     // #946: a subagent asked to run in the background runs inside the turn.
-    // Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
-    // input at a string prompt's first result, and from then on Claude Code
+    // Backgrounded, it outlived its parent's turn: SDK 0.3.283 closed Claude
+    // Code's input at a string prompt's first result, and from then on Claude Code
     // refused every permission request itself ("The user doesn't want to take
     // this action right now"), asking neither canUseTool nor the user. That hit
     // the subagent's own calls and those of the turn Claude Code starts when it
-    // reports back, read tools included (measured on Claude Code 2.1.283 and 2.1.287).
+    // reports back, read tools included (measured on Claude Code 2.1.283; SDK
+    // 0.3.287 keeps the input open until the session reports idle, #1540).
     describe('a subagent asked to run in the background (#946)', () => {
       /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
       function backgroundScript(tool: string, input: Record<string, unknown>) {

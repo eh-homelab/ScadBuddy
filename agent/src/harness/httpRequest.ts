@@ -124,8 +124,8 @@ const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(['authorization', 'cooki
 export const HttpRequestInput = {
   method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD run at once, the others wait for the user to approve'),
   url: z.string().max(8192).describe('Absolute http:// or https:// URL; LAN hosts and plain http are allowed'),
-  // `catchall`, not `z.record`: see `params` in tools/common.ts (the SDK's
-  // bundled MCP server fails tools/list on a z.record field).
+  // `catchall`, not `z.record`: see `params` in tools/common.ts (the MCP server
+  // bundled in SDK 0.3.283 failed tools/list on a z.record field).
   headers: z
     .object({})
     .catchall(z.string().max(8192))

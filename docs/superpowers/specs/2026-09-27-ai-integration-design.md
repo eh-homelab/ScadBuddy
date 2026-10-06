@@ -86,8 +86,8 @@ dependency of `agent/`.
   `CLAUDE_CODE_VERSION` build argument, edited by hand on every bump. In that SDK's
   `sdk.d.ts` (both versions), `settingSources: []` means "disable filesystem settings
   (SDK isolation mode)", so it loads nothing from the host (§4.4).
-- Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
-  SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
+- Read and measured in #300 on SDK 0.3.283, and re-read on 0.3.287 (#1540) (`sdk.d.ts`,
+  `export declare type SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
   `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
   `listSubkeys?({projectKey, sessionId})` are optional. `SessionKey` is
   `{ projectKey, sessionId, subpath? }` (projectKey "Default: sanitized cwd"; no option
@@ -117,7 +117,8 @@ dependency of `agent/`.
 - Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
   - **Tool-name normalisation.** Claude Code names an MCP tool
     `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
-    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe; the same code, under
+    other minified names, in 2.1.287, #1540). `files.list` and
     `files_list` therefore collide on one name, and a name with a space or a dot cannot be
     matched literally. The registry now tiers only names in that alphabet, maps disabled
     names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
@@ -149,7 +150,8 @@ dependency of `agent/`.
   request. Claude does not see the tool and cannot attempt it." Tool-name globs work in
   deny rules. An allow rule only pre-approves; "Auto-approved tools never reach
   `canUseTool`". [Permissions][sdk-permissions]
-- Read and measured in #258 on SDK 0.3.283 (moved up from §3.2): **`canUseTool` can
+- Read and measured in #258 on SDK 0.3.283, and again on 0.3.287 (#1540) (moved up from
+  §3.2): **`canUseTool` can
   park a tool call on an asynchronous human decision, with no deadline of its own.**
   `sdk.d.ts` on `CanUseTool`: "permission prompts have no park deadline"; the
   `dialogExpiry` setting (default 5 minutes) is for a dialog "forwarded to a remote

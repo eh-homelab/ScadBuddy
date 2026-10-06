@@ -166,7 +166,7 @@ const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
 /**
  * ask_user's call timeout. An MCP call is cut off at the server's `timeout`,
- * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283;
+ * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283 and 2.1.287;
  * the cut-off aborts the call, and the gate withdraws its card). The idle
  * timeout does not apply to `sdk` servers, and MCP auto-backgrounding is off
  * in a non-interactive session. A question waits until it is answered or its

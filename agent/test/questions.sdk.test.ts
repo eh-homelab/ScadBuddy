@@ -244,7 +244,7 @@ describe.skipIf(cliMissing !== undefined)(`AskUserQuestion through the question 
   }, 60_000)
 
   // ask_user is an MCP call, which Claude Code cuts off at the server's
-  // `timeout`, else MCP_TOOL_TIMEOUT, else a default (2.1.283). A question
+  // `timeout`, else MCP_TOOL_TIMEOUT, else a default (2.1.283 and 2.1.287). A question
   // waits for a person, so the server's own timeout must be the one in force:
   // with MCP_TOOL_TIMEOUT at 1 s, an answer given after 2.5 s still arrives.
   it("ask_user's own timeout outlasts MCP_TOOL_TIMEOUT: a slow answer still arrives", async () => {
