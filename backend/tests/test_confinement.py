@@ -10,7 +10,7 @@ import pytest
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.library.scad import check_source
 from scadbuddy.render import confinement, sandbox
-from scadbuddy.render.confinement import escaping_includes
+from scadbuddy.render.confinement import EscapingInclude, escaping_includes
 from scadbuddy.render.runner import run_openscad
 
 landlock = pytest.mark.skipif(sandbox.abi_version() < 1, reason="the kernel has no Landlock")
@@ -27,7 +27,9 @@ def test_absolute_and_climbing_targets_are_found(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     found = escaping_includes(tmp_path, "model.scad")
-    assert [(f.kind, f.target, f.line) for f in found] == [
+    escaping = [f for f in found if isinstance(f, EscapingInclude)]
+    assert len(escaping) == len(found)
+    assert [(f.kind, f.target, f.line) for f in escaping] == [
         ("include", "/etc/passwd", 1),
         ("use", "../other-model/model.scad", 2),
         ("include", "BOSL2/../../../etc/passwd", 3),
@@ -154,3 +156,13 @@ async def test_a_model_still_reads_its_own_files_under_the_sandbox(tmp_path: Pat
         context=context,
     )
     assert result.ok, result.log_tail
+
+
+def test_a_model_file_too_many_is_refused_not_trusted(tmp_path: Path) -> None:
+    """Past the cap the rest is unread, and an unread file could hold anything."""
+    count = confinement.MAX_FILES + 1
+    for index in range(count):
+        (tmp_path / f"f{index}.scad").write_text(f"include <f{index + 1}.scad>\n")
+    (tmp_path / f"f{count}.scad").write_text("include </etc/passwd>\n")
+    (found,) = escaping_includes(tmp_path, "f0.scad")
+    assert isinstance(found, confinement.UncheckedFile)

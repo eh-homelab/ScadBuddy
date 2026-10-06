@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
@@ -77,6 +78,21 @@ class EscapingInclude:
         )
 
 
+@dataclass(frozen=True)
+class UncheckedFile:
+    """A model file the check could not read in full, refused rather than trusted."""
+
+    target: str
+    file: str
+    line: int
+
+    def log_line(self) -> str:
+        return (
+            f"ERROR: {self.target} is too large, or one file too many, to check for "
+            f"includes outside the model's directory in file {self.file}, line {self.line}"
+        )
+
+
 def escapes(target: str) -> bool:
     path = PurePosixPath(target)
     return path.is_absolute() or ".." in path.parts
@@ -86,20 +102,23 @@ def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def escaping_includes(root: Path, entry: str) -> list[EscapingInclude]:
+def escaping_includes(root: Path, entry: str) -> list[EscapingInclude | UncheckedFile]:
     """Every ``include``/``use`` in ``entry`` (relative to ``root``) and in the files of
     ``root`` it reaches whose target is absolute or has a ``..`` component.
 
     A file is followed only when its real path is inside ``root``: this runs in the
     backend's own process, unconfined, so a symbolic link out of the model's directory
-    is never read here (the sandbox refuses it to ``openscad``).
+    is never read here (the sandbox refuses it to ``openscad``). A model file that is
+    reached but cannot be read in full — past :data:`MAX_FILES`, over
+    :data:`MAX_FILE_BYTES`, unreadable — is refused too: an unread file could hold
+    anything.
     """
     real_root = root.resolve()
-    found: list[EscapingInclude] = []
-    queue = [root / entry]
+    found: list[EscapingInclude | UncheckedFile] = []
+    queue = [(root / entry, entry, 0)]
     seen: set[Path] = set()
-    while queue and len(seen) < MAX_FILES:
-        current = queue.pop()
+    while queue:
+        current, statement_file, statement_line = queue.pop()
         try:
             real = current.resolve()
         except OSError:
@@ -107,20 +126,24 @@ def escaping_includes(root: Path, entry: str) -> list[EscapingInclude]:
         if real in seen or not _within(real, real_root) or not real.is_file():
             continue
         seen.add(real)
+        name = str(real.relative_to(real_root))
         try:
-            if real.stat().st_size > MAX_FILE_BYTES:
-                continue
+            if len(seen) > MAX_FILES or real.stat().st_size > MAX_FILE_BYTES:
+                raise OSError("too large")
             text = real.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            found.append(UncheckedFile(name, statement_file, statement_line))
             continue
-        name = str(real.relative_to(real_root))
         for match in _STATEMENT.finditer(text):
             kind, target = match[1], match[2]
+            line = text.count("\n", 0, match.start(2)) + 1
             if escapes(target):
-                line = text.count("\n", 0, match.start(2)) + 1
                 found.append(EscapingInclude(kind, target, name, line))
             else:
-                queue.append(current.parent / target)
+                # Relative to the file as named and as resolved: whichever OpenSCAD
+                # uses for a linked file, both are looked at.
+                queue.append((current.parent / target, name, line))
+                queue.append((real.parent / target, name, line))
     return found
 
 
@@ -162,5 +185,10 @@ def sandboxed(
     ]
     home = env.get("HOME")
     if home:
-        write.append(env.get("XDG_CACHE_HOME") or os.path.join(home, ".cache"))
+        cache_home = env.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+        # Only fontconfig's own cache; created so the rule has something to name.
+        fontconfig_cache = os.path.join(cache_home, "fontconfig")
+        with suppress(OSError):
+            os.makedirs(fontconfig_cache, exist_ok=True)
+        write.append(fontconfig_cache)
     return sandbox.command([executable, *args], read=read, write=write)
