@@ -118,10 +118,18 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           tool: `browser_${spec.tool}`,
           toolUseId: ctx.toolUseId,
           signal: ctx.signal,
-          isBack: async () => (await tabs(ctx).status(target(ctx))).attached,
+          isBack: async (signal) => (await tabs(ctx).status(target(ctx), { signal })).attached,
         })
         if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
-        if (spec.risk !== 'read') throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
+        if (spec.risk !== 'read') {
+          // reconnected() runs on whichever replica saw the tab, so "reconnected"
+          // here does not mean this replica has it. Inviting a retry would only
+          // open a wait that cannot end reconnected here (#1393): say so instead.
+          if (waited.why === 'reconnected' && !(await tabs(ctx).status(target(ctx), { signal: ctx.signal })).attached) {
+            throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE.reconnected}`)
+          }
+          throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
+        }
         outcome = await call()
         if (!outcome.ok && outcome.error.code === 'no_browser') {
           throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
