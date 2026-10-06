@@ -82,6 +82,7 @@ CASES+=(
     'tall-rings-default-wall|shape="stacked_rings";ring_height=20'
     'thin-wall-rings|pieces="cup";shape="stacked_rings";wall=1.2;ring_height=12'
     'thin-wall-deep-inlay|wall=1.2;text_depth=2;shape="square"'
+    'thin-wall-inlay-fits|wall=1.2;text_depth=0.4;shape="square"'
     'wide-tray-clamped|pieces="tray";tray_length=80;tray_width=150;shape="hex";tray_compartments=2'
     'no-name|name="";pattern="solid"'
     'name-tray-only-long|name_on="tray";name="Workshop desk tools";shape="round"'
@@ -275,8 +276,10 @@ for line in open(os.path.join(OUT, "cases.txt")):
           "cup %.1f mm, tray %.1f mm tall, inlay %.2f mm deep" % (cup_h, tray_h, td))
     if show_cup and p["cup_height"] > hmax:
         check(name, "NOTE: cup_height reduced" in log, "the log says the cup was shortened for stability")
-    if has_name and p["name_on"] != "none" and td < p["text_depth"]:
+    if has_name and p["name_on"] != "none" and td < p["text_depth"] - 1e-6:
         check(name, "NOTE: text_depth reduced" in log, "the log says the inlay was made shallower")
+    else:
+        check(name, "NOTE: text_depth reduced" not in log, "no text_depth note when the inlay depth is unchanged")
     if show_tray and TW < p["tray_width"]:
         check(name, "NOTE: tray_width reduced" in log, "the log says the tray was made narrower")
     check(name, "WARNING" not in log and "ERROR" not in log, "no OpenSCAD warnings or errors")
