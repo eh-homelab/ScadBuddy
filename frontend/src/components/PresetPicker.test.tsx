@@ -229,14 +229,17 @@ describe('PresetPicker', () => {
   it('says which values it skipped because the template dropped them', async () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Old engraving')
-    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth')
+    // The page's action bar has its own live region (#967), so this one is found by its text.
+    const skipped = screen.getByText(/^Skipped /)
+    expect(skipped).toHaveAttribute('role', 'status')
+    expect(skipped).toHaveTextContent('engrave_depth')
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
   })
 
   it('shows each skipped value with what the preset stored (#358)', async () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Old engraving')
-    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth = 2')
+    expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth = 2')
   })
 
   it('asks before an Update drops the values this template no longer has (#358)', async () => {
@@ -254,7 +257,7 @@ describe('PresetPicker', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(update).not.toHaveBeenCalled()
-    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth')
+    expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth')
 
     await user.click(screen.getByRole('button', { name: 'Update' }))
     await user.click(
