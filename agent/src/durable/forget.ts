@@ -74,7 +74,8 @@ async function removeWorkflow(client: Client, workflowId: string): Promise<'term
     throw err
   }
   const namespace = client.options.namespace
-  const deadline = Date.now() + DELETE_WAIT_MS
+  // A monotonic clock: the host's wall clock may jump.
+  const deadline = performance.now() + DELETE_WAIT_MS
   let delay = BACKOFF_FIRST_MS
   let deleteRequested = false
   let last: unknown
@@ -91,7 +92,7 @@ async function removeWorkflow(client: Client, workflowId: string): Promise<'term
       if (!(isGrpcServiceError(err) && err.code === 9)) throw err
       last = err
     }
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       throw new Error(
         `workflow ${workflowId} was still there ${DELETE_WAIT_MS / 1000} s after its deletion was requested${last instanceof Error ? `: ${last.message}` : ''}`,
       )
@@ -114,7 +115,7 @@ export async function forgetSubject(subject: string, deps: ForgetDeps): Promise<
   if (deps.client) {
     try {
       const client = deps.client
-      workflow = await client.connection.withDeadline(Date.now() + (deps.rpcDeadlineMs ?? RPC_DEADLINE_MS), () =>
+      workflow = await client.connection.withAbortSignal(AbortSignal.timeout(deps.rpcDeadlineMs ?? RPC_DEADLINE_MS), () =>
         removeWorkflow(client, subject),
       )
     } catch (err) {
