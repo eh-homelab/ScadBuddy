@@ -87,14 +87,15 @@ does not reach produce no part.
 ./verify.sh
 ```
 
-Renders 29 cases:
+Renders 32 cases:
 
 - the defaults
 - every shape × pattern
 - every cup compartment count
 - single pieces and the stacked layout
 - the clamps: a 200 mm cup on a 50 mm footprint (prism and rings), a 1.2 mm
-  wall with a 2 mm inlay, and a tray wider than it is long
+  wall with a 2 mm inlay, a 1.2 mm wall whose inlay exactly fits, and a tray
+  wider than it is long
 - rings heights that snap: a 10 mm tray on 12 mm rings (24 mm, the two-ring
   minimum) and a 95 mm cup on 10 mm rings (100 mm)
 - 20 mm rings at the default wall and 12 mm rings on a 1.2 mm wall, whose
