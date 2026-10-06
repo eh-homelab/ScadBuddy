@@ -104,8 +104,7 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
       pending: new PendingActionStore(),
       pollIntervalMs: 5,
       renderWaitMs: 1000,
-      operationFollowMs: 15 * 60_000,
-    }
+      }
     m = manager({
       sql: db.sql,
       paths,

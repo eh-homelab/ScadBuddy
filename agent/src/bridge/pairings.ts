@@ -85,8 +85,8 @@ export interface PairingStore {
   deny(id: string): Promise<boolean>
   /** The user disconnected pairing `id` from tab `tabId`. True when a live one was. */
   end(id: string, tabId: string): Promise<boolean>
-  /** The tab `principal` is paired with now, if any. */
-  pairedTab(principal: Pick<Principal, 'kind' | 'id'>): Promise<(PairingView & { tabId: string }) | undefined>
+  /** The tab `principal` is paired with now, if any. `signal` cancels the query. */
+  pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined>
   /** Every request still waiting for a user, oldest first. */
   pending(): Promise<PairingView[]>
   /** The live pairings of these tabs, by tab id. */
@@ -231,11 +231,18 @@ export class PostgresPairingStore implements PairingStore {
     return rows.length > 0
   }
 
-  async pairedTab(principal: Pick<Principal, 'kind' | 'id'>): Promise<(PairingView & { tabId: string }) | undefined> {
-    const [row] = await this.#sql<(Row & { tab_id: string })[]>`
+  async pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined> {
+    signal?.throwIfAborted()
+    const query = this.#sql<(Row & { tab_id: string })[]>`
       SELECT id, principal_label, expires_at, tab_id FROM ai_browser_pairings
        WHERE principal_kind = ${principal.kind} AND principal_id = ${principal.id}
          AND status = 'paired' AND expires_at > now()`
+    // An abort stops waiting for the read; it never cancels it on the server. A
+    // Postgres CancelRequest names the backend, not the query, so one that lands
+    // after this cheap indexed read finished would cancel whatever statement the
+    // pool handed that connection next (#1405 review). The read finishes and
+    // returns its connection on its own.
+    const [row] = signal ? await settledOrAborted(query, signal) : await query
     return row ? { ...viewOf(row), tabId: row.tab_id } : undefined
   }
 
@@ -257,4 +264,15 @@ export class PostgresPairingStore implements PairingStore {
     for (const row of rows) out.set(row.tab_id, [...(out.get(row.tab_id) ?? []), viewOf(row)])
     return out
   }
+}
+
+/** `work`, unless `signal` aborts first: then its reason, and `work` is left to settle unobserved. */
+function settledOrAborted<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    Promise.resolve(work)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', abort))
+  })
 }

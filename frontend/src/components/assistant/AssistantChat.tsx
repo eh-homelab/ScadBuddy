@@ -3,11 +3,13 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
+import { isDone } from '../../agent/chat/protocol'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
+import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
@@ -47,7 +49,10 @@ export interface OpenRequest {
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
 
-/** The panel's Advanced switch, per browser (the Library page's pattern). */
+/** How many sessions the picker's model filter asks the agent for: its list route's maximum (agent routes/sessions.ts LIST_LIMIT_MAX). */
+const PICKER_FILTER_LIMIT = 500
+
+/** The panel's Advanced switch, remembered per browser as the Library page's is. */
 const ADVANCED_KEY = 'scadbuddy.assistant.advanced'
 
 function readAdvanced(): boolean {
@@ -64,6 +69,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  const pageModel = pageContext(pathname).modelSlug ?? null
+  // The model the filter was turned on for: on another model's page it is off.
+  const [filteredModel, setFilteredModel] = useState<string | null>(null)
+  const filterBy = pageModel !== null && filteredModel === pageModel ? pageModel : null
+  // Read again each time the picker opens or the filter is turned on, so it is current.
+  const touching = useAsync(
+    async () =>
+      filterBy && pickerOpen
+        ? new Set(
+            (await api.listAiResourceSessions({ type: 'model', id: filterBy }, PICKER_FILTER_LIMIT)).sessions.map(
+              (s) => s.id,
+            ),
+          )
+        : null,
+    [filterBy, pickerOpen],
+  )
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
@@ -90,7 +111,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
-  const pendingAttention = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention) ?? false
+  // A `done` summary (#815 §4) asks nothing of the user: it is not announced as needing them.
+  const pendingAttention =
+    active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && i.attention && !isDone(i.attention)) ?? false
   const itemCount = active?.items.length ?? 0
   const finishedTools = active?.items.filter((i) => i.kind === 'tool' && i.result).length ?? 0
 
@@ -185,6 +208,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
   const prompts = suggestedPrompts(pathname)
   const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
+  // #931 — on a model's page, the picker can show only the sessions that changed that model.
+  const touchingIds = filterBy ? touching.data : null
+  const listed = touchingIds ? sessions.filter((s) => touchingIds.has(s.id)) : sessions
+  const filterLoading = filterBy !== null && touching.loading
+  const filterError = filterBy !== null ? touching.error : undefined
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -220,11 +248,43 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
       {pickerOpen && (
         <nav id={pickerId} aria-label="Sessions" className="shrink-0 border-b border-line bg-surface-2">
+          {pageModel && (
+            <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                checked={filterBy !== null}
+                onChange={(event) => setFilteredModel(event.target.checked ? pageModel : null)}
+              />
+              Only sessions that changed {pageModel}
+            </label>
+          )}
+          {filterError ? (
+            <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
+              {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
+              every session, unfiltered.
+            </p>
+          ) : null}
+          {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
+            <p className="px-3 pt-1 text-[11px] text-faint">
+              Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
+            </p>
+          ) : null}
           {sessions.length === 0 ? (
             <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
+          ) : filterLoading ? (
+            <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
+              Finding the sessions that changed {filterBy}…
+            </p>
+          ) : touchingIds && listed.length === 0 ? (
+            <p className="px-3 py-2 text-[12.5px] text-muted">
+              {touchingIds.size === 0
+                ? `No session changed ${filterBy}.`
+                : // The ones that did are older than the sessions this panel has loaded.
+                  `None of the loaded sessions changed ${filterBy}.`}
+            </p>
           ) : (
             <ul className="max-h-56 overflow-y-auto py-1">
-              {sessions.map((s) => (
+              {listed.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"
@@ -324,6 +384,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
           />
         ))}
+        {itemCount === 0 && !busy && advanced && (
+          // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
+          <p className="text-[12px] text-muted">
+            Advanced: tool arguments, sources and memory details will be shown.
+          </p>
+        )}
         {itemCount === 0 && !busy && prompts.length > 0 && owned && (
           <div>
             <p className="mb-2 text-[12px] text-muted">Try asking</p>

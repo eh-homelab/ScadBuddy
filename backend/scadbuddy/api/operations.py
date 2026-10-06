@@ -32,7 +32,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
-from scadbuddy.operations.store import Operation
+from scadbuddy.operations.store import Operation, OperationAccepted
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
@@ -97,7 +97,9 @@ def _problem(
     return ApiError(status_code, detail, title=title, type_=type_, headers=headers, **extensions)
 
 
-def _answer(op: Operation, response: Response, *, repeated: bool) -> dict[str, Any] | Operation:
+def _answer(
+    op: Operation, response: Response, *, repeated: bool
+) -> dict[str, Any] | OperationAccepted:
     """The route's answer for a recorded operation: its body, its problem, or a 202."""
     if op.status == "succeeded":
         return op.result or {}
@@ -106,7 +108,7 @@ def _answer(op: Operation, response: Response, *, repeated: bool) -> dict[str, A
         error = op.error
         raise _problem(error.status, error.detail, error.title, error.type, error.extensions)
     response.status_code = status.HTTP_202_ACCEPTED
-    return op.model_copy(update={"repeated": repeated})
+    return OperationAccepted(**op.model_dump(), repeated=repeated)
 
 
 #: The most an operation's request may carry inline: well under Temporal's 512 KB
@@ -181,8 +183,8 @@ async def run_operation(
     idempotency_key: str | None,
     claimed: Claimed | None = None,
     before_start: Callable[[], Awaitable[None]] | None = None,
-) -> dict[str, Any] | Operation:
-    """Run ``kind`` as an operation; its result body, or 202 with the ``Operation``.
+) -> dict[str, Any] | OperationAccepted:
+    """Run ``kind`` as an operation; its result body, or 202 with the operation.
     A refusal or a recorded failure is raised as the problem the route answers with.
     ``claimed`` is dropped once the answer is final: not on a 202, or on a 503 that
     says the operation may still run (a recorded 503 is final, review #1194 1.1).
@@ -215,7 +217,9 @@ async def run_operation(
         if claimed is not None and (refused or error.type not in _MAY_STILL_RUN):
             await _release(ops, claimed)
         raise
-    if claimed is not None and not (isinstance(result, Operation) and result.status == "running"):
+    if claimed is not None and not (
+        isinstance(result, OperationAccepted) and result.status == "running"
+    ):
         await _release(ops, claimed)
     return result
 
@@ -241,7 +245,7 @@ async def _run_operation(
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
     before_start: Callable[[], Awaitable[None]] | None,
-) -> dict[str, Any] | Operation:
+) -> dict[str, Any] | OperationAccepted:
     body = _body(request)
     size = len(json.dumps(body, separators=(",", ":")).encode())
     if size > MAX_REQUEST_BYTES:
@@ -253,7 +257,8 @@ async def _run_operation(
             f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
         )
     key = operation_key(kind.name, subject, body, idempotency_key or uuid.uuid4().hex)
-    recorded = await ops.store.find(key)
+    # Without a key, the key is new: no record can match it.
+    recorded = None if idempotency_key is None else await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
     workflow_id = f"op-{kind.name}-{key}"
@@ -321,17 +326,17 @@ async def _run_operation(
 
 
 def operation_answer[M: BaseModel](
-    result: dict[str, Any] | Operation, model: type[M]
+    result: dict[str, Any] | OperationAccepted, model: type[M]
 ) -> M | JSONResponse:
     """The route's own body, or 202 with the operation to follow."""
-    if isinstance(result, Operation):
+    if isinstance(result, OperationAccepted):
         return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return model.model_validate(result)
 
 
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
-    202: {"model": Operation, "description": "Still running: follow GET /operations/{id}"},
+    202: {"model": OperationAccepted, "description": "Still running: follow GET /operations/{id}"},
     413: {
         "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
         "bytes; nothing was started"

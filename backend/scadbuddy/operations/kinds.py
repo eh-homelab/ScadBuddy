@@ -48,6 +48,9 @@ class OperationKind:
     needs_prelude: Callable[[dict[str, Any]], bool] = lambda request: True
 
     def __post_init__(self) -> None:
+        # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
+        if self.run_attempts < 1:
+            raise ValueError(f"{self.name!r}: run_attempts must be at least 1")
         if self.where is None:
             object.__setattr__(self, "where", WHERE[self.queue])
 

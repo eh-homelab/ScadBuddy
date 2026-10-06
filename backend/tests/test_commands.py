@@ -178,6 +178,22 @@ async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue:
     assert time.monotonic() - began < 10
 
 
+async def test_a_callers_deadline_is_its_own_timeout_not_still_accepting(queue: str) -> None:
+    """A caller that bounds the call more tightly than ``deadline`` (a route's own
+    budget) gets its cancel back: turned into still-accepting, its `asyncio.timeout`
+    could not tell that it expired (review #1066 (9), the render route's 503)."""
+    from scadbuddy.workflows.client import connect_lazily
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(1):
+            await echo(
+                connect_lazily("127.0.0.1:1", "default"),
+                queue,
+                "echo-caller-bound",
+                deadline=timedelta(seconds=5),
+            )
+
+
 class Proxy:
     """A TCP proxy to Temporal that can be cut, as a frontend going down would be."""
 

@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from google.protobuf.any_pb2 import Any as Any_
 from psycopg.types.json import Jsonb
+from temporalio.api.common.v1 import GrpcStatus
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, render_key
@@ -76,3 +80,16 @@ def legacy_row(store: JobProjection, job: Job) -> Job:
         )
         store._announce(conn, job.id, job.slug, "job.pending")
     return store.read(job.id)
+
+
+def namespace_not_found() -> RPCError:
+    """What Temporal answers a call to a namespace it does not have: NOT_FOUND, with a
+    `NamespaceNotFoundFailure` in its details."""
+    status = GrpcStatus(
+        code=RPCStatusCode.NOT_FOUND,
+        message="Namespace nope is not found.",
+        details=[
+            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
+        ],
+    )
+    return RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())

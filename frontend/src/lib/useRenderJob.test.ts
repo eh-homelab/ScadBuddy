@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { ApiError, api } from '../api/client'
+import { ApiError, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
 import { useRenderJob } from './useRenderJob'
@@ -76,6 +76,7 @@ describe('useRenderJob', () => {
       undefined,
       undefined,
       expect.any(AbortSignal),
+      expect.any(String),
     )
   })
 
@@ -85,8 +86,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'demo', params: { n: 2 } })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
   })
 
   it('supersedes a render whose answer arrives after the next one was asked for', async () => {
@@ -102,7 +103,7 @@ describe('useRenderJob', () => {
     first.resolve(accepted(JOB_A))
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
   })
 
   it("aborts a superseded render's re-sends, never the request in flight (review #1066 2.2)", async () => {
@@ -120,7 +121,64 @@ describe('useRenderJob', () => {
     // Its answer still arrives, and names the job the next render supersedes.
     first.resolve(accepted(JOB_A))
     await settle()
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
+  })
+
+  it('re-sends a render the server is still accepting with its key, so it stays one claim (review #1066 (7) 3)', async () => {
+    const accepting = new ApiError({
+      type: STILL_ACCEPTING,
+      title: 'Service Unavailable',
+      status: 503,
+      detail: 'ScadBuddy is still checking this request. Send it again to follow it.',
+      retry_after: 2,
+    })
+    submit.mockRejectedValueOnce(accepting)
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    const key = submit.mock.calls[0]![5]
+    expect(key).toEqual(expect.any(String))
+    expect(submit.mock.calls[1]![5]).toBe(key)
+  })
+
+  it('re-sends a render Temporal could not take with its key: a start may exist (review #1066 (8) 3)', async () => {
+    // As the client reads it: the 503's Retry-After header becomes `retry_after`.
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal could not start this render right now.',
+        retry_after: 5,
+      }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]![5]).toBe(submit.mock.calls[0]![5])
+  })
+
+  it('retries a full queue under a new key: the refusal is all its key was answered', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'the render queue is full', retry_after: 3 }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]![5]).toEqual(expect.any(String))
+    expect(submit.mock.calls[1]![5]).not.toBe(submit.mock.calls[0]![5])
   })
 
   it('retries a render the full queue refused, after the delay it names', async () => {
@@ -134,7 +192,7 @@ describe('useRenderJob', () => {
     const { result } = mount({ slug: 'demo', params: { n: 1 } })
     await settle()
 
-    expect(result.current.busy).toBe(3)
+    expect(result.current.busy).toEqual({ seconds: 3, reason: 'queue-full' })
     expect(result.current.error).toBeUndefined()
     expect(result.current.rendering).toBe(true)
     expect(submit).toHaveBeenCalledTimes(1)
@@ -144,8 +202,38 @@ describe('useRenderJob', () => {
     })
 
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
     expect(result.current.busy).toBeUndefined()
+    expect(result.current.error).toBeUndefined()
+  })
+
+  it('says why it waits: an unreachable render service, or a request still accepting', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal is unavailable',
+        retry_after: 5,
+      }),
+    )
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'still accepting',
+        retry_after: 2,
+      }),
+    )
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    expect(result.current.busy).toEqual({ seconds: 5, reason: 'temporal-unavailable' })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(result.current.busy).toEqual({ seconds: 2, reason: 'still-accepting' })
     expect(result.current.error).toBeUndefined()
   })
 
@@ -175,7 +263,7 @@ describe('useRenderJob', () => {
     // The newer render went out within a stale-check, not after the 30 s wait,
     // and the refused one was never retried.
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
   })
 
   it('reports a settle only for the newest render, never a superseded one (#254)', async () => {
@@ -190,7 +278,7 @@ describe('useRenderJob', () => {
     await settle()
     rerender({ slug: 'demo', params: second })
     await settle()
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
 
     // A says "done" now, but it was superseded: neither its job nor its params count.
     lateA.resolve(job(JOB_A, 'done'))
@@ -215,8 +303,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'other', params: { n: 1 }, version: 'f'.repeat(40) })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal))
-    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined, expect.any(AbortSignal))
+    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
+    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined, expect.any(AbortSignal), expect.any(String))
   })
 
   describe('following a job (#267)', () => {
