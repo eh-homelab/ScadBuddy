@@ -94,7 +94,7 @@ export async function withSpan<T>(
 // In-process tool calls (decision 10 of the plan). The SDK runs an in-process
 // MCP handler in the async context the query started in, not in its tool's
 // span. Claude Code sends the call's tool_use id in every tools/call's `_meta`
-// under this key (measured on the bundled 2.1.283 binary), so telemetry/turn.ts
+// under this key (measured on the bundled 2.1.283 and 2.1.287 binaries), so telemetry/turn.ts
 // binds each tool span's context under its id and tools/projections.ts finds it.
 export const TOOL_USE_META = 'claudecode/toolUseId'
 

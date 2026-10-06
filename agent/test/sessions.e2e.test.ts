@@ -10,6 +10,7 @@ import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
 import {
+  displayUpdates,
   type FakeAnthropic,
   type RecordedRequest,
   type Reply,
@@ -273,8 +274,16 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    expect(fake.messageCalls().map((c) => c.headers.authorization)).toEqual([`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`])
-    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    // A's 429 is sent once. B's 400 is sent twice, the second time without the
+    // display beta: Claude Code's own re-send, on the same credential, which the
+    // fallback never sees (credentialErrors.ts). It reaches no third credential.
+    expect(fake.messageCalls().map((c) => [c.headers.authorization, displayUpdates(c)])).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_B}`, true],
+      [`Bearer ${TOKEN_B}`, false],
+    ])
+    // None of the three is a turn, and a refused request carries no usage to price.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, costUsd: 0 })
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)
     expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
@@ -339,9 +348,16 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    // Two model requests: the tool call, which counts, and the refused one, which does not.
-    expect(fake.messageCalls()).toHaveLength(2)
-    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 1 })
+    // Three model requests: the tool call, which counts; the refused one; and
+    // Claude Code's re-send of it without the display beta (credentialErrors.ts),
+    // refused too. Neither refusal counts, or costs anything: the turn spent one
+    // priced round trip, as before.
+    const calls = fake.messageCalls()
+    expect(calls.map(displayUpdates)).toEqual([true, true, false])
+    expect(calls[2]?.body?.messages).toEqual(calls[1]?.body?.messages)
+    const row = await m.get(session.id, browser)
+    expect(row).toMatchObject({ status: 'failed', turns: 1 })
+    expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)
     // The panel's count follows the row's.
