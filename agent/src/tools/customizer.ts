@@ -51,12 +51,12 @@ async function getJob(ctx: ToolContext, id: string) {
  * tool "submits a render and streams progress until it settles").
  */
 export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  const deadline = Date.now() + ctx.renderWaitMs
+  const deadline = performance.now() + ctx.renderWaitMs
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (settled(job.status) || Date.now() >= deadline) return job
+    if (settled(job.status) || performance.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -78,13 +78,13 @@ function settled(status: JobStatus['status']): boolean {
  * cannot be reached, or after `holdMs` (30 min) at most (#774).
  */
 async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
-  const deadline = Date.now() + holdMs
+  const deadline = performance.now() + holdMs
   try {
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        signal: AbortSignal.timeout(Math.max(1, deadline - performance.now())),
       })
       if (!data || settled(data.status)) return
     }

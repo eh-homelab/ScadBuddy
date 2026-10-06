@@ -10,7 +10,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -433,6 +434,28 @@ async def test_project_running_then_steps(
     stored = projection.read(job.id)
     assert stored.state == "running"
     assert stored.steps == steps
+
+
+@pytest.mark.requires_postgres
+async def test_project_running_records_the_queue_wait_once(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """From the row's insert to its workflow beginning the render (#1088)."""
+    metrics = Metrics()
+    deps = worker_deps(tmp_path, demo_paths(tmp_path), projection=projection)
+    acts = RenderActivities(replace(deps, metrics=metrics))
+    job = _job(width=1)
+    job.created_at = datetime.now(UTC) - timedelta(seconds=30)
+    projection.submit(job, render_key("demo", {"width": 1}, None))
+
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+    # A second "running" (a retried activity) finds the row already started.
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+
+    registry = metrics.registry
+    assert registry.get_sample_value("scadbuddy_render_queue_wait_seconds_count") == 1
+    waited = registry.get_sample_value("scadbuddy_render_queue_wait_seconds_sum")
+    assert waited is not None and 29 <= waited < 120
 
 
 @pytest.mark.requires_postgres
