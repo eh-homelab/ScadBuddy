@@ -140,7 +140,7 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-SUPERSEDED_ERROR = "superseded by a newer render before it started"
+SUPERSEDED_ERROR = "superseded by a newer render"
 
 
 class QueueFullError(Exception):

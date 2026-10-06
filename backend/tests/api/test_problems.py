@@ -69,6 +69,35 @@ def frontend(tmp_path: Path) -> Path:
     return directory
 
 
+WRONG_METHODS = (
+    ("DELETE", "/api/v1/settings", "GET, PUT"),
+    ("OPTIONS", "/api/v1/models", "GET, POST"),
+    ("POST", "/healthz", "GET"),
+)
+
+
+def assert_allow_names_every_method(client: TestClient) -> None:
+    """#1318: RFC 9110 wants every method in Allow, not just the first route's."""
+    for method, path, allow in WRONG_METHODS:
+        response = client.request(method, path, headers={"Origin": "http://testserver"})
+        assert response.status_code == 405, path
+        assert response.headers["allow"] == allow, path
+        assert response.headers["content-type"] == "application/problem+json", path
+
+
+def test_a_405_allows_every_method_the_path_has(client: TestClient) -> None:
+    assert_allow_names_every_method(client)
+
+
+def test_a_405_allows_every_method_the_path_has_beside_the_spa(
+    frontend: Path, settings: Settings
+) -> None:
+    """With the bundle mounted at ``/`` the router never raises the 405 itself."""
+    settings = settings.model_copy(update={"frontend_dir": frontend})
+    with TestClient(create_app(settings)) as client:
+        assert_allow_names_every_method(client)
+
+
 def test_the_spa_is_served_with_a_fallback_for_client_routes(
     frontend: Path, settings: Settings
 ) -> None:
