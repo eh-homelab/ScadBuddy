@@ -89,6 +89,42 @@ describe('PresetPicker', () => {
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
   })
 
+  it('shows each skipped value with what the preset stored (#358)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Old engraving')
+    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth = 2')
+  })
+
+  it('asks before an Update drops the values this template no longer has (#358)', async () => {
+    const update = vi.spyOn(api, 'updatePreset')
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Old engraving')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
+    await user.click(screen.getByRole('button', { name: 'Update' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Update preset Old engraving' })
+    expect(dialog).toHaveTextContent('engrave_depth = 2')
+    expect(update).not.toHaveBeenCalled()
+
+    // Cancel keeps the stored preset as it is.
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(update).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('engrave_depth')
+
+    await user.click(screen.getByRole('button', { name: 'Update' }))
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Update preset Old engraving' })).getByRole('button', {
+        name: 'Update and drop them',
+      }),
+    )
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith('name-keychain', 'b1b2c3d4e5f60718293a4b5c6d7e8f90', {
+        inputs: { params: { name: 'Adam' } },
+      }),
+    )
+  })
+
   it('saves what differs from the defaults as a new preset', async () => {
     const create = vi.spyOn(api, 'createPreset')
     const { user } = render()
