@@ -271,7 +271,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
   `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
   `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
+  badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
   the one read of every parked call, approvals and answers, that the badge counts, and
   `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
   any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
