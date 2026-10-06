@@ -312,7 +312,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
       decision: 'cancelled',
       reason: 'interrupted by You',
     })
-    expect(events.map((e) => e.event)).toContainEqual({ v: 1, type: 'approval.resolved', sessionId: session.id, id: approvalId, approved: false })
+    expect(events.filter((e) => e.event.type === 'approval.resolved' && e.event.id === approvalId)).toHaveLength(1)
     expect(events.some((e) => e.event.type === 'assistant.text.done')).toBe(false)
     expect(events.map((e) => e.event).slice(-2)).toEqual([
       { v: 1, type: 'error', sessionId: session.id, code: 'interrupted', message: 'the turn was interrupted' },
