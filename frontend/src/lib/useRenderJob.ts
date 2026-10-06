@@ -82,7 +82,9 @@ export function useRenderJob(
   const extraRef = useLatest(extra)
 
   useEffect(() => {
-    if (!slug || !params || Object.keys(params).length === 0) return
+    // An empty `params` is a model with no customizer parameters (#941): its defaults
+    // are still a render. A caller with nothing to render yet passes undefined.
+    if (!slug || !params) return
 
     const mine = ++generation.current
     let timer: ReturnType<typeof setTimeout> | undefined
