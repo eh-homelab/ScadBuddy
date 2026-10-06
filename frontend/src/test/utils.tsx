@@ -22,6 +22,8 @@ function parse(route: string) {
  *
  * `rerender` takes the bare element and re-renders it in place inside the same
  * router, as testing-library's does: component state survives (#1013).
+ * Pass the bare element, never one wrapped in a `MemoryRouter`: `rerender`
+ * re-wraps it, so a wrapped element nests a router inside a router and throws.
  */
 export function renderPage(
   ui: ReactElement,

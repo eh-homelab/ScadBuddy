@@ -20,10 +20,12 @@ describe('renderPage', () => {
   it('rerender updates props in place: state and the router survive (#1013)', async () => {
     const { user, rerender } = renderPage(<Counter label="first" />, { route: '/x' })
     await user.click(screen.getByRole('button'))
-    expect(screen.getByRole('button')).toHaveTextContent('first: 1 at /x')
+    const before = screen.getByRole('button')
+    expect(before).toHaveTextContent('first: 1 at /x')
 
     rerender(<Counter label="second" />)
 
+    expect(screen.getByRole('button')).toBe(before)
     expect(screen.getByRole('button')).toHaveTextContent('second: 1 at /x')
   })
 
