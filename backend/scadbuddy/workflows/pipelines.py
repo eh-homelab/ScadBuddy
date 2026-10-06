@@ -125,14 +125,36 @@ def _target_gone(error: FailureError) -> bool:
     return isinstance(error, ApplicationError) and error.type == EXTERNAL_NOT_FOUND
 
 
+#: What each piece activity does, for a failure that is not OpenSCAD's (#952).
+_STAGES = {
+    "cached_piece": "looking up the finished piece",
+    "prepare": "preparing the template's source",
+    "render_main": "rendering the model",
+    "render_solids": "building the per-colour solids",
+    "finish_piece": "writing the 3MF and previews",
+}
+
+
 def _failure_of(error: BaseException) -> Failure:
+    """OpenSCAD's own failure where there is one; else the stage that failed and the
+    innermost cause, never just the wrapper ("ChildWorkflowError: Child Workflow
+    execution failed", #952)."""
+    stage: str | None = None
+    innermost = error
     cause: BaseException | None = error
     while cause is not None:
         if isinstance(cause, ApplicationError) and cause.type == "OpenSCADError" and cause.details:
             detail = cause.details[0]
             return detail if isinstance(detail, Failure) else Failure.model_validate(detail)
+        if isinstance(cause, ActivityError):
+            stage = _STAGES.get(cause.activity_type, cause.activity_type)
+        innermost = cause
         cause = cause.__cause__
-    return Failure(error=f"{type(error).__name__}: {error}")
+    if isinstance(innermost, ApplicationError) and innermost.type:
+        reason = f"{innermost.type}: {innermost.message}"
+    else:
+        reason = f"{type(innermost).__name__}: {innermost}"
+    return Failure(error=f"{stage} failed: {reason}" if stage else reason)
 
 
 @workflow.defn(name="RenderPiece")

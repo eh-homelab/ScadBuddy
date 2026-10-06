@@ -545,6 +545,9 @@ export function runHarness(run: HarnessRun): Query {
       end()
     }
   }
+  // The SDK's Query hands for-await its inner message stream, which bypasses
+  // the wrappers above (#1009). Iterate the Query itself.
+  q[Symbol.asyncIterator] = () => q
   return q
 }
 

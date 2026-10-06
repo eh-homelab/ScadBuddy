@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -256,6 +256,28 @@ describe('render_model', () => {
     const done = await runTool(tool('render_model'), { slug: 'box', save_output: true, output_name: 'v1' }, ctx())
     expect(firstText(done)).toMatchObject({ status: 'done', output: { id: '0123456789abcdef0123456789abcdef' } })
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
+  })
+
+  it('waits out renderWaitMs in elapsed time, whatever the wall clock does (#1485)', async () => {
+    let polls = 0
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now')
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => {
+        polls += 1
+        // The clock steps an hour on during the first poll.
+        if (polls === 1) stepped.mockImplementation(() => now.call(Date) + 3_600_000)
+        return HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: polls < 3 ? 'running' : 'done' })
+      }),
+    )
+    try {
+      const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 60_000 }))
+      expect(firstText(result)).toMatchObject({ status: 'done' })
+    } finally {
+      stepped.mockRestore()
+    }
   })
 
   it('reports a cancelled render as a tool error with its log, settling immediately rather than waiting out renderWaitMs', async () => {
