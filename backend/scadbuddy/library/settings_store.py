@@ -44,7 +44,13 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import NozzleChoice, RackAlgorithm, SlotChoice, Tier
+from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
+    NozzleChoice,
+    RackAlgorithm,
+    SlotChoice,
+    Tier,
+)
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
@@ -104,6 +110,14 @@ def _nullable(name: str) -> bool:
 #: switches or a level, which only a reset puts back.
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 
+
+#: How long a printer's rack-algorithm save may wait for a connection, and then how
+#: long its write may run (#1129). Together well under the print dialog's 25 s give-up
+#: (``rackAlgorithmSave`` in ``frontend/src/api/client.ts``): the dialog then sends its
+#: next choice, and a save it gave up on must not commit after that one. This bounds
+#: only the server's database work, not time a request spends before it reaches the
+#: store (a worker thread, a proxy); ordering saves explicitly is #1216.
+RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 
 #: The settings `StoreNotReadyError` is decided from.
 STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
@@ -176,6 +190,11 @@ class StoredSettings(BambuddyIds):
     #: How long a finished print run's row is kept (#1052, spec 2026-10-01 §5.4).
     #: ``None`` keeps every one: the rows are the start of print history.
     print_run_retention_seconds: float | None = None
+    #: How long a finished operation's row is kept (#1053, spec 2026-10-01 §4.2).
+    #: ``None`` keeps every one. Keep it at least the Temporal namespace's retention: a
+    #: retry whose row is gone while its closed execution is not answers 409 "may have
+    #: been done" rather than its outcome (review #1063 8).
+    operation_retention_seconds: float | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
@@ -220,8 +239,8 @@ class StoredSettings(BambuddyIds):
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
         if printer_id is None:
-            return "least_used"
-        return self.printer_rack_algorithms.get(str(printer_id), "least_used")
+            return DEFAULT_ALGORITHM
+        return self.printer_rack_algorithms.get(str(printer_id), DEFAULT_ALGORITHM)
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -280,8 +299,9 @@ class SettingsPatch(BaseModel):
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
     #: At least a day, past the repeat window: a pruned row would turn a retry of a print
-    #: that succeeded into "print again" (review #1061).
+    #: (or an operation) that succeeded into a second one (review #1061).
     print_run_retention_seconds: float | None = Field(default=None, ge=86400)
+    operation_retention_seconds: float | None = Field(default=None, ge=86400)
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
@@ -618,11 +638,23 @@ class SettingsStore:
 
     def set_printer_rack_algorithm(
         self, printer_id: int, algorithm: RackAlgorithm | None
-    ) -> StoredSettings:
-        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it."""
-        with self._pool.connection() as conn:
+    ) -> RackAlgorithm:
+        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
+        Returns the printer's algorithm now.
+
+        Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
+        write, so it commits well inside the print dialog's give-up or not at all
+        (#1129). Nothing is read back afterwards: an unbounded read of every setting
+        could outlast the give-up on a save that has already landed."""
+        bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
+        with (
+            self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
+            conn.transaction(),
+        ):
+            conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
             _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
-        return self._written("printer_rack_algorithm")
+        emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
+        return algorithm or DEFAULT_ALGORITHM
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing

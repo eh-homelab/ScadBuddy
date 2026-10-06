@@ -26,7 +26,6 @@ from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.print_run import (
@@ -42,12 +41,13 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PrintWatcher
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
-from scadbuddy.library.outputs import OutputStore, PlateSend
+from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
@@ -100,12 +100,13 @@ def problem(error: ApiError) -> PrintRunError:
     )
 
 
-def _raised(error: ApiError, kind: str) -> ApplicationError:
+def raised_as(error: ApiError, kind: str) -> ApplicationError:
     return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
 
 
-async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
+async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive.
+    The operation activities beat with it too."""
     task = asyncio.create_task(work)
     try:
         while True:
@@ -179,11 +180,11 @@ class PrintActivities:
                     client, source, settings, input.request, rack=self.d.rack
                 )
         except ApiError as error:
-            raise _raised(error, REFUSED) from None
+            raise raised_as(error, REFUSED) from None
         except InvalidModelMetaError as error:
             # As every route that reads a broken model.json answers it (`api/models.py`).
             invalid = ApiError(status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata")
-            raise _raised(invalid, REFUSED) from None
+            raise raised_as(invalid, REFUSED) from None
         return Checked(source=spec, prepared=PreparedPlates.of(prepared))
 
     @activity.defn(name="print_insert")
@@ -209,11 +210,11 @@ class PrintActivities:
         try:
             async with client_for(settings) as client:
                 source = await self._source(client, input.accepted.source, settings)
-                return await _heartbeating(
+                return await heartbeating(
                     plan_run(client, source, settings, input.input.request, input.accepted.prepared)
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_slice_start")
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:
@@ -226,16 +227,16 @@ class PrintActivities:
                     plate_id=input.plate_id,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
         """Polls the slice job inside the activity, heartbeating (§5.3)."""
         try:
             async with client_for(self._settings()) as client:
-                return await _heartbeating(wait_slice(client, job_id))
+                return await heartbeating(wait_slice(client, job_id))
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_start_enqueue")
     async def start_enqueue(self, run_id: str) -> None:
@@ -255,7 +256,7 @@ class PrintActivities:
                     credit=input.credit,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -275,7 +276,7 @@ class PrintActivities:
                     input.sent,
                 )
         except ApiError as error:
-            raise _raised(error, FAILED) from None
+            raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:

@@ -19,6 +19,14 @@ import type { QuestionGate, UserQuestion } from './questions.js'
 //   - `stop`: the turn ends, as an interrupt ends it.
 // #815's `approval_pending` reason is refused as malformed: an approval is
 // already its own entry, with its own card, and must never time out to proceed.
+//
+// `done` IS NOT A WAIT (#815 §4, the "done" summary). The agent posts it when it
+// finishes work the user stepped away from, and the call returns at once: there
+// is no timer, no quick reply the model would read, and the row outlives its turn
+// so the badge still counts it when the user comes back. The user dismisses it
+// on its card. ScadBuddy adds its own record of what the turn touched
+// (questions/doneSummary.ts), split around the attention request nobody
+// answered, so what was done unattended is read first.
 
 export const ATTENTION_TOOL_NAME = 'request_user_attention'
 
@@ -40,6 +48,21 @@ export const MESSAGE_MAX = 2_000
 
 /** The quick replies the card offers when the agent names none. */
 export const DEFAULT_REPLIES = ["I'm here", 'Carry on without me'] as const
+/** A tab wait's reply that means the tab is back (sessions/manager.ts waitForTab). */
+export const IM_BACK = "I'm back"
+/**
+ * Replies that say only "the tab is back": a reconnect that resolved the row first
+ * already did what they ask (questions/service.ts answer). Any other reply is words
+ * the model would never read, so it is not one of these.
+ */
+export const BACK_REPLIES: readonly string[] = [IM_BACK, DEFAULT_REPLIES[0]]
+
+/**
+ * A `done` card's replies. The panel shows one Dismiss button, which answers with
+ * the first; the card still carries two because every card is a question, which
+ * has at least two options (harness/questions.ts OPTIONS_MIN).
+ */
+export const DONE_REPLIES = ['Dismiss', 'Got it'] as const
 
 /** What the card's header says for each reason. */
 const HEADERS: Record<AttentionReason, string> = {
@@ -81,12 +104,20 @@ export const ATTENTION_TOOL_SHAPE = {
 }
 
 /** What the gate needs to know about an attention request, beside its card. */
-export type AttentionSpec = {
-  reason: AttentionReason
-  onTimeout: OnTimeout
-  /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
-  timeoutS: number
-}
+export type AttentionSpec =
+  | {
+      reason: Exclude<AttentionReason, 'done'>
+      onTimeout: OnTimeout
+      /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
+      timeoutS: number
+      /** Called once the request is recorded and shown (questions/service.ts `gate`). */
+      onParked?: () => Promise<void>
+    }
+  /** A done summary: posted, never waited on (see above). */
+  | { reason: 'done' }
+
+/** What a `done` request refuses: each is about waiting for a reply, and nobody waits on one. */
+const NOT_FOR_DONE = ['options', 'timeout_s', 'on_timeout'] as const
 
 /** The request's input, or why it is refused (and nothing parks). */
 export function parseAttention(input: unknown): { ok: true; input: AttentionInput } | { ok: false; error: string } {
@@ -96,6 +127,17 @@ export function parseAttention(input: unknown): { ok: true; input: AttentionInpu
       error:
         "reason 'approval_pending' is not an attention request: an outward call already waits for its own approval, " +
         'which the user is shown and which never times out to proceed',
+    }
+  }
+  if (typeof input === 'object' && input !== null && (input as { reason?: unknown }).reason === 'done') {
+    const named = NOT_FOR_DONE.filter((k) => (input as Record<string, unknown>)[k] !== undefined)
+    if (named.length > 0) {
+      return {
+        ok: false,
+        error:
+          `reason 'done' takes no ${named.join(', ')}: a done summary does not wait for a reply. ` +
+          'Post it with a message only, then finish your turn.',
+      }
     }
   }
   const parsed = AttentionInputSchema.safeParse(input)
@@ -108,11 +150,12 @@ export function attentionCard(input: AttentionInput): UserQuestion {
     question: input.message,
     header: HEADERS[input.reason],
     multiSelect: false,
-    options: (input.options ?? DEFAULT_REPLIES).map((label) => ({ label, description: '' })),
+    options: (input.reason === 'done' ? DONE_REPLIES : (input.options ?? DEFAULT_REPLIES)).map((label) => ({ label, description: '' })),
   }
 }
 
 export function attentionSpec(input: AttentionInput): AttentionSpec {
+  if (input.reason === 'done') return { reason: 'done' }
   return {
     reason: input.reason,
     onTimeout: input.on_timeout,
@@ -135,10 +178,19 @@ export function timedOutText(seconds: number): string {
     `timed_out: the user did not reply within ${seconds} s. Carry on with work that needs no approval only ` +
     '(for example render_model instead of browser_render, or save a preset instead of setting values in the tab). ' +
     'A timeout never approves anything: a print, send, delete, or settings or credential write still waits for ' +
-    "the user's explicit approval. When you finish, tell the user what you did while they were away and what " +
-    'still needs them.'
+    "the user's explicit approval. When you finish, post request_user_attention with reason 'done' saying what " +
+    'you did while they were away and what still needs them.'
   )
 }
+
+/** The result the model reads when its `done` summary was posted. */
+export const POSTED_TEXT =
+  "posted: the user sees your summary on the Assistant badge until they dismiss it, with ScadBuddy's own list " +
+  'of what this turn created, changed or deleted. Nobody is waiting on you and no reply will reach you: finish your turn.'
+
+/** The result the model reads when the session's tab came back (#815 §2): not a reply, but the wait is over. */
+export const RECONNECTED_TEXT =
+  'reconnected: the ScadBuddy tab is connected again (the user has not replied). Retry the browser_* call that failed.'
 
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
@@ -167,7 +219,9 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
   try {
     const verdict = await gate({ tool, questions: [card], toolUseId, signal: context.data.signal, attention })
     if (verdict.answered) return text(answeredText(verdict.answers[card.question] ?? ''))
-    if (verdict.timedOut) return text(timedOutText(attention.timeoutS))
+    if (verdict.posted) return text(POSTED_TEXT)
+    if (verdict.timedOut && attention.reason !== 'done') return text(timedOutText(attention.timeoutS))
+    if (verdict.reconnected) return text(RECONNECTED_TEXT)
     return text(verdict.message, true)
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
@@ -178,9 +232,12 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
 /** The tool's description, as the model reads it. */
 export const ATTENTION_DESCRIPTION =
   'Get the user\'s attention and wait for their reply: shown in the ScadBuddy panel and counted on the Assistant ' +
-  'badge. Use it when you cannot go on without them (`blocked`, `tab_disconnected` after a browser_* call ' +
-  'found no tab, a `question` that has no fixed choices), or to tell them you are `done` with long work. ' +
+  'badge. Use it when you cannot go on without them (`blocked`, a `question` that has no fixed choices). ' +
+  'Do not use it after a browser_* call finds no tab: that call already waits for the tab and asks the user ' +
+  'itself, and its result says what they chose. ' +
+  '`done` is different: post it when you finish work the user stepped away from (above all after a timed_out ' +
+  'request), with a message saying what you did and what still needs them. It returns at once and waits for ' +
+  'nothing, takes no options, timeout_s or on_timeout, and stays on the badge until the user dismisses it. ' +
   '`options` are up to four quick replies; the user may also type their own. After `timeout_s` (default 300) ' +
   '`on_timeout` decides: `proceed` (default) returns timed_out and you carry on with work that needs no ' +
-  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything. ' +
-  'One request per reason is open at a time: a new one replaces the last.'
+  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything.'

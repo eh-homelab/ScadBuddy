@@ -624,6 +624,16 @@ class SnapshotUnavailableError(RuntimeError):
     """No snapshot is stored and this process has no git history to make one."""
 
 
+class SnapshotPendingError(RuntimeError):
+    """A revision's snapshot is still being stored past the request's wait for it
+    (`SnapshotStore.pin`, #686). The store carries on; a retry after ``retry_after``
+    seconds finds it stored, or joins it."""
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:
     """Evict revision exports nobody has rendered from in ``ttl`` seconds.
 

@@ -115,6 +115,10 @@ export type PrintRunResult = Schemas['PrintRunResult']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
+/** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
+export type Operation = Schemas['Operation']
+/** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
+export type OperationAccepted = Schemas['OperationAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
@@ -284,7 +288,22 @@ export interface AiSessionView {
  * queue item id; `print_run` is ScadBuddy's own run.
  */
 export interface SessionResource {
-  type: 'model' | 'revision' | 'preset' | 'asset' | 'render_job' | 'output' | 'print_run' | 'print' | 'unclassified'
+  type:
+    | 'model'
+    | 'revision'
+    | 'preset'
+    | 'asset'
+    | 'render_job'
+    | 'output'
+    | 'print_run'
+    | 'print'
+    | 'library'
+    | 'font'
+    | 'setting'
+    | 'project'
+    | 'bambuddy_file'
+    | 'print_archive'
+    | 'unclassified'
   /** Null only for `unclassified`. */
   id: string | null
   action: 'created' | 'modified' | 'deleted'

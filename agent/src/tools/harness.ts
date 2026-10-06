@@ -5,7 +5,7 @@ import type { TurnPrincipal } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
 import { createHarnessServer, SERVER_NAME } from './projections.js'
-import type { Tool, ToolServices } from './registry.js'
+import type { Tool, ToolServices, WaitForTab } from './registry.js'
 
 // The registry's harness side, as the session manager takes it
 // (sessions/manager.ts SessionManagerDeps `tierOf` and `mcpServers`), so that
@@ -28,20 +28,29 @@ import type { Tool, ToolServices } from './registry.js'
 
 export type HarnessTools = {
   tierOf: TierResolver
-  mcpServers: (session: { id?: string; owner: Owner }, turn?: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers: (
+    session: { id?: string; owner: Owner },
+    turn?: TurnPrincipal,
+    extras?: { waitForTab?: WaitForTab },
+  ) => Record<string, McpSdkServerConfigWithInstance>
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
   const risk = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t.risk]))
   return {
     tierOf: (name) => risk.get(name),
-    mcpServers: (session, turn) => {
+    mcpServers: (session, turn, extras) => {
       const principal = turnPrincipal(session.owner, turn)
       const allowed = tools.filter((t) => hasTier(principal, t.risk))
       // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).
       const bound =
         services.browser && session.id !== undefined
-          ? { ...services, browser: services.browser.forSession(session.id) }
+          ? {
+              ...services,
+              browser: services.browser.forSession(session.id),
+              // #815 §2: a call that finds no tab may wait for it (browser.ts).
+              ...(extras?.waitForTab ? { waitForTab: extras.waitForTab } : {}),
+            }
           : services
       // The session id too, so its commits name it (authorship.ts, #252).
       return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id) }
