@@ -129,7 +129,8 @@ describe('CataloguePage filters (#276)', () => {
 
   it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
     const { user } = renderCatalogue()
-    const tags = within(await screen.findByRole('group', { name: 'Tags' }))
+    await user.click(await screen.findByRole('button', { name: /^Tags/ }))
+    const tags = within(screen.getByRole('group', { name: 'Tags' }))
     expect(tags.getByRole('button', { name: 'template 1' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Mine' }))

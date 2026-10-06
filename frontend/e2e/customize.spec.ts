@@ -56,6 +56,28 @@ test.describe('customizer', () => {
     await expect(page.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
   })
 
+  test('shows every parameter group tab however narrow the panel, none scrolled out of sight (#942)', async ({
+    page,
+  }) => {
+    await page.goto('/m/name-keychain')
+    const tablist = page.getByRole('tablist', { name: 'Parameter groups' })
+    await expect(tablist.getByRole('tab')).toHaveCount(3)
+    // Narrower than the three tabs side by side: a template with many groups
+    // (Dollhouse Kit has 15) overflows the panel at any width.
+    await tablist.evaluate((element) => element.setAttribute('style', 'width: 90px'))
+
+    const box = await tablist.boundingBox()
+    if (!box) throw new Error('the tablist is not laid out')
+    for (const tab of await tablist.getByRole('tab').all()) {
+      const tabBox = await tab.boundingBox()
+      if (!tabBox) throw new Error('a tab is not laid out')
+      // Inside the tablist, not past its edge behind a hidden scrollbar.
+      expect(tabBox.x).toBeGreaterThanOrEqual(box.x - 0.5)
+      expect(tabBox.x + tabBox.width).toBeLessThanOrEqual(box.x + box.width + 0.5)
+    }
+    expect(await tablist.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  })
+
   test('keeps the previous preview while the next render runs', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toContainText('64.1')

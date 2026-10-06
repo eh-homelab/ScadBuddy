@@ -352,13 +352,17 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-1">
-        {modified && (
-          <span data-testid="preset-modified" className="mr-auto text-[12px] text-faint">
-            Changed from {selected?.name}
-          </span>
-        )}
+        {/* #351 — always in the page, so "Changed from …" is announced as it appears. */}
+        <span role="status" className="mr-auto text-[12px] text-faint">
+          {modified && <span data-testid="preset-modified">Changed from {selected?.name}</span>}
+        </span>
         {editable && modified && (
-          <Button size="sm" onClick={() => void update()} disabled={busy}>
+          <Button
+            size="sm"
+            onClick={() => void update()}
+            disabled={busy}
+            aria-label={`Update preset ${selected?.name ?? ''}`}
+          >
             Update
           </Button>
         )}
