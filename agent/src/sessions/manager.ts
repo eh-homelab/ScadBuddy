@@ -74,7 +74,7 @@ import {
   type ServerEvent,
   type SessionStatus,
 } from './protocol.js'
-import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
+import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
@@ -1077,6 +1077,7 @@ export class SessionManager {
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf)
+    const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
     // MCP call, or the decision an orphan resumes under), else a root.
@@ -1135,12 +1136,17 @@ export class SessionManager {
        * says it, and they are dropped; otherwise they are shown as they came.
        */
       const heldErrors: SDKMessage[] = []
-      const show = async (message: SDKMessage) => {
-        await pluginCheck?.(message)
-        const events = mapper.map(message)
+      const log = async (events: ServerEvent[]) => {
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
         for (const e of events) traced.observe(e)
         if (auditor) for (const e of events) await auditor.observe(e)
+      }
+      const show = async (message: SDKMessage) => {
+        await pluginCheck?.(message)
+        const events = mapper.map(message)
+        const logged = log(events)
+        shownCalls.logging(events, logged)
+        await logged
       }
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
@@ -1237,6 +1243,11 @@ export class SessionManager {
           secrets: () => secrets,
           signal: controller.signal,
           trace: traced,
+          shown: (toolUseId, toolName, input) =>
+            shownCalls.ensure(toolUseId, () => {
+              const call = mapper.call(toolUseId, toolName, input)
+              return call ? log([call]) : Promise.resolve()
+            }),
         })
         const sandbox =
           this.deps.headlessBrowser?.sandbox && browserSetting === true

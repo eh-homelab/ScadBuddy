@@ -17,6 +17,7 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy import filaments
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import (
     COLOUR_MATCH_DISTANCE,
@@ -188,7 +189,7 @@ def test_a_spool_in_another_printers_tray_takes_none_of_this_printers_state() ->
 
 def test_the_keychain_pre_selects_the_closest_blue_and_pink() -> None:
     """#87's acceptance case: two colours, no clicks. The blue is an exact match and
-    the pink is within the threshold; the far-off Hot Pink is not offered."""
+    the pink is the nearer of Magenta and Hot Pink."""
     built = options()
     chosen = {choice.slot_id: choice.spool_id for choice in built.suggested}
     assert chosen == {1: 5, 2: 3}
@@ -594,19 +595,12 @@ async def test_the_requirements_read_turns_that_zero_into_none(bambuddy: Bambudd
 def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     """``COLOUR_MATCH_DISTANCE`` is a real cut-off, not a number nothing reads: a
     colour just inside it is pre-selected and one just outside is not."""
-    near = f"#{int(COLOUR_MATCH_DISTANCE) - 1:02X}0000"
-    far = f"#{int(COLOUR_MATCH_DISTANCE) + 1:02X}0000"
-    black = [
-        Spool.model_validate(
-            {
-                "id": 1,
-                "material": "PLA",
-                "rgba": "000000FF",
-                "label_weight": 1000,
-                "weight_used": 0.0,
-            }
-        )
-    ]
+    near, far = "#230000", "#240000"
+    near_distance = colour_distance(near, "#000000")
+    far_distance = colour_distance(far, "#000000")
+    assert near_distance is not None and far_distance is not None
+    assert near_distance < COLOUR_MATCH_DISTANCE < far_distance
+    black = [_spool(1, "000000FF")]
     inside = build_options(
         library_file_id=1,
         spools=black,
@@ -621,3 +615,81 @@ def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     )
     assert [choice.spool_id for choice in inside.suggested] == [1]
     assert outside.suggested == []
+
+
+def _spool(spool_id: int, rgba: str | None, material: str = "PLA") -> Spool:
+    return Spool.model_validate(
+        {
+            "id": spool_id,
+            "material": material,
+            "rgba": rgba,
+            "label_weight": 1000,
+            "weight_used": 0.0,
+        }
+    )
+
+
+# CIEDE2000 test pairs from Sharma, Wu and Dalal (2005), Table 1.
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485), 2.0425),
+        ((50.0, -1.3802, -84.2814), (50.0, 0.0, -82.7485), 1.0000),
+        ((50.0, 2.5, 0.0), (73.0, 25.0, -18.0), 27.1492),
+        ((60.2574, -34.0099, 36.2677), (60.4626, -34.1751, 39.4387), 1.2644),
+        ((2.0776, 0.0795, -1.1350), (0.9033, -0.0636, -0.5514), 0.9082),
+    ],
+)
+def test_colour_distance_is_ciede2000(
+    first: tuple[float, float, float], second: tuple[float, float, float], expected: float
+) -> None:
+    assert filaments.ciede2000(first, second) == pytest.approx(expected, abs=1e-4)
+
+
+def test_a_pure_css_red_pre_selects_the_nearest_real_red_not_a_colourless_spool() -> None:
+    """#943: `#FF0000` is about 50 RGB units from every real red filament, so all of
+    them were excluded and a spool with no colour won the slot."""
+    shelf = [
+        _spool(30, None),  # Inland PLA Glow, Fluorescent Rainbow: no colour
+        _spool(4, "C12E1FFF"),  # PLA Basic Red
+        _spool(6, "D6001CFF", "PETG"),  # PETG Basic Red
+        _spool(11, "B50011FF"),  # PLA Translucent Red, 16 away
+    ]
+
+    def pick(material: str | None) -> list[int]:
+        built = build_options(
+            library_file_id=1,
+            spools=shelf,
+            assignments=[],
+            requirements=[SlotNeed(slot_id=1, colour="#FF0000", material=material)],
+        )
+        return [choice.spool_id for choice in built.suggested]
+
+    assert pick(None) == [6]
+    assert pick("PLA") == [4]
+
+
+def test_a_coloured_slot_with_only_a_colourless_spool_is_left_unchosen() -> None:
+    built = build_options(
+        library_file_id=1,
+        spools=[_spool(30, None)],
+        assignments=[],
+        requirements=[SlotNeed(slot_id=1, colour="#FF0000")],
+    )
+    assert built.suggested == []
+
+
+def test_a_loaded_cobalt_beats_a_closer_cyan_on_the_shelf() -> None:
+    """#943's second case: the loaded `#0056B8` was over the RGB cut-off, so the shelf
+    cyan was suggested and the dialog asked for a reload."""
+    loaded = SpoolAssignment.model_validate(
+        {**recording("inventory-assignments.json")[0], "spool_id": 40, "spool": None}
+    )
+    built = build_options(
+        library_file_id=1,
+        spools=[_spool(24, "0086D6FF"), _spool(40, "0056B8FF")],
+        assignments=[loaded],
+        requirements=[SlotNeed(slot_id=1, colour="#0D71E3")],
+        printer=printer(),
+    )
+    assert [choice.spool_id for choice in built.suggested] == [40]

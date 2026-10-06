@@ -55,6 +55,44 @@ def test_print_again_queues_the_archive_on_its_printer_and_plate(
 
 
 @respx.mock
+def test_print_again_queues_with_the_remembered_print_options(
+    client: TestClient, model: str
+) -> None:
+    """#1329: global, then the printer's, then the model's, as a print from the dialog."""
+    configure(client)
+    output_id = make_output(client, model)
+    slug = client.get(f"/api/v1/outputs/{output_id}").json()["slug"]
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    queue = mock_enqueue()
+    options = "/api/v1/settings/print-options"
+    remember = [
+        {"scope": "global", "options": {"use_ams": False, "layer_inspect": True}},
+        {"scope": "printer", "key": "3", "options": {"manual_start": True, "timelapse": True}},
+        {"scope": "printer", "key": "4", "options": {"auto_off_after": True}},
+        # A copy count and a project are the dialog's own controls, not a reprint's.
+        {
+            "scope": "model",
+            "key": slug,
+            "options": {"layer_inspect": False, "quantity": 3, "project_id": 7},
+        },
+    ]
+    for body in remember:
+        assert client.put(options, json=body).status_code == 200
+
+    assert client.post("/api/v1/prints/35/reprint").status_code == 201
+
+    sent = json.loads(queue.calls.last.request.content)
+    assert sent["manual_start"] is True
+    assert sent["timelapse"] is True
+    assert sent["use_ams"] is False
+    assert sent["layer_inspect"] is False
+    assert sent["auto_off_after"] is False
+    assert sent.get("quantity", 1) == 1
+    assert sent.get("project_id") is None
+
+
+@respx.mock
 def test_print_again_falls_back_to_the_links_printer_and_plate(
     client: TestClient, model: str
 ) -> None:
