@@ -37,6 +37,7 @@ from scadbuddy.core.tracing import DEFAULT_SAMPLER
 from scadbuddy.library import url_import
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render import confinement
 from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
@@ -149,6 +150,16 @@ def installed_font_families() -> str:
 def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad") and openscad_binary() is None:
         pytest.skip("openscad is not on PATH")
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_only_real_openscad(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fake openscads are scripts reading and writing the test's own files, which
+    the sandbox (#994) rightly refuses them; a test of the real binary keeps it."""
+    if not request.node.get_closest_marker("requires_openscad"):
+        monkeypatch.setattr(confinement, "landlock_abi", lambda: 0)
 
 
 @pytest.fixture(autouse=True)
