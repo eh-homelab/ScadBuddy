@@ -15,6 +15,8 @@ REVIEW_UPDATE = "review"
 PENDING_QUERY = "pending_approvals"
 DECISIONS_QUERY = "decisions"
 EXPIRED_BY = "system:expired"
+# The send validator's refusal while a Stop closes the run (the agent maps it to `busy`).
+STOPPING = "the session is stopping; send again"
 
 RESTORE_REASON = "the previous run of this session stopped unexpectedly"
 _RECENT_CALLS = 256  # the plugin's run-once guard keeps this many ids (_workflow.py)

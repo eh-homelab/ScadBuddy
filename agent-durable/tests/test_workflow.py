@@ -40,7 +40,7 @@ from scadbuddy_durable.models import (
     restore_state,
 )
 from scadbuddy_durable.workflow import DurableSession
-from tests.short_runs import ShortRuns
+from tests.short_runs import LongStop, ShortRuns
 from tests.support import WAIT, Rig, Seen, make_policy, rig_on
 
 HISTORIES = Path(__file__).parent / "histories"
@@ -358,6 +358,21 @@ async def test_stop_during_a_tool_hands_over_the_state_and_resumes(rig: Rig) -> 
     ]
     assert rig.stubs.ids("get_model").count(call_id) == 1
     assert len(rig.stubs.ids("get_model")) == 2
+
+
+@temporal
+async def test_a_message_sent_while_a_stop_closes_the_run_is_refused(rig: Rig) -> None:
+    # Accepted, it would be lost: the run returns its state without reading its inbox.
+    rig.stubs.gate("get_model")
+    wid, inp = rig.new()
+    handle = await rig.send(wid, inp, "read slow", workflow=LongStop)
+    await rig.started("get_model")
+    await handle.cancel()
+    await rig.event(wid, "cancelled")  # the plugin ended the task; the run is still open
+    with pytest.raises(WorkflowUpdateFailedError) as err:
+        await handle.execute_update(DurableSession.send_message, Message("after stop"))
+    assert "the session is stopping" in str(err.value.cause)
+    await handle.terminate("test over")
 
 
 @temporal

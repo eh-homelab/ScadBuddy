@@ -21,6 +21,7 @@ from .models import (
     PENDING_QUERY,
     REVIEW_UPDATE,
     SEND_UPDATE,
+    STOPPING,
     WORKFLOW_NAME,
     InFlight,
     Message,
@@ -95,6 +96,10 @@ class DurableSession:
     def check_message(self, message: Message) -> None:
         if not message.text.strip():
             raise ValueError("the message is empty")
+        # A Stop ends the plugin's task (the session reads idle) before this run returns
+        # its state, without reading its inbox: a message accepted meanwhile would be lost.
+        if workflow.cancellation_reason() is not None:
+            raise ValueError(STOPPING)
         if self.agent.busy or self._inbox:
             raise ValueError("the session is busy")
 

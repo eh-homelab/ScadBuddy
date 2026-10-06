@@ -22,7 +22,7 @@ from scadbuddy_durable.models import PENDING_QUERY, TASK_QUEUE, Message, Session
 from scadbuddy_durable.segments import SAVE_SNAPSHOT
 from scadbuddy_durable.tools import TOOL_QUEUE, TOOLS
 from scadbuddy_durable.workflow import DurableSession
-from tests.short_runs import ShortRuns
+from tests.short_runs import LongStop, ShortRuns
 
 WAIT = 60.0
 
@@ -202,7 +202,7 @@ async def rig_on(client: Client, state_dir: Path) -> AsyncIterator[Rig]:
             Worker(
                 client,
                 task_queue=TASK_QUEUE,
-                workflows=[DurableSession, ShortRuns],
+                workflows=[DurableSession, ShortRuns, LongStop],
                 activities=[snaps.activity],
                 plugins=[ClaudeAgentPlugin(runner, heartbeat_every=1.0)],
             ),
