@@ -50,7 +50,7 @@ pose = "wave"; // [straight:Straight, wave:Wave, curl:Curl]
 // Name along the back, one letter per body segment; segments are added, and the critter lengthened if need be, to fit it (leave empty for none)
 name = ""; // 12
 
-// Typeface for the name (the app fills this dropdown from the fonts installed in the image)
+// Typeface for the name
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Hinges] */
