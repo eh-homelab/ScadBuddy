@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import {
+  DEFAULT_MAX_REQUEST_BODY_SIZE,
+  readRequestBody,
+  requestBodyTooLargeMessage,
+} from '@modelcontextprotocol/sdk/server/requestBody.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
+import { context, propagation, ROOT_CONTEXT, trace } from '@opentelemetry/api'
 import type { Context, Hono } from 'hono'
 import type { AuditLog } from '../audit/log.js'
 import {
@@ -21,6 +27,7 @@ import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
 import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
+import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
@@ -133,6 +140,123 @@ function jsonRpcError(status: number, code: number, message: string): Response {
   return Response.json({ jsonrpc: '2.0', error: { code, message }, id: null }, { status })
 }
 
+// What a client may send an MCP server (the SDK's types.ts). A span name is
+// only ever one of these or `unknown`, never caller-chosen text.
+const MCP_METHODS: ReadonlySet<string> = new Set([
+  'initialize',
+  'ping',
+  'tools/list',
+  'tools/call',
+  'resources/list',
+  'resources/read',
+  'resources/templates/list',
+  'resources/subscribe',
+  'resources/unsubscribe',
+  'prompts/list',
+  'prompts/get',
+  'completion/complete',
+  'logging/setLevel',
+  'notifications/initialized',
+  'notifications/cancelled',
+  'notifications/progress',
+  'notifications/roots/list_changed',
+])
+
+/** The JSON-RPC method of a parsed POST body, for its span name; `unknown` unless it is a known MCP method. A batch is named after its first method. */
+export function mcpMethodOf(body: unknown): string {
+  const first: unknown = Array.isArray(body) ? body[0] : body
+  const method = typeof first === 'object' && first !== null ? (first as { method?: unknown }).method : undefined
+  return typeof method === 'string' && MCP_METHODS.has(method) ? method : 'unknown'
+}
+
+/**
+ * A POST body, read once and parsed once, under the transport's own bound.
+ * The span is named from it and the transport is handed it as `parsedBody`,
+ * so nothing is cloned or parsed twice. A body over the bound is answered as
+ * the transport would; one that is not JSON goes to the transport as text, so
+ * it answers it exactly as before (415 for the wrong type, else 400).
+ */
+async function readPost(request: Request): Promise<{ parsedBody: unknown } | { request: Request } | Response> {
+  const body = await readRequestBody(request, DEFAULT_MAX_REQUEST_BODY_SIZE)
+  if (body.tooLarge) return jsonRpcError(413, -32000, requestBodyTooLargeMessage(DEFAULT_MAX_REQUEST_BODY_SIZE))
+  try {
+    return { parsedBody: JSON.parse(body.text) as unknown }
+  } catch {
+    return { request: new Request(request.url, { method: 'POST', headers: request.headers, body: body.text }) }
+  }
+}
+
+type Handle = (request: Request, options: { parsedBody?: unknown }) => Promise<Response>
+
+/**
+ * `agent.mcp/<method>` around one POST (spec 2026-10-01 §5.4). Under the HTTP
+ * instrumentation's server span in production; where there is none (tests, or
+ * an untraced listener), the caller's `traceparent` is continued here. GET is
+ * the SSE stream (left untraced, telemetry/setup.ts) and DELETE has no method.
+ */
+async function traced(request: Request, handle: Handle): Promise<Response> {
+  if (request.method !== 'POST') return handle(request, {})
+  const active = context.active()
+  const parent = trace.getSpan(active)
+    ? active
+    : propagation.extract(ROOT_CONTEXT, request.headers, {
+        keys: (headers) => [...headers.keys()],
+        get: (headers, key) => headers.get(key) ?? undefined,
+      })
+  const span = tracer().startSpan('agent.mcp', {}, parent)
+  try {
+    // Read for the transport whether or not the span is kept; naming it costs
+    // no second read or parse.
+    const read = await readPost(request)
+    if (read instanceof Response) {
+      span.setAttribute('http.response.status_code', read.status)
+      span.end()
+      return read
+    }
+    if ('parsedBody' in read) {
+      const method = mcpMethodOf(read.parsedBody)
+      span.updateName(`agent.mcp/${method}`)
+      span.setAttribute('rpc.method', method)
+    }
+    const response = await context.with(trace.setSpan(parent, span), () =>
+      'parsedBody' in read ? handle(request, { parsedBody: read.parsedBody }) : handle(read.request, {}),
+    )
+    span.setAttribute('http.response.status_code', response.status)
+    // An SSE answer is returned before the tool has finished: the span ends
+    // when its body does (or is cancelled), so it outlives its children. The
+    // body is passed through chunk by chunk, never buffered.
+    if (response.body && response.headers.get('content-type')?.includes('text/event-stream')) {
+      const reader = response.body.getReader()
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read()
+            if (done) {
+              span.end()
+              controller.close()
+            } else controller.enqueue(value)
+          } catch (err) {
+            recordFailure(span, err)
+            span.end()
+            controller.error(err)
+          }
+        },
+        async cancel(reason) {
+          span.end()
+          await reader.cancel(reason)
+        },
+      })
+      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
+    }
+    span.end()
+    return response
+  } catch (err) {
+    recordFailure(span, err)
+    span.end()
+    throw err
+  }
+}
+
 /** What /mcp shares with the rest of the app: the origin allowlist and how to read the peer. */
 export type McpHttpContext = { origins: OriginPolicy; remoteAddress: RemoteAddress }
 
@@ -221,7 +345,7 @@ export function mountMcp(
       // principal, even a valid one, may not ride on it.
       if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
       session.lastSeen = Date.now()
-      return session.transport.handleRequest(request, { authInfo: authInfoFor(principal) })
+      return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
     }
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
@@ -256,7 +380,9 @@ export function mountMcp(
       },
     })
     await server.connect(transport)
-    const response = await transport.handleRequest(request, { authInfo: authInfoFor(principal) })
+    const response = await traced(request, (req, options) =>
+      transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }),
+    )
     // Not an initialize request: the transport answered 400 and no session exists.
     if (transport.sessionId === undefined) {
       detach()

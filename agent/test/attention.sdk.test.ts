@@ -4,12 +4,17 @@ import path from 'node:path'
 import { query, type SDKMessage, type SDKResultMessage, type SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  ATTENTION_DESCRIPTION,
   answeredText,
+  attentionCard,
   attentionHandler,
   attentionSpec,
   DEFAULT_REPLIES,
   DEFAULT_TIMEOUT_S,
+  DONE_REPLIES,
   parseAttention,
+  POSTED_TEXT,
+  RECONNECTED_TEXT,
   timedOutText,
   WAIT_CEILING_S,
 } from '../src/harness/attention.js'
@@ -66,11 +71,33 @@ describe('parseAttention', () => {
     const at = (on_timeout: string) => {
       const parsed = parseAttention({ reason: 'blocked', message: MESSAGE, timeout_s: 60, on_timeout })
       if (!parsed.ok) throw new Error(parsed.error)
-      return attentionSpec(parsed.input).timeoutS
+      const spec = attentionSpec(parsed.input)
+      if (spec.reason === 'done') throw new Error('a blocked request has a timer')
+      return spec.timeoutS
     }
     expect(at('wait')).toBe(WAIT_CEILING_S)
     expect(at('proceed')).toBe(60)
     expect(at('stop')).toBe(60)
+  })
+
+  // #815 §4: a done summary is posted, never waited on.
+  it("'done' has no timer and Dismiss replies, and refuses what only a wait would use", () => {
+    const parsed = parseAttention({ reason: 'done', message: MESSAGE })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(attentionSpec(parsed.input)).toEqual({ reason: 'done' })
+    expect(attentionCard(parsed.input)).toMatchObject({ header: 'Done', options: DONE_REPLIES.map((label) => ({ label })) })
+    for (const extra of [{ options: ['a', 'b'] }, { timeout_s: 60 }, { on_timeout: 'wait' }]) {
+      const refused = parseAttention({ reason: 'done', message: MESSAGE, ...extra })
+      expect(refused, JSON.stringify(extra)).toMatchObject({ ok: false, error: expect.stringMatching(/does not wait for a reply/) })
+    }
+  })
+})
+
+describe('ATTENTION_DESCRIPTION', () => {
+  it("does not send the model to it after a failed browser_* call, which waits for the tab itself (#815)", () => {
+    expect(ATTENTION_DESCRIPTION).toMatch(/Do not use it after a browser_\* call finds no tab: that call already waits/)
+    expect(ATTENTION_DESCRIPTION).not.toMatch(/`tab_disconnected` after a browser_\* call/)
+    expect(ATTENTION_DESCRIPTION).not.toMatch(/One request per reason/)
   })
 })
 
@@ -107,6 +134,23 @@ describe('request_user_attention handler', () => {
     const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'blocked', message: MESSAGE, timeout_s: 30 }, extra())
     expect(result).toEqual({ content: [{ type: 'text', text: timedOutText(30) }] })
     expect(timedOutText(30)).toMatch(/^timed_out: .*never approves anything/)
+  })
+
+  // #1343: only a read is re-run when the tab is back; the model must not repeat a write blind.
+  it('a reconnect is a result, not an error, and sends the model to re-check the page, not to retry', async () => {
+    const { gate } = recording(() => Promise.resolve({ answered: false, reconnected: true, message: 'the ScadBuddy tab is connected again' }))
+    const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'tab_disconnected', message: MESSAGE }, extra())
+    expect(result).toEqual({ content: [{ type: 'text', text: RECONNECTED_TEXT }] })
+    expect(RECONNECTED_TEXT).toMatch(/^reconnected: .*re-check it \(browser_status, then browser_snapshot\)/)
+    expect(RECONNECTED_TEXT).not.toMatch(/retry/i)
+  })
+
+  it('a posted done summary is a result, not an error, and tells the model nobody waits on it', async () => {
+    const { asked, gate } = recording(() => Promise.resolve({ answered: false, posted: true, message: 'posted' }))
+    const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'done', message: MESSAGE }, extra())
+    expect(asked).toMatchObject([{ attention: { reason: 'done' }, questions: [{ header: 'Done' }] }])
+    expect(result).toEqual({ content: [{ type: 'text', text: POSTED_TEXT }] })
+    expect(POSTED_TEXT).toMatch(/^posted: .*no reply will reach you/)
   })
 
   it('anything else is the error the model reads, and malformed input parks nothing', async () => {

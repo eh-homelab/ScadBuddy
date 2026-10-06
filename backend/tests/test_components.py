@@ -398,3 +398,14 @@ def test_the_model_kinds_refuse_a_core_that_is_not_the_app_state() -> None:
     not with an ``AttributeError`` inside an operation."""
     with pytest.raises(TypeError, match="AppState"):
         library_operations.OPERATION_KINDS(CORE, Components(CORE, []))
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> None:
+    """Review #1063 fourth review 2: Temporal reads ``maximum_attempts=0`` as unlimited."""
+
+    async def step(*args: object) -> dict[str, object]:
+        return {}
+
+    with pytest.raises(ValueError, match="run_attempts"):
+        OperationKind("send", step, step, run_attempts=attempts)

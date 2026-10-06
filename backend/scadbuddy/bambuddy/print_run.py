@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.hardware import (
     plate_warning,
 )
 from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
     FilamentRequirements,
     FlowType,
     PrinterStatus,
@@ -763,7 +764,7 @@ class PlannedRun(BaseModel):
     plates: list[PlatePlan]
     warnings: list[FilamentWarning] = Field(default_factory=list)
     #: How the rack is ranked, a hand-picked position, and whether there is a rack (#836).
-    rack_algorithm: RackAlgorithm = "least_used"
+    rack_algorithm: RackAlgorithm = DEFAULT_ALGORITHM
     rack_position: int | None = None
     has_rack: bool = False
 

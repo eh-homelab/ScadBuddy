@@ -13,7 +13,7 @@ export const MAX_MESSAGE_CHARS = 200
 
 /** Characters as Pydantic's `max_length` counts them: code points, where a JS string's
  * `length` (and so Zod's `.max`) counts UTF-16 units and an astral character twice. */
-function codePoints(text: string): number {
+export function codePoints(text: string): number {
   let count = 0
   for (const _ of text) count++
   return count

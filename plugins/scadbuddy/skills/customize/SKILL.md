@@ -190,6 +190,10 @@ settings are `outward`, and always need a human approval in the ScadBuddy UI
   ScadBuddy, `browser_pair` first gives a one-time code for the user to type into
   their tab, and `browser_status` says when it is attached. Without a paired tab,
   work through the render tools above and tell the user which values you chose.
+- Picking a preset in the tab over edits that no preset holds opens an "Apply
+  preset …?" dialog, and `fill` reports it in a `confirm` note. "Replace my
+  changes" discards those edits for good. Press it only if you made them; if the
+  user did, ask them first.
 - For a render that fails or warns, `get_render_diagnostics` gives OpenSCAD's
   warnings and errors with the file and line each names. `get_lsp_diagnostics`
   checks a source's syntax without rendering it. Fixing the template itself is the

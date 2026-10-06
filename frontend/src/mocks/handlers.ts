@@ -1803,6 +1803,24 @@ export const handlers = [
     })
   }),
 
+  // #624 — the strip's small copy: the image, or a video's poster (404 with none).
+  http.get(`${base}/models/:slug/media/:id/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item || item.missing) return noMediaItem(slug, id)
+    const file = item.kind === 'video' ? item.poster : item.file
+    if (!file) return noMediaItem(slug, id)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, file, 'image'), {
+      headers: {
+        'Content-Type': 'image/webp',
+        'Cache-Control': item.id === 'thumbnail' ? 'no-cache' : IMMUTABLE_CACHE_CONTROL,
+      },
+    })
+  }),
+
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const model = mediaTarget(slug)
@@ -2466,6 +2484,9 @@ export const handlers = [
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.BROKEN_PREVIEW_NAME) {
+      return problem(500, 'Internal Server Error')
+    }
     const [x, y, z] = job.bbox_mm.size
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {

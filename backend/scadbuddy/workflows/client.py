@@ -118,7 +118,10 @@ def bambuddy_worker(
     the release that adds them needs a ``Recreate`` rollout (or the old replicas scaled
     to 0 first). #1053 is one: it adds ``Operation`` and its ``op_*`` and
     ``op.<kind>.*`` activities, and ``FollowPrint`` with its ``follow_print`` activity
-    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue")."""
+    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue").
+    Rolled anyway, an unregistered workflow task only stalls, but an activity's failure
+    counts against its retry policy: an effect that runs once is recorded ``failed``
+    ("may have been done") without reaching Bambuddy, and a check can answer 500."""
     return Worker(
         client,
         task_queue=task_queue,

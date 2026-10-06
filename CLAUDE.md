@@ -318,10 +318,27 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
   `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
   `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts);
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
+  badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
+  the one read of every parked call, approvals and answers, that the badge counts, and
+  `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
+  any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
+  a browser_* call that finds no tab in such a session parks the same way as a
+  `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  `src/api/schema.d.ts`.
+  Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
+  `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
+  before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
+  park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,
+  `decision_traceparent`). Only `api/backend.ts`'s middleware injects `traceparent`;
+  never add trace context to another outgoing call. Tests share one provider
+  (`test/support/tracing.ts` `testTracing`).
+  `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
@@ -415,9 +432,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -510,10 +527,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
-- `claude-review` is a merge gate: the review runs after CI, then a classifier passes
-  only when every finding in the review for *this* commit is fixed or tracked in an
-  open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
-  to the PR files those `pr-feedback` issues automatically.
+- `claude-review` is a merge gate: the review runs after CI and sorts its findings into
+  `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
+  finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
+  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
+  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
+  `pr-feedback` issues automatically.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed
