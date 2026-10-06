@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable, Sequence
 from typing import Literal
 
@@ -56,11 +57,14 @@ from scadbuddy.bambuddy.models import (
 
 logger = logging.getLogger(__name__)
 
-#: How far apart two colours may be, as a plain RGB distance, and still be pre-selected.
-#: The whole cube's diagonal is ~441, so this is "recognisably the same colour" — a
-#: navy and a royal blue match, a blue and a pink do not. It only seeds the picker's
+#: How far apart two colours may be, as a CIEDE2000 colour difference, and still be
+#: pre-selected. About 2 is "just noticeable" and 100 is black against white, so this
+#: is "recognisably the same colour": `#FF0000` matches an opaque red filament
+#: (10-12), a navy matches a royal blue (12), and a royal blue does not match a
+#: greyish Misty Blue (20) or a blue a pink (37). Kept this tight because a loaded
+#: spool inside it beats an exact match on the shelf. It only seeds the picker's
 #: opening selection; every slot stays editable and nothing is decided by it.
-COLOUR_MATCH_DISTANCE = 48.0
+COLOUR_MATCH_DISTANCE = 15.0
 
 WarningKind = Literal[
     "not-loaded",
@@ -211,7 +215,8 @@ def normalise_colour(raw: str | None) -> str | None:
 
 
 def colour_distance(left: str | None, right: str | None) -> float | None:
-    """Plain RGB distance, or ``None`` when either side has no colour.
+    """The CIEDE2000 difference of two sRGB colours, or ``None`` when either side
+    has no colour (#943: plain RGB distance put every real red over the cut-off).
 
     ``None`` rather than ``0.0``: "no colour on either side" is not a perfect match,
     and returning zero would make every unpainted slot claim every spool.
@@ -219,8 +224,75 @@ def colour_distance(left: str | None, right: str | None) -> float | None:
     first, second = normalise_colour(left), normalise_colour(right)
     if first is None or second is None:
         return None
-    pairs = [(int(first[i : i + 2], 16), int(second[i : i + 2], 16)) for i in (1, 3, 5)]
-    return float(float(sum((a - b) ** 2 for a, b in pairs)) ** 0.5)
+    return ciede2000(_lab(first), _lab(second))
+
+
+Lab = tuple[float, float, float]
+
+
+def _lab(colour: str) -> Lab:
+    """A ``#RRGGBB`` sRGB colour in CIE L*a*b*, against the D65 white."""
+    srgb = [int(colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    red, green, blue = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb)
+    x = (0.4124564 * red + 0.3575761 * green + 0.1804375 * blue) / 0.95047
+    y = 0.2126729 * red + 0.7151522 * green + 0.0721750 * blue
+    z = (0.0193339 * red + 0.1191920 * green + 0.9503041 * blue) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 216 / 24389 else (24389 / 27 * t + 16) / 116
+
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def ciede2000(first: Lab, second: Lab) -> float:
+    """The CIEDE2000 colour difference (Sharma, Wu and Dalal, 2005), kL = kC = kH = 1."""
+    l1, a1, b1 = first
+    l2, a2, b2 = second
+    c_mean = (math.hypot(a1, b1) + math.hypot(a2, b2)) / 2
+    g = 0.5 * (1 - math.sqrt(c_mean**7 / (c_mean**7 + 25**7)))
+    a1p, a2p = a1 * (1 + g), a2 * (1 + g)
+    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+    h1p = math.degrees(math.atan2(b1, a1p)) % 360 if c1p else 0.0
+    h2p = math.degrees(math.atan2(b2, a2p)) % 360 if c2p else 0.0
+
+    delta_l = l2 - l1
+    delta_c = c2p - c1p
+    if c1p * c2p == 0:
+        delta_h = 0.0
+    elif abs(h2p - h1p) <= 180:
+        delta_h = h2p - h1p
+    elif h2p - h1p > 180:
+        delta_h = h2p - h1p - 360
+    else:
+        delta_h = h2p - h1p + 360
+    delta_big_h = 2 * math.sqrt(c1p * c2p) * math.sin(math.radians(delta_h / 2))
+
+    l_mean = (l1 + l2) / 2
+    cp_mean = (c1p + c2p) / 2
+    if c1p * c2p == 0:
+        h_mean = h1p + h2p
+    elif abs(h1p - h2p) <= 180:
+        h_mean = (h1p + h2p) / 2
+    elif h1p + h2p < 360:
+        h_mean = (h1p + h2p + 360) / 2
+    else:
+        h_mean = (h1p + h2p - 360) / 2
+    t = (
+        1
+        - 0.17 * math.cos(math.radians(h_mean - 30))
+        + 0.24 * math.cos(math.radians(2 * h_mean))
+        + 0.32 * math.cos(math.radians(3 * h_mean + 6))
+        - 0.20 * math.cos(math.radians(4 * h_mean - 63))
+    )
+    delta_theta = 30 * math.exp(-(((h_mean - 275) / 25) ** 2))
+    r_c = 2 * math.sqrt(cp_mean**7 / (cp_mean**7 + 25**7))
+    s_l = 1 + 0.015 * (l_mean - 50) ** 2 / math.sqrt(20 + (l_mean - 50) ** 2)
+    s_c = 1 + 0.045 * cp_mean
+    s_h = 1 + 0.015 * cp_mean * t
+    r_t = -math.sin(math.radians(2 * delta_theta)) * r_c
+    lightness, chroma, hue = delta_l / s_l, delta_c / s_c, delta_big_h / s_h
+    return math.sqrt(lightness**2 + chroma**2 + hue**2 + r_t * chroma * hue)
 
 
 def build_options(
@@ -353,9 +425,12 @@ def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None)
     if slot.material and option.material.upper() != slot.material.upper():
         return None
     distance = colour_distance(slot.colour, option.colour)
+    if distance is None and normalise_colour(slot.colour) is not None:
+        # A spool with no colour says nothing about a slot that has one: opening with
+        # it reads as a match (#943). The slot is left for the user instead.
+        return None
     if distance is None:
-        # No colour to go on either side: material alone is a weak but real match, and
-        # it is ranked behind every colour match rather than competing with them.
+        # No colour to go on in the slot: material alone is a weak but real match.
         base = 1_000.0
     elif distance > COLOUR_MATCH_DISTANCE:
         return None

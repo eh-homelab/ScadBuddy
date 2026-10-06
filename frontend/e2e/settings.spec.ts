@@ -53,4 +53,24 @@ test.describe('settings', () => {
     // The catalogue writes its view to the URL (#534, lib/catalogueQuery.ts).
     await expect(page).toHaveURL(/\/(\?view=cards)?$/)
   })
+
+  // #969 — at desktop width the section nav was capped at max-w-2xl with a hidden
+  // horizontal scrollbar, so the last four sections sat off-screen with no affordance.
+  test('shows every section link at desktop width', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/settings')
+    const nav = page.getByRole('navigation', { name: 'Settings sections' })
+    const links = nav.getByRole('link')
+    await expect(links.last()).toHaveText(/About/)
+    const navBox = (await nav.boundingBox())!
+    for (const link of await links.all()) {
+      const box = (await link.boundingBox())!
+      const name = await link.textContent()
+      expect(box.x, `${name} starts inside the nav`).toBeGreaterThanOrEqual(navBox.x)
+      expect(box.x + box.width, `${name} ends inside the nav`).toBeLessThanOrEqual(navBox.x + navBox.width)
+    }
+    const list = nav.getByRole('list')
+    const overflow = await list.evaluate((el) => el.scrollWidth - el.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
+  })
 })

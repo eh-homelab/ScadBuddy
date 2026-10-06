@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
@@ -26,6 +26,11 @@ interface Props {
   extra: InputsExtra
   /** Replaces every value on screen, and the UI state, as Reset to defaults does. */
   onApply: (values: ParamValues, extra: InputsExtra) => void
+  /**
+   * #350 — changes whenever the page resets the values to the defaults, which leaves
+   * them no preset's: the selection is cleared, so Update cannot empty the preset.
+   */
+  resetKey?: number
 }
 
 interface Selection {
@@ -55,6 +60,14 @@ function gone(caught: unknown): boolean {
   return caught instanceof ApiError && caught.status === 404
 }
 
+/** The server's longest preset name (`library/presets.py`), in code points as it counts. */
+const MAX_NAME = 80
+
+/** `base` with `suffix`, the base cut short so the whole fits the name limit (#350). */
+function prefill(base: string, suffix: string): string {
+  return [...base].slice(0, MAX_NAME - [...suffix].length).join('') + suffix
+}
+
 const FIELD =
   'w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
 
@@ -64,7 +77,7 @@ const FIELD =
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
+export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -89,6 +102,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
    * or the tags when they are refused here, else the name, which only the server judges.
    */
   const [invalidField, setInvalidField] = useState<'name' | 'description' | 'tags' | null>(null)
+  const nameInput = useRef<HTMLInputElement>(null)
   const descriptionInput = useRef<HTMLTextAreaElement>(null)
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
@@ -126,6 +140,23 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
     setNaming(null)
     setError(DELETED_ELSEWHERE)
   }
+
+  // #350 — a reset puts the defaults on screen: no preset's values any more.
+  const [seenReset, setSeenReset] = useState(resetKey)
+  if (resetKey !== seenReset) {
+    setSeenReset(resetKey)
+    setSelection(null)
+    setSkipped([])
+    setError(null)
+  }
+
+  // #350 — the prefill selected, so typing replaces it rather than appending to it.
+  // After the dialog's own effect, which focuses its panel.
+  useEffect(() => {
+    if (naming === null) return
+    nameInput.current?.focus()
+    nameInput.current?.select()
+  }, [naming])
 
   const selected = selection?.preset
   const modified = selection !== null && !sameValues(values, selection.applied)
@@ -166,7 +197,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   }
 
   function openSaveAs() {
-    setName(selected && modified ? `${selected.name} (variant)` : '')
+    setName(selected && modified ? prefill(selected.name, ' (variant)') : '')
     setDescription('')
     setTagsText('')
     setNameError(null)
@@ -176,7 +207,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
 
   function openDuplicate() {
     if (!selected) return
-    setName(`${selected.name} copy`)
+    setName(prefill(selected.name, ' copy'))
     setNameError(null)
     setInvalidField(null)
     setNaming('duplicate')
@@ -222,6 +253,12 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   function refused(caught: unknown) {
     setNameError(message(caught))
     setInvalidField('name')
+  }
+
+  /** An edit answers whatever the error said, so it goes (#350). */
+  function edited() {
+    setNameError(null)
+    setInvalidField(null)
   }
 
   function closeNaming() {
@@ -394,13 +431,17 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-1">
-        {modified && (
-          <span data-testid="preset-modified" className="mr-auto text-[12px] text-faint">
-            Changed from {selected?.name}
-          </span>
-        )}
+        {/* #351 — always in the page, so "Changed from …" is announced as it appears. */}
+        <span role="status" className="mr-auto text-[12px] text-faint">
+          {modified && <span data-testid="preset-modified">Changed from {selected?.name}</span>}
+        </span>
         {editable && modified && (
-          <Button size="sm" onClick={() => void update()} disabled={busy}>
+          <Button
+            size="sm"
+            onClick={() => void update()}
+            disabled={busy}
+            aria-label={`Update preset ${selected?.name ?? ''}`}
+          >
             Update
           </Button>
         )}
@@ -507,9 +548,13 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
           <label className="flex flex-col gap-1 text-[13px] text-muted">
             Preset name
             <input
+              ref={nameInput}
               value={name}
-              onChange={(event) => setName(event.target.value)}
-              maxLength={80}
+              onChange={(event) => {
+                setName(event.target.value)
+                edited()
+              }}
+              maxLength={MAX_NAME}
               autoFocus
               aria-invalid={invalidField === 'name' || undefined}
               aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
@@ -523,7 +568,10 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
                 <textarea
                   ref={descriptionInput}
                   value={description}
-                  onChange={(event) => setDescription(event.target.value)}
+                  onChange={(event) => {
+                    setDescription(event.target.value)
+                    edited()
+                  }}
                   rows={3}
                   aria-invalid={invalidField === 'description' || undefined}
                   aria-describedby={
@@ -537,7 +585,10 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
                 <input
                   ref={tagsInput}
                   value={tagsText}
-                  onChange={(event) => setTagsText(event.target.value)}
+                  onChange={(event) => {
+                    setTagsText(event.target.value)
+                    edited()
+                  }}
                   aria-invalid={invalidField === 'tags' || undefined}
                   aria-describedby={invalidField === 'tags' && nameError ? dialogErrorId : undefined}
                   placeholder="gift, small"

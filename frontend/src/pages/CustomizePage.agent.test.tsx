@@ -126,6 +126,8 @@ describe('customizer tools', () => {
     expect(!tooLong.ok && tooLong.error).toMatchObject({ code: 'invalid_args', message: '"name" is at most 20 characters.' })
     const outOfRange = await call('set_param', { name: 'text_size', value: 99 })
     expect(!outOfRange.ok && outOfRange.error.message).toBe('"text_size" is at most 28.')
+    const outOfRangeText = await call('set_param', { name: 'text_size', value: '99' })
+    expect(!outOfRangeText.ok && outOfRangeText.error.message).toBe('"text_size" is at most 28.')
     const unknown = await call('set_param', { name: 'nope', value: 1 })
     expect(!unknown.ok && unknown.error.code).toBe('invalid_args')
 
@@ -133,6 +135,12 @@ describe('customizer tools', () => {
     const mixed = await call('set_params', { values: { name: 'Ok', text_size: 'big' } })
     expect(!mixed.ok && mixed.error.code).toBe('invalid_args')
     expect(field).toHaveValue('Reagan')
+  })
+
+  it('takes a number sent as a numeric string, as the model sometimes sends it (#948)', async () => {
+    await open()
+    const outcome = await call('set_param', { name: 'text_size', value: '20' })
+    expect(outcome).toMatchObject({ ok: true, result: { name: 'text_size', value: 20 } })
   })
 
   it('shows the tab of the parameter it changed, and resets it', async () => {
