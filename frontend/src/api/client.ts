@@ -713,6 +713,15 @@ export const api = {
     item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
 
   /**
+   * #624 — a small copy of an image or of a video's poster, for a strip of
+   * thumbnails; undefined for a video with no poster, which has none.
+   */
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+    item.kind === 'video' && !item.poster
+      ? undefined
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+
+  /**
    * #274 — adds an image or video as the template's last item. XHR rather than
    * `fetch`, which reports no upload progress; a video runs to a gigabyte.
    * `onProgress` gets the fraction sent, 0 to 1.
