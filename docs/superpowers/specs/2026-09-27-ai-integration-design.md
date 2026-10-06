@@ -77,11 +77,15 @@ dependency of `agent/`.
   store lookup key derives from the working directory, so resume from a `cwd` matching
   the original run's" (§6 therefore gives every session a stable service-owned `cwd`).
   [Sessions][sdk-sessions]
-- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283: the bundled Claude
-  Code binary prints `2.1.283 (Claude Code)` on stdout for `--version` and exits 0, so
-  the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
-  `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
-  filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283, and again on 0.3.287
+  (#1540): the bundled Claude Code binary prints its version (`2.1.283 (Claude Code)`,
+  then `2.1.287 (Claude Code)`) on stdout for `--version` and exits 0, the same version
+  the SDK's `package.json` declares as `claudeCodeVersion`. `agent/package.json` pins the
+  SDK exactly and the lockfile pins the binary, so the image build asserts only that the
+  two agree (`agent/src/check-cli-version.ts`); until #1540 it also compared them with a
+  `CLAUDE_CODE_VERSION` build argument, edited by hand on every bump. In that SDK's
+  `sdk.d.ts` (both versions), `settingSources: []` means "disable filesystem settings
+  (SDK isolation mode)", so it loads nothing from the host (§4.4).
 - Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
   SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
   `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and

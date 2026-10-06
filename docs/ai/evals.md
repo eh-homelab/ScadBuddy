@@ -103,7 +103,7 @@ SCADBUDDY_EVAL_ANTHROPIC_API_KEY is not set`). The command still exits 0.
 `SCADBUDDY_EVAL_REPORT=<file>` writes a JSON report. For each scenario it records
 pass/fail per check, the tool calls, the gate's requests, cost, turns and the model id
 the run used. The report also records the Claude Code version the SDK declares (the
-build pins `CLAUDE_CODE_VERSION`; see the [`Dockerfile`](../../Dockerfile)).
+image build checks the bundled binary against it; see the [`Dockerfile`](../../Dockerfile)).
 
 Each scenario starts its own Claude Code process with `maxTurns` 12 and
 `maxBudgetUsd` 0.5 (`runScenario` defaults), under a 5-minute deadline.
