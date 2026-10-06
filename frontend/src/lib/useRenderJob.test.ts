@@ -192,7 +192,7 @@ describe('useRenderJob', () => {
     const { result } = mount({ slug: 'demo', params: { n: 1 } })
     await settle()
 
-    expect(result.current.busy).toBe(3)
+    expect(result.current.busy).toEqual({ seconds: 3, reason: 'queue-full' })
     expect(result.current.error).toBeUndefined()
     expect(result.current.rendering).toBe(true)
     expect(submit).toHaveBeenCalledTimes(1)
@@ -204,6 +204,36 @@ describe('useRenderJob', () => {
     expect(submit).toHaveBeenCalledTimes(2)
     expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
     expect(result.current.busy).toBeUndefined()
+    expect(result.current.error).toBeUndefined()
+  })
+
+  it('says why it waits: an unreachable render service, or a request still accepting', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal is unavailable',
+        retry_after: 5,
+      }),
+    )
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'still accepting',
+        retry_after: 2,
+      }),
+    )
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    expect(result.current.busy).toEqual({ seconds: 5, reason: 'temporal-unavailable' })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(result.current.busy).toEqual({ seconds: 2, reason: 'still-accepting' })
     expect(result.current.error).toBeUndefined()
   })
 
