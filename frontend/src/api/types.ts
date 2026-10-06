@@ -9,6 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
+import type { Origin, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -114,6 +115,10 @@ export type PrintRunResult = Schemas['PrintRunResult']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
+/** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
+export type Operation = Schemas['Operation']
+/** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
+export type OperationAccepted = Schemas['OperationAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
@@ -141,6 +146,12 @@ export type NozzleInfo = Schemas['NozzleInfo']
 export type ModelPrintChoices = Schemas['ModelPrintChoices']
 /** #83 — the plate remembered per printer, and an output's plates. */
 export type PrinterBedType = Schemas['PrinterBedType']
+/** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
+export type RackPickView = Schemas['RackPickView']
+export type RackOption = Schemas['RackOption']
+export type RackSentPick = Schemas['RackSentPick']
+export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
+export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
 export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */
@@ -259,9 +270,57 @@ export interface SessionLimits {
 export interface AiSessionView {
   id: string
   title: string
+  origin: Origin
+  status: SessionStatus
+  updated_at: string
   parent_id: string | null
   turns: number
   cost_usd: number
   budget_usd: number
   running: boolean
+}
+
+/**
+ * #931 — one resource a session's tool call created, changed or deleted (agent
+ * `sessions/touched.ts` TouchedRecord, `GET /api/v1/ai/sessions/:id/resources`).
+ * `model` is the model it belongs to; `before`/`after` are what it was and became
+ * where that has an id (a revision's parent and new commit). `print` is a Bambuddy
+ * queue item id; `print_run` is ScadBuddy's own run.
+ */
+export interface SessionResource {
+  type:
+    | 'model'
+    | 'revision'
+    | 'preset'
+    | 'asset'
+    | 'render_job'
+    | 'output'
+    | 'print_run'
+    | 'print'
+    | 'library'
+    | 'font'
+    | 'setting'
+    | 'project'
+    | 'bambuddy_file'
+    | 'print_archive'
+    | 'unclassified'
+  /** Null only for `unclassified`. */
+  id: string | null
+  action: 'created' | 'modified' | 'deleted'
+  model: string | null
+  before: string | null
+  after: string | null
+  /** The tool whose call touched it. */
+  tool: string
+  at: string
+}
+
+/**
+ * #931 — a resource to find the sessions of (agent `sessions/touched.ts` ResourceRef,
+ * `GET /api/v1/ai/resources/:type/:id/sessions`). A `model` matches anything of that
+ * model; any other kind matches its own id.
+ */
+export interface ResourceRef {
+  type: Exclude<SessionResource['type'], 'unclassified'>
+  id: string
 }

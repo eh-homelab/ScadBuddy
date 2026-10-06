@@ -297,7 +297,13 @@ Both call `deploy.reusable.yml`, which:
    `scadbuddy-render.yaml` when that file exists in clusters (#547; until
    clusters#1454 adds it, the run notes its absence and pins the API alone). Each
    file must have exactly one such image line and one of each annotation, before
-   and after the rewrite, or the deploy stops;
+   and after the rewrite, or the deploy stops. In the same PR it moves the
+   dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
+   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`, to
+   the same revision. That line is optional: an overlay that does not mention
+   `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
+   notice; one that mentions it in any other form (a short SHA, a branch, a
+   comment, other casing or spacing) or twice stops the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -374,6 +380,35 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
 
+### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
+
+The API process also polls the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`):
+print runs and every other Bambuddy write (send, project files, projects, reprint,
+timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
+**not** versioned: any replica polling the queue may take any task on it.
+
+- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
+  activities to that queue, and this release **must** roll out with `Recreate` (or the
+  old replicas scaled to 0 before the new ones start). The homelab deployment sets
+  `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
+  takes those tasks and fails them as unregistered. A workflow task is retried, so an
+  `Operation` there only stalls. An activity task's failure counts against its retry
+  policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
+  so one such task on an old replica records the operation `failed` as "may have been
+  done" although nothing reached Bambuddy, and a check whose three attempts all land
+  there is refused with a 500.
+- **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
+  must be at least the Temporal namespace's retention (`DescribeNamespace`'s
+  `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
+  field, and while Temporal cannot be reached a changed value is refused with the
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  A retry of an operation whose record was deleted while Temporal still holds its closed
+  execution would answer 409 "may have been done" instead of its outcome. Raising the
+  namespace's retention after the save is not re-checked.
+- **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
+  a rolling update stays safe; a release that adds a workflow or activity type to the
+  queue says so here and needs the same `Recreate` rollout.
+
 ### Blob store and render workers (#426)
 
 Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
@@ -387,6 +422,10 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
+  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
+  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
+  trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
@@ -537,9 +576,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   shows as `"unavailable (database timed out)"` instead of a hung probe. An
   edited, already-applied migration stops the service at start with a message
   naming it (each file's sha256 is recorded).
-- The Claude credential (an Anthropic API key, or a gateway base URL plus
-  token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
-  tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
+- The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
+  `claude setup-token`, or gateway base URLs plus tokens) are set in
+  Settings → Assistant → **Claude credentials**, a list in the order the
+  assistant tries them (#1000, #1093). Each shows whether it is active, rate
+  limited until a time, or disabled and why, and can be moved, tested, reset,
+  given a new key or deleted. Underneath, and from a loopback shell when there
+  is no UI (`docs/ai/operating.md`), they are `/api/v1/ai/credentials/entries`,
+  tested with `POST …/entries/{id}/test` (one test at a time, at most
   one per 10 s; otherwise `429` with `Retry-After`). No route returns the
   secret. The sealed value is bound to its `kind` and `base_url`, so editing
   either in the database makes it fail to decrypt rather than send the token
@@ -702,7 +746,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
-  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  and the agent's questions are answered through
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
+  still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
@@ -756,6 +803,9 @@ deploy PR link into the release notes. There is no human step after
   `applications/scadbuddy/scadbuddy.yaml` and
   `applications/scadbuddy/scadbuddy-render.yaml`; one deploy pins both to the
   same digest.
+- **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
+  clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
+  `revision` annotation.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -766,9 +816,77 @@ deploy PR link into the release notes. There is no human step after
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
 image line and annotations in the clusters manifests (both, once the render
-worker's exists) by hand and merging does
-exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
-what makes the running image knowable.
+worker's exists), and the dashboard line's `?ref=` (the full 40-character
+revision), by hand and merging does exactly what the pipeline does. Do not
+`kubectl rollout restart` — the pin is what makes the running image knowable.
+
+### Tracing (#988)
+
+The API, the render worker and the agent sidecar export OpenTelemetry traces over
+OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
+exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
+`otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
+also turns it off, with a warning in the log, since only the OTLP exporter ships.
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+and `OTEL_EXPORTER_OTLP_HEADERS` apply as the SDK defines. Only standard `OTEL_*`
+variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans:
+database queries and Bambuddy calls from background loops; it keeps everything that
+starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
+problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
+
+The agent starts as `node --import ./dist/telemetry.js dist/main.js` (the image's
+`CMD` and `pnpm start`): the import registers the ESM loader hook and the SDK before
+the app loads. A chat turn is one trace; an approval ends the turn's spans when the
+call parks, and the decision is a trace of its own linked to it
+(`ai_approvals.traceparent`).
+
+**Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
+`POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay
+(`backend/scadbuddy/telemetry/`) forwards it in the background to
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is) or else
+`$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
+`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
+public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
+`same-origin`, so a page on another allowed origin is refused; a request without
+`Sec-Fetch-Site`, from an older browser or a non-browser client, is admitted on `Origin`
+alone), at
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
+`service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
+reduced to the backend route template its path matches, or to its origin (a relative
+one on no route is dropped), as a server span keeps only its route; a URL on any host
+but those same origins keeps only its origin, since that host has none of the routes.
+No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
+answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
+export, arrives with row 4 of #988). Its rate
+limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+client), so with more than one API replica the overall ceiling multiplies.
+**`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
+whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
+`SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
+gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
+`FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
+that flag lets any loopback caller name its own client.
+`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
+`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+
+The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
+directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
+in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
+rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
+overlay will list it as a remote resource pinned to a full commit SHA, once
+clusters#1596 Phase 5 adds the line, and the deploy
+moves that pin with the image (above), so the dashboard shown is the one written
+for the build that is serving. The overlay must namespace its own resources with
+an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
+ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
+Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default
+uid `tempo`); until clusters#1596 Phase 4 adds Tempo the trace tables are empty
+and the metric panels are unaffected. CI's `lint` job checks the dashboard
+(`.github/scripts/lint-dashboard.sh`): every series it reads must be declared in
+`core/metrics.py`, and every span name must be one the service emits.
 
 ## Development
 

@@ -34,7 +34,6 @@ import type {
   PrintDetail,
   PrintPage,
   PrintProgress,
-  PrintCheck,
   PrintRunRequest,
   PrintRun,
   PrintRunResult,
@@ -55,6 +54,7 @@ import type {
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
+import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -1792,6 +1792,24 @@ export const handlers = [
     })
   }),
 
+  // #624 — the strip's small copy: the image, or a video's poster (404 with none).
+  http.get(`${base}/models/:slug/media/:id/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item || item.missing) return noMediaItem(slug, id)
+    const file = item.kind === 'video' ? item.poster : item.file
+    if (!file) return noMediaItem(slug, id)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, file, 'image'), {
+      headers: {
+        'Content-Type': 'image/webp',
+        'Cache-Control': item.id === 'thumbnail' ? 'no-cache' : IMMUTABLE_CACHE_CONTROL,
+      },
+    })
+  }),
+
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const model = mediaTarget(slug)
@@ -2455,6 +2473,9 @@ export const handlers = [
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.BROKEN_PREVIEW_NAME) {
+      return problem(500, 'Internal Server Error')
+    }
     const [x, y, z] = job.bbox_mm.size
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
@@ -2703,9 +2724,11 @@ export const handlers = [
     }
     await delay(250)
     // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
+    const known = new Set((output.library_files ?? []).map((copy) => copy.id))
     const libraryFileId = copyIn(output, null)
     const result: SendResult = {
       library_file_id: libraryFileId,
+      created: !known.has(libraryFileId),
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
       bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
@@ -2877,6 +2900,10 @@ export const handlers = [
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+      rack_picks:
+        body.rack_algorithm === 'bambuddy' && body.rack_position == null
+          ? []
+          : mockRackPicks(body.rack_position ?? null, [body.plate_id ?? 1]),
     } satisfies PrintRunResult
     // #470: the server answers 202 with a run. This one has already finished, so the
     // client reads its result without polling; GET /print/runs/:id answers it too.
@@ -2905,9 +2932,11 @@ export const handlers = [
    * #755 — the check before Print. The run checks no mounted nozzle (#768), so it
    * refuses nothing here; a test that needs a verdict answers this route itself.
    */
-  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+  http.post(`${base}/print/outputs/:id/check`, async ({ params, request }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
-    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
+    // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
+    const body = (await request.json()) as { rack_position?: number | null }
+    return HttpResponse.json(mockRackCheck(body.rack_position ?? null))
   }),
 
   // --- #79 projects -----------------------------------------------------------------

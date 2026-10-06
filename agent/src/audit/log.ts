@@ -38,6 +38,11 @@ import { redact } from '../secrets.js'
 //               harness/httpRequest.ts), each redirect hop its own row:
 //               action the method, `input_summary` the scheme, host, status
 //               and size as JSON (never a path, a header or a body)
+//   question    every answer the user gives a question the agent asked
+//               (#940, #1075, questions/service.ts): action `answered`,
+//               tied to the call by `tool_use_id`, `input_hash` the keyed
+//               hash of the answers (never their text: an answer may be
+//               anything the user typed)
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -53,7 +58,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -312,12 +317,13 @@ export class AuditLog implements AuditRepo {
     if (filter.before) add((n) => `id < $${n}::bigint`, filter.before)
     const limit = Math.min(Math.max(filter.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
     params.push(limit + 1)
+    // ORDER BY names ai_audit.id: a bare `id` is the text output column, which sorts "99" above "1000" (#893).
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT id::text AS id, at, kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id, approved_by_kind,
               approved_by_id, approved_by_label, outcome, detail, started_at, finished_at, duration_ms
        FROM ai_audit ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY id DESC LIMIT $${params.length}`,
+       ORDER BY ai_audit.id DESC LIMIT $${params.length}`,
       params,
     )
     const page = rows.slice(0, limit).map(view)

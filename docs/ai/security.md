@@ -310,8 +310,10 @@ the UI approval". As built:
   (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
   of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
   session id itself.
-- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
-  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/pending-input/approval:<id>`
+  ([`agent/src/routes/pendingInput.ts`](../../agent/src/routes/pendingInput.ts), #815), or
+  the older `POST /api/v1/ai/approvals/:id/approve` or `/deny`
+  ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), both as
   the browser user. `authorize` refuses a principal deciding its own request even with
   an approval grant, so an MCP client cannot approve what it prepared (covered in
   `agent/test/mcpConfirm.pg.test.ts`).
@@ -389,11 +391,13 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
   `secrets.ts` header. `seal()` writes version `0x02`, whose AAD is `v2|` + context, so
   the version byte is authenticated too. Version `0x01` (#354) is opened only by the
   generic `open()`, and is never written.
-- **AAD binding.** `credentialAad(kind, baseUrl)` is
-  `ai_credentials:default:` + `JSON.stringify({kind, base_url})`, and the data key's
-  AAD is `dek:` + that. Someone with write access to the table but without the KEK
-  therefore cannot re-point `base_url` to their own host, or change `kind`: the edited
-  row fails GCM authentication instead of sending the token elsewhere. The comment on
+- **AAD binding.** `credentialAad(id, kind, baseUrl)` is
+  `ai_credentials:<row id>:` + `JSON.stringify({kind, base_url})`, and the data key's
+  AAD is `dek:` + that. The credential saved before #1093 keeps the row id `default`,
+  so its AAD did not change. Someone with write access to the table but without the KEK
+  therefore cannot re-point `base_url` to their own host, change `kind`, or copy a
+  sealed secret onto another row (say, a higher-priority one): the edited row fails GCM
+  authentication instead of sending the token elsewhere. The comment on
   `credentialAad()` explains, and the PR #379 findings table (row 2) lists the tests.
 - **No legacy fallback.** A v1 row (#354, whose AAD did not bind `kind` and `base_url`)
   is refused (`openCredential()`). `/healthz` reports it as "outdated format". A
@@ -514,7 +518,24 @@ PreToolUse hook is where their tier applies. A subagent's own calls go through
 tasks are off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, #946), so a subagent asked to run in
 the background runs inside the turn too. Backgrounded, it outlived the turn, and Claude Code
 then refused its calls itself, as if the user had declined them, without asking `canUseTool`
-or anyone. A query
+or anyone. A subagent cannot ask the user with `AskUserQuestion`: Claude Code refuses it
+there ("not available inside subagents") and never asks `canUseTool`. A session the
+browser user owns therefore also gets `mcp__scadbuddy_questions__ask_user` (#940,
+[`agent/src/harness/questions.ts`](../../agent/src/harness/questions.ts)), an in-process
+tool at `read` that parks on the same question gate, so only the user answers it. The same
+server carries `request_user_attention` (#815,
+[`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts)), which parks there
+too and is answered the same way. It is the one entry with a timer, and the timer never
+answers for the user: on `proceed` the call returns `timed_out` and every outward call the
+agent then makes still parks for its own approval; `wait` and `stop` end the turn. The
+`approval_pending` reason is refused, so an approval can never time out to proceed. The
+`done` reason (#815 §4) is the one that does not wait: the call returns at once, takes no
+quick replies or timer, and the row outlives its turn on the badge until the user dismisses
+it. Beside the agent's message its card shows ScadBuddy's own list of what the turn created,
+changed or deleted, read from `ai_session_resources` rather than from the model
+([`agent/src/questions/doneSummary.ts`](../../agent/src/questions/doneSummary.ts)), with what
+was done while an attention request went unanswered listed first, so an outward write made
+unattended would be visible there. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 

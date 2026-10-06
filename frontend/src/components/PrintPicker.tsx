@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api } from '../api/client'
+import { api, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   FilamentWarning,
@@ -8,6 +8,7 @@ import type {
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
+  RackAlgorithm,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
@@ -30,6 +31,7 @@ import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
+import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
@@ -108,7 +110,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
   const outputId = source?.kind === 'output' ? source.output.id : undefined
   const picker = usePrintChoices(open, source)
-  const { choices, loading, loadError, printers, printerId, printer, selection, size } = picker
+  const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
+    picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
   const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
     source,
@@ -123,6 +126,94 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /**
+   * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
+   * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
+   * names one hotend for one printer and one nozzle size, so either changing drops it.
+   */
+  /**
+   * Only an algorithm chosen in this dialog is sent; otherwise `null`, and the backend
+   * applies the printer's remembered one, so one printer's can never go out for another
+   * while the new printer's choices are read (claude-review on #1043).
+   */
+  const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
+  /**
+   * A printer's algorithm as an earlier session's save left it, when that save landed
+   * after this dialog started reading the choices (#1086 review). Shown only, never sent,
+   * and only on that printer. A choices read started after the save landed supersedes it;
+   * one started before it may still answer with the old algorithm, so it does not.
+   */
+  const [savedAlgorithm, setSavedAlgorithm] = useState<{
+    printerId: number
+    algorithm: RackAlgorithm
+    /** The last choices read started when the save landed. */
+    afterRead: number
+    /** The save's `algorithmSave` number, so an earlier one landing later is ignored. */
+    save: number
+  } | null>(null)
+  const storedAlgorithm =
+    savedAlgorithm && savedAlgorithm.printerId === printerId && choicesRead <= savedAlgorithm.afterRead
+      ? savedAlgorithm.algorithm
+      : choices?.rack_algorithm
+  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
+  const [rackPosition, setRackPosition] = useState<number | null>(null)
+  /** A failed save of the algorithm: this print still uses it, the next one may not. */
+  const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
+  /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
+   *  report its failure on the next one (#1086 review). */
+  const algorithmSession = useRef(0)
+  /** Bumped by each algorithm save: only the latest one's outcome counts, whatever
+   *  order the answers arrive in (#1086 review). */
+  const algorithmSave = useRef(0)
+  /** The saves, one at a time: two in flight at once could be applied in either order,
+   *  leaving the printer on a choice the user had replaced (#1086 review). */
+  const algorithmSaves = useRef<Promise<unknown>>(Promise.resolve())
+  // Only a change of printer drops the hand pick and the chosen algorithm.
+  useEffect(() => {
+    algorithmSession.current += 1
+    setChosenAlgorithm(null)
+    setRackPosition(null)
+    setAlgorithmUnsaved(false)
+  }, [printerId])
+  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
+  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
+  const { advanced } = picker
+  useEffect(() => {
+    if (!advanced) setRackPosition(null)
+  }, [advanced])
+  useEffect(() => {
+    setRackPosition(null)
+  }, [size])
+  function changeRackAlgorithm(next: RackAlgorithm) {
+    setChosenAlgorithm(next)
+    setAlgorithmUnsaved(false)
+    const session = algorithmSession.current
+    const save = ++algorithmSave.current
+    const savedOn = printerId
+    if (savedOn === null) return
+    const saving = algorithmSaves.current.then(() =>
+      api.putPrinterRackAlgorithm(savedOn, next, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+    )
+    algorithmSaves.current = saving.catch(() => undefined)
+    void saving.then(
+      () => {
+        // Saved after its session ended (#1086 review): the printer now stores `next`,
+        // which a dialog that already read its choices does not know. Show it for that
+        // printer without carrying it in as a choice, and without re-reading the
+        // choices, which would reset the bed type and filament plan set since.
+        if (algorithmSession.current !== session)
+          setSavedAlgorithm((shown) =>
+            shown && shown.printerId === savedOn && shown.save > save
+              ? shown
+              : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
+          )
+      },
+      () => {
+        if (algorithmSave.current === save && algorithmSession.current === session)
+          setAlgorithmUnsaved(true)
+      },
+    )
+  }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
@@ -156,6 +247,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     copies,
     projectId,
     options,
+    rackPosition,
+    rackAlgorithm: chosenAlgorithm,
     onRan,
   })
   const { run, running, runError, refused, result, unanswered } = runPrint
@@ -262,9 +355,19 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           choices: printChoices,
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
+          rack_position: rackPosition,
+          rack_algorithm: chosenAlgorithm,
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  // #836 — a hand pick the current check no longer offers (no rack this time, or the
+  // position gone from its options) would be sent unseen, so it goes back to Automatic.
+  // Only a current verdict decides: one still on its way keeps the pick.
+  const offered = check.current ? (check.verdict?.rack?.options ?? []) : null
+  const pickOffered = rackPosition === null || offered === null || offered.some((o) => o.position === rackPosition)
+  useEffect(() => {
+    if (!pickOffered) setRackPosition(null)
+  }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
    * #772 — Simple mode hides the notes about the nozzle step, which only Advanced shows.
@@ -276,10 +379,14 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
   const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
   const verdict = (
-    <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+    <>
+      <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
+      <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+    </>
   )
   const verdictShown =
     check.error !== undefined ||
+    Boolean(check.verdict?.rack) ||
     (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
@@ -291,6 +398,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    setRackPosition(null)
+    // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
+    algorithmSession.current += 1
+    setChosenAlgorithm(null)
+    setAlgorithmUnsaved(false)
     runPrint.reset()
     picker.reset()
     onClose()
@@ -312,9 +424,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
-              Open in queue
-            </Button>
+            {result.bambuddy_url && (
+              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+                Open in queue
+              </Button>
+            )}
           </>
         ) : unanswered !== null ? (
           <>
@@ -465,6 +579,16 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                     value={nozzles}
                     onChange={picker.changeNozzles}
                   />
+                  {check.verdict?.rack && (
+                    <RackNozzleStep
+                      rack={check.verdict.rack}
+                      algorithm={rackAlgorithm}
+                      position={rackPosition}
+                      algorithmUnsaved={algorithmUnsaved}
+                      onAlgorithm={changeRackAlgorithm}
+                      onPosition={setRackPosition}
+                    />
+                  )}
                   <QualityStep
                     size={size}
                     tiers={choices.tiers?.[size] ?? []}

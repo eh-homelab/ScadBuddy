@@ -5,10 +5,12 @@ import os
 import shutil
 import struct
 import subprocess
+import time
 import uuid
 import zipfile
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from datetime import timedelta
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,10 @@ import numpy as np
 import psycopg
 import pytest
 import trimesh
+from opentelemetry import trace
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import Connection
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import DictRow, dict_row
@@ -26,6 +32,8 @@ from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
+from scadbuddy.core.tracing import DEFAULT_SAMPLER
 from scadbuddy.library import url_import
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
@@ -33,6 +41,8 @@ from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.workflows.commands import start_command
+from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     TEST_TEMPORAL_ADDRESS_ENV,
     TEST_TEMPORAL_DEV_SERVER_ENV,
@@ -41,6 +51,38 @@ from tests.support.temporal import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
+
+#: Every span any test makes, after the same scrub production uses (spec §6).
+_SPANS = InMemorySpanExporter()
+_provider = TracerProvider(sampler=DEFAULT_SAMPLER)
+_provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(_SPANS)))
+trace.set_tracer_provider(_provider)
+
+
+@pytest.fixture(autouse=True)
+def _clear_spans() -> Iterator[None]:
+    """Every test's spans go after it, whether it read them or not: the exporter lives
+    for the whole session and would otherwise hold every span every test made."""
+    yield
+    _SPANS.clear()
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    return _SPANS
+
+
+def wait_for_span(
+    spans: InMemorySpanExporter, predicate: Callable[[ReadableSpan], bool], timeout: float = 30
+) -> ReadableSpan:
+    """Spans end on the worker's own tasks after the job settles: poll, bounded."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for finished in spans.get_finished_spans():
+            if predicate(finished):
+                return finished
+        time.sleep(0.05)
+    raise AssertionError("no matching span was recorded")
 
 
 def load_fixture_param(stem: str) -> dict[str, Any]:
@@ -142,6 +184,21 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
             f"no Temporal: set {TEST_TEMPORAL_ADDRESS_ENV} (a running server) or"
             f" {TEST_TEMPORAL_DEV_SERVER_ENV} (a temporal CLI), or put `temporal` on PATH"
         )
+
+
+#: The answer deadline `start_command` takes when its caller names none: a route's
+#: inline window and its accept bound. Production's 10 s is a promise about latency
+#: that a loaded machine breaks (a 202, or a 503 `command-still-accepting`, where the
+#: test asserts the final answer), so tests wait this long instead. A test of the
+#: deadline itself names one, or sets this default back.
+TEST_ANSWER_DEADLINE = timedelta(seconds=60)
+
+
+@pytest.fixture(autouse=True)
+def _answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    defaults = start_command.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "deadline", TEST_ANSWER_DEADLINE)
 
 
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
@@ -516,3 +573,20 @@ def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 
     monkeypatch.setattr(url_import, "resolve_host", resolve)
     return answers
+
+
+@pytest.fixture(autouse=True)
+def rack_pick_swallows_only_expected_errors(
+    request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
+) -> Iterator[None]:
+    """A rack fallback (the pick, the /check preview, the usage read, or the store's
+    seen, picks and settle writes and reads, #1112) swallows every exception by spec, so
+    this is where a programming error (TypeError, KeyError...) surfaces. A test that
+    needs another type on purpose opts out with ``@pytest.mark.rack_injects_errors``,
+    which turns the guard off for every fallback in that test: when an expected type
+    (``ApiError``, ``psycopg.OperationalError``) proves the same point, inject that."""
+    yield
+    if request.node.get_closest_marker("rack_injects_errors"):
+        return
+    foreign = foreign_rack_errors(caplog.get_records("call"))
+    assert not foreign, f"a rack fallback swallowed a programming error: {foreign}"

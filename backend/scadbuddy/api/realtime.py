@@ -73,6 +73,7 @@ from scadbuddy.core.events import (
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
+    OperationEvent,
     OutputEvent,
     PrintEvent,
     PrintRunEvent,
@@ -157,6 +158,9 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case OperationEvent():
+            # Followed by `GET /operations/{id}` (#1053); the event log keeps it.
+            return []
         case SessionBusEvent():
             # The agent's own (#300): the UI follows sessions over the agent's
             # chat socket, which knows who may see which.
@@ -215,14 +219,22 @@ class RateLimit:
         self._tokens = float(burst)
         self._at = clock()
 
-    def take(self) -> bool:
+    def _refill(self) -> None:
         now = self._clock()
         self._tokens = min(self.burst, self._tokens + (now - self._at) * self.per_second)
         self._at = now
+
+    def take(self) -> bool:
+        self._refill()
         if self._tokens < 1:
             return False
         self._tokens -= 1
         return True
+
+    def retry_after(self) -> float:
+        """Seconds until one more frame is allowed; 0 when one is now (a ``Retry-After``)."""
+        self._refill()
+        return max(0.0, (1 - self._tokens) / self.per_second)
 
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]

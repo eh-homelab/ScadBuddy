@@ -112,8 +112,11 @@ cd frontend && pnpm exec msw init public --save   # --save, or it prompts and di
 ```
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
-`.github/scripts/*.test.sh` suites. Every `docker run` in a `verify.sh` must carry
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
+`lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
+kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
+repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+`docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
 the same line: `verify-models.sh` reaps a timed-out template's containers by it (#302).
@@ -149,7 +152,23 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
-  `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
+  `render_worker`, `print_worker`, `make_current`, `drained`), `models.py` (what crosses
+  the history). Printing (#1052): `printing.py` (`PrintRunWorkflow`), `print_activities.py`
+  (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
+  update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
+  `bambuddy` queue's worker runs inside the API process until #1060.
+  Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
+  finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+- `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
+  `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts) and `component.py` (`OPERATIONS`, `OperationsDep`). A feature registers
+  its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list;
+  the Bambuddy kinds are `bambuddy/operations.py`. `api/operations.py` `run_operation`
+  is how a route runs a kind (`Idempotency-Key` header; 202 with the operation past the
+  deadline) and serves `GET /operations/{id}`. The browser's `command()`
+  (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`) send the
+  key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
@@ -182,6 +201,20 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
+- `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
+  standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
+  helpers every traced file uses (`span`, `detached_span` for a span exited in another
+  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  `core/trace_scrub.py` strips exception messages and status
+  descriptions before anything is exported; never record a parameter value, a log
+  line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
+  fixture `spans`); the Bambuddy client injects no trace headers.
+  The browser relay (`POST /telemetry/v1/traces`, route `api/telemetry.py`, feature
+  `scadbuddy/telemetry/`): `admission.py` (same-origin checks and the rate limits; the
+  client by `core/proxies.py` and `SCADBUDDY_TRUSTED_PROXIES`, the agent's rules),
+  `payload.py` (rebuilds, caps and scrubs the page's spans), `forwarder.py` (the queue
+  and the one uninstrumented httpx client; never retries), `target.py` (the collector URL
+  and headers from the `OTEL_*` variables, `None` unless `traces_export_enabled()`).
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
@@ -190,6 +223,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
   up without editing `handlers.ts`, and must export `handlers` (and optionally
   `reset`) (#508).
+- `frontend/src/lib/tracing.ts` — the browser's OpenTelemetry (#988), a lazy chunk
+  `main.tsx` loads after the first paint; spans leave through `traceScrub.ts` and
+  `relayExporter.ts` to the backend relay `/telemetry/v1/traces`, and stop for the
+  page's life when it answers `X-ScadBuddy-Tracing: off` (`startTracing` then undoes
+  itself, so no `traceparent` is sent; msw always answers off,
+  `src/mocks/features/telemetry.ts`). A user action is `traceAction`
+  (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
+  the action's trace only inside its `within`. `traceparent` goes on same-origin
+  requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
+  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
+  reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
@@ -224,9 +268,30 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
   panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
-  #940, and never outlives its turn);
+  #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
+  `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
+  `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
+  badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
+  the one read of every parked call, approvals and answers, that the badge counts, and
+  `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
+  any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
+  a browser_* call that finds no tab in such a session parks the same way as a
+  `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  `src/api/schema.d.ts`.
+  Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
+  `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
+  before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
+  park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,
+  `decision_traceparent`). Only `api/backend.ts`'s middleware injects `traceparent`;
+  never add trace context to another outgoing call. Tests share one provider
+  (`test/support/tracing.ts` `testTracing`).
+  `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
@@ -268,6 +333,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
   09-27 template-pipelines spec makes Postgres and Temporal required.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
+  `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
+  `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
+  `DS_PROMETHEUS`/`DS_TEMPO` variables. clusters will pull it in as a remote
+  resource pinned to a full SHA, once clusters#1596 Phase 5 adds the line, and
+  `deploy.reusable.yml` moves that `ref` with the image.
+  A query may read only series `core/metrics.py` declares and span names the
+  service emits (`lint-dashboard.sh` checks both).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
@@ -299,9 +372,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -394,10 +467,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
-- `claude-review` is a merge gate: the review runs after CI, then a classifier passes
-  only when every finding in the review for *this* commit is fixed or tracked in an
-  open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
-  to the PR files those `pr-feedback` issues automatically.
+- `claude-review` is a merge gate: the review runs after CI and sorts its findings into
+  `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
+  finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
+  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
+  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
+  `pr-feedback` issues automatically.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed

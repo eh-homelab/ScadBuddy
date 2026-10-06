@@ -3,23 +3,27 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { NavLink, Outlet } from 'react-router'
-import { attentionCount, attentionLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import { NavLink, Outlet, useLocation } from 'react-router'
+import { attentionCount, attentionDetail, attentionLabel, summaryLabel, useAttention, useAttentionTitle } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
   ASSISTANT_SHORTCUT_LABEL,
   isAssistantShortcut,
 } from '../agent/chat/shortcut'
+import { AssistantOpenerContext, type AssistantOpener } from '../agent/chat/opener'
 import type { ChatTransportFactory } from '../agent/chat/transport'
 import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
+import { ErrorBoundary } from './ErrorBoundary'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { Button } from './ui/Button'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
@@ -52,6 +56,7 @@ interface Props {
 }
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
+  const location = useLocation()
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
@@ -61,6 +66,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // Mounted from the first open on, and hidden rather than unmounted when closed, so
   // closing the panel doesn't drop the connection or the transcript.
   const [mounted, setMounted] = useState(false)
+  // #931 — a page asked for one session ("Changed by assistant"): the panel opens on it.
+  // Cleared once the panel has selected it, or when the panel goes, so a later mount
+  // does not select it.
+  const [openRequest, setOpenRequest] = useState<{ sessionId: string } | null>(null)
   // A mounted panel rides out an outage: while the agent restarts, or its status
   // read fails for a moment, the panel's transport keeps reconnecting with its
   // transcript and anything queued for the reconnect (a decision, say) intact,
@@ -74,13 +83,20 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     if (!shown) {
       setOpen(false)
       setMounted(false)
+      // #931 — a session asked for but not yet selected goes too.
+      setOpenRequest(null)
     }
   }, [shown])
-  // #815 — approvals waiting on the user, shown on the toggle so a closed panel (or a
-  // background session's approval, which never reaches this tab's socket) still says so.
+  // #815 — what waits on the user (approvals, questions, attention requests), shown on the
+  // toggle so a closed panel (or a background session's, which never reaches this tab's
+  // socket) still says so.
   const attention = useAttention(shown)
   const refreshAttention = attention.refresh
   const waitingLabel = attentionLabel(attention.waiting)
+  const waitingDetail = attentionDetail(attention.counts)
+  // A done summary waits for nothing, so it is shown beside the count, not in it.
+  const summaries = summaryLabel(attention.counts)
+  const toggleLabel = [waitingLabel, summaries].filter(Boolean).join(', ')
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
@@ -90,6 +106,19 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setOpen(true)
     setFocusKey((k) => k + 1)
   }, [])
+  const openHandled = useCallback(() => setOpenRequest(null), [])
+  const opener = useMemo<AssistantOpener | null>(
+    () =>
+      shown
+        ? {
+            openSession: (sessionId) => {
+              setOpenRequest({ sessionId })
+              openPanel()
+            },
+          }
+        : null,
+    [shown, openPanel],
+  )
   const closePanel = useCallback(() => {
     setOpen(false)
     toggleButton.current?.focus()
@@ -133,103 +162,136 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
-      <header
-        className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-surface px-4 py-1.5 sm:gap-x-5 ${
-          embedded ? 'min-h-10' : 'min-h-14'
-        }`}
-        data-embedded={embedded ? 'true' : 'false'}
-      >
-        <NavLink to="/" className="flex items-baseline gap-1.5 shrink-0" aria-label="ScadBuddy">
-          <span className={`font-semibold tracking-tight ${embedded ? 'text-[13px]' : 'text-base'}`}>
-            Scad<span className="text-accent">Buddy</span>
-          </span>
-          {!embedded && (
-            <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
-          )}
-        </NavLink>
-
-        <nav className="flex items-center gap-0.5" aria-label="Main">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                `rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
-                  isActive
-                    ? 'bg-surface-3 text-ink'
-                    : 'text-muted hover:bg-surface-2 hover:text-ink'
-                }`
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="ml-auto flex items-center gap-2">
-          <LiveUpdatesIndicator />
-          {shown && (
-            // Announces the badge (#815): it appears while focus is elsewhere, so the
-            // button's own name changing is not enough. A bare live region, not
-            // role=status, so it is not mistaken for a page's status message.
-            <span data-testid="assistant-attention-live" aria-live="polite" className="sr-only">
-              {waitingLabel}
+    <AssistantOpenerContext.Provider value={opener}>
+      <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
+        <header
+          className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-surface px-4 py-1.5 sm:gap-x-5 ${
+            embedded ? 'min-h-10' : 'min-h-14'
+          }`}
+          data-embedded={embedded ? 'true' : 'false'}
+        >
+          <NavLink to="/" className="flex items-baseline gap-1.5 shrink-0" aria-label="ScadBuddy">
+            <span className={`font-semibold tracking-tight ${embedded ? 'text-[13px]' : 'text-base'}`}>
+              Scad<span className="text-accent">Buddy</span>
             </span>
-          )}
-          {shown && (
-            <button
-              ref={toggleButton}
-              type="button"
-              onClick={toggle}
-              aria-expanded={open}
-              aria-controls={mounted ? PANEL_ID : undefined}
-              aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
-              aria-label={waitingLabel ? `Assistant, ${waitingLabel}` : undefined}
-              title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${waitingLabel ? `: ${waitingLabel}` : ''}`}
-              className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
-                open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
-              }`}
+            {!embedded && (
+              <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
+            )}
+          </NavLink>
+
+          <nav className="flex items-center gap-0.5" aria-label="Main">
+            {NAV.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  `rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                    isActive
+                      ? 'bg-surface-3 text-ink'
+                      : 'text-muted hover:bg-surface-2 hover:text-ink'
+                  }`
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+
+          <div className="ml-auto flex items-center gap-2">
+            <LiveUpdatesIndicator />
+            {shown && (
+              // Announces the badge (#815): it appears while focus is elsewhere, so the
+              // button's own name changing is not enough. A bare live region, not
+              // role=status, so it is not mistaken for a page's status message.
+              <span data-testid="assistant-attention-live" aria-live="polite" className="sr-only">
+                {waitingLabel}
+              </span>
+            )}
+            {shown && (
+              <button
+                ref={toggleButton}
+                type="button"
+                onClick={toggle}
+                aria-expanded={open}
+                aria-controls={mounted ? PANEL_ID : undefined}
+                aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
+                aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
+                title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
+                className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                  open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
+                }`}
+              >
+                Assistant
+                {attention.waiting !== null && attention.waiting > 0 && (
+                  <span
+                    data-testid="assistant-attention"
+                    aria-hidden="true"
+                    className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-warn/50 bg-warn/10 px-1 text-[10.5px] leading-none font-semibold text-warn"
+                  >
+                    {attentionCount(attention.waiting)}
+                  </span>
+                )}
+                {summaries && (
+                  <span data-testid="assistant-summaries" aria-hidden="true" className="text-[11px] text-muted">
+                    {summaries}
+                  </span>
+                )}
+              </button>
+            )}
+          </div>
+        </header>
+
+        {ai.available && (
+          <Suspense fallback={null}>
+            <AgentLink factory={tabLink} />
+          </Suspense>
+        )}
+        <div className="relative flex min-h-0 flex-1">
+          <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
+            {/* #361 — the last resort: one page that throws never blanks the app, and
+                leaving it clears the error. Reload, not an in-place retry: what lands
+                here is mostly a lazy chunk that failed, which React caches as failed. */}
+            <ErrorBoundary
+              resetKey={location.pathname}
+              fallback={() => <PageFailed />}
             >
-              Assistant
-              {attention.waiting !== null && attention.waiting > 0 && (
-                <span
-                  data-testid="assistant-attention"
-                  aria-hidden="true"
-                  className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-warn/50 bg-warn/10 px-1 text-[10.5px] leading-none font-semibold text-warn"
-                >
-                  {attentionCount(attention.waiting)}
-                </span>
-              )}
-            </button>
+              <Outlet />
+            </ErrorBoundary>
+          </main>
+          {shown && mounted && (
+            <aside
+              id={PANEL_ID}
+              aria-label="Assistant"
+              hidden={!open}
+              onKeyDown={onPanelKey}
+              className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-line bg-surface shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
+            >
+              <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
+                <AssistantPanel
+                  onClose={closePanel}
+                  focusKey={focusKey}
+                  factory={assistantTransport}
+                  embedded={embedded}
+                  openRequest={openRequest}
+                  onOpenHandled={openHandled}
+                />
+              </Suspense>
+            </aside>
           )}
         </div>
-      </header>
-
-      {ai.available && (
-        <Suspense fallback={null}>
-          <AgentLink factory={tabLink} />
-        </Suspense>
-      )}
-      <div className="relative flex min-h-0 flex-1">
-        <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          <Outlet />
-        </main>
-        {shown && mounted && (
-          <aside
-            id={PANEL_ID}
-            aria-label="Assistant"
-            hidden={!open}
-            onKeyDown={onPanelKey}
-            className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-line bg-surface shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
-          >
-            <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
-              <AssistantPanel onClose={closePanel} focusKey={focusKey} factory={assistantTransport} embedded={embedded} />
-            </Suspense>
-          </aside>
-        )}
       </div>
+    </AssistantOpenerContext.Provider>
+  )
+}
+
+function PageFailed() {
+  return (
+    <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]">
+      <p className="text-ink">This page stopped working. The details are in the browser console.</p>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        Reload page
+      </Button>
     </div>
   )
 }

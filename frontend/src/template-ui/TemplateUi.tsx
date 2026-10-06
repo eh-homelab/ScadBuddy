@@ -9,14 +9,17 @@ import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './hos
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
-import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
+import { UI_API_SUPPORTED, type Mount, type MountResult, type TemplateUiFailure, type UiDeclaration } from './types'
 
 const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
+
+/** How long a template's module may take to load and mount before the page falls back to the form (#847). */
+export const MOUNT_TIMEOUT_MS = 15_000
 
 interface Props {
   slug: string
   ui: UiDeclaration
-  /** The revision to load the module from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
+  /** The revision to load the module from: the pinned commit, or else the last commit to the template's `ui/` (#846); undefined only when history is unavailable. */
   version: string | undefined
   deps: HostDeps
   inputs: JsonObject
@@ -88,11 +91,37 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     let cleanup: (() => void) | void
     void (async () => {
       try {
-        const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
-        const mount = mountOf(module)
-        if (!mount) throw new Error(`${ui.module} does not export a mount function`)
-        if (!active) return
-        const result = await mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api })
+        let expired = false
+        // Loading and mounting together: either can hang (an import() the server never
+        // answers, a mount awaiting a resource), and both leave the panel empty (#847).
+        const mounting = (async (): Promise<MountResult> => {
+          const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
+          const mount = mountOf(module)
+          if (!mount) throw new Error(`${ui.module} does not export a mount function`)
+          if (!active || expired) return
+          return await mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api })
+        })()
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let result: MountResult
+        try {
+          result = await Promise.race([
+            mounting,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                expired = true
+                reject(new Error(`did not load and mount within ${MOUNT_TIMEOUT_MS / 1000} s`))
+              }, MOUNT_TIMEOUT_MS)
+            }),
+          ])
+        } catch (cause) {
+          // The page has moved on to the form: a mount that finishes after all is undone.
+          mounting.then((late) => {
+            if (typeof late === 'function') late()
+          }, () => {})
+          throw cause
+        } finally {
+          clearTimeout(timer)
+        }
         if (active) cleanup = result
         else if (typeof result === 'function') result()
       } catch (cause) {

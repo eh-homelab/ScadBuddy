@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { command, isRunning } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
@@ -66,11 +67,10 @@ export const printHistoryTools: Tool[] = [
     bambuddyScope: ['Read Status', 'Manage Queue'],
     routes: ['POST /api/v1/prints/{archive_id}/reprint'],
     summarize: ({ archive_id }) => `Queue print ${archive_id} again on its printer`,
-    handler: async ({ archive_id }, { backend }) =>
+    handler: async ({ archive_id }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/prints/{archive_id}/reprint', { params: { path: { archive_id } } }),
-          `print ${archive_id} again`,
+        await command(ctx, `print ${archive_id} again`, (headers) =>
+          ctx.backend.POST('/api/v1/prints/{archive_id}/reprint', { params: { path: { archive_id } }, headers }),
         ),
       ),
   }),
@@ -89,16 +89,34 @@ export const printHistoryTools: Tool[] = [
     bambuddyScope: ['Read Status', 'Manage Archives'],
     routes: ['POST /api/v1/prints/{archive_id}/timelapse/pull'],
     summarize: ({ archive_id, filename }) => `Pull timelapse ${filename} from the printer onto print ${archive_id}`,
-    handler: async ({ archive_id, filename }, { backend }) => {
-      await ok(
-        backend.POST('/api/v1/prints/{archive_id}/timelapse/pull', {
+    handler: async ({ archive_id, filename }, ctx) => {
+      const pulled = await command(ctx, `pull timelapse ${filename} onto print ${archive_id}`, (headers) =>
+        ctx.backend.POST('/api/v1/prints/{archive_id}/timelapse/pull', {
           params: { path: { archive_id } },
           body: { filename },
+          headers,
         }),
-        `pull timelapse ${filename} onto print ${archive_id}`,
       )
-      return json({ attached: filename })
+      return json(isRunning(pulled) ? pulled : { attached: filename })
     },
+  }),
+
+  // ── read (#1053): a Bambuddy write still running when its tool returned ──
+  defineTool({
+    name: 'get_operation',
+    description:
+      "Read a Bambuddy write (a send, a reprint, project filing, a timelapse pull) that was still running when its " +
+      'tool returned: its status, and its result or error once it ended.',
+    input: z.object({ operation_id: z.string().regex(/^[0-9a-f]{32}$/).describe('The operation id the tool named') }),
+    risk: 'read',
+    routes: ['GET /api/v1/operations/{operation_id}'],
+    handler: async ({ operation_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/operations/{operation_id}', { params: { path: { operation_id } } }),
+          `get operation ${operation_id}`,
+        ),
+      ),
   }),
 ]
 

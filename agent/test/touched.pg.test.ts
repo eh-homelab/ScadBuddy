@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, SessionResources } from '../src/sessions/touched.js'
+import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -16,7 +16,7 @@ import { SERVER_NAME } from '../src/tools/projections.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // What a session touched (#931, src/sessions/touched.ts) in Postgres: a
 // session's tool calls through the harness projection land in
@@ -106,11 +106,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     expect(resources.every((r) => !Number.isNaN(Date.parse(r.at)))).toBe(true)
   })
 
+  it('stores every kind the extractors name (the table CHECK lists them all)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const kinds = RESOURCE_TYPES.filter((t) => t !== 'unclassified')
+    await db.sql`INSERT INTO ai_session_resources ${db.sql(
+      kinds.map((t) => ({ session_id: session.id, tool: 't', resource_type: t, resource_id: 'x', action: 'modified' })),
+    )}`
+    expect((await m.resources(session.id, browser)).map((r) => r.type)).toEqual(kinds)
+  })
+
   it('records a write with no extractor as unclassified, naming the tool', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     expect(await m.resources(session.id, browser)).toMatchObject([
-      { type: 'unclassified', id: null, action: 'modified', tool: 'set_print_options' },
+      { type: 'unclassified', id: null, action: 'modified', tool: 'browser_click' },
     ])
   })
 
@@ -149,7 +158,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     // No such session: the foreign key refuses the row.
     await broken.record({
       sessionId: '33333333-3333-4333-8333-333333333333',
-      tool: { name: 'set_print_options', risk: 'write' },
+      tool: { name: 'browser_click', risk: 'write' },
       input: {},
       result: { content: [] },
     })
@@ -180,7 +189,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
 
   it("goes with its session, and is read only by those who may see the session", async () => {
     const { session } = await m.start(agentA, { origin: 'mcp' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     // The browser user sees every session (spec §6); another agent does not.
     expect(await m.resources(session.id, browser)).toHaveLength(1)
     await expect(m.resources(session.id, { kind: 'bearer', id: 'token:b', label: 'B' })).rejects.toThrow(/no session/)
@@ -191,7 +200,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
 
   it('answers sessions_resources to whoever may see the session', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp' })
-    await store.record({ sessionId: session.id, tool: { name: 'set_print_options', risk: 'write' }, input: {}, result: { content: [] } })
+    await store.record({ sessionId: session.id, tool: { name: 'browser_click', risk: 'write' }, input: {}, result: { content: [] } })
     const tool = ALL_TOOLS.find((t) => t.name === 'sessions_resources')!
     const call = (owner: typeof agentA) =>
       runTool(tool, { session_id: session.id }, {
@@ -200,7 +209,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
         progress: async () => {},
         signal: new AbortController().signal,
       })
-    expect(firstText(await call(agentA))).toMatchObject({ resources: [{ type: 'unclassified', tool: 'set_print_options' }] })
+    expect(firstText(await call(agentA))).toMatchObject({ resources: [{ type: 'unclassified', tool: 'browser_click' }] })
     const other = await call({ kind: 'bearer', id: 'token:b', label: 'B' })
     expect(other.isError).toBe(true)
   })
@@ -238,5 +247,129 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       headers: { ...UI_READ, 'sec-fetch-site': 'cross-site' },
     })
     expect(foreign.status).toBe(403)
+  })
+
+  // The reverse direction (#931): which sessions touched a resource.
+  describe('sessions that touched a resource', () => {
+    const touch = (sessionId: string, name: string, input: Record<string, unknown>, result: unknown = {}) =>
+      store.record({
+        sessionId,
+        tool: { name, risk: 'write' },
+        input,
+        result: { content: [{ type: 'text', text: JSON.stringify(result) }] },
+      })
+
+    async function seed() {
+      const edit = (await m.start(agentA, { origin: 'mcp', title: 'edit box' })).session
+      await touch(edit.id, 'update_source', { slug: 'box', base: C1 }, { slug: 'box', version: C2 })
+      const preset = (await m.start(browser, { origin: 'chat', title: 'preset on box' })).session
+      await touch(preset.id, 'save_preset', { slug: 'box' }, { id: 'p1' })
+      const output = (await m.start(agentB, { origin: 'mcp', title: 'save an output' })).session
+      await touch(output.id, 'save_output', { slug: 'lid' }, { id: 'out-1', slug: 'lid' })
+      const other = (await m.start(browser, { origin: 'chat', title: 'unrelated' })).session
+      await touch(other.id, 'delete_model', { slug: 'boxes' })
+      return { edit, preset, output, other }
+    }
+
+    function app() {
+      return createApp({
+        database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+        backend: () => Promise.resolve(true),
+        kek: { ok: false, reason: 'unused' },
+        credentials: new MemoryCredentials(),
+        testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+        remoteAddress: () => '10.0.0.7',
+        origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+        approvals: m.approvals,
+        sessions: m,
+      })
+    }
+
+    it('a model matches every row of that model; any other kind matches its id', async () => {
+      const { edit, preset, output } = await seed()
+      const ids = async (resource: { type: 'model' | 'output' | 'revision' | 'preset'; id: string }) =>
+        (await m.list(browser, { resource })).map((s) => s.id).sort()
+      expect(await ids({ type: 'model', id: 'box' })).toEqual([edit.id, preset.id].sort())
+      expect(await ids({ type: 'revision', id: C2 })).toEqual([edit.id])
+      expect(await ids({ type: 'preset', id: 'p1' })).toEqual([preset.id])
+      expect(await ids({ type: 'output', id: 'out-1' })).toEqual([output.id])
+      expect(await ids({ type: 'output', id: 'out-2' })).toEqual([])
+    })
+
+    it("finds a model's sessions by what its extractors record: a library pin, its print options", async () => {
+      const pin = (await m.start(browser, { origin: 'chat' })).session
+      await touch(pin.id, 'pin_library', { slug: 'tray', name: 'BOSL2' }, { slug: 'tray', version: C1 })
+      const options = (await m.start(browser, { origin: 'chat' })).session
+      await touch(options.id, 'set_print_options', { scope: 'model', key: 'tray', options: {} }, {})
+      await touch((await m.start(browser, { origin: 'chat' })).session.id, 'set_print_options', { scope: 'global', options: {} }, {})
+      expect((await m.list(browser, { resource: { type: 'model', id: 'tray' } })).map((s) => s.id).sort()).toEqual([pin.id, options.id].sort())
+      expect((await m.list(browser, { resource: { type: 'library', id: 'BOSL2' } })).map((s) => s.id)).toEqual([pin.id])
+    })
+
+    it('lists a session once however many times it touched the resource', async () => {
+      const { edit } = await seed()
+      await touch(edit.id, 'update_source', { slug: 'box', base: C2 }, { slug: 'box', version: C1 })
+      expect((await m.list(browser, { resource: { type: 'model', id: 'box' } })).filter((s) => s.id === edit.id)).toHaveLength(1)
+    })
+
+    it('keeps visibility: an agent sees only the sessions it may see', async () => {
+      const { edit } = await seed()
+      expect((await m.list(agentA, { resource: { type: 'model', id: 'box' } })).map((s) => s.id)).toEqual([edit.id])
+      expect(await m.list(agentB, { resource: { type: 'model', id: 'box' } })).toEqual([])
+    })
+
+    it('serves GET /api/v1/ai/resources/:type/:id/sessions to the UI', async () => {
+      const { edit, preset } = await seed()
+      const res = await app().request('/api/v1/ai/resources/model/box/sessions', { headers: UI_READ })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { sessions: { id: string; title: string }[] }
+      expect(body.sessions.map((s) => s.id).sort()).toEqual([edit.id, preset.id].sort())
+      expect(body.sessions.find((s) => s.id === edit.id)).toMatchObject({ title: 'edit box', owner: { kind: 'bearer', id: 'token:a' } })
+
+      const limited = await app().request('/api/v1/ai/resources/model/box/sessions?limit=1', { headers: UI_READ })
+      expect(((await limited.json()) as { sessions: unknown[] }).sessions).toHaveLength(1)
+
+      // An id with reserved characters arrives percent-encoded and is matched decoded.
+      const odd = (await m.start(browser, { origin: 'chat' })).session
+      await touch(odd.id, 'save_output', { slug: 'box' }, { id: 'out/7 a', slug: 'box' })
+      const encoded = await app().request(`/api/v1/ai/resources/output/${encodeURIComponent('out/7 a')}/sessions`, { headers: UI_READ })
+      expect(((await encoded.json()) as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual([odd.id])
+
+      for (const type of ['unclassified', 'nope']) {
+        const bad = await app().request(`/api/v1/ai/resources/${type}/box/sessions`, { headers: UI_READ })
+        expect(bad.status, type).toBe(400)
+      }
+      const foreign = await app().request('/api/v1/ai/resources/model/box/sessions', {
+        headers: { ...UI_READ, 'sec-fetch-site': 'cross-site' },
+      })
+      expect(foreign.status).toBe(403)
+    })
+
+    it('filters GET /api/v1/ai/sessions by resource_type and resource_id, together only', async () => {
+      const { output } = await seed()
+      const res = await app().request('/api/v1/ai/sessions?resource_type=output&resource_id=out-1', { headers: UI_READ })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual([output.id])
+      for (const query of ['resource_type=output', 'resource_id=out-1', 'resource_type=print_runs&resource_id=1']) {
+        const bad = await app().request(`/api/v1/ai/sessions?${query}`, { headers: UI_READ })
+        expect(bad.status, query).toBe(400)
+      }
+    })
+
+    it('filters sessions_list by resource, as its caller', async () => {
+      const { edit } = await seed()
+      const tool = ALL_TOOLS.find((t) => t.name === 'sessions_list')!
+      const call = async (owner: typeof agentA) =>
+        firstText(
+          await runTool(tool, { resource: { type: 'model', id: 'box' } }, {
+            ...services({ sessions: m }),
+            principal: harnessPrincipal(owner),
+            progress: async () => {},
+            signal: new AbortController().signal,
+          }),
+        ) as { id: string }[]
+      expect((await call(agentA)).map((s) => s.id)).toEqual([edit.id])
+      expect(await call(agentB)).toEqual([])
+    })
   })
 })

@@ -28,12 +28,21 @@ import { startFakeHindsight } from './support/fakeHindsight.js'
 const API_KEY = 'sk-ant-api03-unit-test-key-000011112222'
 const GATEWAY_TOKEN = 'gw-unit-test-token-3333444455556666'
 
+const OAUTH_TOKEN = 'sk-ant-oat01-test-token-0000'
+
 describe('buildHarnessOptions', () => {
   const paths = { stateDir: '/var/lib/scadbuddy-agent' }
   const base: HarnessRun = { paths, credential: { kind: 'anthropic_api_key', secret: API_KEY }, prompt: 'hi' }
 
   it('passes an API key as ANTHROPIC_API_KEY and nothing else', () => {
     expect(credentialEnv({ kind: 'anthropic_api_key', secret: API_KEY })).toEqual({ ANTHROPIC_API_KEY: API_KEY })
+  })
+
+  it('passes a Claude Code OAuth token as CLAUDE_CODE_OAUTH_TOKEN and nothing else', () => {
+    // In x-api-key (ANTHROPIC_API_KEY) Anthropic answers an sk-ant-oat01- token with 401.
+    expect(credentialEnv({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN })).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN,
+    })
   })
 
   it('passes a gateway as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN', () => {
@@ -74,6 +83,11 @@ describe('buildHarnessOptions', () => {
     })
   })
 
+  it('bounds Claude Code’s retries only when asked (#1093: there is a credential to fall back to)', () => {
+    expect(buildHarnessOptions(base).env?.CLAUDE_CODE_MAX_RETRIES).toBeUndefined()
+    expect(buildHarnessOptions({ ...base, maxRetries: 2 }).env?.CLAUDE_CODE_MAX_RETRIES).toBe('2')
+  })
+
   it('links the abort signal', () => {
     const stop = new AbortController()
     const options = buildHarnessOptions({ ...base, signal: stop.signal })
@@ -87,6 +101,14 @@ describe('buildHarnessOptions', () => {
     expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('../plugins/scadbuddy') }])
     expect(typeof options.canUseTool).toBe('function')
     expect(options.hooks?.PreToolUse).toHaveLength(1)
+  })
+
+  it('adds the trace hooks after the permission seam (#988)', () => {
+    const traceHooks = { PreToolUse: [{ hooks: [() => Promise.resolve({})] }], PostToolUse: [{ hooks: [() => Promise.resolve({})] }] }
+    const options = buildHarnessOptions({ ...base, traceHooks })
+    expect(options.hooks?.PreToolUse).toHaveLength(2)
+    expect(options.hooks?.PreToolUse?.[1]).toBe(traceHooks.PreToolUse[0])
+    expect(options.hooks?.PostToolUse).toEqual(traceHooks.PostToolUse)
   })
 
   it("loads ScadBuddy's own plugin first, with Skill and Agent at read and no other built-in (#896)", () => {

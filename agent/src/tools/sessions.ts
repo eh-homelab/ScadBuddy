@@ -7,6 +7,7 @@ import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import type { LoggedEvent } from '../sessions/eventLog.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
+import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -289,19 +290,27 @@ export const sessionTools: Tool[] = [
     description:
       'List the agent sessions this caller may see (its own, those it started, and those offered to it, flagged ' +
       'offered_to_you), newest first: id, title, origin, owner ("controlled by"), any pending handoff offer, ' +
-      'status, turns and cost.',
+      'status, turns and cost. With `resource`, only the sessions whose tool calls touched it (sessions_resources).',
     input: z.object({
       status: z.enum(SESSION_STATUSES).optional(),
       origin: z.enum(ORIGINS).optional(),
       limit: z.number().int().min(1).max(MAX_EVENTS).default(50),
+      resource: z
+        .object({
+          type: z.enum(LOOKUP_TYPES),
+          id: z.string().min(1).max(ID_MAX),
+        })
+        .optional()
+        .describe('A resource: a model by slug (anything of that model matches), or any other kind by its id (sessions_resources shows the kinds and ids).'),
     }),
     risk: 'read',
     routes: [],
-    handler: async ({ status, origin, limit }, ctx) => {
+    handler: async ({ status, origin, limit, resource }, ctx) => {
       const sessions = await refusals(() =>
         manager(ctx).list(ownerOf(ctx.principal), {
           ...(status ? { status } : {}),
           ...(origin ? { origin } : {}),
+          ...(resource ? { resource } : {}),
           limit,
         }),
       )

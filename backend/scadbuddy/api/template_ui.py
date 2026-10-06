@@ -19,7 +19,7 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.jobs import _resolve_version
-from scadbuddy.api.models import _etag_matches, require_model_exists
+from scadbuddy.api.models import etag_matches, require_model_exists
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.jobs import source_directory
 
@@ -88,7 +88,7 @@ def _serve(file: FsPath, *, pinned: bool, if_none_match: str | None) -> Response
         "ETag": etag,
         "Cache-Control": PINNED_CACHE_CONTROL if pinned else LIVE_CACHE_CONTROL,
     }
-    if _etag_matches(if_none_match, etag):
+    if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(body, media_type=UI_MEDIA_TYPES[file.suffix.lower()], headers=headers)
 
@@ -131,7 +131,12 @@ async def get_ui_file_at(
     requested = await _resolve_version(history, slug, commit)
     # The directory only: the UI's files need no library checkout, so a pinned library
     # that is missing (and cannot be fetched offline) does not stop the UI mounting.
-    directory, _ = await source_directory(slug, requested, paths=paths, history=history)
+    # The page asks for the last commit to `ui/` (#846), which a later commit elsewhere
+    # leaves behind the template's own: its `ui/` is still the live one, not an export.
+    if requested is not None and requested == await asyncio.to_thread(catalogue.ui_version, slug):
+        directory = paths.model_dir(slug)
+    else:
+        directory, _ = await source_directory(slug, requested, paths=paths, history=history)
     file = await asyncio.to_thread(_ui_file, directory, path)
     # The current revision is answered from the live directory, which an uncommitted
     # edit can change; only an export is immutable.

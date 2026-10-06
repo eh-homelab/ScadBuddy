@@ -1,69 +1,41 @@
-"""The print dialog's runs, answered with 202 and followed to the end (#470).
+"""The print dialog's runs, answered with 202 and followed to the end (#470, #1052).
 
-``POST /print/outputs/{id}/run`` used to upload, slice, wait for every slice (up to
-``DEFAULT_SLICE_TIMEOUT`` each) and queue inside the one request. The proxies in front
-cut a request long before that: Envoy's default route timeout is 15 s, Cloudflare's
-first-byte limit about 100 s. The browser got a non-JSON 504 while the backend went on
-and queued the print, and a retry queued it again.
+``POST /print/outputs/{id}/run`` used to upload, slice, wait for every slice and queue
+inside the one request, which the proxies in front cut long before that (Envoy's route
+timeout is 15 s). Then (#470) it answered 202 and ran the rest as a task in the API
+process, which a restart lost. Now each run is a Temporal workflow, ``PrintRun``
+(``workflows/printing.py``, spec 2026-10-01 §5): the route starts it with
+update-with-start, and its first activity makes the cheap refusals and inserts the run
+here. ``GET /print/runs/{id}`` reads the row, so any replica can answer it.
 
-Now the route makes the refusals that are cheap (:func:`~scadbuddy.bambuddy.print_run.
-prepare_run`), records a run here, answers 202 with it and hands the rest to
-:class:`PrintRuns`, which runs it as a task on the event loop. ``GET /print/runs/{id}``
-reads the row, so any replica can answer it.
+The row is written only by the workflow's activities (:class:`PrintRunStore`), each
+write with its ``print.run`` event in the same transaction.
 
 Idempotency
 -----------
-A run's key is the output plus the parsed request body (:func:`run_key`), including
-the caller's ``request_id``: one per deliberate Print, reused by every retry of it, so a
-retry re-attaches to its run while a reprint with the same choices is a new print. An
-older client sends none, and then the output and choices alone are the key. A second
-POST with the same key returns the run it repeats, instead of starting another, while
-that run is in flight or for ``REPEAT_WINDOW`` after it succeeded. The key is looked
-up and the new row inserted under one advisory lock, so two POSTs that race get one run.
-The route's cheap refusals run before that lock; one that refuses re-reads the key
-first, so a racer whose own Bambuddy read refused still answers with the winner's run.
+A run's key is the subject plus the parsed request body (:func:`run_key`), including
+the caller's ``request_id``: one per deliberate Print, reused by every retry of it. The
+workflow ID is ``print-<key>``, so a repeat while the run is in flight attaches to it.
+With a ``request_id`` a repeat answers with the recorded run for as long as the row is
+kept (``print_run_retention_seconds``, :meth:`PrintRunStore.find`); without one, #470's
+rule holds: for ``REPEAT_WINDOW`` after a success, or after a failure once it had tried
+to queue (``may_have_queued``).
 
-A run that failed before it tried to queue anything holds nothing: repeating it tries
-again. Once it has tried (``enqueue_attempted``, set by :meth:`PrintRunStore.
-start_enqueue` before the first ``POST /queue/``), the print may be on Bambuddy's queue
-even if the run then failed: that POST timed out (a 504 whose item Bambuddy may still
-have created), or plate 1 was queued before plate 2 failed. Such a run is
-``may_have_queued`` and keeps holding its key for ``REPEAT_WINDOW`` like a success, so
-a retry answers with it instead of queueing again.
-
-Lost runs
----------
-While a run is alive its task touches ``heartbeat_at`` every ``HEARTBEAT_INTERVAL``.
-A ``running`` row whose heartbeat is older than ``LOST_AFTER``, and that this process
-is not running itself, reads as failed: its process died, or is too slow to beat (a
-database blip, a saturated thread pool) and so cannot be told from a dead one. Every
-state change is a compare-and-set on ``status = 'running'``, which makes that safe:
-
-- expiry before the run's ``start_enqueue`` wins: the run cannot queue any more (its
-  ``start_enqueue`` finds the row failed and it stops), so the key is released and
-  the message says nothing was queued (``LOST_UNQUEUED_DETAIL``);
-- expiry after it keeps the key and says the print may be queued (``LOST_DETAIL``);
-- either way the slow run's own end no longer overwrites the row. After it, though,
-  the slow run's heartbeats and its end still move ``finished_at``, so the key is
-  held until ``REPEAT_WINDOW`` after the run really stopped, not after the expiry.
-
-A run this process is still running when it shuts down is failed the same way.
+Once a run has tried to queue (``enqueue_attempted``, set by :meth:`PrintRunStore.
+start_enqueue` before the first ``POST /queue/``) the print may be on Bambuddy's queue
+even if the run then failed: that POST timed out, or plate 1 was queued before plate 2
+failed. Such a run is ``may_have_queued``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
-import uuid
-from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
-from fastapi import status
-from fastapi.encoders import jsonable_encoder
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -71,35 +43,17 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
-from scadbuddy.core.events import EventBus, PrintRunEvent, emit
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.events import Event, PrintRunEvent
 
 logger = logging.getLogger(__name__)
 
 RunStatus = Literal["running", "succeeded", "failed"]
 
-#: How often a live run touches its heartbeat.
-HEARTBEAT_INTERVAL = 10.0
-#: A ``running`` run whose heartbeat is older than this was lost with its process.
-LOST_AFTER = timedelta(seconds=60)
-#: How long a succeeded run answers a repeat of its request instead of a new print.
-#: Long enough for any retry of a request a proxy cut. A client that sends a
-#: ``request_id`` makes a deliberate reprint a new key; one that does not pays with
-#: its reprints of the same choices inside the window.
+#: How long a succeeded run answers a repeat of its request instead of a new print,
+#: for a client that sends no ``request_id``. Long enough for any retry of a request a
+#: proxy cut.
 REPEAT_WINDOW = timedelta(minutes=10)
-#: Finished runs are kept this long, then pruned when a new run is recorded.
-RETENTION = timedelta(days=7)
-#: The first key of the two-key advisory lock taken per idempotency key: "SBPR".
-RUN_LOCK_CLASS = 0x5342_5052
 
-LOST_DETAIL = (
-    "ScadBuddy restarted while it was preparing this print, after it had started "
-    "queueing it, so it cannot tell whether the print was queued."
-)
-LOST_UNQUEUED_DETAIL = (
-    "ScadBuddy stopped while it was preparing this print, before it queued anything. "
-    "Nothing was queued; print again to retry."
-)
 UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while preparing this print; see its logs."
 
 _COLUMNS = (
@@ -149,28 +103,28 @@ class PrintRun(BaseModel):
     repeated: bool = False
 
 
-#: A run whose process went away before it ended: lost to a restart, or shut down.
-LOST = PrintRunError(
-    status=status.HTTP_500_INTERNAL_SERVER_ERROR, title="Internal Server Error", detail=LOST_DETAIL
+LOST_DETAIL = (
+    "This print's run ended without recording an outcome, after it had started queueing "
+    "it, so ScadBuddy cannot tell whether the print was queued."
 )
-#: The same, lost before it tried to queue anything.
+LOST_UNQUEUED_DETAIL = (
+    "This print's run ended without recording an outcome, before it queued anything. "
+    "Nothing was queued; print again to retry."
+)
+#: A run whose execution closed, or is gone, while its row still said ``running``: one
+#: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
+LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
 LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
-
-
-class RunLostError(RuntimeError):
-    """The run was failed as lost while this process was still running it."""
-
-    def __init__(self, run_id: str) -> None:
-        super().__init__(f"print run {run_id} was failed as lost; it will not queue")
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The output plus the request as parsed, so key order and spacing do not matter.
 
-    ``request_id`` and ``print_sequence`` are part of it when sent; without them the key
-    is what it was before the fields existed.
+    ``request_id``, ``print_sequence``, ``rack_position`` and ``rack_algorithm`` are part
+    of it when sent; without them the key is what it was before the fields existed.
     """
-    exclude = {name for name in ("request_id", "print_sequence") if getattr(request, name) is None}
+    optional = ("request_id", "print_sequence", "rack_position", "rack_algorithm")
+    exclude = {name for name in optional if getattr(request, name) is None}
     body = request.model_dump(mode="json", exclude=exclude or None)
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
@@ -181,30 +135,31 @@ class DatabaseRequiredError(RuntimeError):
         super().__init__("print runs need the database; set SCADBUDDY_DATABASE_URL (#401)")
 
 
-class PrintRunStore:
-    """``print_runs`` (migration ``20260928T1200Z_print_runs``), on the process's pool.
+class TransactionalEvents(Protocol):
+    """Publishes an event inside a caller's transaction (`PgNotifyEventBus`)."""
 
-    The pool is the render queue's, as :class:`~scadbuddy.bambuddy.uploads.
-    BambuddyUploadStore` uses it. Every method runs its queries in a worker thread.
-    Times are the database's ``now()``, so replicas agree on what is stale.
+    def publish_in(self, conn: Connection[Any], event: Event) -> None: ...
+
+
+class PrintRunStore:
+    """``print_runs`` (migrations ``20260928T1200Z_print_runs``,
+    ``*_print_runs_on_temporal``), on the process's pool. Every method runs its queries
+    in a worker thread; times are the database's ``now()``.
+
+    Only the ``PrintRun`` workflow's activities write here (spec 2026-10-01 §5.4), and
+    every write that changes a row publishes ``print.run`` in the same transaction.
     """
 
     def __init__(
         self,
         pool: ConnectionPool[Connection[DictRow]] | None,
         *,
-        lost_after: timedelta = LOST_AFTER,
+        events: TransactionalEvents | None = None,
         repeat_window: timedelta = REPEAT_WINDOW,
-        retention: timedelta = RETENTION,
     ) -> None:
         self._pool = pool
-        self.lost_after = lost_after
+        self.events = events
         self.repeat_window = repeat_window
-        self.retention = retention
-        #: The runs this process is running (:class:`PrintRuns` keeps it): never
-        #: expired here, however late their heartbeat. Replaced, never mutated: the
-        #: loop changes it while a worker thread reads it in :meth:`_expire_lost`.
-        self.live: frozenset[str] = frozenset()
 
     @property
     def available(self) -> bool:
@@ -216,243 +171,184 @@ class PrintRunStore:
             raise DatabaseRequiredError
         return self._pool
 
-    async def find(self, key: str) -> PrintRun | None:
-        """The run a request with ``key`` repeats: one in flight, or recently succeeded."""
-        return await asyncio.to_thread(self._find, key)
-
-    async def claim(self, output_id: str, key: str) -> tuple[PrintRun, bool]:
-        """The run for ``key``: the one it repeats, else a new one; True if it is new."""
-        return await asyncio.to_thread(self._claim, output_id, key)
+    async def find(self, key: str, *, has_request_id: bool) -> PrintRun | None:
+        """The run a request with ``key`` repeats. With a ``request_id`` that is the key's
+        newest run, for as long as ``print_run_retention_seconds`` keeps it: one press is
+        one print. Without, one in flight, or one that succeeded or may have queued
+        within ``repeat_window`` (#470)."""
+        return await asyncio.to_thread(self._find, key, has_request_id)
 
     async def get(self, run_id: str) -> PrintRun | None:
         return await asyncio.to_thread(self._get, run_id)
 
-    async def heartbeat(self, run_id: str) -> None:
-        await asyncio.to_thread(self._heartbeat, run_id)
+    async def insert_accepted(
+        self,
+        run_id: str,
+        *,
+        subject: str,
+        key: str,
+        slug: str,
+        workflow_id: str,
+        workflow_run_id: str,
+        retention: timedelta | None,
+    ) -> PrintRun:
+        """Record an accepted run; the execution's row if it has one already (a retried
+        activity, §4.2 step 3), announced only when inserted. Prunes runs that finished
+        more than ``retention`` ago; ``None`` keeps every one."""
+        return await asyncio.to_thread(
+            self._insert, run_id, subject, key, slug, workflow_id, workflow_run_id, retention
+        )
 
     async def start_enqueue(self, run_id: str) -> None:
-        """Record that the run is about to queue; :class:`RunLostError` if it was lost."""
+        """Record that the run is about to queue: from here a failure may have queued."""
         await asyncio.to_thread(self._start_enqueue, run_id)
 
-    async def succeed(self, run_id: str, result: PrintRunResult) -> None:
-        await asyncio.to_thread(
-            self._finish, run_id, "succeeded", "result", result.model_dump(mode="json")
+    async def succeed(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun:
+        return await asyncio.to_thread(
+            self._finish, run_id, slug, "succeeded", "result", result.model_dump(mode="json")
         )
 
-    async def fail(self, run_id: str, error: PrintRunError) -> None:
-        await asyncio.to_thread(
-            self._finish, run_id, "failed", "error", error.model_dump(mode="json")
+    async def fail(self, run_id: str, slug: str, error: PrintRunError) -> PrintRun:
+        return await asyncio.to_thread(
+            self._finish, run_id, slug, "failed", "error", error.model_dump(mode="json")
         )
+
+    async def fail_lost(self, run_id: str) -> PrintRun:
+        """End a run its execution will never end: ``LOST`` once it had tried to queue,
+        ``LOST_UNQUEUED`` before. A run that has ended is left as it is."""
+        return await asyncio.to_thread(self._fail_lost, run_id)
+
+    async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        """``(run id, workflow id, workflow run id)`` of each run still ``running`` that
+        was accepted more than ``older_than`` ago."""
+        return await asyncio.to_thread(self._running_executions, older_than)
 
     # The blocking bodies, run in a worker thread by the coroutines above.
 
-    def _expire_lost(self, conn: Connection[DictRow], column: str, value: str) -> None:
-        """Fail every ``running`` row matching ``column = value`` whose process is gone.
+    def _announce(self, conn: Connection[DictRow], run: PrintRun, slug: str) -> None:
+        if self.events is not None:
+            self.events.publish_in(
+                conn, PrintRunEvent(output_id=run.output_id, slug=slug, run_id=run.id)
+            )
 
-        Not the runs this process is running, which are alive by definition.
-        """
-        conn.execute(
-            "UPDATE print_runs SET status = 'failed', finished_at = now(),"
-            " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
-            f" WHERE {column} = %s AND status = 'running' AND heartbeat_at < now() - %s"
-            " AND NOT (id = ANY(%s))",
-            (
-                Jsonb(LOST.model_dump(mode="json")),
-                Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
-                value,
-                self.lost_after,
-                list(self.live),
-            ),
-        )
-
-    def _current(self, conn: Connection[DictRow], key: str) -> PrintRun | None:
-        self._expire_lost(conn, "idempotency_key", key)
-        row = conn.execute(
-            f"SELECT {_COLUMNS} FROM print_runs WHERE idempotency_key = %s"
-            " AND (status = 'running'"
-            "  OR ((status = 'succeeded' OR (status = 'failed' AND enqueue_attempted))"
-            "      AND finished_at >= now() - %s))"
-            " ORDER BY created_at DESC LIMIT 1",
-            (key, self.repeat_window),
-        ).fetchone()
-        return PrintRun.model_validate(row) if row else None
-
-    def _find(self, key: str) -> PrintRun | None:
+    def _find(self, key: str, has_request_id: bool) -> PrintRun | None:
+        if has_request_id:
+            query = (
+                f"SELECT {_COLUMNS} FROM print_runs WHERE idempotency_key = %s"
+                " ORDER BY created_at DESC LIMIT 1"
+            )
+            args: tuple[Any, ...] = (key,)
+        else:
+            query = (
+                f"SELECT {_COLUMNS} FROM print_runs WHERE idempotency_key = %s"
+                " AND (status = 'running'"
+                "  OR ((status = 'succeeded' OR (status = 'failed' AND enqueue_attempted))"
+                "      AND finished_at >= now() - %s))"
+                " ORDER BY created_at DESC LIMIT 1"
+            )
+            args = (key, self.repeat_window)
         with self._require().connection() as conn:
-            return self._current(conn, key)
-
-    def _claim(self, output_id: str, key: str) -> tuple[PrintRun, bool]:
-        with self._require().connection() as conn, conn.transaction():
-            conn.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (RUN_LOCK_CLASS, key))
-            existing = self._current(conn, key)
-            if existing is not None:
-                return existing, False
-            conn.execute("DELETE FROM print_runs WHERE finished_at < now() - %s", (self.retention,))
-            row = conn.execute(
-                "INSERT INTO print_runs (id, output_id, idempotency_key, status)"
-                f" VALUES (%s, %s, %s, 'running') RETURNING {_COLUMNS}",
-                (uuid.uuid4().hex, output_id, key),
-            ).fetchone()
-        assert row is not None  # INSERT ... RETURNING always answers one row
-        return PrintRun.model_validate(row), True
+            row = conn.execute(query, args).fetchone()
+        return PrintRun.model_validate(row) if row else None
 
     def _get(self, run_id: str) -> PrintRun | None:
         with self._require().connection() as conn:
-            self._expire_lost(conn, "id", run_id)
             row = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s",
-                (run_id,),
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
             ).fetchone()
         return PrintRun.model_validate(row) if row else None
 
-    def _heartbeat(self, run_id: str) -> None:
-        with self._require().connection() as conn:
-            conn.execute(
-                "UPDATE print_runs SET heartbeat_at = now() WHERE id = %s AND status = 'running'",
-                (run_id,),
-            )
-            self._hold_lost(conn, run_id)
+    def _insert(
+        self,
+        run_id: str,
+        subject: str,
+        key: str,
+        slug: str,
+        workflow_id: str,
+        workflow_run_id: str,
+        retention: timedelta | None,
+    ) -> PrintRun:
+        with self._require().connection() as conn, conn.transaction():
+            if retention is not None:
+                conn.execute("DELETE FROM print_runs WHERE finished_at < now() - %s", (retention,))
+            row = conn.execute(
+                "INSERT INTO print_runs"
+                " (id, output_id, idempotency_key, status, workflow_id, workflow_run_id, slug)"
+                " VALUES (%s, %s, %s, 'running', %s, %s, %s)"
+                " ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING"
+                f" RETURNING {_COLUMNS}",
+                (run_id, subject, key, workflow_id, workflow_run_id, slug),
+            ).fetchone()
+            if row is not None:
+                run = PrintRun.model_validate(row)
+                self._announce(conn, run, slug)
+                return run
+            existing = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs"
+                " WHERE workflow_id = %s AND workflow_run_id = %s",
+                (workflow_id, workflow_run_id),
+            ).fetchone()
+        assert existing is not None  # the conflict was on this pair
+        return PrintRun.model_validate(existing)
 
-    def _hold_lost(self, conn: Connection[DictRow], run_id: str) -> None:
-        # A run failed as lost after it tried to queue, which this process is still
-        # running: it may queue more, so its key is held from now, not from the expiry.
-        conn.execute(
-            "UPDATE print_runs SET finished_at = now()"
-            " WHERE id = %s AND status = 'failed' AND enqueue_attempted",
-            (run_id,),
-        )
+    def _fail_lost(self, run_id: str) -> PrintRun:
+        with self._require().connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE print_runs SET status = 'failed', finished_at = now(),"
+                " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
+                f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}, slug",
+                (
+                    Jsonb(LOST.model_dump(mode="json")),
+                    Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
+                    run_id,
+                ),
+            ).fetchone()
+            if row is not None:
+                run = PrintRun.model_validate(row)
+                self._announce(conn, run, row["slug"] or "")
+                return run
+            current = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if current is None:
+            raise LookupError(f"there is no print run {run_id}")
+        return PrintRun.model_validate(current)
+
+    def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT id, workflow_id, workflow_run_id FROM print_runs"
+                " WHERE status = 'running' AND workflow_id IS NOT NULL"
+                " AND created_at <= now() - %s ORDER BY created_at",
+                (older_than,),
+            ).fetchall()
+        return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
 
     def _start_enqueue(self, run_id: str) -> None:
-        # The compare-and-set that orders this against `_expire_lost`: if the run was
-        # expired first, its key is released and a retry may be running, so this one
-        # must not queue.
-        with self._require().connection() as conn:
-            row = conn.execute(
-                "UPDATE print_runs SET enqueue_attempted = true, heartbeat_at = now()"
-                " WHERE id = %s AND status = 'running' RETURNING id",
-                (run_id,),
-            ).fetchone()
-        if row is None:
-            raise RunLostError(run_id)
-
-    def _finish(self, run_id: str, state: RunStatus, column: str, value: dict[str, Any]) -> None:
-        # Only a run still `running`: one that was failed as lost meanwhile stays as the
-        # retries that read it saw it (see the module docstring).
         with self._require().connection() as conn:
             conn.execute(
-                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now(),"
-                " heartbeat_at = now() WHERE id = %s AND status = 'running'",
-                (state, Jsonb(value), run_id),
+                "UPDATE print_runs SET enqueue_attempted = true"
+                " WHERE id = %s AND status = 'running'",
+                (run_id,),
             )
-            self._hold_lost(conn, run_id)
 
-
-#: Awaited by the work before each ``POST /queue/`` (:meth:`PrintRunStore.start_enqueue`).
-BeforeEnqueue = Callable[[], Awaitable[None]]
-Work = Callable[[BeforeEnqueue], Awaitable[PrintRunResult]]
-
-
-class PrintRuns:
-    """Runs each accepted print as a task on this process's loop, recording its end."""
-
-    def __init__(
-        self,
-        store: PrintRunStore,
-        events: EventBus | None,
-        *,
-        heartbeat_interval: float = HEARTBEAT_INTERVAL,
-    ) -> None:
-        self.store = store
-        self.events = events
-        self.heartbeat_interval = heartbeat_interval
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-
-    @property
-    def running(self) -> frozenset[str]:
-        return frozenset(self._tasks)
-
-    def announce(self, run: PrintRun, slug: str) -> None:
-        """``print.run`` on the output's topic: re-read ``GET /print/runs/{id}``."""
-        emit(self.events, PrintRunEvent(output_id=run.output_id, slug=slug, run_id=run.id))
-
-    def start(self, run: PrintRun, slug: str, work: Work) -> None:
-        task = asyncio.create_task(self._run(run, slug, work), name=f"print-run-{run.id}")
-        self._tasks[run.id] = task
-        self.store.live = self.store.live | {run.id}
-
-        def done(_: asyncio.Task[None]) -> None:
-            self._tasks.pop(run.id, None)
-            self.store.live = self.store.live - {run.id}
-
-        task.add_done_callback(done)
-
-    async def aclose(self) -> None:
-        """Fail every run still in progress: this process will not finish them."""
-        tasks = list(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _beat(self, run_id: str) -> None:
-        while True:
-            await asyncio.sleep(self.heartbeat_interval)
-            try:
-                await self.store.heartbeat(run_id)
-            except Exception:
-                # A missed beat costs nothing until LOST_AFTER; keep trying.
-                logger.exception("could not touch a print run's heartbeat")
-
-    async def _run(self, run: PrintRun, slug: str, work: Work) -> None:
-        beat = asyncio.create_task(self._beat(run.id), name=f"print-run-beat-{run.id}")
-        enqueuing = False
-
-        async def before_enqueue() -> None:
-            nonlocal enqueuing
-            if not enqueuing:
-                # Set first, so a cancel mid-write says "may be queued", never "nothing".
-                enqueuing = True
-                await self.store.start_enqueue(run.id)
-
-        try:
-            try:
-                result = await work(before_enqueue)
-            except ApiError as error:
-                await self.store.fail(
-                    run.id,
-                    PrintRunError(
-                        type=error.type,
-                        status=error.status,
-                        title=error.title,
-                        detail=error.detail,
-                        extensions=jsonable_encoder(error.extensions),
-                    ),
-                )
-            except asyncio.CancelledError:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(
-                        self.store.fail(run.id, LOST if enqueuing else LOST_UNQUEUED)
-                    )
-                raise
-            except RunLostError:
-                # Failed as lost (by another replica) before it queued; the row says so.
-                logger.warning("a print run was failed as lost", extra={"run_id": run.id})
-            except Exception:
-                logger.exception("a print run failed", extra={"run_id": run.id})
-                await self.store.fail(
-                    run.id,
-                    PrintRunError(
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        title="Internal Server Error",
-                        detail=UNEXPECTED_DETAIL,
-                    ),
-                )
-            else:
-                await self.store.succeed(run.id, result)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # The row stays `running`; with no heartbeat it reads as lost in LOST_AFTER.
-            logger.exception("could not record a print run's end", extra={"run_id": run.id})
-        finally:
-            beat.cancel()
-            self.announce(run, slug)
+    def _finish(
+        self, run_id: str, slug: str, state: RunStatus, column: str, value: dict[str, Any]
+    ) -> PrintRun:
+        # Only a run still `running`: a retried end finds it ended and changes nothing.
+        with self._require().connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now()"
+                f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}",
+                (state, Jsonb(value), run_id),
+            ).fetchone()
+            if row is not None:
+                run = PrintRun.model_validate(row)
+                self._announce(conn, run, slug)
+                return run
+            current = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if current is None:
+            raise LookupError(f"there is no print run {run_id}")
+        return PrintRun.model_validate(current)

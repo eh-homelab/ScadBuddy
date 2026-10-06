@@ -1,3 +1,4 @@
+import { fixedCredentials } from './fixedCredentials.js'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -81,7 +82,7 @@ export async function tempPaths(): Promise<{ stateDir: string }> {
 
 export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>): SessionManager {
   return new SessionManager({
-    credential: () => Promise.resolve({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
+    credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
     pollMs: 50,
     ...deps,

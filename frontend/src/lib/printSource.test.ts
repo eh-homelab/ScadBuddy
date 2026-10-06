@@ -29,7 +29,7 @@ describe('printSource', () => {
     const remember = vi.spyOn(api, 'putLibraryChoices').mockResolvedValue({ filament_plan: [] })
     await sourceApi(LIBRARY).run({} as never)
     await sourceApi(LIBRARY).remember({ filament_plan: [] })
-    expect(run).toHaveBeenCalledWith(89, {}, undefined)
+    expect(run).toHaveBeenCalledWith(89, {}, undefined, undefined)
     const check = vi.spyOn(api, 'checkLibraryPrint').mockResolvedValue({ errors: [], warnings: [] })
     await sourceApi(LIBRARY).check({} as never)
     expect(check).toHaveBeenCalledWith(89, {})

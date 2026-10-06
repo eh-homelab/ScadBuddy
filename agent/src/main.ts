@@ -8,6 +8,7 @@ import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
+import { CredentialPool } from './harness/fallback.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -35,6 +36,7 @@ import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents
 import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
+import { shutdownTelemetry, traceListener } from './telemetry/setup.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -263,17 +265,16 @@ const sessions =
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
-        credential: async () => {
-          if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
-          const credential = await credentials.reveal(kek.kek)
-          if (!credential) throw new Error('no Claude credential is configured')
-          return credential
-        },
+        // Every usable credential in priority order, with fallback; disables,
+        // cooldowns, recoveries and fallbacks are audited (#1093).
+        credentials: new CredentialPool({ repo: credentials, kek, audit }),
       })
     : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
+// #815 §2: a session whose tab is connected again stops waiting for it.
+if (sessions) tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
 // The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
 if (sessions) toolServices.sessions = sessions
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
@@ -344,6 +345,7 @@ const app = createApp({
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
 const stopHeartbeat = startHeartbeat(wss)
 
+traceListener(PORT)
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
@@ -409,5 +411,8 @@ async function stop(): Promise<void> {
     timeoutMs: 10_000,
   })
   if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
+  // The last spans (this shutdown's turns among them), within 2 s of the
+  // pod's grace period. Without --import no SDK started and this is a no-op.
+  await shutdownTelemetry()
   process.exit(result === 'clean' ? 0 : 1)
 }

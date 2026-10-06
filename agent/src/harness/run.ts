@@ -34,7 +34,7 @@ import {
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
-import { ASK_USER_QUESTION, askThroughGate, type QuestionGate } from './questions.js'
+import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -54,8 +54,10 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     https://code.claude.com/docs/en/llm-gateway-connect ("Each variable sends
 //     the credential in a different HTTP header: `ANTHROPIC_AUTH_TOKEN` in
 //     `Authorization: Bearer`, `ANTHROPIC_API_KEY` in `x-api-key`"):
-//       anthropic_api_key → ANTHROPIC_API_KEY
-//       gateway           → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+//       anthropic_api_key  → ANTHROPIC_API_KEY
+//       claude_oauth_token → CLAUDE_CODE_OAUTH_TOKEN, the token `claude setup-token`
+//                            prints (an sk-ant-oat01- token in x-api-key is a 401)
+//       gateway            → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 //   - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1: without it Claude Code "also
 //     sends nonessential background traffic outside the gateway path, to
 //     Anthropic and to third-party services such as GitHub: version checks,
@@ -71,6 +73,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     were refused that way, read tools included (measured on Claude Code
 //     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
 //     through the permission seam below, and an outward one parks at the gate.
+//   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
+//     Claude Code's retries on one credential when there is another to fall
+//     back to (#1093);
 //   - limits: `maxTurns`, `maxBudgetUsd` ("The query will stop if this budget is
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
@@ -96,7 +101,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     that origin for the session (browserOrigins.ts).
 //   - the AskUserQuestion built-in (#940, questions.ts) when the run has a
 //     question gate: the call is answered in `canUseTool`, where it parks
-//     until the user answers in the panel;
+//     until the user answers in the panel; and, for subagents, which Claude
+//     Code refuses AskUserQuestion, the `scadbuddy_questions` server's ask_user tool on
+//     the same gate;
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -112,6 +119,12 @@ export type HarnessRun = {
   model?: string
   maxTurns?: number
   maxBudgetUsd?: number
+  /**
+   * How many times Claude Code retries a failed model request on this
+   * credential (CLAUDE_CODE_MAX_RETRIES); its own default when omitted. Set
+   * when there is another credential to fall back to (fallback.ts, #1093).
+   */
+  maxRetries?: number
   /** Aborting stops the query and its Claude Code process. */
   signal?: AbortSignal
   /**
@@ -185,11 +198,18 @@ export type HarnessRun = {
    * `createMemoryHooks`), added beside the permission seam's `PreToolUse`.
    */
   memoryHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
+  /**
+   * SDK callback hooks for the turn's trace (telemetry/turn.ts
+   * `TurnTrace.hooks`): every tool's start and end, after the permission
+   * seam's `PreToolUse` and the memory hooks. In-process callbacks, like the
+   * memory hooks, so not the command hooks plugins.ts refuses.
+   */
+  traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
 }
 
-/** The permission seam's PreToolUse hook first, then the memory hooks, by event. */
+/** The permission seam's PreToolUse hook first, then the memory hooks, then the trace hooks, by event. */
 function mergeHooks(
   base: Partial<Record<HookEvent, HookCallbackMatcher[]>>,
   extra: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined,
@@ -206,6 +226,8 @@ export function credentialEnv(credential: Credential): Record<string, string> {
   switch (credential.kind) {
     case 'anthropic_api_key':
       return { ANTHROPIC_API_KEY: credential.secret }
+    case 'claude_oauth_token':
+      return { CLAUDE_CODE_OAUTH_TOKEN: credential.secret }
     case 'gateway':
       return { ANTHROPIC_BASE_URL: credential.baseUrl, ANTHROPIC_AUTH_TOKEN: credential.secret }
   }
@@ -325,11 +347,16 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const base = buildQueryOptions(run.paths)
   const harnessTiers = harnessTierOf(run)
   const questions = run.questionGate
-  // AskUserQuestion only asks the user; it is answered in canUseTool below.
+  // AskUserQuestion and ask_user only ask the user; the first is answered in
+  // canUseTool below, the second by its own handler.
   const ownTiers: TierResolver = questions
-    ? (name, input) => (name === ASK_USER_QUESTION ? 'read' : harnessTiers(name, input))
+    ? (name, input) => (isQuestionTool(name) ? 'read' : harnessTiers(name, input))
     : harnessTiers
-  const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
+  const local = { ...(run.mcpServers ?? {}), ...(questions ? { [QUESTION_SERVER]: questionServer(questions) } : {}) }
+  if (questions && Object.hasOwn(run.mcpServers ?? {}, QUESTION_SERVER)) {
+    throw new PluginConfigError(`MCP server name "${QUESTION_SERVER}" is used twice`)
+  }
+  const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(local)))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
   let gate = run.approvalGate
@@ -400,20 +427,24 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
     },
-    mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
+    mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
-      {
-        PreToolUse: [
-          makePreToolUseHook(tierOf, run.onDecision, gate, guard),
-          ...(questions ? [QUESTION_PROMPT_HOOK] : []),
-        ],
-      },
-      run.memoryHooks,
+      mergeHooks(
+        {
+          PreToolUse: [
+            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+            ...(questions ? [QUESTION_PROMPT_HOOK] : []),
+          ],
+        },
+        run.memoryHooks,
+      ),
+      run.traceHooks,
     ),
     permissionMode: 'default',
   }

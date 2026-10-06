@@ -13,6 +13,7 @@ describe('toSlides (#275)', () => {
       kind: 'image',
       src: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6',
       poster: undefined,
+      thumbnail: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6/thumbnail',
       alt: 'Printed in blue and orange',
       caption: 'Printed in blue and orange',
       contentType: 'image/png',
@@ -20,8 +21,14 @@ describe('toSlides (#275)', () => {
     expect(slides[3]).toMatchObject({
       kind: 'video',
       poster: '/api/v1/models/creme-coaster/media/d4e5f6a1b2c3/poster',
+      thumbnail: '/api/v1/models/creme-coaster/media/d4e5f6a1b2c3/thumbnail',
       contentType: 'video/mp4',
     })
+  })
+
+  it('gives a video with no poster no thumbnail (#624)', () => {
+    const items: MediaView[] = media[GALLERY_SLUG]!.map((item) => ({ ...item, poster: null }))
+    expect(toSlides(GALLERY_SLUG, items)[3]?.thumbnail).toBeUndefined()
   })
 
   it('names an uncaptioned item by its place, and leaves its caption out', () => {

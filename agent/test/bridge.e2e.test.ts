@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -93,7 +94,7 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     const m = manager({
       sql: db.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...harnessTools(toolServices),
       approvalHashKey: Buffer.alloc(32, 9),

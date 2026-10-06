@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
+import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -51,6 +52,12 @@ const SCHEMA = {
   ],
 }
 
+describe('print_output still-accepting budget (#1061)', () => {
+  it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
+    expect(ACCEPTING_MS).toBe(240_000)
+  })
+})
+
 describe('validateParams', () => {
   it('accepts values the customizer could produce and reports effective values', () => {
     const report = validateParams(SCHEMA as never, { width: 50, style: 'square', colour: '#00ff00' })
@@ -78,6 +85,13 @@ describe('validateParams', () => {
       logo: 'must be "" (none), the default ("default-logo.svg"), a sample file ("default-logo.svg", "star.svg"), or an asset id from upload_asset',
       nope: 'is not a parameter of this model',
     })
+  })
+})
+
+describe('validateParams: max_length counts characters as the backend and the customizer do (#920)', () => {
+  it('counts an emoji as one character, not two UTF-16 units', () => {
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cd' }).valid).toBe(true)
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cde' }).valid).toBe(false)
   })
 })
 
@@ -455,6 +469,52 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBeFalsy()
       expect(ids).toHaveLength(2)
       expect(ids[1]).toBe(ids[0])
+    })
+
+    // No Retry-After unless a test sets one: a real one is whole seconds (review #1061 4a).
+    const accepting = (retryAfter?: string) => () =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/command-still-accepting',
+          title: 'Service Unavailable',
+          status: 503,
+          detail: 'ScadBuddy is still checking this print.',
+        },
+        { status: 503, headers: retryAfter ? { 'Retry-After': retryAfter } : {} },
+      )
+
+    it('re-sends while the backend is still accepting the same request (#1052)', async () => {
+      const { ids, handler } = posts([accepting(), () => HttpResponse.json(running, { status: 202 })])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
+      const sent: number[] = []
+      const { ids, handler } = posts([
+        () => (sent.push(Date.now()), accepting('0.2')()),
+        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    })
+
+    it('keeps re-sending while still accepting past the re-send count, as the browser does (review #1061)', async () => {
+      const { ids, handler } = posts([
+        ...Array.from({ length: RUN_REATTEMPTS + 3 }, () => accepting()),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(RUN_REATTEMPTS + 4)
+      expect(new Set(ids).size).toBe(1)
     })
 
     it("never re-sends a problem the backend wrote, even a 503", async () => {
@@ -1151,6 +1211,144 @@ describe('print_again and pull_print_timelapse (#311)', () => {
   it('declare every Bambuddy scope their route needs: the archive read, then the write', () => {
     expect(tool('print_again').bambuddyScope).toEqual(['Read Status', 'Manage Queue'])
     expect(tool('pull_print_timelapse').bambuddyScope).toEqual(['Read Status', 'Manage Archives'])
+  })
+})
+
+describe('Bambuddy writes as operations (#1053)', () => {
+  const OUT = 'd'.repeat(32)
+  const op = { id: 'op-1', kind: 'reprint', subject: 'archive:35', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const again = { queue_item_id: 51, printer_id: 1, bambuddy_url: 'https://b/queue' }
+
+  it('print_again sends an Idempotency-Key and re-sends the same one after a dropped answer', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2 ? HttpResponse.error() : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('follows a 202 to the operation result', async () => {
+    let reads = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => {
+        reads += 1
+        return HttpResponse.json(reads < 2 ? op : { ...op, status: 'succeeded', result: again })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('follows a 202 past renderWaitMs, within the command follow window (review #1063 3)', async () => {
+    let reads = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, async () => {
+        reads += 1
+        if (reads < 4) await new Promise((resolve) => setTimeout(resolve, 30))
+        return HttpResponse.json(reads < 4 ? op : { ...op, status: 'succeeded', result: again })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ renderWaitMs: 20 }))
+    expect(result.isError).toBeFalsy()
+    expect(reads).toBe(4)
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('hands back a still-running operation after a short follow, for get_operation (review #1063 r6 3)', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json(op)),
+    )
+    const started = Date.now()
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ commandFollowMs: 50 }))
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(result.isError).toBeFalsy()
+    const body = firstText(result)
+    expect(body).toMatchObject({ status: 'running', operation_id: 'op-1' })
+    expect(JSON.stringify(body)).toContain('get_operation')
+  })
+
+  it('the default follow is the backend deadline plus a margin, not the browser window', () => {
+    expect(COMMAND_FOLLOW_MS).toBeLessThanOrEqual(30_000)
+    expect(COMMAND_FOLLOW_MS).toBeGreaterThan(10_000)
+  })
+
+  it('a failed operation is the tool error, in the backend words', async () => {
+    const error = { type: 'about:blank', status: 502, title: 'Bad Gateway', detail: 'Bambuddy said no', extensions: {} }
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json({ ...op, status: 'failed', error })),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('Bambuddy said no')
+  })
+
+  it('a followed failure is the same tool error as the direct answer (review #1063 4)', async () => {
+    const UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+    const problem = { type: UNAVAILABLE, status: 504, title: 'Gateway Timeout', detail: 'Bambuddy did not answer' }
+    const run = async (answer: () => Response) => {
+      server.use(
+        http.post(`${BACKEND}/api/v1/prints/35/reprint`, answer),
+        http.get(`${BACKEND}/api/v1/operations/op-1`, () =>
+          HttpResponse.json({ ...op, status: 'failed', error: { ...problem, extensions: { slice_job_id: 's-1' } } }),
+        ),
+      )
+      return runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    }
+    const direct = await run(() => HttpResponse.json({ ...problem, slice_job_id: 's-1' }, { status: 504 }))
+    const followed = await run(() => HttpResponse.json(op, { status: 202 }))
+    expect(followed.isError).toBe(true)
+    expect(followed.content).toEqual(direct.content)
+  })
+
+  it.each([
+    ['send_to_bambuddy', { output_id: OUT }, `/api/v1/outputs/${OUT}/send`],
+    ['create_print_project', { name: 'P' }, '/api/v1/print/projects'],
+    ['pull_print_timelapse', { archive_id: 35, filename: 'a.mp4' }, '/api/v1/prints/35/timelapse/pull'],
+  ])('%s sends an Idempotency-Key', async (name, args, path) => {
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({}, { status: 200 })
+      }),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('get_operation reads an operation', async () => {
+    const id = 'a'.repeat(32)
+    server.use(http.get(`${BACKEND}/api/v1/operations/${id}`, () => HttpResponse.json({ ...op, status: 'succeeded', result: again })))
+    const result = await tool('get_operation').execute({ operation_id: id }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('succeeded')
+    expect(tool('get_operation').risk).toBe('read')
+  })
+
+  it('get_operation refuses an id the backend would not take (review #1063 4)', async () => {
+    let asked = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => {
+        asked = true
+        return HttpResponse.json(op)
+      }),
+    )
+    const result = await runTool(tool('get_operation'), { operation_id: 'op-1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(asked).toBe(false)
   })
 })
 

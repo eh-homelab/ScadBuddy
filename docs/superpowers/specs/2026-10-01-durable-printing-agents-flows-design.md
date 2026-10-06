@@ -345,7 +345,7 @@ each queue's worker holds only what its commands need.
 | `render` | `scadbuddy-render` | renders, previews, Arrange | store key; runs template code |
 | `library` | `scadbuddy-library`, a container in the API pod (it needs `scadbuddy-data`, which is RWO) | model create/import/patch/duplicate/delete, source and file writes, thumbnail/readme/media writes, preset writes that need `openscad`, version restore, upstream merge/dismiss/detach, library pin/repin/unpin/remove, font install, the sweeps | the data volume and git; no Bambuddy key; runs no template code |
 | `bambuddy` | `scadbuddy-print` (§5.5) | prints, send, project file, create project, file into project, Bambuddy part of output delete, reprint, timelapse pull, sidebar registration, analyzer fix apply | full Bambuddy key |
-| `agent-tools`, `agent` | `agent-tools`: the agent service's sidecar; `agent`: the `scadbuddy-agent-durable` Deployment (§6.2) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
+| `agent-tools`, `agent` | `agent-tools`: the agent service's sidecar; `agent`: the `agent-durable` sidecar beside it (§6.2) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
 | `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward; the KEK, read-only, only to encrypt flow payloads (§6.5) |
 
 Git writes to one model's history still take the catalogue's existing lock inside the
@@ -525,7 +525,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 - **`print_runs` is our system of record**, written only by the workflow's activities,
   following the `render/projection.py` pattern. `GET /print/runs/{id}` (`id` is the row
   id, returned by the 202) reads it, as today. A new migration:
-  - drops `heartbeat_at`;
+  - leaves `heartbeat_at`, which a pre-#1052 pod still writes during the rolling update;
+    a later migration drops it (expand/contract);
   - adds `workflow_id text` and `workflow_run_id text`, with a unique index on the pair
     (§4.2 step 3).
 
@@ -600,13 +601,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 - `DurableSession`, workflow ID `session-<ai_sessions.id>`, on queue `agent`, in a new
   Python package `agent-durable/`. It is shipped as the Dockerfile target
-  `agent-durable` and runs as **its own Deployment, `scadbuddy-agent-durable`**. It is
-  not a container in the ScadBuddy pod, because a NetworkPolicy selects pods, not
-  containers.
-  - The ScadBuddy pod already holds the backend and the `agent` sidecar (AI spec
-    §4.1). Both need egress that this runtime must not have: Bambuddy, DO Spaces,
-    remote MCP plugins.
-  - With its own pod, §6.3a's NetworkPolicy applies to this runtime alone.
+  `agent-durable` and runs as **a sidecar in the ScadBuddy pod**, beside the `agent`
+  sidecar (AI spec §4.1), with the same trust.
   - It needs nothing on `localhost`: tool calls reach the agent service as activities
     on `agent-tools` (§6.3), events go to Postgres (`ai_session_events`), and it reads
     nothing from the data volume.
@@ -649,13 +645,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   (`/srv/agent`), as the store keys sessions by it.
 - **The credential** is read from `ai_credentials` and decrypted in Python with a port of
   `openSecret` (`agent/src/secrets.ts:187`):
+  - There may be several rows (#1093). A query takes them in the pool's fallback order
+    (`CredentialPool`, `agent/src/harness/fallback.ts`): by `priority`, skipping any
+    that are cooling down, disabled, or not openable with the mounted key.
   - AES-256-GCM, sealed format `version | IV(12) | tag(16) | ciphertext`;
-  - AAD `v2|ai_credentials:default:{"kind":…,"base_url":…}` for the secret, and
-    `dek:` + that for the data key;
+  - AAD `v2|ai_credentials:<row id>:{"kind":…,"base_url":…}` for the secret, as
+    `credentialAad` (`agent/src/credentials.ts`) builds it. The row id is `default`
+    for the row migrated from the single-credential table. The data key's AAD is
+    `dek:` + that;
   - KEK id = the first 16 hex characters of the key's SHA-256.
 
   **Test vectors, from one source of truth.** `agent/test/fixtures/secret-vectors.json`
-  holds one envelope per credential kind (`anthropic_api_key`, `gateway`) and per
+  holds one envelope per credential kind (`anthropic_api_key`, `claude_oauth_token`,
+  `gateway`) and per
   version. A TypeScript script writes it with `seal` under a fixed KEK, data key and IV.
   - The agent's test suite regenerates it and fails if the committed file differs. So a
     change to `secrets.ts`'s format or AAD cannot land without new vectors.
@@ -664,8 +666,9 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - The `agent-durable` CI job runs whenever `agent/src/secrets.ts`,
     `agent/src/credentials.ts` or the vectors change.
 
-  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`, or
-  `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
+  The result goes to the runner's `env` as `ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN` for a `claude_oauth_token`, or `ANTHROPIC_BASE_URL` plus
+  `ANTHROPIC_AUTH_TOKEN` for a gateway (`credentialEnv`,
   `agent/src/harness/run.ts:185`). It never enters history.
 - **Limits.** `max_turns` and `budget_usd` are the session row's. Each segment gets the
   remaining budget as `max_budget_usd`, and the row's `cost_usd` and `turns` are updated
@@ -703,47 +706,19 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 ### 6.3a The `agent-durable` container
 
-It holds the Anthropic credential and runs a git-pinned, pre-release package, so it is
-the most constrained runtime in the system.
+It is trusted like the `agent` sidecar, including the git-pinned plugin package, and is
+configured the same way.
 
 - **Image.** The Dockerfile stage `agent-durable` runs as `USER 10001:10001`, like the
-  `agent` stage (`Dockerfile:271`). There are no build tools in the final
-  stage, and its only writable path is `/srv/agent`, an `emptyDir`. The pod sets
-  `readOnlyRootFilesystem`, `runAsNonRoot`, drops all capabilities and uses
-  `seccompProfile: RuntimeDefault`.
-- **Secrets.** It mounts exactly what it needs, read-only:
-  - `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation),
-    from the same Secret the `agent` container mounts, as files rather than
-    environment variables;
-  - `SCADBUDDY_DATABASE_URL` for the `ai_*` tables;
-  - the Temporal address.
-
-  It holds no Bambuddy key and no MCP or plugin secrets. Its database role can read
-  `ai_credentials` and `ai_payload_keys`, and write `ai_session_events`,
-  `ai_durable_entries` (or `ai_session_entries`) and the session counters. For §6.6 it
-  has exactly `SELECT, INSERT, UPDATE, DELETE` on `ai_pending_input` (the upsert and
-  the guarded `DELETE … RETURNING` need all four), `SELECT, INSERT` on
-  `ai_input_responses`, and `INSERT` on `ai_audit` under an RLS `INSERT` policy for
-  the `agent-durable` role, `WITH CHECK (kind = 'approval')`. The agent service's role
-  owns `ai_audit` (it runs the agent migrations) and `FORCE ROW LEVEL SECURITY` is not
-  set, so the owner bypasses RLS and its writes and the audit read routes are
-  unchanged. Phase 5 confirms that ownership before enabling RLS. If the owner differs,
-  the service role gets `FOR ALL USING (true) WITH CHECK (true)` instead. §8 asserts
-  the audit read routes still return rows after the migration. It can do nothing else.
-- **Network.** Egress is allowed only to Postgres, the Temporal frontend, the cluster
-  DNS (kube-dns/CoreDNS, UDP and TCP 53, which a default-deny egress policy otherwise
-  blocks), and the credential's endpoint: `api.anthropic.com`, or the gateway's
-  `base_url` host. Nothing is fetched at run time: the pinned package is installed at
-  build.
-  - A plain `NetworkPolicy` cannot name a host, only pods, namespaces and CIDRs. The
-    cluster's CNI is Cilium (the existing `applications/scadbuddy/networkpolicy-agent.yaml`
-    relies on it), so this is a `CiliumNetworkPolicy`: `toEndpoints` for Postgres and
-    Temporal, and `toFQDNs` (`matchName`) for the endpoint, with the DNS rule's
-    `rules.dns` that Cilium's DNS proxy needs to learn the names' addresses. Addresses
-    rotating behind a CDN are followed by the proxy, not pinned in the manifest.
-  - The host is named in the manifest, so pointing the credential at a new gateway
-    is also a clusters change. Until it lands, the new host is refused: the policy
-    fails closed, and the session's error names the blocked endpoint.
+  `agent` stage (`Dockerfile:271`), with the same pod security settings as the `agent`
+  container.
+- **Configuration.** It mounts the `agent` container's Secret and reads the same
+  infrastructure variables: `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), plus the Temporal address. It holds
+  no Bambuddy key.
+- **Network.** No policy of its own: it is in the ScadBuddy pod, and the existing
+  ingress policy (`applications/scadbuddy/networkpolicy-agent.yaml`) covers only the
+  `agent` port. It opens no port besides its health check.
 - **The credential** is decrypted per segment, passed to the runner's `env`, and never
   logged, written to disk or put in history (§6.2).
 
@@ -1011,7 +986,8 @@ happens, and there is no separate request system.
     kind, tool, summary, input_hash, prompt, requested_by, responders, created_at,
     expires_at, last_checked_at)` and `ai_input_responses(request_id primary key, session_id, kind,
     outcome, response jsonb, responder, created_at)` are one new agent migration in
-    phase 5, and the `agent-durable` role writes both (§6.3a). The workflow pair is the
+    phase 5, and the `agent-durable` container writes both with the agent's database URL
+    (§6.3a). The workflow pair is the
     one `workflow_runs` records too. The sweep reads it, and nothing but the route's
     prefix dispatch parses `request_id`.
 - **Two reads, two sources.**
@@ -1059,8 +1035,8 @@ happens, and there is no separate request system.
   on the `scadbuddy` Temporal frontend (only `networkpolicy-agent.yaml`, which selects
   the agent pod). That client could equally terminate or reset the workflow, so this is
   the frontend's boundary, not the gate's. Phase 5 adds it: a `CiliumNetworkPolicy`
-  ingress on the Temporal frontend that admits only the ScadBuddy pod (the backend and
-  the agent service), `scadbuddy-agent-durable`, the ScadBuddy worker Deployments and
+  ingress on the Temporal frontend that admits only the ScadBuddy pod (the backend, the
+  agent service and its `agent-durable` sidecar), the ScadBuddy worker Deployments and
   the Temporal UI (#668, an operator surface), each by its pod label in the
   `scadbuddy` namespace. §8 asserts the policy, since a forged responder cannot be
   refused at the Update layer.
@@ -1438,9 +1414,6 @@ happens, and there is no separate request system.
     carrying the pre-Reset id is refused as stale;
   - `cancel_input` with the `agent-durable` worker down: an interrupt still stops the
     turn, and a handoff is refused with a retryable error;
-  - `open_input` and `resolve_input` run as the `agent-durable` role itself, not as the
-    migration owner, and that role's insert of an `ai_audit` row of another kind is
-    refused;
   - after a Reset the aggregate read shows exactly one entry for the call, and a
     terminated run's entry leaves it within one sweep;
   - a classic id with an unknown prefix, or with no row, is refused as stale;
@@ -1450,7 +1423,6 @@ happens, and there is no separate request system.
     `approval_expiry_seconds`;
   - a non-browser owner holding the grant is given role `owner` and cannot approve a
     call in its own session, in both modes;
-  - the audit read routes still return rows after `ai_audit`'s RLS migration;
   - flow `wait_for_human` `timeout` outside 10–86 400 s is refused at type check for a
     literal, and raises at run time for a computed value;
   - an interrupt with the `agent-durable` worker down: when the worker returns, the
@@ -1527,9 +1499,23 @@ Each phase is its own implementation plan and ships alone.
    - The clusters manifests: `scadbuddy-print`, Search Attributes, Archival.
    - Fixes the lost run (a print run that dies with the API pod). #742, the library
      route's 202, is already done (#945).
+   - As built (#1052, plan `2026-10-02-durable-phase-1-printrun.md`): the `bambuddy`
+     worker runs inside the API process, because an output's source reads and records on
+     the data volume; the `scadbuddy-print` Deployment and a volume-free source are #1060.
+     The `operations` table and route, and the frontend `command()` and agent wrapper
+     beyond the print POST's re-send on `command-still-accepting`, move to phase 2. The
+     Search Attributes are upserted only with `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` set,
+     until the clusters change registers them.
 2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
    join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
    sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
+   - As built so far (2a, #1053, plan `2026-10-03-durable-phase-2a-operations-bambuddy.md`):
+     `operations`, `GET /operations/{id}`, the `Operation` workflow, and send, project
+     file, create project, attach project, reprint, timelapse pull and sidebar
+     registration as its kinds. Every kind answers `done` (today's body inside the
+     deadline, 202 past it); the client's key is the `Idempotency-Key` header; analyzer
+     fix apply stays a request (Postgres only, §4.1); output delete's Bambuddy part goes
+     with the library commands (phase 3). Renders (2b) and `FollowPrint` (2c) follow.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.

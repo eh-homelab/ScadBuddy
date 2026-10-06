@@ -1,8 +1,10 @@
+import { context as otelContext } from '@opentelemetry/api'
 import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { ApprovalError } from '../approvals/service.js'
 import { QuestionError } from '../questions/service.js'
+import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
@@ -34,6 +36,9 @@ import { ready, type RouteModule } from './module.js'
 //                            the agent's AskUserQuestion
 //   approval.decision      → ApprovalService.decision (#258): the same decision
 //                            as POST /api/v1/ai/approvals/:id/approve|deny
+//                          (The panel now answers both through POST
+//                          /api/v1/ai/pending-input/{id}, #815; these two stay
+//                          for a panel loaded before that.)
 //   session.interrupt      → SessionManager.interrupt
 //   session.handoff        → SessionManager.handoff to the browser user (take over)
 //   tab.bind               → the tab this panel is in (#254): from then on each
@@ -101,6 +106,8 @@ export type ChatConnectionOptions = {
   snapshotMs?: number
   /** The browser bridge's tabs (#254); without them `tab.bind` pairs nothing. */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
+  clientIp?: string | undefined
 }
 
 export type ChatRouteDeps = {
@@ -181,6 +188,7 @@ export class ChatConnection {
   private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
+  private readonly clientIp: string | undefined
 
   constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
@@ -191,6 +199,7 @@ export class ChatConnection {
     this.buffered = options.buffered ?? (() => 0)
     this.overflow = options.overflow ?? (() => {})
     this.tabs = options.tabs
+    this.clientIp = options.clientIp
     this.limits = {
       highWater: SEND_HIGH_WATER,
       bufferMax: SEND_BUFFER_MAX,
@@ -340,26 +349,28 @@ export class ChatConnection {
       switch (message.type) {
         case 'user.message': {
           const context = renderPageContext(message.context)
+          // The turn is the browser's child when the frame names its span,
+          // else a root (spec 2026-10-01 §4); a malformed one is ignored.
+          const parent = contextFrom(message.traceparent)
           if (!message.sessionId) {
-            const { session } = await this.sessions.start(this.principal, {
-              origin: 'chat',
-              prompt: message.text,
-              context,
-            })
+            const { session } = await otelContext.with(parent, () =>
+              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context }),
+            )
             this.pairTab(session.id)
             // From the start: session.started is what the panel adopts its new chat by.
             this.follow(session.id, 0)
             return
           }
+          const id = message.sessionId
           // Ownership first, every time (get() refuses another owner's session):
           // pairing this tab must never outrun the check that send() repeats.
-          await this.sessions.get(message.sessionId, this.principal)
-          if (!this.follows.has(message.sessionId)) {
-            this.follow(message.sessionId, await this.sessions.events.lastSeq(message.sessionId))
+          await this.sessions.get(id, this.principal)
+          if (!this.follows.has(id)) {
+            this.follow(id, await this.sessions.events.lastSeq(id))
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
-          this.pairTab(message.sessionId)
-          await this.sessions.send(message.sessionId, this.principal, message.text, { context })
+          this.pairTab(id)
+          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context }))
           return
         }
         case 'session.attach':
@@ -373,7 +384,7 @@ export class ChatConnection {
           await this.sessions.approvals.decision(this.principal, message)
           return
         case 'question.answer':
-          await this.sessions.questions.answer(this.principal, message)
+          await this.sessions.questions.answer(this.principal, message, { clientIp: this.clientIp })
           return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
@@ -460,8 +471,9 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
   app.get(
     CHAT_PATH,
     gate,
-    upgrade(() => {
+    upgrade((c) => {
       let connection: ChatConnection | undefined
+      const clientIp = deps.remoteAddress(c)
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
@@ -469,6 +481,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           const raw = ws.raw as { bufferedAmount?: number } | undefined
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
+            clientIp,
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             ...(deps.tabs ? { tabs: deps.tabs } : {}),
             buffered: () => raw?.bufferedAmount ?? 0,

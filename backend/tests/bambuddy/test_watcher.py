@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -575,3 +576,101 @@ def test_the_postgres_print_log_keeps_the_latest_start(pg_conninfo: str) -> None
             await log.aclose()
 
     assert asyncio.run(scenario()) == (None, None, [OUTPUT], [])
+
+
+def test_a_settle_hook_runs_once_after_print_settled_is_published(paths: DataPaths) -> None:
+    async def scenario() -> tuple[list[list[str]], list[Event]]:
+        write_output(paths)
+        watcher, seen = watcher_for(
+            paths, Script(progress("running"), progress("done", settled=True, done=1))
+        )
+        at_hook: list[list[str]] = []
+
+        async def hook(meta: OutputMeta) -> None:
+            at_hook.append(kinds(seen))
+
+        watcher.on_settled.append(hook)
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return at_hook, seen
+
+    at_hook, seen = asyncio.run(scenario())
+    assert at_hook == [["print.progress", "print.progress", "print.settled"]]
+    assert kinds(seen).count("print.settled") == 1
+
+
+def test_a_failing_settle_hook_still_settles_and_forgets_the_print(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> tuple[MemoryPrintLog, list[Event]]:
+        write_output(paths)
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, seen = watcher_for(
+            paths, Script(progress("done", settled=True, done=1)), prints=log
+        )
+
+        async def hook(meta: OutputMeta) -> None:
+            raise RuntimeError("the database went away near TEST-HOTEND-19")
+
+        watcher.on_settled.append(hook)
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return log, seen
+
+    with caplog.at_level(logging.DEBUG):
+        log, seen = asyncio.run(scenario())
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    assert asyncio.run(log.printed_at(OUTPUT)) is None
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "RuntimeError"
+    assert getattr(record, "output_id", None) == OUTPUT
+    assert "TEST-HOTEND" not in repr(record.__dict__) and record.exc_info is None
+
+
+def test_a_settle_hook_that_hangs_is_cut_off_and_the_print_still_settles(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1083: a hook is awaited inline in the watch loop, so one that never returns
+    (a slow Bambuddy, a stuck pool) is bounded and logged like any other failure."""
+
+    async def scenario() -> tuple[MemoryPrintLog, list[Event]]:
+        write_output(paths)
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, seen = watcher_for(
+            paths, Script(progress("done", settled=True, done=1)), prints=log
+        )
+        watcher.settle_timeout = 0.05
+
+        async def hook(meta: OutputMeta) -> None:
+            await asyncio.Event().wait()
+
+        watcher.on_settled.append(hook)
+        watcher.watch(OUTPUT)
+        await asyncio.wait_for(until_idle(watcher), timeout=5)
+        return log, seen
+
+    with caplog.at_level(logging.DEBUG):
+        log, seen = asyncio.run(scenario())
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    assert asyncio.run(log.printed_at(OUTPUT)) is None
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "TimeoutError"
+
+
+def test_an_output_never_printed_through_the_queue_never_reaches_the_hook(
+    paths: DataPaths,
+) -> None:
+    async def scenario() -> int:
+        write_output(paths)
+        watcher, _ = watcher_for(paths, Script(None))
+        calls: list[str] = []
+
+        async def hook(meta: OutputMeta) -> None:
+            calls.append(meta.id)
+
+        watcher.on_settled.append(hook)
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return len(calls)
+
+    assert asyncio.run(scenario()) == 0

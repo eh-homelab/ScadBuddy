@@ -59,7 +59,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -83,12 +83,26 @@ ERROR_INTERVAL = 60.0
 MAX_AGE = timedelta(hours=24)
 #: How often the prints a dead replica held are looked for.
 RESCAN_INTERVAL = 300.0
+#: How long one settled-print hook may run (#1083). Hooks are awaited inside the
+#: watch loop, so one that never returns would hold the watch open. A hook cut off here
+#: is not retried now: the rack's settle leaves the archives it had not yet started
+#: unrecorded until that output settles again (another print of it), which records them
+#: with its own time; the warning names the output, and the rack logs the archive ids
+#: it left unrecorded, so the gap can be traced. Cutting a
+#: hook off stops the wait, not the work: a database read or write it started in a
+#: thread runs on until Postgres answers, so the archive whose write was in flight may
+#: still be recorded.
+SETTLE_TIMEOUT = 60.0
 
 #: The first key of the two-key advisory lock: "SBPW", so it can't collide with the
 #: migration lock (``render/pg_store.py`` ``MIGRATION_LOCK``, a one-key lock).
 WATCH_LOCK_CLASS = 0x5342_5057
 
 Reader = Callable[[OutputMeta], Awaitable[PrintProgress | None]]
+
+#: Awaited on each read that finds a print settled (#836): after its ``print.settled``
+#: is published, before it is forgotten.
+SettledHook = Callable[[OutputMeta], Awaitable[None]]
 
 
 def _now() -> datetime:
@@ -256,6 +270,8 @@ class PrintWatcher:
         max_age: timedelta = MAX_AGE,
         rescan_interval: float = RESCAN_INTERVAL,
         now: Callable[[], datetime] = _now,
+        on_settled: Sequence[SettledHook] = (),
+        settle_timeout: float = SETTLE_TIMEOUT,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -269,6 +285,10 @@ class PrintWatcher:
         self.max_age = max_age
         self.rescan_interval = rescan_interval
         self.now = now
+        #: Each runs on the settled branch only; what one raises is logged by type and the
+        #: watch ends as before. A feature registers itself here (``rack/component.py``).
+        self.on_settled: list[SettledHook] = list(on_settled)
+        self.settle_timeout = settle_timeout
         self._tasks: dict[str, asyncio.Task[None]] = {}
         #: Set to cut a follower's wait short: a new print of an output already followed.
         self._pokes: dict[str, asyncio.Event] = {}
@@ -380,6 +400,17 @@ class PrintWatcher:
             # The next rescan reads it once more and forgets it then.
             logger.exception("could not forget a finished print", extra={"output_id": output_id})
 
+    async def _settled(self, meta: OutputMeta) -> None:
+        for hook in self.on_settled:
+            try:
+                await asyncio.wait_for(hook(meta), timeout=self.settle_timeout)
+            except Exception as exc:
+                # Type only: a hook's error can carry data it must not log (#836, spec §7).
+                logger.warning(
+                    "a settled-print hook failed",
+                    extra={"output_id": meta.id, "error": type(exc).__name__},
+                )
+
     async def _loop(self, output_id: str) -> None:
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
@@ -438,6 +469,10 @@ class PrintWatcher:
                 continue
             last_failure = None
             changed = self.observer.observe(meta, progress)
+            if progress is not None and progress.settled:
+                # After observe, so print.settled is already published (spec §4). Not on
+                # progress None: an output never printed through slice_queue has no picks.
+                await self._settled(meta)
             if progress is None or progress.settled:
                 await self._done(output_id)
                 return

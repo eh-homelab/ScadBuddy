@@ -1,3 +1,4 @@
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -103,11 +104,11 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
       pending: new PendingActionStore(),
       pollIntervalMs: 5,
       renderWaitMs: 1000,
-    }
+      }
     m = manager({
       sql: db.sql,
       paths,
-      credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       tierOf,
       mcpServers: () => ({

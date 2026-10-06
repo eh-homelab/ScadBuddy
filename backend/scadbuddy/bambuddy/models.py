@@ -267,8 +267,18 @@ class NozzleRackSlot(NozzleInfo):
     stat: int | None = None
     filament_type: str = ""
     filament_colour: str = Field(default="", alias="filament_color")
+    #: The hotend's own serial (#836). It goes into the ``rack_nozzle_*`` tables and
+    #: nowhere else (spec 2026-10-01 §7), so it is kept out of ``repr``. A firmware
+    #: ``null`` reads as ``""`` and any other non-string is coerced to text, so it can
+    #: never fail the whole status parse or leak through a ValidationError's input.
+    serial_number: str = Field(default="", repr=False)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    @field_validator("serial_number", mode="before")
+    @classmethod
+    def _serial_text(cls, value: Any) -> Any:
+        return "" if value is None else str(value)
 
 
 class SlotChoice(BaseModel):
@@ -282,6 +292,12 @@ class SlotChoice(BaseModel):
 NozzleSize = Literal["0.2", "0.4", "0.6", "0.8"]
 FlowType = Literal["standard", "high_flow"]
 Tier = Literal["fine", "standard", "draft"]
+#: How ScadBuddy ranks an H2C's nozzle rack (#836, spec 2026-10-01 §4). Here rather than
+#: in ``scadbuddy/rack`` so the settings store can remember it per printer without
+#: importing the ranking (which reaches the client, which imports the store).
+RackAlgorithm = Literal["least_used", "oldest_first", "newest_first", "bambuddy"]
+#: A printer with no remembered algorithm ranks by this (spec 2026-10-01 §4).
+DEFAULT_ALGORITHM: RackAlgorithm = "least_used"
 
 
 class NozzleChoice(BaseModel):
@@ -615,6 +631,23 @@ class SpoolAssignment(BambuddyModel):
     spool: Spool | None = None
 
 
+class FilamentGroup(BambuddyModel):
+    """A sliced filament's hotend group (#836): ``filament-requirements``' ``group``,
+    read from the sliced 3MF. Measured 2026-10-01 on library file 228:
+    ``{on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard",
+    filament_color: "#00B1B7"}``. An unsliced upload answers ``null`` (spec §5)."""
+
+    on_rack: bool = False
+    nozzle_diameter: str = ""
+    volume_type: str = ""
+    filament_color: str = ""
+
+    @field_validator("nozzle_diameter", "volume_type", "filament_color", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> Any:
+        return "" if value is None else str(value)
+
+
 class FilamentRequirement(BambuddyModel):
     """One slot of ``GET /api/v1/library/files/{id}/filament-requirements``.
 
@@ -630,6 +663,10 @@ class FilamentRequirement(BambuddyModel):
     used_grams: float = 0.0
     used_meters: float = 0.0
     used_in_plate: bool = True
+    #: The slicer's filament group (#836): one group is one hotend, and several
+    #: filaments can share it. Both are ``None`` on an unsliced upload.
+    group_id: int | None = None
+    group: FilamentGroup | None = None
 
 
 class FilamentRequirements(BambuddyModel):
@@ -786,6 +823,8 @@ class QueueItemCreate(BambuddyModel):
     project_id: int | None = None
     cost_center_id: int | None = None
     estimated_cost: float | None = None
-    #: Nozzle-rack slot per extruder, keyed by stringified extruder index.
+    #: Rack position (1-6) per **filament group id**, the stringified ``group_id`` of
+    #: ``filament-requirements`` on the sliced file (spec 2026-10-01 §2). Not an
+    #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False

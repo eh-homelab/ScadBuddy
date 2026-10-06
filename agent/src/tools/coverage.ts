@@ -64,6 +64,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'GET /api/v1/models/{slug}/media/{item_id}',
       'GET /api/v1/models/{slug}/media/{item_id}/poster',
+      'GET /api/v1/models/{slug}/media/{item_id}/thumbnail',
     ] as const
   ).map((operation) => ({
     operation,
@@ -90,6 +91,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   // #185: the source editor's go-to-definition opens the file a definition is in. The
   // model-directory reader is also get_source_file's route (#252), so only the library one stays here.
+  // #951: a model README's relative images, for the browser's Markdown view.
+  {
+    operation: 'GET /api/v1/models/{slug}/images/{path}',
+    reason:
+      "Serves the image files beside a model to the browser, so a README's relative `![](thumbnail.png)` " +
+      'shows (#951). The bytes are only useful to an <img>; an agent reads the README itself through ' +
+      'get_source_file and sees the image path in it.',
+  },
   {
     operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
     reason:
@@ -161,6 +170,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  {
+    operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
+    reason:
+      "Remembers how the print dialog ranks a printer's nozzle rack (#836). It lands UI-first, " +
+      'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
+      'remembered algorithm, and a tool for changing it is a follow-up.',
+  },
 ]
 
 /**
