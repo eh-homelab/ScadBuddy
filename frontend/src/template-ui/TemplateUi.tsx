@@ -13,7 +13,7 @@ import { UI_API_SUPPORTED, type Mount, type MountResult, type TemplateUiFailure,
 
 const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
 
-/** How long a template's `mount` may take before the page falls back to the form (#847). */
+/** How long a template's module may take to load and mount before the page falls back to the form (#847). */
 export const MOUNT_TIMEOUT_MS = 15_000
 
 interface Props {
@@ -91,22 +91,26 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     let cleanup: (() => void) | void
     void (async () => {
       try {
-        const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
-        const mount = mountOf(module)
-        if (!mount) throw new Error(`${ui.module} does not export a mount function`)
-        if (!active) return
-        const mounting = Promise.resolve(mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api }))
+        let expired = false
+        // Loading and mounting together: either can hang (an import() the server never
+        // answers, a mount awaiting a resource), and both leave the panel empty (#847).
+        const mounting = (async (): Promise<MountResult> => {
+          const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
+          const mount = mountOf(module)
+          if (!mount) throw new Error(`${ui.module} does not export a mount function`)
+          if (!active || expired) return
+          return await mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api })
+        })()
         let timer: ReturnType<typeof setTimeout> | undefined
         let result: MountResult
         try {
-          // A mount that never settles would leave the panel empty for good (#847).
           result = await Promise.race([
             mounting,
             new Promise<never>((_, reject) => {
-              timer = setTimeout(
-                () => reject(new Error(`mount() did not finish within ${MOUNT_TIMEOUT_MS / 1000} s`)),
-                MOUNT_TIMEOUT_MS,
-              )
+              timer = setTimeout(() => {
+                expired = true
+                reject(new Error(`did not load and mount within ${MOUNT_TIMEOUT_MS / 1000} s`))
+              }, MOUNT_TIMEOUT_MS)
             }),
           ])
         } catch (cause) {
