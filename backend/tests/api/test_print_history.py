@@ -84,6 +84,7 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "archive_id": 35,
         "output_id": output_id,
         "slug": model,
+        "library_file_id": None,
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,

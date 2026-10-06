@@ -27,6 +27,12 @@ interface Props {
   /** Replaces every value on screen, and the UI state, as Reset to defaults does. */
   onApply: (values: ParamValues, extra: InputsExtra) => void
   /**
+   * #355 — the page customizes an old revision. A preset belongs to the template and
+   * is checked against its current revision, which refuses this one's own parameters,
+   * so the values on screen can be neither saved nor updated into a preset.
+   */
+  pinned?: boolean
+  /**
    * #350 — changes whenever the page resets the values to the defaults, which leaves
    * them no preset's: the selection is cleared, so Update cannot empty the preset.
    */
@@ -77,7 +83,7 @@ const FIELD =
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }: Props) {
+export function PresetPicker({ slug, schema, values, extra, onApply, pinned = false, resetKey }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -268,7 +274,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
   async function saveAs(event?: FormEvent) {
     event?.preventDefault()
     const chosen = name.trim()
-    if (!chosen || busy) return
+    if (!chosen || busy || pinned) return
     setNameError(null)
     const described = details()
     if (!described) return
@@ -348,7 +354,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
   }
 
   async function update(confirmed = false) {
-    if (!selected || !editable || busy) return
+    if (!selected || !editable || busy || pinned) return
     // The server refuses a parameter the template does not have, so the stored values
     // cannot be kept: Update replaces them, and says so before it does.
     if (skipped.length > 0 && !confirmed) {
@@ -443,7 +449,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
         {modified && <>Changed from {selected?.name}</>}
       </p>
       <div className="flex flex-wrap items-center justify-end gap-1">
-        {editable && modified && (
+        {editable && modified && !pinned && (
           <Button
             size="sm"
             onClick={() => void update()}
@@ -463,7 +469,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
             Duplicate
           </Button>
         )}
-        <Button size="sm" onClick={openSaveAs} disabled={busy}>
+        <Button size="sm" onClick={openSaveAs} disabled={busy || pinned}>
           Save as preset…
         </Button>
         {editable && (
@@ -488,6 +494,12 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
           </Button>
         )}
       </div>
+
+      {pinned && (
+        <p data-testid="preset-pinned" className="text-[12px] text-faint">
+          Presets are saved against the current version.
+        </p>
+      )}
 
       {selected && (selected.description || selected.tags.length > 0) && (
         <div data-testid="preset-details" className="flex flex-col gap-1 text-[12px] text-muted">
@@ -643,8 +655,13 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
         }
       >
         <p className="text-[13px] text-muted">
-          Applying {pending?.name} replaces them. To keep them, cancel and{' '}
-          {editable ? `update ${selected?.name} or ` : ''}save them as a preset first.
+          Applying {pending?.name} replaces them.
+          {!pinned && (
+            <>
+              {' '}To keep them, cancel and {editable ? `update ${selected?.name} or ` : ''}save
+              them as a preset first.
+            </>
+          )}
         </p>
       </Dialog>
 

@@ -21,8 +21,14 @@ export type Reply =
   | { error: { status: number; type: string; message: string; headers?: Record<string, string> } }
   /** Never answer (until the server closes): a model that is still thinking. */
   | { hang: true }
+  /**
+   * Start a streamed text reply, send `text`, then never finish it: a model cut
+   * off mid-reply (#991). `usage` is message_start's usage (10 input tokens by
+   * default); no message_delta, so the output's usage is never reported.
+   */
+  | { stall: string; usage?: { input_tokens: number; output_tokens?: number } }
 
-type ContentReply = Exclude<Reply, { error: unknown } | { hang: true }>
+type ContentReply = Exclude<Reply, { error: unknown } | { hang: true } | { stall: string }>
 
 export type RecordedRequest = {
   method: string
@@ -61,6 +67,26 @@ function contentOf(reply: ContentReply): { block: Record<string, unknown>; stopR
     block: { type: 'tool_use', id: nextId('toolu'), name: reply.toolUse.name, input: reply.toolUse.input },
     stopReason: 'tool_use',
   }
+}
+
+function stalledStart(model: string, reply: Extract<Reply, { stall: string }>): string {
+  return [
+    sse('message_start', {
+      type: 'message_start',
+      message: {
+        id: nextId('msg'),
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, input_tokens: 10, ...reply.usage },
+      },
+    }),
+    sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    sse('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: reply.stall } }),
+  ].join('')
 }
 
 function streamEvents(model: string, reply: ContentReply): string {
@@ -129,6 +155,11 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
         const model = body?.model ?? 'claude-fake'
         const answer = reply(recorded)
         if ('hang' in answer) return
+        if ('stall' in answer) {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+          res.write(stalledStart(model, answer))
+          return
+        }
         if ('error' in answer) {
           res.writeHead(answer.error.status, { ...answer.error.headers, 'content-type': 'application/json' })
           res.end(JSON.stringify({ type: 'error', error: { type: answer.error.type, message: answer.error.message } }))

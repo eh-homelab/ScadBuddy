@@ -153,6 +153,10 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
         plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
         # The model whose remembered print options apply, as for a print from the dialog.
+        # A library file's print (#976) has no output and so no model: global and the
+        # printer's options only.
+        if link.output_id is None:
+            return {"printer_id": printer_id, "plate_id": plate_id, "slug": None}
         meta = await asyncio.to_thread(require_output, outputs, link.output_id)
         return {"printer_id": printer_id, "plate_id": plate_id, "slug": meta.slug}
 

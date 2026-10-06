@@ -797,6 +797,7 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      pinned={version !== undefined}
       resetKey={resets}
     />
   )
@@ -1060,6 +1061,7 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    pinned={version !== undefined}
                     resetKey={resets}
                   />
                 </>

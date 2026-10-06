@@ -45,7 +45,7 @@ function loaded(rest: Partial<NonNullable<SpoolOption['loaded']>> = {}) {
 }
 
 function slot(rest: Partial<SlotNeed> = {}): SlotNeed {
-  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, ...rest }
+  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [], ...rest }
 }
 
 describe('spoolLabel', () => {
@@ -266,7 +266,10 @@ describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
     track_switch: false,
-    slots: [slot({ slot_id: 1 }), slot({ slot_id: 2, colour: '#FF1493' })],
+    slots: [
+      slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
+      slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
+    ],
     spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
     suggested: [
       { slot_id: 1, spool_id: 1 },
@@ -284,6 +287,14 @@ describe('seedPlan', () => {
 
   it('falls back to the auto-match for a remembered spool no longer in the inventory', () => {
     expect(seedPlan(options, [{ slot_id: 1, spool_id: 99 }])).toEqual(options.suggested)
+  })
+
+  it('falls back to the auto-match for a remembered spool whose colour no longer fits (#933)', () => {
+    const recoloured: FilamentOptions = {
+      ...options,
+      slots: [options.slots![0]!, slot({ slot_id: 2, colour: '#FF1493', colour_matches: [2] })],
+    }
+    expect(seedPlan(recoloured, [{ slot_id: 2, spool_id: 3 }])).toEqual(options.suggested)
   })
 
   it('ignores a remembered slot this plate does not have', () => {

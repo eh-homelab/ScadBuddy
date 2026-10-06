@@ -139,6 +139,32 @@ def test_a_download_uses_the_models_remembered_choices(
 
 
 @respx.mock
+def test_a_remembered_spool_whose_colour_no_longer_matches_is_not_used(
+    client: TestClient, model: str, settings: Settings
+) -> None:
+    """#933: the model was last printed on a blue silk; it is red now, and the red
+    spool is what the slot gets, not the remembered blue."""
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)",
+            (model, Jsonb({"printer_id": 1, "filament_plan": [{"slot_id": 1, "spool_id": 5}]})),
+        )
+    _bambuddy()
+    spools: list[dict[str, Any]] = recording("inventory-spools.json")
+    blue_silk = [row for row in spools if row["id"] == 5]
+    assert blue_silk[0]["rgba"] == "0047BBFF"
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=_red_spool() + blue_silk)
+    )
+
+    body = _project_settings(client.get(f"/api/v1/outputs/{output_id}/model.3mf").content)
+
+    assert body["filament_settings_id"] == ["Bambu PLA Basic @BBL H2C 0.2 nozzle"]
+
+
+@respx.mock
 def test_choices_remembered_for_another_printer_are_not_used(
     client: TestClient, model: str, settings: Settings
 ) -> None:
