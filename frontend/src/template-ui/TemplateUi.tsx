@@ -16,7 +16,7 @@ const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
 interface Props {
   slug: string
   ui: UiDeclaration
-  /** The revision to load the module from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
+  /** The revision to load the module from: the pinned commit, or else the last commit to the template's `ui/` (#846); undefined only when history is unavailable. */
   version: string | undefined
   deps: HostDeps
   inputs: JsonObject

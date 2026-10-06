@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_VERSION } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
@@ -113,6 +114,38 @@ describe('CustomizePage with a template UI', () => {
     open(UI_DEMO_SLUG)
     await waitFor(() => expect(shadowText()).toContain('custom'))
     expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${UI_DEMO_VERSION}/ui/index.js`])
+  })
+
+  it('keeps the interface mounted across a commit that leaves ui/ alone, and remounts on one that does (#846)', async () => {
+    const model = models.find((m) => m.slug === UI_DEMO_SLUG)!
+    const uiCommit = 'c'.repeat(40)
+    let record = { ...model, version: 'a'.repeat(40), ui_version: uiCommit }
+    server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json(record)))
+    const urls: string[] = []
+    let mounts = 0
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return {
+        mount: (root: ShadowRoot) => {
+          mounts += 1
+          root.textContent = 'custom'
+        },
+      }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toBe('custom'))
+    // An "Edit details": a new record revision, the same interface.
+    record = { ...record, version: 'b'.repeat(40), name: 'Renamed' }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await screen.findByRole('heading', { name: 'Renamed' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(mounts).toBe(1)
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${uiCommit}/ui/index.js`])
+    // A commit to ui/ does remount it, from that commit.
+    record = { ...record, version: 'd'.repeat(40), ui_version: 'd'.repeat(40) }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await waitFor(() => expect(mounts).toBe(2))
+    expect(urls.at(-1)).toBe(`/api/v1/models/${UI_DEMO_SLUG}/versions/${'d'.repeat(40)}/ui/index.js`)
   })
 
   it('loads the live module when the record has no revision', async () => {

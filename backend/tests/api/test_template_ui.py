@@ -239,3 +239,22 @@ def test_a_revisions_schema_carries_that_revisions_ui(
     assert client.get(f"/api/v1/models/{model}/versions/{head}/schema").json()["ui"] == UI
     bad = client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()
     assert bad["ui"] is None and bad["ui_error"].startswith("model.json's ui is not valid")
+
+
+@pytest.mark.requires_git
+def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: DataPaths) -> None:
+    """#846: a commit that leaves ``ui/`` alone keeps the interface's revision, so the
+    page keeps the mounted interface."""
+    _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
+    ui = _commit(paths, "ui")
+    assert client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"}).status_code == 200
+    record = client.get(f"/api/v1/models/{model}").json()
+    assert record["version"] != ui
+    assert record["ui_version"] == ui
+    _with_ui(paths, model, {"index.js": b"export function mount() { /* two */ }\n"})
+    two = _commit(paths, "ui two")
+    assert client.get(f"/api/v1/models/{model}").json()["ui_version"] == two
+
+
+def test_a_model_without_ui_has_no_ui_version(client: TestClient, model: str) -> None:
+    assert client.get(f"/api/v1/models/{model}").json()["ui_version"] is None
