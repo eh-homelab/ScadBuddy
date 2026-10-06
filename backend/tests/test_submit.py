@@ -1139,6 +1139,7 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
     (review #1066 2.1)."""
     defaults = commands_module.start_command.__kwdefaults__
     assert defaults is not None
+    deadline = defaults["deadline"]
     monkeypatch.setitem(defaults, "deadline", timedelta(seconds=1))
     width = _w()
     async with temporal_client() as client:
@@ -1150,6 +1151,10 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
             request = uuid.uuid4().hex
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, {"width": width}, request_id=request)
+            # Only that submit is meant to outlive its deadline: on a loaded machine a
+            # fresh start's accept can take over the 1 s, and the supersede below must
+            # not be answered still-accepting.
+            defaults["deadline"] = deadline
             accepting.set()
             first = await service.submit(SLUG, {"width": width}, request_id=request)
             again = await service.submit(SLUG, {"width": width}, request_id=request)
@@ -1297,6 +1302,32 @@ async def test_an_old_legacy_row_whose_workflow_never_ran_does_not_block_its_key
     assert done.state == "done", done.error
     stored = await asyncio.to_thread(projection.read, old.id)
     assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+
+
+async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres out of reach past the accept's retries is transient, as an older build's
+    row is: the request is still accepting, not a 500 render-unstartable that tells
+    clients not to send it again (review #1066 (11), the same class as 2)."""
+
+    def unreachable(*_: object, **__: object) -> Job:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(projection, "accept", unreachable)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+        await service.aclose()
+
+    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
 
 
 async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_closes(

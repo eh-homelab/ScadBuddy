@@ -17,7 +17,8 @@ from typing import Any
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.tracing import span
-from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
+from scadbuddy.render.confinement import escaping_includes, sandboxed
+from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector, parse_diagnostics
 from scadbuddy.render.schema import (
     CustomizerSchema,
     Parameter,
@@ -229,6 +230,9 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
 
 
 def _format_checked(parameter: Parameter, value: ParamValue) -> str:
+    if isinstance(value, str) and "\x00" in value:
+        # Neither execve nor Postgres takes one (#965).
+        raise ValueError(f"parameter {parameter.name!r} contains a NUL byte")
     if parameter.type == "boolean":
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
@@ -323,9 +327,18 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
     # here the same way it would on a fresh install, instead of working by accident.
     if config.library_path:
         env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
+    # #994: a target outside the model and its libraries is refused before the run,
+    # and the run itself is confined to them; see render/confinement.py.
+    escaping = await asyncio.to_thread(escaping_includes, cwd, args[-1]) if args else []
+    if escaping:
+        log = [include.log_line() for include in escaping]
+        raise OpenSCADError(
+            "the model includes a file outside its directory and libraries",
+            log,
+            diagnostics=parse_diagnostics(log),
+        )
     process = await asyncio.create_subprocess_exec(
-        config.openscad,
-        *args,
+        *sandboxed(config.openscad, args, cwd=cwd, config=config, env=env),
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

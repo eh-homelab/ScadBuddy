@@ -276,6 +276,17 @@ def _part_sources(
     )
 
 
+#: What OpenSCAD logs when the render it is asked to export draws nothing.
+EMPTY_TOP_LEVEL = "Current top level object is empty."
+
+
+def _empty_plate(index: int, count: int) -> str:
+    return (
+        f"plate {index} of {count} rendered no geometry: the template asks for "
+        f"echo(plates = {count}) but draws nothing when $plate = {index}"
+    )
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -322,8 +333,11 @@ async def plate_layout(
         try:
             await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
         except OpenSCADError as error:
+            # OpenSCAD will not export an empty top-level object: it exits 1
+            # before there is a 3MF to find empty (#1328).
+            empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
             raise OpenSCADError(
-                f"plate {index} of {count}: {error}",
+                _empty_plate(index, count) if empty else f"plate {index} of {count}: {error}",
                 error.log_tail,
                 error.returncode,
                 diagnostics=error.diagnostics,
@@ -331,7 +345,7 @@ async def plate_layout(
             ) from error
         split = split_by_material(raw)
         if not split:
-            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
+            raise OpenSCADError(_empty_plate(index, count), [])
         for part in split:
             if part.colour not in colours:
                 colours.append(part.colour)
