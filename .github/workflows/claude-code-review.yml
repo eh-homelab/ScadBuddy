@@ -95,7 +95,7 @@ jobs:
         # merge-gate steps below. continue-on-error keeps the job going so the gate runs
         # and becomes the single source of pass/fail.
         continue-on-error: true
-        uses: anthropics/claude-code-action@ed670b4cf9de2a5a570d130d2f6197b9e543cd64 # v1
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
@@ -471,7 +471,7 @@ jobs:
         if: always() && steps.summary_probe.outputs.found == 'false'
         # The assertion below is what fails the run; this step only tries.
         continue-on-error: true
-        uses: anthropics/claude-code-action@ed670b4cf9de2a5a570d130d2f6197b9e543cd64 # v1
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
@@ -569,7 +569,7 @@ jobs:
       - name: Merge-gate classification
         id: gate
         if: always()
-        uses: anthropics/claude-code-action@ed670b4cf9de2a5a570d130d2f6197b9e543cd64 # v1
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Classify bot-authored PRs too (weekly cache-refresh, image digest bumps);
