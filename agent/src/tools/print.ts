@@ -55,8 +55,8 @@ async function getRun(ctx: ToolContext, id: string) {
  * A read that stays unanswered names the run, so it is followed, not printed again.
  */
 async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
-  const deadline = Date.now() + ctx.renderWaitMs
-  for (let step = 1; run.status === 'running' && Date.now() < deadline; step++) {
+  const deadline = performance.now() + ctx.renderWaitMs
+  for (let step = 1; run.status === 'running' && performance.now() < deadline; step++) {
     await ctx.progress(step, undefined, 'print run: slicing and queueing')
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
     const id = run.id

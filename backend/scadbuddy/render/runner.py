@@ -241,6 +241,9 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
 
 
 def _format_checked(parameter: Parameter, value: ParamValue) -> str:
+    if isinstance(value, str) and "\x00" in value:
+        # Neither execve nor Postgres takes one (#965).
+        raise ValueError(f"parameter {parameter.name!r} contains a NUL byte")
     if parameter.type == "boolean":
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")

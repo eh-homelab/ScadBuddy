@@ -183,6 +183,35 @@ def test_a_text_value_past_its_max_length_is_refused(
     assert client.get(_url(model)).json()[0]["params"] == {"label": "x" * 8}
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "p nul\x00", "params": {}},
+        {"name": "p desc", "params": {}, "description": "a\x00b"},
+        {"name": "p tag", "params": {}, "tags": ["a\x00"]},
+        {"name": "p param", "params": {"label": "a\x00"}},
+    ],
+)
+def test_a_nul_in_a_preset_is_a_422(client: TestClient, model: str, body: dict[str, Any]) -> None:
+    """#965: Postgres cannot hold a NUL, so a save was a 500 echoing the driver's error."""
+    response = client.post(_url(model), json=body)
+    assert response.status_code == 422, response.text
+    assert "NUL byte" in response.text
+    assert client.get(_url(model)).json() == []
+
+
+def test_a_nul_in_a_preset_update_or_duplicate_is_a_422(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    for body in ({"name": "x\x00"}, {"params": {"label": "a\x00"}}, {"tags": ["\x00"]}):
+        response = client.patch(_url(model, saved["id"]), json=body)
+        assert response.status_code == 422, response.text
+        assert "NUL byte" in response.text
+    duplicate = _duplicate(client, model, saved["id"], "y\x00")
+    assert duplicate.status_code == 422, duplicate.text
+    assert "NUL byte" in duplicate.text
+    assert [p["name"] for p in client.get(_url(model)).json()] == ["Big"]
+
+
 def test_names_are_unique_per_template_ignoring_case(client: TestClient, model: str) -> None:
     _save(client, model, "Big", {"width": 25})
     clash = client.post(_url(model), json={"name": "big", "params": {}})
