@@ -76,6 +76,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
+import { UnpricedSpend } from './unpricedSpend.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 
@@ -398,6 +399,18 @@ export type SessionRecord = {
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * A session as its turn claimed it, with how much of `costUsd` is spend
+ * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
+ * query's `total_cost_usd` does not hold that part.
+ */
+type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
+
+const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
+  ...record(row),
+  unpricedCostUsd: row.unpriced_cost_usd,
+})
 
 export type TurnOutcome =
   | { kind: 'result'; subtype: SDKResultMessage['subtype']; costUsd: number; turns: number }
@@ -932,17 +945,17 @@ export class SessionManager {
     if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
     const turnId = randomUUID()
-    const [claimed] = await this.deps.sql.unsafe<Row[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
-    if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    return this.startTurn(record(claimed), turnId, prompt, principal, {
+    if (!claim) throw await this.whyNotClaimed(id, principal, before)
+    return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
@@ -962,16 +975,16 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claimed] = await this.deps.sql.unsafe<Row[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [approval.sessionId, turnId, this.leaseMs],
     )
-    if (!claimed) {
+    if (!claim) {
       return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
     }
     try {
@@ -983,8 +996,8 @@ export class SessionManager {
         `${publicLabel(by)} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
         'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
         'and is used once. If you no longer need it, say so instead.'
-      const tiers = await this.resumeTiers(approval, record(claimed))
-      await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId, ...(tiers ? { tiers } : {}) })
+      const tiers = await this.resumeTiers(approval, record(claim))
+      await this.startTurn(claimed(claim), turnId, prompt, by, { keepResumeTurn: turnId, ...(tiers ? { tiers } : {}) })
       return { resumed: true }
     } catch (err) {
       await this.releaseClaim(approval.sessionId, turnId)
@@ -1016,7 +1029,7 @@ export class SessionManager {
   }
 
   private async startTurn(
-    session: SessionRecord,
+    session: ClaimedSession,
     turnId: string,
     prompt: string,
     author: Owner,
@@ -1077,7 +1090,7 @@ export class SessionManager {
   }
 
   private async runTurn(
-    session: SessionRecord,
+    session: ClaimedSession,
     turnId: string,
     prompt: string,
     local: LocalTurn,
@@ -1151,6 +1164,8 @@ export class SessionManager {
       }, this.renewMs)
 
       let failure: string | undefined
+      /** The model request the turn is cut off in, if it is: Claude Code never prices it (#991). */
+      const unpriced = new UnpricedSpend()
       /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
       let refused: Refused | undefined
       /**
@@ -1376,13 +1391,15 @@ export class SessionManager {
           // Each attempt's query starts inside the turn's span (runHarness starts it at once).
           run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
           ...(this.deps.probe ? { probe: this.deps.probe } : {}),
-          // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
-          ...(resume ? { priorCostUsd: session.ownCostUsd } : {}),
+          // A resumed query's total includes what the session spent before
+          // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
+          ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
           onRefused: (evidence, judged) => {
             refused = { evidence, ...judged }
           },
         })
         for await (const message of turn) {
+          unpriced.observe(message)
           if (message.type === 'assistant' && message.error) {
             heldErrors.push(message)
             continue
@@ -1441,6 +1458,9 @@ export class SessionManager {
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
+        // Only a turn that did not end on its own can be cut off mid-request;
+        // one that did has every request priced in its result.
+        stopped !== undefined || !result ? unpriced.usd() : 0,
       )
       return outcome
     } catch (err) {
@@ -1546,7 +1566,7 @@ export class SessionManager {
    * SHUTTING_DOWN), when it was.
    */
   private async finish(
-    session: SessionRecord,
+    session: ClaimedSession,
     turnId: string,
     stopped: string | undefined,
     result: SDKResultMessage | undefined,
@@ -1554,11 +1574,24 @@ export class SessionManager {
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
+    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
     let status: SessionStatus
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
+    // `total_cost_usd` of a RESUMED query already includes the earlier
+    // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
+    // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
+    // SDK restores it from the transcript's `cost-state` entry, which holds
+    // only what Claude Code priced: not the session's unpriced spend (#991),
+    // which is added back. If the restore ever fails the total comes back
+    // smaller than what it should have carried, and it is added instead.
+    // The session's own row, not the lineage's pool (#823): only its own turns are in its transcript.
+    const priced = session.ownCostUsd - session.unpricedCostUsd
+    const fromTotal = (total: number) =>
+      total >= priced ? total + session.unpricedCostUsd : session.ownCostUsd + total
     let costUsd = session.ownCostUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when
@@ -1586,23 +1619,15 @@ export class SessionManager {
       // Stopped, and Claude Code still reported a result: the interrupt's
       // `error_during_execution` (harness/run.ts stopFirst), or a result that
       // raced the stop. The turn reads interrupted either way (#1168); what it
-      // spent before it stopped is still counted (see below).
-      const total = result.total_cost_usd
-      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      // spent before it stopped is still counted, the cut-off request too.
+      costUsd = fromTotal(result.total_cost_usd) + cutUsd
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      // `total_cost_usd` of a RESUMED query already includes the earlier
-      // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
-      // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
-      // SDK restores it from the transcript's `cost-state` entry, so if that
-      // restore ever fails the total comes back smaller than what is recorded,
-      // and it is added instead.
-      const total = result.total_cost_usd
-      costUsd = total >= session.ownCostUsd ? total : session.ownCostUsd + total
+      costUsd = fromTotal(result.total_cost_usd)
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -1633,10 +1658,19 @@ export class SessionManager {
       }
     } else if (stopped !== undefined) {
       status = 'idle'
+      if (cutUsd > 0) {
+        // No result, but the request it was cut off in was billed: the meter shows it.
+        costUsd = session.ownCostUsd + cutUsd
+        tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      }
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else {
       status = 'failed'
+      if (cutUsd > 0) {
+        costUsd = session.ownCostUsd + cutUsd
+        tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      }
       const message = failure ?? 'the turn ended without a result'
       tail.push(event({ type: 'error', sessionId: id, code: 'turn_failed', message }))
       outcome = { kind: 'failed', message }
@@ -1647,6 +1681,7 @@ export class SessionManager {
     const [released] = await this.deps.sql<{ id: string }[]>`
       UPDATE ai_sessions
       SET status = ${status}, cost_usd = ${costUsd}, turns = ${turns},
+          unpriced_cost_usd = unpriced_cost_usd + ${cutUsd},
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
