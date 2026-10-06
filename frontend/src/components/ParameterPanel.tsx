@@ -1,6 +1,6 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
-import { diffFromDefaults, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
+import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
 
@@ -24,6 +24,13 @@ interface Props {
    */
   reveal?: { name: string }
   /**
+   * #938 — the latest finished render: the colours it used, in extruder order, and the
+   * values it ran with. With it a colour parameter unchanged since is labelled with the
+   * extruder it actually got, or as not in the render; without it, by its place among
+   * the colour parameters.
+   */
+  rendered?: { colors: string[]; params: ParamValues }
+  /**
    * #971 — on a short stacked window the page scrolls, so the list takes its full
    * height rather than scrolling in a box. Off where the panel has a height of its own
    * (the full-screen flyout).
@@ -41,6 +48,7 @@ export function ParameterPanel({
   onReset,
   toolbar,
   reveal,
+  rendered,
   growsWithPage = false,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
@@ -84,7 +92,11 @@ export function ParameterPanel({
     tabRefs.current[next]?.focus()
   }
 
-  const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
+  const extruders = useMemo<Map<string, number | null | undefined>>(
+    () =>
+      rendered ? extrudersIn(schema, values, rendered.colors, rendered.params) : extrudersOf(schema, values),
+    [schema, values, rendered],
+  )
   const extruderOf = (name: string) => extruders.get(name)
 
   // The font picker previews what will actually be printed, so it needs the model's

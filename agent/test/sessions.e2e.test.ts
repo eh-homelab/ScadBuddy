@@ -488,6 +488,66 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     // Three Claude Code runs; past vitest's 5 s default on a loaded machine.
   }, 60_000)
 
+  it('a fork’s first turn records only its own spend, not the parent’s again (#1648)', async () => {
+    // The fake prices every reply alike (10 input + 5 output tokens), so a
+    // turn costs the same in the parent and the child.
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const b = await replica()
+    const { session: parent, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'make a box', title: 'box' })
+    const first = await turn!.done
+    if (first.kind !== 'result') throw new Error(`parent turn: ${JSON.stringify(first)}`)
+    const reply = first.costUsd
+    expect(reply).toBeGreaterThan(0)
+
+    const child = await b.fork(parent.id, agentA)
+    const forked = await (await b.send(child.id, agentA, 'make it taller')).done
+    expect(forked).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (forked.kind !== 'result') throw new Error('unreachable')
+    // The child's own spend is its one turn; the lineage's pool holds both.
+    expect(forked.costUsd).toBeCloseTo(reply, 10)
+    expect(await b.get(child.id, agentA)).toMatchObject({ turns: 1 })
+    expect((await b.get(child.id, agentA)).ownCostUsd).toBeCloseTo(reply, 10)
+    expect((await b.get(child.id, agentA)).costUsd).toBeCloseTo(2 * reply, 10)
+    expect((await a.get(parent.id, agentA)).ownCostUsd).toBeCloseTo(reply, 10)
+
+    // And its second turn adds one more, not the parent's again either.
+    const again = await (await b.send(child.id, agentA, 'and wider')).done
+    if (again.kind !== 'result') throw new Error(`second child turn: ${JSON.stringify(again)}`)
+    expect(again.costUsd).toBeCloseTo(2 * reply, 10)
+    expect((await b.get(child.id, agentA)).costUsd).toBeCloseTo(3 * reply, 10)
+  }, 60_000)
+
+  it('a fork of a session with a stopped turn charges the cut-off request once, to the parent (#1648, #991)', async () => {
+    // Prices as in the #991 test below.
+    const cut = (100_000 * 3 + 4 * 15) / 1_000_000
+    const reply = (10 * 3 + 5 * 15) / 1_000_000
+    let stall = true
+    script = () => (stall ? { stall: 'Once upon a time', usage: { input_tokens: 100_000 } } : { text: 'OK' })
+    const a = await replica()
+    const { session: parent } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(parent.id, browser, 'write a long essay')
+    for (let i = 0; i < 400; i++) {
+      if ((await allEvents(a, parent.id)).some((e) => e.event.type === 'assistant.text.delta')) break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    expect(await a.interrupt(parent.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect((await a.get(parent.id, browser)).ownCostUsd).toBeCloseTo(cut, 10)
+
+    stall = false
+    const child = await a.fork(parent.id, browser)
+    const forked = await (await a.send(child.id, browser, 'reply OK')).done
+    expect(forked).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (forked.kind !== 'result') throw new Error('unreachable')
+    expect(forked.costUsd).toBeCloseTo(reply, 10)
+    expect((await a.get(child.id, browser)).ownCostUsd).toBeCloseTo(reply, 10)
+    expect((await a.get(child.id, browser)).costUsd).toBeCloseTo(cut + reply, 10)
+    // The cut-off request stays the parent's: the child's row carries none of it.
+    const [row] = await db.sql<{ unpriced_cost_usd: number }[]>`SELECT unpriced_cost_usd FROM ai_sessions WHERE id = ${child.id}`
+    expect(row?.unpriced_cost_usd).toBe(0)
+  }, 60_000)
+
   it('keeps a turn stopped by a restart in the transcript, so the next turn on another replica has it', async () => {
     let n = 0
     script = (r) => (conversation(r).includes('kettle') && ++n === 1 ? { hang: true } : { text: `answer ${n}` })

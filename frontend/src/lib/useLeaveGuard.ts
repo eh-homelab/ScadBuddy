@@ -109,6 +109,16 @@ export function useLeaveGuard(dirty: boolean) {
     }
   }, [dirty])
 
+  const go = (to: string) => {
+    bypass.current = true
+    try {
+      // Replacing the sentinel, so Back from `to` comes to this page, not to it.
+      void navigate(to, { replace: onSentinel() })
+    } finally {
+      bypass.current = false
+    }
+  }
+
   return {
     pending,
     stay: () => setPending(null),
@@ -122,13 +132,12 @@ export function useLeaveGuard(dirty: boolean) {
         return
       }
       if (to === null) return
-      bypass.current = true
-      try {
-        // Replacing the sentinel, so Back from `to` comes to this page, not to it.
-        void navigate(to, { replace: onSentinel() })
-      } finally {
-        bypass.current = false
-      }
+      go(to)
     },
+    /**
+     * #997 — leaves for `to` without asking: for a page that has just saved, whose
+     * `dirty` has not caught up yet in this render.
+     */
+    leaveTo: go,
   }
 }

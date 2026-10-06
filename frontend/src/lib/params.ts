@@ -66,6 +66,36 @@ export function extrudersOf(schema: CustomizerSchema, values: ParamValues): Map<
   return extruders
 }
 
+/**
+ * #938 — each colour parameter's extruder as a finished render numbered them: its
+ * colour's place in the render's `colors`, which are in extruder order. A colour the
+ * geometry never used is in no extruder (null), whatever its place among the colour
+ * parameters, since a hard-coded colour can take the slot its position would suggest.
+ *
+ * The render can only speak for the values it ran with (`renderedValues`): a colour
+ * changed since, or one that is not hex (the backend resolves CSS names, so the render
+ * reports `red` as `#FF0000`), gets no label (undefined) rather than a wrong one.
+ */
+export function extrudersIn(
+  schema: CustomizerSchema,
+  values: ParamValues,
+  colors: string[],
+  renderedValues: ParamValues,
+): Map<string, number | null | undefined> {
+  const rendered = colors.map((colour) => normalizeHex(colour))
+  const extruders = new Map<string, number | null | undefined>()
+  for (const name of colorParamNames(schema)) {
+    const value = String(values[name] ?? '')
+    if (values[name] !== renderedValues[name] || !HEX.test(value.trim())) {
+      extruders.set(name, undefined)
+      continue
+    }
+    const index = rendered.indexOf(normalizeHex(value))
+    extruders.set(name, index < 0 ? null : index + 1)
+  }
+  return extruders
+}
+
 export interface ParamDiff {
   name: string
   caption: string
