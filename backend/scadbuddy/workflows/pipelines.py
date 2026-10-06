@@ -24,6 +24,7 @@ with workflow.unsafe.imports_passed_through():
         ACCEPT_ACTIVITY,
         CLAIMS_ACTIVITY,
         CLOSING,
+        LEGACY_PENDING,
         QUEUE_FULL,
         RELEASE_UPDATE,
         RENDER_UNSTARTABLE,
@@ -59,11 +60,11 @@ PROJECT_RETRY = RetryPolicy(
 )
 SHORT = timedelta(seconds=60)
 #: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
-#: retry fixes (an unexpected SQL error, an older build's row on the key that outlives
-#: them) answers the request rather than holding its render key with no row (review
-#: #1066 (10) 1). A failing attempt is answered within the route's 10 s deadline; a slow
-#: one is not cut short (each has `SHORT`), so a loaded database delays a render, as
-#: `command-still-accepting`, rather than refusing it.
+#: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
+#: them answers still-accepting) answers the request rather than holding its render key
+#: with no row (review #1066 (10) 1). A failing attempt is answered within the route's
+#: 10 s deadline; a slow one is not cut short (each has `SHORT`), so a loaded database
+#: delays a render, as `command-still-accepting`, rather than refusing it.
 ACCEPT_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
@@ -278,6 +279,9 @@ class TemplatePipeline:
         self._queue_full: int | None = None
         #: Why the first step failed past its retries: the run completes with no row.
         self._unstartable: str | None = None
+        #: An older build's row held the key past the first step's retries: the run
+        #: completes with no row, and the request is still accepting.
+        self._legacy_pending = False
         self._answered = False
         self._claims = 0
         #: The `accepted` Update ids answered: a request sent again keeps its one claim.
@@ -298,11 +302,19 @@ class TemplatePipeline:
 
     def _started(self) -> bool:
         return (
-            self._work is not None or self._queue_full is not None or self._unstartable is not None
+            self._work is not None
+            or self._queue_full is not None
+            or self._unstartable is not None
+            or self._legacy_pending
         )
 
     def _closing(self) -> bool:
-        return self._released is not None or self._raised() or self._unstartable is not None
+        return (
+            self._released is not None
+            or self._raised()
+            or self._unstartable is not None
+            or self._legacy_pending
+        )
 
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> RenderAnswer:
@@ -442,6 +454,13 @@ class TemplatePipeline:
             # A local activity's failure arrives as its ApplicationError itself
             # (temporalio 1.33), a regular one's as the ActivityError's cause.
             cause = error.cause if isinstance(error, ActivityError) else error
+            if isinstance(cause, ApplicationError) and cause.type == LEGACY_PENDING:
+                # Transient: the older build's workflow settles its row, so `accepted`
+                # answers `closing` and the client sends the request again.
+                self._legacy_pending = True
+                self._upsert(STATUS.value_set("refused"))
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                return
             if not (isinstance(cause, ApplicationError) and cause.type == QUEUE_FULL):
                 # Its retries spent: nothing was written, and the Update answers the
                 # failure (500 `render-unstartable`); the run completes, so the next

@@ -654,6 +654,32 @@ async def test_an_update_aborted_by_a_closing_execution_starts_again(
     assert submitted.id == job.id and len(calls) == 2
 
 
+async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing the closing race on both attempts is the other outcome of the same race
+    as a `CLOSING` rejection: 503 still-accepting, never a configuration error (review
+    #1066 (11) 1)."""
+    monkeypatch.setattr(submit_module, "CLOSING_WAIT", 0.1)
+    calls: list[str] = []
+
+    async def aborting(*_: object, **kwargs: Any) -> RenderAnswer:
+        calls.append(str(kwargs["id"]))
+        raise RPCError(
+            "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+        )
+
+    monkeypatch.setattr(submit_module, "start_command", aborting)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(CommandStillAcceptingError):
+            await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    assert len(calls) == 2
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+
+
 class FakePreview:
     """`render_preview_png` by name, holding every call until released."""
 
@@ -1321,6 +1347,33 @@ async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_clos
     stored = await asyncio.to_thread(projection.read, old.id)
     assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
     assert done.state == "done", done.error
+
+
+async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the_retries(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """A legacy row on the key whose older build's workflow still runs (a draining
+    worker's) outlives `ACCEPT_RETRY`: the request is still accepting, re-sent with its
+    key, never a 500 `render-unstartable` (review #1066 (11) 2)."""
+    params: dict[str, ParamValue] = {"width": _w()}
+    old = legacy_row(
+        projection, Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
+    )
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        # The old build's execution: on a queue no worker polls, so it stays running.
+        legacy = await client.start_workflow(
+            "TemplatePipeline", id=workflow_id_for(old.id), task_queue=f"{queue}-old"
+        )
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, params, request_id=uuid.uuid4().hex)
+        await legacy.terminate()
+        await service.aclose()
+
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+    assert (await asyncio.to_thread(projection.read, old.id)).state == "pending"
 
 
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(

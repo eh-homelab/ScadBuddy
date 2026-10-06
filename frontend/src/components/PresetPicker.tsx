@@ -85,7 +85,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  /** #359 — the preset a pick would apply over edits no preset holds, while it asks. */
+  /** #359 — the preset a pick would apply over unsaved edits, while it asks. */
   const [pending, setPending] = useState<ParamPreset | null>(null)
   /** #358 — an Update would drop the skipped values for good, so it asks first. */
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
@@ -103,17 +103,19 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
    * stops at the first preset instead of applying each one in turn.
    */
   function choose(id: string) {
+    // While it asks, a further change (a key held down on the select) waits its turn.
+    if (pending) return
     const preset = presets.find((candidate) => candidate.id === id)
     if (preset && unsaved) {
       setPending(preset)
       return
     }
-    pick(id)
+    pick(preset)
   }
 
-  function pick(id: string) {
+  /** Applies `preset`, or with none clears the selection and leaves the values alone. */
+  function pick(preset: ParamPreset | undefined) {
     setError(null)
-    const preset = presets.find((candidate) => candidate.id === id)
     if (!preset) {
       setSelection(null)
       setSkipped([])
@@ -513,7 +515,11 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
       <Dialog
         open={pending !== null}
         title={`Apply preset ${pending?.name ?? ''}?`}
-        description="The values on screen have changes no preset holds."
+        description={
+          selected
+            ? `You changed ${selected.name} since you picked it.`
+            : 'The values on screen have changes no preset holds.'
+        }
         onClose={() => setPending(null)}
         footer={
           <>
@@ -522,11 +528,13 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
             </Button>
             <Button
               variant="danger"
+              // The preset as asked about, not looked up again: it may have changed since.
+              // Not USER_ONLY: replacing the values on screen stays in the page, so the
+              // assistant may confirm a pick it made (spec §8.1).
               onClick={() => {
-                if (pending) pick(pending.id)
+                pick(pending ?? undefined)
                 setPending(null)
               }}
-              {...USER_ONLY}
             >
               Replace my changes
             </Button>
@@ -534,7 +542,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
         }
       >
         <p className="text-[13px] text-muted">
-          Applying {pending?.name} replaces them. To keep them, cancel and save them as a preset first.
+          Applying {pending?.name} replaces them. To keep them, cancel and{' '}
+          {editable ? `update ${selected?.name} or ` : ''}save them as a preset first.
         </p>
       </Dialog>
 

@@ -37,13 +37,34 @@ export interface RenderState {
    */
   settledFor: ParamValues | undefined
   /**
-   * Seconds until the submit is tried again, while the server's render queue is
-   * full (503 with `retry_after`, only when SCADBUDDY_RENDER_QUEUE_MAX is set).
-   * Not an error: the preview is still coming.
+   * Seconds until the submit is tried again, and why: a 503 with `retry_after` (a full
+   * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; Temporal unavailable; the
+   * request still being accepted; or no answer from ScadBuddy). Not an error: the
+   * preview is still coming.
    */
-  busy: number | undefined
+  busy: RenderBusy | undefined
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
+}
+
+export type BusyReason = 'queue-full' | 'temporal-unavailable' | 'still-accepting' | 'unanswered'
+
+export interface RenderBusy {
+  seconds: number
+  reason: BusyReason
+}
+
+function busyReason(cause: ApiError): BusyReason {
+  switch (cause.problem.type) {
+    case TEMPORAL_UNAVAILABLE:
+      return 'temporal-unavailable'
+    case STILL_ACCEPTING:
+      return 'still-accepting'
+    case UNANSWERED:
+      return 'unanswered'
+    default:
+      return 'queue-full'
+  }
 }
 
 /**
@@ -91,7 +112,7 @@ export function useRenderJob(
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
-  const [busy, setBusy] = useState<number | undefined>(undefined)
+  const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
   const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
@@ -213,10 +234,13 @@ export function useRenderJob(
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
+          // Retried for as long as the server answers with a wait, Temporal being
+          // unavailable included: the banner says so, and the preview comes back
+          // with the render service rather than needing a reload.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
           if (claimedNothing(cause)) requestId = newRequestId()
-          setBusy(wait)
+          setBusy({ seconds: wait, reason: busyReason(cause as ApiError) })
           await waitUnlessStale(wait)
           if (isStale()) throw cause
         }

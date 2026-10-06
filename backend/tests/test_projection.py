@@ -16,6 +16,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
+    SUPERSEDED_ERROR,
     Job,
     JobResult,
     PartInfo,
@@ -237,6 +238,18 @@ def test_delete_removes_the_row_and_its_blob_refs(
     assert projection.list_jobs() == []
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM blob_refs").fetchone() == (0,)
+
+
+def test_a_newer_render_supersedes_a_running_one(
+    pg_conninfo: str, announcing: JobProjection
+) -> None:
+    first = _row(announcing, _job(width=19))
+    announcing.mark_started(first.id)
+    assert announcing.release_claim(first.id, slug="demo", error=SUPERSEDED_ERROR) is not None
+    dropped = announcing.read(first.id)
+    # #1323: it had started, so the error must not say "before it started".
+    assert dropped.state == "cancelled" and dropped.error == "superseded by a newer render"
+    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
 
 
 def test_a_workflow_that_fails_before_starting_settles_from_pending(

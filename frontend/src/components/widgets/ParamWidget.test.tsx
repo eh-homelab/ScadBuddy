@@ -100,6 +100,72 @@ describe('number and integer', () => {
   })
 })
 
+// #1323: a number box keeps what is typed as a draft and commits only a parseable number.
+describe.each([
+  {
+    kind: 'number field',
+    param: { group: 'Main', name: 'thickness', type: 'number', initial: 3, caption: 'Thickness' } as Param,
+    label: 'Thickness',
+  },
+  {
+    kind: 'slider box',
+    param: {
+      group: 'Main',
+      name: 'thickness',
+      type: 'slider',
+      initial: 3,
+      caption: 'Thickness',
+      min: -10,
+      max: 20,
+      step: 0.5,
+    } as Param,
+    label: 'Thickness value',
+  },
+])('the $kind draft (#1323)', ({ param, label }) => {
+  const field = () => screen.getByRole('spinbutton', { name: label })
+
+  it('keeps a cleared field empty and commits nothing', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    expect(field()).toHaveValue(null)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('commits a negative number typed into a cleared field', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-')
+    expect(onChange).not.toHaveBeenCalled()
+    await user.type(field(), '3')
+    expect(onChange.mock.calls).toEqual([[-3]])
+    expect(field()).toHaveValue(-3)
+  })
+
+  it('commits an exponent only once it is complete', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '1e1')
+    expect(onChange).toHaveBeenLastCalledWith(10)
+    expect(onChange.mock.calls.flat()).not.toContain(0)
+  })
+
+  it('goes back to the last valid value when left empty', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.tab()
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('goes back to the last valid value on Enter', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-{Enter}')
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
 describe('string', () => {
   const param: Param = {
     group: 'Main',
