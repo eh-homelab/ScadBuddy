@@ -15,6 +15,7 @@ from scadbuddy.api.operations import (
     IdempotencyKey,
     operation_answer,
     run_operation,
+    temporal_refused,
     temporal_unavailable,
 )
 from scadbuddy.api.runtime import apply_runtime, restart_required
@@ -44,7 +45,11 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
 )
 from scadbuddy.operations.component import OperationCommands, OperationsDep
-from scadbuddy.workflows.commands import TemporalUnavailableError, namespace_retention
+from scadbuddy.workflows.commands import (
+    TemporalRefusedError,
+    TemporalUnavailableError,
+    namespace_retention,
+)
 
 router = APIRouter(tags=["settings"])
 
@@ -334,8 +339,21 @@ async def _check_operation_retention(
         return
     try:
         temporal = await namespace_retention(ops.client)
+    except TemporalRefusedError:
+        raise temporal_refused(
+            "a retention check",
+            "Temporal refused to say how long it keeps a finished operation; see ScadBuddy's"
+            " logs. Nothing was saved.",
+            may_have_started=None,
+        ) from None
     except TemporalUnavailableError:
-        raise temporal_unavailable("operations") from None
+        # A describe starts nothing, and the save is refused whole.
+        raise temporal_unavailable(
+            "a retention check",
+            "ScadBuddy could not ask Temporal how long it keeps a finished operation, so"
+            " nothing was saved; try again shortly.",
+            may_have_started=None,
+        ) from None
     if seconds < temporal.total_seconds():
         msg = (
             f"Keep them at least as long as Temporal keeps a finished operation "

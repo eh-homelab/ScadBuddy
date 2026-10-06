@@ -67,6 +67,7 @@ from scadbuddy.library.catalogue import (
     InvalidModelMetaError,
     ModelExistsError,
     ModelMeta,
+    ModelNameTakenError,
     ModelNotFoundError,
     ModelPatch,
     ModelRecord,
@@ -1131,6 +1132,13 @@ async def patch_template(slug: str, patch: ModelPatch, state: AppState) -> Model
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"{slug!r} already has a saved preset named {name!r}",
+            name=name,
+        ) from None
+    except ModelNameTakenError as error:
+        other, name = error.args
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"another model ({other!r}) is already named {name!r}",
             name=name,
         ) from None
     emit(state.events, ModelEvent(kind="model.updated", slug=slug))

@@ -34,6 +34,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     Field,
@@ -93,7 +94,15 @@ class SavedPresetsUnavailableError(RuntimeError):
     """Saved presets live in Postgres, and this server has no database."""
 
 
+def _refuse_nul(text: str) -> str:
+    """Postgres text cannot hold a NUL (#965): a 422 here, not a 500 at the insert."""
+    if "\x00" in text:
+        raise ValueError("contains a NUL byte")
+    return text
+
+
 def _clean_name(name: str) -> str:
+    _refuse_nul(name)
     cleaned = " ".join(name.split())
     if not cleaned:
         raise ValueError("a preset needs a name")
@@ -124,7 +133,13 @@ def _clean_tags(value: object) -> object:
 #: is written from now on; a template's file written before it is read as
 #: :func:`_details_as_written` reads it.
 PresetTags = Annotated[
-    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
+    list[
+        Annotated[
+            str,
+            StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$"),
+            AfterValidator(_refuse_nul),
+        ]
+    ],
     BeforeValidator(_clean_tags),
     Field(max_length=MAX_PRESET_TAGS),
 ]
@@ -170,7 +185,9 @@ def _details_as_written(raw: Any) -> Any:
 
 #: A preset's description (#327): short Markdown, trimmed.
 PresetDescription = Annotated[
-    str, StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION)
+    str,
+    StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION),
+    AfterValidator(_refuse_nul),
 ]
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, newRequestId, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
 import type { Job } from '../api/types'
 import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
@@ -43,6 +43,8 @@ export interface RenderState {
    * preview is still coming.
    */
   busy: RenderBusy | undefined
+  /** Submits the same render again: after an `error` the caller offers it as "try again". */
+  retry: () => void
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
 }
@@ -53,6 +55,13 @@ export interface RenderBusy {
   seconds: number
   reason: BusyReason
 }
+
+/**
+ * How many times a render is sent again on a 503 that is not a full queue before it is
+ * shown as an error: an outage outlasts a preview's patience, and "try again" (`retry`)
+ * sends it once more (review #1066 (11) 1). A full queue waits as long as it names.
+ */
+export const TRANSIENT_RETRIES = 5
 
 function busyReason(cause: ApiError): BusyReason {
   switch (cause.problem.type) {
@@ -113,6 +122,8 @@ export function useRenderJob(
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
   const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
+  const [attempt, setAttempt] = useState(0)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
   const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
@@ -221,7 +232,7 @@ export function useRenderJob(
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
       let requestId = newRequestId()
-      for (;;) {
+      for (let transient = 0; ; ) {
         try {
           const { job_id } = await api.render(
             slug,
@@ -234,13 +245,14 @@ export function useRenderJob(
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
-          // Retried for as long as the server answers with a wait, Temporal being
-          // unavailable included: the banner says so, and the preview comes back
-          // with the render service rather than needing a reload.
+          // A full queue is waited out; any other wait is retried `TRANSIENT_RETRIES`
+          // times, then shown as an error the person can try again.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
+          const reason = busyReason(cause as ApiError)
+          if (reason !== 'queue-full' && transient++ >= TRANSIENT_RETRIES) throw cause
           if (claimedNothing(cause)) requestId = newRequestId()
-          setBusy({ seconds: wait, reason: busyReason(cause as ApiError) })
+          setBusy({ seconds: wait, reason })
           await waitUnlessStale(wait)
           if (isStale()) throw cause
         }
@@ -270,7 +282,7 @@ export function useRenderJob(
       // preview must not name it through the debounce before the next submit.
       setStage(undefined)
     }
-  }, [slug, params, version, extraRef])
+  }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, settledFor, stage }
+  return { job, rendering, error, busy, retry, settledFor, stage }
 }

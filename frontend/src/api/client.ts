@@ -304,15 +304,21 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
- * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
- * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice. A failed print run (#470) says so itself: its
- * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ * Or the backend said its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
+ * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
+ * upstream took it) and an offline browser all mean it did not. For a request with a
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print
+ * run (#470) says so itself: its `may_have_queued` is whether it had tried to queue,
+ * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   // Its run may be checking still, and will print once it is accepted (#1052).
   if (error.problem.type === STILL_ACCEPTING) return true
+  // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
+  if (error.problem.may_have_started === true) return true
+  if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false

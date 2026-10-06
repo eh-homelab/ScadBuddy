@@ -118,9 +118,10 @@ class Settings(BaseSettings):
     public_url: str | None = None
     # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
     # besides the public URL's — the LAN hostname when the public URL is an SSO
-    # proxy, say. A browser's `Origin` on the realtime socket must be one of them
-    # (`api/realtime.py`, #266); with only the public URL, whichever other hostname
-    # the same deployment answers on shows "Live updates unavailable". Not a stored
+    # proxy, say. A browser's `Origin` on the realtime socket (`api/realtime.py`, #266)
+    # and on every write (`api/cross_site.py`, #962) must be one of them; with only
+    # the public URL, whichever other hostname the same deployment answers on shows
+    # "Live updates unavailable" and cannot save anything. Not a stored
     # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
     # pages may reach the server, so it belongs to the deployment.
     allowed_origins: str = ""
@@ -368,7 +369,8 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "database_pool_size": "Sizes the connection pool the settings are read through.",
         "allowed_origins": (
-            "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
+            "Which pages may open the realtime socket and make writes. Like the agent's"
+            " trusted proxies, it"
             " decides who can reach the server, so it belongs to the deployment."
         ),
         "trusted_proxies": (
