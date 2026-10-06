@@ -4,6 +4,7 @@ import path from 'node:path'
 import { query, type SDKMessage, type SDKResultMessage, type SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  ATTENTION_DESCRIPTION,
   answeredText,
   attentionHandler,
   attentionSpec,
@@ -71,6 +72,14 @@ describe('parseAttention', () => {
     expect(at('wait')).toBe(WAIT_CEILING_S)
     expect(at('proceed')).toBe(60)
     expect(at('stop')).toBe(60)
+  })
+})
+
+describe('ATTENTION_DESCRIPTION', () => {
+  it("does not send the model to it after a failed browser_* call, which waits for the tab itself (#815)", () => {
+    expect(ATTENTION_DESCRIPTION).toMatch(/Do not use it after a browser_\* call finds no tab: that call already waits/)
+    expect(ATTENTION_DESCRIPTION).not.toMatch(/`tab_disconnected` after a browser_\* call/)
+    expect(ATTENTION_DESCRIPTION).not.toMatch(/One request per reason/)
   })
 })
 
