@@ -654,7 +654,6 @@ async def test_an_update_aborted_by_a_closing_execution_starts_again(
     assert submitted.id == job.id and len(calls) == 2
 
 
-
 async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
     make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -679,6 +678,7 @@ async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
 
     assert len(calls) == 2
     assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+
 
 class FakePreview:
     """`render_preview_png` by name, holding every call until released."""
@@ -1349,7 +1349,6 @@ async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_clos
     assert done.state == "done", done.error
 
 
-
 async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the_retries(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
@@ -1375,6 +1374,7 @@ async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the
 
     assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
     assert (await asyncio.to_thread(projection.read, old.id)).state == "pending"
+
 
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection

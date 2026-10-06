@@ -62,9 +62,9 @@ SHORT = timedelta(seconds=60)
 #: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
-#: with no row (review #1066 (10) 1). A failing attempt is answered within the route's 10 s deadline; a slow
-#: one is not cut short (each has `SHORT`), so a loaded database delays a render, as
-#: `command-still-accepting`, rather than refusing it.
+#: with no row (review #1066 (10) 1). A failing attempt is answered within the route's
+#: 10 s deadline; a slow one is not cut short (each has `SHORT`), so a loaded database
+#: delays a render, as `command-still-accepting`, rather than refusing it.
 ACCEPT_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )

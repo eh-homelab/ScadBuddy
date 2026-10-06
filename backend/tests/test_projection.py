@@ -16,11 +16,11 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
+    SUPERSEDED_ERROR,
     Job,
     JobResult,
     PartInfo,
     QueueFullError,
-    SUPERSEDED_ERROR,
     StepInfo,
     render_key,
 )
