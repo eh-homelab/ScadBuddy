@@ -109,6 +109,21 @@ describe('SdkEventMapper', () => {
       ['t3', true, SUMMARY_MAX],
     ])
   })
+
+  it('takes a result from the block the model was sent, not from tool_use_result (#1540)', () => {
+    // SDK 0.3.287 leaves an MCP tool's structuredContent over 1,048,576 JSON
+    // characters out of `tool_use_result` and sets `structuredContentOmitted`.
+    // Neither ok nor the summary may come from what is left there.
+    const omitted = { tool_use_result: { structuredContentOmitted: true } }
+    const events = mapAll([
+      user([{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'found 3' }] }], omitted),
+      user([{ type: 'tool_result', tool_use_id: 't2', is_error: true, content: 'refused' }], omitted),
+    ])
+    expect(events.map((e) => (e.type === 'tool.result' ? [e.id, e.ok, e.summary] : e.type))).toEqual([
+      ['t1', true, 'found 3'],
+      ['t2', false, 'refused'],
+    ])
+  })
 })
 
 describe('scrubForLog', () => {
