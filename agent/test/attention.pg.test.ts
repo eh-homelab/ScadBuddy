@@ -802,7 +802,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         const own = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_own', signal: new AbortController().signal, attention: spec() })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
         const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(2)
+        // No poll for both rows pending here: the test body waits for them and then resolves
+        // both, so a poll here could only lose that race and wait forever (#1472).
         results.push(...(await Promise.all([own, auto])))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
