@@ -96,7 +96,7 @@ export function ParameterPanel({
         })}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto short:flex-none">
         {globalGroup && (
           <div className="border-b border-line bg-surface-2/40">
             <ul className="divide-y divide-line/60">
