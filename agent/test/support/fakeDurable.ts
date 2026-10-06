@@ -7,6 +7,7 @@ import type {
   DurableSessions,
   PendingCall,
 } from '../../src/durable/client.js'
+import { DurableStopped } from '../../src/durable/client.js'
 
 /**
  * DurableSessions without Temporal, for the manager's and the approval service's own
@@ -24,6 +25,8 @@ export class FakeDurable implements DurableSessions {
   sendError: unknown
   /** Thrown by `send` before its claim. */
   describeError: unknown
+  /** `send` waits for this after its claim and before it sends: a stopped run still closing. A Stop ends the wait. */
+  closing: Promise<void> | undefined
   /** `send` waits for this after its claim: no worker accepts the Update until it settles. */
   accepted: Promise<void> | undefined
   reviewError: unknown
@@ -37,6 +40,16 @@ export class FakeDurable implements DurableSessions {
   async send(input: DurableSessionInput, message: DurableMessage, options: DurableSendOptions = {}): Promise<DurableSendResult> {
     if (this.describeError) throw this.describeError
     await options.beforeStart?.(this.result)
+    if (this.closing) {
+      const signal = options.signal
+      await Promise.race([
+        this.closing,
+        new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true })),
+      ])
+    }
+    if (options.signal?.aborted) throw new DurableStopped('the session was stopped before this message was sent')
+    if (this.closing) await options.newRun?.()
+    options.starting?.()
     this.sends.push({ input, message })
     await this.accepted
     if (this.sendError) throw this.sendError

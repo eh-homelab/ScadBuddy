@@ -58,6 +58,14 @@ export class DurableRefused extends Error {
   override name = 'DurableRefused'
 }
 
+/** The session was stopped (DurableSendOptions.signal) before the message was sent: nothing was started. */
+export class DurableStopped extends Error {
+  override name = 'DurableStopped'
+}
+
+/** A send's refusal when the stopped execution did not close within D (DurableSendOptions). */
+export const STILL_STOPPING = "this session's previous run is still stopping; send again"
+
 /** Temporal did not answer: nothing was started. */
 export class DurableUnavailable extends Error {
   override name = 'DurableUnavailable'
@@ -81,6 +89,19 @@ export type DurableSendOptions = {
    * When it throws, nothing is sent.
    */
   beforeStart?: (result: DurableSendResult) => Promise<void>
+  /**
+   * Runs as the update-with-start is sent; from then on a Stop reaches the execution
+   * (`cancel`). Before it, a Stop aborts `signal` instead, and `send` gives up with
+   * DurableStopped, having started nothing.
+   */
+  starting?: () => void
+  signal?: AbortSignal
+  /**
+   * After a claim taken while a stopped run was still closing (`beforeStart` was told
+   * `attached`: that run was still the latest, and the projector must not leave it yet),
+   * runs once it closed and before the next run is started: the manager's stream reset.
+   */
+  newRun?: () => Promise<void>
 }
 
 /** A waiting call; `expires_at` (ISO 8601) is when the run's expiry timer denies it (workflow.py). */
@@ -136,7 +157,8 @@ export class TemporalDurableSessions implements DurableSessions {
   }
 
   async #ask<T>(work: () => Promise<T>): Promise<T> {
-    return this.#client.connection.withDeadline(Date.now() + ASK_MS, work)
+    // A timer, not a wall-clock deadline (the host's clock may jump).
+    return this.#client.connection.withAbortSignal(AbortSignal.timeout(ASK_MS), work)
   }
 
   /** The execution's status name, or undefined when the ID has none. */
@@ -165,22 +187,30 @@ export class TemporalDurableSessions implements DurableSessions {
 
   /**
    * A stopped execution still running: the plugin ends its task (and the session reads
-   * `idle`) before the execution returns its state. An Update it accepted meanwhile would
-   * be lost with it, so the send waits for it to close, up to D, and is then handed over.
+   * `idle`) before the execution returns its state, and its send validator refuses
+   * messages meanwhile (workflow.py). The send waits for it to close, up to D, and is then
+   * handed over; a Stop of the session (`stopped`) ends the wait.
    */
-  async #closed(sessionId: string): Promise<{ status: string; chain: string; stopping: boolean } | undefined> {
+  async #closed(
+    sessionId: string,
+    stopped: AbortSignal | undefined,
+  ): Promise<{ status: string; chain: string; stopping: boolean } | undefined> {
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), this.#sendDeadlineMs)
+    const stop = () => abort.abort()
+    stopped?.addEventListener('abort', stop, { once: true })
     try {
       await this.#client.connection.withAbortSignal(abort.signal, () =>
         this.#client.workflow.getHandle(durableWorkflowId(sessionId)).result(),
       )
     } catch (err) {
       // Closed some other way (terminated, failed) is closed too.
-      if (abort.signal.aborted) throw new DurableRefused('the session is still stopping; send again')
+      if (stopped?.aborted) throw new DurableStopped('the session was stopped before this message was sent')
+      if (abort.signal.aborted) throw new DurableRefused(STILL_STOPPING)
       if (unreachable(err)) throw new DurableUnavailable((err as Error).message)
     } finally {
       clearTimeout(timer)
+      stopped?.removeEventListener('abort', stop)
     }
     return this.#describe(sessionId)
   }
@@ -189,7 +219,16 @@ export class TemporalDurableSessions implements DurableSessions {
     const sessionId = input.session_id
     const workflowId = durableWorkflowId(sessionId)
     let before = await this.#describe(sessionId)
-    if (before?.status === 'RUNNING' && before.stopping) before = await this.#closed(sessionId)
+    // Claimed before the wait, so the sender is answered without it (the chat socket's
+    // queue moves on at the claim), as an attach: until the stopped run closes it is the
+    // latest, whose stream the projector keeps; `newRun` resets it once it closed.
+    let claimed: DurableSendResult | undefined
+    if (before?.status === 'RUNNING' && before.stopping) {
+      claimed = { started: 'attached', resumedFresh: false }
+      await options.beforeStart?.(claimed)
+      before = await this.#closed(sessionId, options.signal)
+      if (before?.status !== 'RUNNING') await options.newRun?.()
+    }
     const status = before?.status
     let state: unknown = null
     let start = input
@@ -213,7 +252,9 @@ export class TemporalDurableSessions implements DurableSessions {
       }
       result = status === 'RUNNING' ? { started: 'attached', resumedFresh: false } : fallback
     }
-    await options.beforeStart?.(result)
+    if (!claimed) await options.beforeStart?.(result)
+    if (options.signal?.aborted) throw new DurableStopped('the session was stopped before this message was sent')
+    options.starting?.()
     const operation = new WithStartWorkflowOperation(DURABLE_WORKFLOW, {
       workflowId,
       taskQueue: DURABLE_TASK_QUEUE,

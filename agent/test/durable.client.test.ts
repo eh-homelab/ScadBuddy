@@ -94,8 +94,8 @@ describe('TemporalDurableSessions', () => {
     await expect(durable.send(input, { text: 'hi', context: 'page' })).rejects.toBeInstanceOf(
       WorkflowUpdateRPCTimeoutOrCancelledError,
     )
-    expect(signals).toHaveLength(1)
-    expect(signals[0]?.aborted).toBe(true)
+    // The describes before it carry timeout signals of their own; the update's is the last.
+    expect(signals.at(-1)?.aborted).toBe(true)
     expect(DURABLE_SEND_DEADLINE_MS).toBe(30_000)
   })
 

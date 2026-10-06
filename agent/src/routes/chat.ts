@@ -226,10 +226,10 @@ export class ChatConnection {
    * past `drainStallMs` (which closes the connection).
    */
   private async drained(signal: AbortSignal): Promise<boolean> {
-    const since = Date.now()
+    const since = performance.now()
     while (this.buffered() > this.limits.highWater) {
       if (this.closed || signal.aborted) return false
-      if (Date.now() - since > this.limits.drainStallMs) {
+      if (performance.now() - since > this.limits.drainStallMs) {
         this.giveUp(`nothing drained for ${this.limits.drainStallMs} ms`)
         return false
       }
@@ -367,7 +367,7 @@ export class ChatConnection {
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
           this.pairTab(message.sessionId)
-          await this.sessions.send(message.sessionId, this.principal, message.text, { context })
+          await this.sendClaimed(message.sessionId, message.text, context)
           return
         }
         case 'session.attach':
@@ -401,6 +401,32 @@ export class ChatConnection {
       }
       this.emit(errorEvent(err, sessionId, this.log, message.type === 'question.answer' ? message.id : undefined))
     }
+  }
+
+  /**
+   * A send, waited for until it claimed the session (its `user.turn` is logged, so a send
+   * after it is refused as busy) or ended. A durable send may wait on Temporal after its
+   * claim (its run to close after a Stop, a worker to accept it, #1056); the queue moves
+   * on meanwhile, so a Stop or an approval sent next is not held behind it. What fails
+   * after the claim is reported when it does.
+   */
+  private async sendClaimed(sessionId: string, text: string, context: string | undefined): Promise<void> {
+    let claimed = () => {}
+    const claim = new Promise<'claimed'>((resolve) => {
+      claimed = () => resolve('claimed')
+    })
+    const outcome = this.sessions.send(sessionId, this.principal, text, { context, onClaimed: claimed }).then(
+      () => ({ err: undefined as unknown }),
+      (err: unknown) => ({ err }),
+    )
+    const first = await Promise.race([outcome, claim])
+    if (first !== 'claimed') {
+      if (first.err !== undefined) throw first.err
+      return
+    }
+    void outcome.then(({ err }) => {
+      if (err !== undefined) this.emit(errorEvent(err, sessionId, this.log))
+    })
   }
 
   /** Pairs `sessionId` with this panel's tab, once the panel has named it. */

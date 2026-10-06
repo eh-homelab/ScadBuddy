@@ -11,6 +11,7 @@ import type { PayloadKeys } from '../temporal/payloadKeys.js'
 import {
   DurableRefused,
   type DurableSendResult,
+  DurableStopped,
   type DurableSessionInput,
   type DurableSessions,
   DurableUnavailable,
@@ -344,6 +345,12 @@ export type SendOptions = {
    * `harnessPrincipal`: everything for the browser user, `read` otherwise).
    */
   tiers?: readonly Tier[]
+  /**
+   * Runs once a durable send has claimed the session and logged its turn, before Temporal
+   * has the message: from then on the session is busy for other sends, so the chat socket
+   * takes its next frame (a Stop, an approval) without waiting for the rest (#1056).
+   */
+  onClaimed?: () => void
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -647,6 +654,8 @@ export class SessionManager {
   private readonly run: QueryRunner
   private readonly leaseMs: number
   private readonly renewMs: number
+  /** Durable sends claimed and not yet sent to Temporal, which a Stop aborts (interruptDurable). */
+  private readonly unsent = new Map<string, AbortController>()
   /** Turns running in THIS process, by session id. */
   private readonly active = new Map<string, LocalTurn>()
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
@@ -1049,6 +1058,10 @@ export class SessionManager {
     const claim = new Promise<void>((resolve) => {
       claimed = resolve
     })
+    const unsent = new AbortController()
+    const sent = () => {
+      if (this.unsent.get(id) === unsent) this.unsent.delete(id)
+    }
     const sending = durable.send(
       input,
       { text: prompt, context: options.context ?? null },
@@ -1056,10 +1069,16 @@ export class SessionManager {
         beforeStart: async (result) => {
           userSeq = await this.claimDurable(session, principal, turnId, prompt, result)
           planned = result
+          this.unsent.set(id, unsent)
           claimed()
+          options.onClaimed?.()
         },
+        starting: sent,
+        signal: unsent.signal,
+        newRun: () => this.newDurableRun(id, turnId),
       },
     )
+    sending.then(sent, sent)
     let timer: NodeJS.Timeout | undefined
     const late = Symbol('late')
     const first = await Promise.race([
@@ -1095,8 +1114,10 @@ export class SessionManager {
       )
     } else if ('err' in first) {
       if (userSeq === undefined) throw durableError(first.err)
+      // Stopped before it was sent: the log says so (failDurable), and the sender is not told of an error.
+      if (first.err instanceof DurableStopped) await this.failDurable(id, first.err, { logged: true })
       // The sender is told (the thrown error), so the log only records the release.
-      if (await this.failDurable(id, first.err, { logged: false })) throw durableError(first.err)
+      else if (await this.failDurable(id, first.err, { logged: false })) throw durableError(first.err)
     } else {
       await this.startedDurable(id, planned!, first.ok)
     }
@@ -1170,17 +1191,27 @@ export class SessionManager {
   }
 
   /**
-   * A durable send that `describe` took for an attach started a new execution instead (the
-   * running one closed in between). Its live output starts at offset 0 in a new chain,
+   * A durable send whose execution turned out other than planned at the claim: `describe`
+   * took it for an attach and the running one closed in between, or a stopped run closed
+   * other than with its state. A new run's live output starts at offset 0 in a new chain,
    * which the projector reads from 0 itself (the stream row's offset counts in its
    * `chain`, projector.py `_drain`), so nothing is reset here; the log says when the
    * conversation could not be resumed.
    */
   private async startedDurable(id: string, planned: DurableSendResult, actual: DurableSendResult): Promise<void> {
-    if (planned.started !== 'attached' || actual.started === 'attached') return
-    if (actual.resumedFresh) {
+    if (actual.resumedFresh && !planned.resumedFresh) {
       await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
     }
+  }
+
+  /**
+   * The stream reset a claim taken as an attach owes once the run it waited for closed
+   * (DurableSendOptions.newRun): the next run's live output starts at offset 0, in a chain
+   * of this turn's own, as claimDurable writes one for a new execution.
+   */
+  private async newDurableRun(id: string, turnId: string): Promise<void> {
+    await this.deps.sql`
+      UPDATE ai_durable_streams SET next_offset = 0, chain = ${turnId} WHERE session_id = ${id} AND sending = ${turnId}`
   }
 
   /** The claim's `sending` mark, once its update-with-start answered (claimDurable). */
@@ -1201,8 +1232,10 @@ export class SessionManager {
     const released = await this.deps.sql`
       UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`
     if (released.count > 0) {
+      const stopped = err instanceof DurableStopped
       await this.events.append(id, [
-        ...(logged ? [event({ type: 'error', sessionId: id, code, message: describe(failure) })] : []),
+        ...(stopped ? [event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' })] : []),
+        ...(logged && !stopped ? [event({ type: 'error', sessionId: id, code, message: describe(failure) })] : []),
         event({ type: 'session.status', sessionId: id, status: 'idle' }),
       ])
     }
@@ -1218,6 +1251,14 @@ export class SessionManager {
   private async interruptDurable(session: SessionRecord): Promise<boolean> {
     const id = session.id
     if (!this.deps.durable || (session.status !== 'running' && session.status !== 'waiting_approval')) return false
+    // A send not yet at Temporal (waiting for a stopped run to close): it gives up, and
+    // its failure gives the session back (failDurable). No execution has its message.
+    const unsent = this.unsent.get(id)
+    if (unsent) {
+      this.unsent.delete(id)
+      unsent.abort()
+      return true
+    }
     let cancelled: boolean
     try {
       cancelled = await this.deps.durable.cancel(id)
@@ -1238,7 +1279,7 @@ export class SessionManager {
     let result = false
     try {
       for await (const { event: e } of this.events.follow(id, afterSeq)) {
-        if (e.type === 'error' && e.code !== DURABLE_WAITING_CODE) failed = e.message
+        if (e.type === 'error' && e.code !== DURABLE_WAITING_CODE && e.code !== 'interrupted') failed = e.message
         if (e.type === 'session.result') result = true
         if (e.type === 'session.status' && (e.status === 'idle' || e.status === 'done' || e.status === 'failed')) break
       }

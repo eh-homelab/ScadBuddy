@@ -351,6 +351,39 @@ describe.skipIf(skip !== undefined)(`durable sessions in the manager${skip ? ` (
     expect(await turn.done).toEqual({ kind: 'failed', message: 'the session is busy' })
   })
 
+  it('a Stop and an approval sent while a send waits for a stopped run are taken at once', async () => {
+    const durable = new FakeDurable()
+    // The stopped run never closes: only the Stop ends the send's wait.
+    durable.closing = new Promise(() => {})
+    const m = await durableManager(durable, { durableAcceptWaitMs: 600_000 })
+    const { session } = await m.start(browser, { origin: 'chat', mode: 'durable' })
+    const out: { type: string; code?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    const frame = (body: Record<string, unknown> & { type: string }) => JSON.stringify(clientMessage(body))
+    // Each receive resolves once its frame was handled: held behind the send, none would.
+    await connection.receive(frame({ type: 'user.message', sessionId: session.id, text: 'hi', context: { route: '/' } }))
+    expect(await status(session.id)).toBe('running')
+    await connection.receive(
+      frame({ type: 'approval.decision', sessionId: session.id, id: `durable:${session.id}:toolu_1`, approve: false }),
+    )
+    expect(durable.reviews).toEqual([{ sessionId: session.id, toolUseId: 'toolu_1', approved: false, approver: 'browser:browser' }])
+    await connection.receive(frame({ type: 'session.interrupt', sessionId: session.id }))
+    // The send gave up before reaching Temporal: nothing was sent and nothing cancelled.
+    await expect.poll(() => status(session.id)).toBe('idle')
+    expect(durable.sends).toEqual([])
+    expect(durable.cancels).toEqual([])
+    const log = (await m.events.read(session.id)).map((e) => e.event)
+    expect(log.slice(-2)).toEqual([
+      { v: 1, type: 'error', sessionId: session.id, code: 'interrupted', message: 'the turn was interrupted' },
+      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
+    ])
+    // The Stop is not reported to the panel as a failed send.
+    expect(out.filter((e) => e.type === 'error' && e.code !== 'interrupted')).toEqual([])
+    connection.close()
+  })
+
   it('Stop cancels the running execution of a running turn', async () => {
     const durable = new FakeDurable()
     const m = await durableManager(durable)

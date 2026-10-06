@@ -7,8 +7,10 @@ import type { Database } from '../src/db.js'
 import {
   DURABLE_TASK_QUEUE,
   DurableRefused,
+  type DurableSendResult,
   type DurableSessionInput,
   durableWorkflowId,
+  STILL_STOPPING,
   TemporalDurableSessions,
 } from '../src/durable/client.js'
 import { seenQuery } from './support/durableWorkflow.js'
@@ -99,14 +101,42 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     await durable.send(input, { text: 'first', context: null })
     expect(await durable.cancel(sid)).toBe(true)
     // Sent at once: the stopping execution would accept it, then close and lose it.
-    expect(await durable.send(input, { text: 'after stop', context: null })).toEqual({
-      started: 'handed_over',
-      resumedFresh: false,
-    })
+    const steps: string[] = []
+    expect(
+      await durable.send(
+        input,
+        { text: 'after stop', context: null },
+        {
+          beforeStart: async (r) => void steps.push(`claim ${r.started}`),
+          newRun: async () => void steps.push('new run'),
+          starting: () => void steps.push('starting'),
+        },
+      ),
+    ).toEqual({ started: 'handed_over', resumedFresh: false })
+    // Claimed while the stopped run was the latest; its stream is reset once it closed.
+    expect(steps).toEqual(['claim attached', 'new run', 'starting'])
     const seen = await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)
     expect(seen.args[1]).toEqual({ handed_over: 1 })
     expect(seen.messages).toEqual([{ text: 'after stop', context: null }])
     await durable.cancel(sid)
+  }, 120_000)
+
+  it('a stopped execution that does not close within D: claimed, then refused as still stopping', async () => {
+    const sid = randomUUID()
+    const durable = new TemporalDurableSessions(env.client, db.sql, { sendDeadlineMs: 1_000 })
+    const input = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: null, stop_ms: 600_000 }
+    await durable.send(input, { text: 'first', context: null })
+    expect(await durable.cancel(sid)).toBe(true)
+    const planned: DurableSendResult[] = []
+    await expect(
+      durable.send(input, { text: 'too soon', context: null }, { beforeStart: async (r) => void planned.push(r) }),
+    ).rejects.toThrow(new DurableRefused(STILL_STOPPING))
+    // Claimed before the wait (as an attach: the stopped run is still the latest), so the
+    // sender was answered without it.
+    expect(planned).toEqual([{ started: 'attached', resumedFresh: false }])
+    const handle = env.client.workflow.getHandle(durableWorkflowId(sid))
+    expect((await handle.query(seenQuery)).messages).toEqual([{ text: 'first', context: null }])
+    await handle.terminate('test over')
   }, 120_000)
 
   it('a terminated execution with no snapshot starts from nothing and says so', async () => {
