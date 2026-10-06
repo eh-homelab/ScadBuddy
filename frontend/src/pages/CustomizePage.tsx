@@ -32,7 +32,7 @@ import {
   sameValues,
   type ParamValues,
 } from '../lib/params'
-import { joinInputs, NO_EXTRA, splitInputs, type InputsExtra, type JsonObject } from '../lib/inputs'
+import { joinInputs, NO_EXTRA, sameJson, splitInputs, type InputsExtra, type JsonObject } from '../lib/inputs'
 import { applyPreset, presetInputs } from '../lib/presets'
 import { saveOutput } from '../lib/saveOutput'
 import { findParamRow } from '../template-ui/elements'
@@ -110,7 +110,7 @@ export function CustomizePage() {
     values: ParamValues | null
     extra: InputsExtra | null
   }>({ of: null, values: null, extra: null })
-  const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
+  const [saved, setSaved] = useState<{ jobId: string; extra: InputsExtra; output: Output } | undefined>(undefined)
   // The template's own Generate (<sb-generate>): its save in flight, and why the last failed.
   const [uiGenerate, setUiGenerate] = useState<{ generating: boolean; error: string | null }>({
     generating: false,
@@ -268,8 +268,10 @@ export function CustomizePage() {
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering
 
-  // A parameter change invalidates the saved output — Generate has to run again.
-  const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
+  // A parameter change invalidates the saved output — Generate has to run again. So does
+  // a UI-state-only change (#848): it starts no render, but the output records the old state.
+  const output =
+    settled && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
@@ -379,10 +381,15 @@ export function CustomizePage() {
           })
           const done = live.current.job
           if (!done) throw new Error('there is no render to keep')
-          const created = await saveOutput({ slug, job: done, extra: live.current.extra, capture })
-          setSaved({ jobId: done.id, output: created })
+          const savedExtra = live.current.extra
+          const created = await saveOutput({ slug, job: done, extra: savedExtra, capture })
+          setSaved({ jobId: done.id, extra: savedExtra, output: created })
           live.current.reloadOutputs()
-          await committed(() => live.current.output?.id === created.id, 'the saved output')
+          // Shown, or already left behind by a UI-state change made while it saved (#848).
+          await committed(
+            () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
+            'the saved output',
+          )
           return { jobId: done.id, outputId: created.id }
         })()
         generating.current = { key, run }
@@ -734,8 +741,8 @@ export function CustomizePage() {
       fit={fit}
       fitProblems={misfit}
       onPrinterModel={setPrinterModel}
-      onGenerated={(created) => {
-        if (job) setSaved({ jobId: job.id, output: created })
+      onGenerated={(created, savedExtra) => {
+        if (job) setSaved({ jobId: job.id, extra: savedExtra, output: created })
         outputsState.reload()
       }}
       onSent={() => outputsState.reload()}

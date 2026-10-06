@@ -47,6 +47,8 @@ class StoreBundle:
     local_usage: tuple[float, StoreUsage] | None = field(default=None, repr=False)
 
     async def aclose(self) -> None:
+        if self.snapshots is not None:
+            await self.snapshots.aclose()
         if self.content is not None:
             await self.content.aclose()
         if self.remote is not None:
