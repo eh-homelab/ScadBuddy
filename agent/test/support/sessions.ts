@@ -23,6 +23,16 @@ export type FakeTurn =
     }
   /** Waits until the query is aborted, then throws as the SDK does. */
   | { hang: true }
+  /**
+   * Starts a reply (message_start with this usage, then `text`) and waits for
+   * the abort, as a model cut off mid-reply (#991). Then ends with the
+   * interrupt's result, whose total is `resultCostUsd` (Claude Code prices
+   * nothing for the cut-off request), or throws when that is undefined.
+   */
+  | {
+      stall: { model: string; usage: Record<string, number>; text?: string }
+      resultCostUsd?: number
+    }
   | { throws: string }
 
 /**
@@ -51,6 +61,29 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         return
       }
       if ('throws' in turn) throw new Error(turn.throws)
+      if ('stall' in turn) {
+        const { model, usage, text = '' } = turn.stall
+        yield stream({ type: 'message_start', message: { id: msgId, model, usage } })
+        yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+        yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })
+        const stopped = new Promise<void>((resolve) => {
+          if (run.signal?.aborted) resolve()
+          run.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        await stopped
+        if (turn.resultCostUsd === undefined) throw new Error('Claude Code process aborted by user')
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          errors: [],
+          num_turns: 0,
+          total_cost_usd: turn.resultCostUsd,
+          terminal_reason: 'aborted_streaming',
+          session_id,
+        } as unknown as SDKMessage
+        return
+      }
       yield stream({ type: 'message_start', message: { id: msgId } })
       yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
       yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: turn.reply } })

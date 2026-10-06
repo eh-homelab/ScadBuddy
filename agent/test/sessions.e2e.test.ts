@@ -470,6 +470,36 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     ])
   })
 
+  it('charges a turn stopped mid-reply for the request it cut off, once, across the resumed turn (#991)', async () => {
+    // Measured: Claude Code prices the cut-off request at nothing (its
+    // `aborted_streaming` result reports 0), and the next resumed query's
+    // total leaves it out too. The manager prices it from the stream:
+    // claude-sonnet-4-5, 100k input at $3/MTok, "Once upon a time" ≈ 4 output tokens at $15.
+    const cut = (100_000 * 3 + 4 * 15) / 1_000_000
+    let stall = true
+    script = () => (stall ? { stall: 'Once upon a time', usage: { input_tokens: 100_000 } } : { text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(session.id, browser, 'write a long essay')
+    for (let i = 0; i < 400; i++) {
+      if ((await allEvents(a, session.id)).some((e) => e.event.type === 'assistant.text.delta')) break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    expect(await a.interrupt(session.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(cut, 10)
+
+    // A plain reply costs the fake's 10 input + 5 output tokens.
+    stall = false
+    const reply = (10 * 3 + 5 * 15) / 1_000_000
+    const next = await (await a.send(session.id, browser, 'reply OK')).done
+    expect(next).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (next.kind !== 'result') throw new Error('unreachable')
+    expect(next.costUsd).toBeCloseTo(cut + reply, 10)
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(cut + reply, 10)
+    await expectPanelAccepts((await allEvents(a, session.id)).map((e) => e.event))
+  }, 60_000)
+
   it('streams tool calls and results, and a late attach replays the same sequence a live watcher saw', async () => {
     script = (r) =>
       conversation(r).includes('tool_result')
