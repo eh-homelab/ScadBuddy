@@ -3,6 +3,7 @@ built-in default pipeline: one piece, one plate layout, one output."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
@@ -119,6 +120,17 @@ def _waiter_recheck() -> timedelta:
         + _retried(FINISH_TIMEOUT)
         + SHORT
     )
+
+
+def _raise_if_cancelled() -> None:
+    """Raise the workflow's cancellation if one was requested. temporalio (1.34)
+    shields a signal in flight from it: a cancel that lands before the signal
+    resolves only cancels the signal command, which is a no-op once it has been
+    sent, and is then dropped (`_await_temporal_operation` uncancels the task).
+    The signal's own outcome comes back, and the workflow would carry on as if it
+    had never been cancelled (#1590)."""
+    if workflow.cancellation_reason() is not None:
+        raise asyncio.CancelledError
 
 
 def _target_gone(error: FailureError) -> bool:
@@ -336,9 +348,11 @@ class TemplatePipeline:
                 try:
                     await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                 except FailureError as error:
+                    _raise_if_cancelled()
                     if not _target_gone(error):
                         raise
                     continue  # it closed in between; start it again
+                _raise_if_cancelled()
                 try:
                     await workflow.wait_condition(
                         lambda: self._outcome is not None, timeout=_waiter_recheck()
