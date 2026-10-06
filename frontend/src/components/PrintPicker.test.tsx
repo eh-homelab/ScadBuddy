@@ -1,7 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
-import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, printRunPoll, rackAlgorithmSave } from '../api/client'
 import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
@@ -261,11 +260,7 @@ describe('PrintPicker', () => {
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
     await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
@@ -1619,8 +1614,10 @@ describe('PrintPicker · Plates of a 3MF', () => {
   })
 
   it("drops the previous output's plates while the next output's load", async () => {
-    const first = { ...output, id: 'a'.repeat(32), library_files: [] }
-    const second = { ...output, id: 'b'.repeat(32), library_files: [] }
+    // Both outputs are ones the mock knows, so the second's choices read lands and the
+    // dialog stays up: only the reset can take the first output's plates away.
+    const first = { ...(fixtures.outputs[0] as Output), library_files: [] }
+    const second = { ...(fixtures.outputs[1] as Output), library_files: [] }
     server.use(
       http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
         if (params.id === second.id) await delay('infinite')
@@ -1630,17 +1627,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
         ])
       }),
     )
+    const reads = watch('GET', '/choices')
     const { rerender } = renderPage(
       <PrintPicker open source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await screen.findByTestId('plate-choice')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
-    await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await waitFor(() => expect(reads.urls.at(-1)).toContain(`/print/outputs/${second.id}/choices`))
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 })
 
@@ -1823,11 +1819,7 @@ describe('PrintPicker · A library file (#313)', () => {
     await user.click(screen.getByText('Options'))
     await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
+    rerender(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
     await waitFor(() => expect(reads.urls.at(-1)).toContain('/print/library/89/choices'))
     await loaded()
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
@@ -1836,13 +1828,15 @@ describe('PrintPicker · A library file (#313)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(urls).toEqual([expect.stringContaining('/print/library/89/run')])
-    expect(bodies[0]).toMatchObject({
+    // toMatchObject would take `{}` as "any object": the cleared halves are compared exactly.
+    const body = bodies[0] as { options: unknown; choices: { filament_overrides: unknown } }
+    expect(body).toMatchObject({
       plate_id: 1,
       all_plates: false,
-      options: {},
-      choices: { filament_overrides: {} },
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 27 }]) },
     })
+    expect(body.options).toEqual({})
+    expect(body.choices.filament_overrides).toEqual({})
   })
 })
 
