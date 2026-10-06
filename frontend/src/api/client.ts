@@ -58,6 +58,8 @@ import type {
   PrintProgress,
   PrintCheck,
   PrintRun,
+  Operation,
+  OperationAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -142,6 +144,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).body
+}
+
+/** `request`, keeping the status: a 202 from an operation's route is not its body. */
+async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -157,9 +164,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await readProblem(response))
   }
   if (response.status === 204) {
-    return undefined as T
+    return { status: 204, body: undefined as T }
   }
-  return (await response.json()) as T
+  return { status: response.status, body: (await response.json()) as T }
 }
 
 /**
@@ -185,6 +192,12 @@ export const UNANSWERED = 'urn:scadbuddy:unanswered'
 export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
+/**
+ * The `type` of the problem `command()` writes when it stops following an operation
+ * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
+ * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
+ */
+export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
 /**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
@@ -329,8 +342,21 @@ const seg = encodeURIComponent
 /**
  * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
  * execution is gone within minutes; this is the backstop, past any run's own length.
+ * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
+ * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
+ * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent does not follow
+ * that long: it follows for `COMMAND_FOLLOW_MS` (the backend's answer deadline plus a
+ * margin, agent/src/tools/command.ts), then hands back the running operation for
+ * `get_operation`.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3, acceptingMs: 240_000, followMs: 3_600_000 }
+export const printRunPoll = {
+  intervalMs: 1000,
+  reattempts: 3,
+  acceptingMs: 240_000,
+  followMs: 3_600_000,
+  operationFollowMs: 1_260_000,
+}
 
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
@@ -407,6 +433,46 @@ async function reattach<T>(
       await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
+}
+
+/**
+ * A Bambuddy write as an operation (#1053, spec 2026-10-01 §4.2): one `Idempotency-Key`
+ * per call, which a re-send after an answer that never arrived keeps, so the server
+ * answers it with the first outcome and does nothing twice. The route answers its own
+ * body, or 202 with an operation still running, followed here through
+ * `GET /operations/{id}` to that body, or to the problem the route would have answered.
+ */
+async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const signal = init.signal ?? undefined
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
+  if (first.status !== 202) return first.body as T
+  let op: Operation = first.body as OperationAccepted
+  const began = Date.now()
+  while (op.status === 'running') {
+    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+      throw new ApiError({
+        type: OPERATION_UNFINISHED,
+        title: 'Still running',
+        status: 504,
+        detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
+      })
+    }
+    await wait(printRunPoll.intervalMs, signal)
+    const id = op.id
+    op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
+  }
+  if (op.status === 'failed') {
+    const error = op.error
+    throw new ApiError({
+      ...error?.extensions,
+      type: error?.type,
+      title: error?.title ?? 'Failed',
+      status: error?.status ?? 500,
+      detail: error?.detail ?? 'The operation ended without a result.',
+    })
+  }
+  return (op.result ?? undefined) as T
 }
 
 /**
@@ -647,6 +713,15 @@ export const api = {
     item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
 
   /**
+   * #624 — a small copy of an image or of a video's poster, for a strip of
+   * thumbnails; undefined for a video with no poster, which has none.
+   */
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+    item.kind === 'video' && !item.poster
+      ? undefined
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+
+  /**
    * #274 — adds an image or video as the template's last item. XHR rather than
    * `fetch`, which reports no upload progress; a video runs to a gigabyte.
    * `onProgress` gets the fraction sent, 0 to 1.
@@ -836,11 +911,11 @@ export const api = {
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
-  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+  reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
   /** #311 — attaches a timelapse still on the printer to the print. */
   pullTimelapse: (archiveId: number, filename: string) =>
-    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+    command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
     }),
@@ -854,7 +929,7 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   sendOutput: (id: string, body: SendRequest) =>
-    request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
+    command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
   /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
   putThumbnail: (outputId: string, png: Blob) => {
@@ -980,7 +1055,7 @@ export const api = {
    * row — that makes Bambuddy's project page list the files.
    */
   createProject: (body: ProjectRequest) =>
-    request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+    command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #317 — the project both pickers open on; `null` is "No project". */
   rememberProject: (projectId: number | null) =>
@@ -994,7 +1069,7 @@ export const api = {
    * Idempotent: the same project again answers with the file already there.
    */
   fileIntoProject: (outputId: string, projectId: number) =>
-    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+    command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId }),
     }),
@@ -1003,7 +1078,7 @@ export const api = {
    * sliced, and an archive only once a print has finished, so the ids come from the
    * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
-    request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
+    command<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1200,7 +1275,7 @@ export const api = {
     request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
 
   registerSidebar: () =>
-    request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+    command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
    * The AI agent's headless browser (#349), served by the agent service under

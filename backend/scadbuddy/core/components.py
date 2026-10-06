@@ -25,7 +25,9 @@ import scadbuddy
 if TYPE_CHECKING:
     import asyncio
 
+    from scadbuddy.api.deps import PrintCommands
     from scadbuddy.bambuddy.print_links import PrintLinkStore
+    from scadbuddy.bambuddy.uploads import BambuddyUploadStore
     from scadbuddy.bambuddy.watcher import PrintWatcher
     from scadbuddy.core.config import Config
     from scadbuddy.core.events import EventBus
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from scadbuddy.library.libraries import CheckoutGate
     from scadbuddy.library.outputs import OutputStore
     from scadbuddy.library.settings_store import SettingsStore
+    from scadbuddy.render.projection import JobProjection
     from scadbuddy.render.submit import RenderService
 
 #: The module a feature package names its component in, and what it exports.
@@ -63,6 +66,9 @@ class Core(Protocol):
     settings_store: SettingsStore
     print_links: PrintLinkStore
     print_watcher: PrintWatcher
+    uploads: BambuddyUploadStore
+    projection: JobProjection
+    print_runs: PrintCommands
 
 
 @dataclass(frozen=True)
@@ -155,18 +161,27 @@ class Components:
             yield
 
 
-def discover_components(package: ModuleType = scadbuddy) -> list[Component[Any]]:
-    """The ``COMPONENT`` of each ``<package>.<feature>.component`` module, by feature
-    name. Only packages are features: a ``component`` module directly in ``package``
-    is not one."""
-    found: list[Component[Any]] = []
+def feature_exports(module: str, attr: str, package: ModuleType = scadbuddy) -> list[Any]:
+    """``attr`` of each ``<package>.<feature>.<module>`` module that has one, by feature
+    name. Only packages are features: a ``<module>`` directly in ``package`` is not one."""
+    found: list[Any] = []
     for info in sorted(pkgutil.iter_modules(package.__path__), key=lambda i: i.name):
         if not info.ispkg:
             continue
-        name = f"{package.__name__}.{info.name}.{COMPONENT_MODULE}"
+        name = f"{package.__name__}.{info.name}.{module}"
         if importlib.util.find_spec(name) is None:
             continue
-        component = getattr(importlib.import_module(name), COMPONENT_ATTR, None)
-        if isinstance(component, Component):
-            found.append(component)
+        value = getattr(importlib.import_module(name), attr, None)
+        if value is not None:
+            found.append(value)
     return found
+
+
+def discover_components(package: ModuleType = scadbuddy) -> list[Component[Any]]:
+    """The ``COMPONENT`` of each ``<package>.<feature>.component`` module, by feature
+    name."""
+    return [
+        component
+        for component in feature_exports(COMPONENT_MODULE, COMPONENT_ATTR, package)
+        if isinstance(component, Component)
+    ]

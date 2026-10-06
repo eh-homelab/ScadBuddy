@@ -606,6 +606,9 @@ export class QuestionService {
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
+      // A failed check (the hub, the database) must not leave the row with
+      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
+      await attention?.onParked?.().catch(() => undefined)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
