@@ -1,4 +1,12 @@
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import {
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type Ref,
+} from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -399,18 +407,43 @@ export function ActionBar({
   )
 }
 
-/** The other things Generate can make from the preview: for now, an image to share. */
+/**
+ * The other things Generate can make from the preview: for now, an image to share.
+ *
+ * #968 — the WAI-ARIA menu button pattern. Opening it (click, Enter, Space or the
+ * arrows) puts focus on an item; the arrows, Home and End move between items, which are
+ * out of the Tab order; Escape closes it back to the button, and Tab out closes it.
+ */
 function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () => void }) {
-  const [open, setOpen] = useState(false)
+  // Which item takes focus as it opens: the first, or the last for ArrowUp.
+  const [open, setOpen] = useState<'first' | 'last' | null>(null)
   const root = useRef<HTMLDivElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const menuId = useId()
+
+  const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  const close = (refocus: boolean) => {
+    setOpen(null)
+    // The shared Button takes no ref, so the trigger is found in the root.
+    if (refocus) root.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus()
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const all = items()
+    const first = open === 'last' ? all.at(-1) : all[0]
+    first?.focus()
+  }, [open])
 
   useEffect(() => {
     if (!open) return
     const onDown = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
+      if (!root.current?.contains(event.target as Node)) setOpen(null)
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key !== 'Escape') return
+      // Back to the button only from inside: an Escape elsewhere just closes it.
+      close(!!root.current?.contains(document.activeElement))
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -420,15 +453,46 @@ function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () =>
     }
   }, [open])
 
+  function onTriggerKey(event: ReactKeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    event.preventDefault()
+    setOpen(event.key === 'ArrowUp' ? 'last' : 'first')
+  }
+
+  function onMenuKey(event: ReactKeyboardEvent) {
+    const all = items()
+    const at = all.indexOf(document.activeElement as HTMLElement)
+    const next =
+      event.key === 'ArrowDown'
+        ? all[(at + 1) % all.length]
+        : event.key === 'ArrowUp'
+          ? all[(at - 1 + all.length) % all.length]
+          : event.key === 'Home'
+            ? all[0]
+            : event.key === 'End'
+              ? all.at(-1)
+              : undefined
+    if (event.key === 'Tab') {
+      // Focus goes on to wherever Tab takes it; the menu does not stay open behind.
+      setOpen(null)
+      return
+    }
+    if (!next) return
+    event.preventDefault()
+    next.focus()
+  }
+
   return (
     <div ref={root} className="relative">
       <Button
         variant="primary"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen((value) => (value ? null : 'first'))}
+        onKeyDown={onTriggerKey}
         disabled={disabled}
         aria-label="More to generate"
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={open !== null}
+        aria-controls={open ? menuId : undefined}
         data-testid="generate-menu"
         className="rounded-l-none border-l-accent-ink/25 px-2"
       >
@@ -438,16 +502,22 @@ function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () =>
       </Button>
       {open && (
         <div
+          ref={menu}
+          id={menuId}
           role="menu"
+          aria-label="More to generate"
+          onKeyDown={onMenuKey}
           className="absolute right-0 bottom-full z-30 mb-1 min-w-48 rounded-[6px] border border-line bg-surface py-1 shadow-xl"
         >
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             data-testid="generate-image"
-            className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
+            className="block w-full px-3 py-1.5 text-left text-[13px] outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
             onClick={() => {
-              setOpen(false)
+              // Back to the button first, so the dialog returns focus there when it closes.
+              close(true)
               onImage()
             }}
           >
