@@ -1,14 +1,26 @@
 import { HttpResponse, http } from 'msw'
+import type { RespondBody } from '../../agent/respond'
+import { mockAgentSessions } from '../agent'
 
 /**
  * #815 — the agent's list of tool calls parked on the user (`GET
  * /api/v1/ai/pending-input`, agent/src/routes/pendingInput.ts), which the header's
  * attention badge counts (`src/agent/attention.ts`). Empty unless a test parks some:
  * the mocked agent's scripted approvals and questions (`../agent.ts`) ride its
- * socket, not this route.
+ * socket, not this read.
+ *
+ * Its respond route (`POST /api/v1/ai/pending-input/{id}`, `src/agent/respond.ts`)
+ * answers what the open scripted agent is parked on; every request is kept for tests
+ * (`respondRequests`).
  */
 
 const state = { approvals: 0, questions: 0, attention: 0, done: 0 }
+let responses: { id: string; body: RespondBody }[] = []
+
+/** Tests: every respond the panel sent, in order. */
+export function respondRequests(): readonly { id: string; body: RespondBody }[] {
+  return responses
+}
 
 /** Tests: how many approvals the agent says are waiting. */
 export function setPendingApprovals(n: number): void {
@@ -26,6 +38,7 @@ export function reset(): void {
   state.approvals = 0
   state.questions = 0
   state.attention = 0
+  responses = []
   state.done = 0
 }
 
@@ -70,6 +83,16 @@ function answer(i: number, attention: boolean, done = false) {
 }
 
 export const handlers = [
+  http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
+    const id = String(params.id)
+    const body = (await request.json()) as RespondBody
+    responses.push({ id, body })
+    const agent = mockAgentSessions()
+    if (!agent) return HttpResponse.json({ detail: 'the assistant is not connected' }, { status: 503 })
+    const result = agent.respond(id, body)
+    if ('error' in result) return HttpResponse.json({ detail: result.error }, { status: result.status })
+    return HttpResponse.json({ id, kind: body.kind, outcome: body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied' })
+  }),
   http.get('/api/v1/ai/pending-input', () =>
     HttpResponse.json({
       entries: [

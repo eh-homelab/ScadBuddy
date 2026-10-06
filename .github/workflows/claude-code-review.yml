@@ -217,15 +217,55 @@ jobs:
             7. **Shell scripts**
                - ShellCheck compliance, `set -euo pipefail`, quoted expansions.
 
-            8. **Feedback Standards**
-               - Treat ALL feedback as important — never minimize findings with phrases like "minor observation", "nit", or "optional"
-               - Every piece of feedback must be clearly actionable
+            8. **Feedback Standards: classify every finding**
+               Every finding is either **Blocking** or **Non-blocking**. Only
+               Blocking findings gate the merge or become `pr-feedback` issues,
+               so classify deliberately — a Blocking finding must be worth
+               stopping the merge for.
+
+               **Blocking** — only these:
+               - Correctness bugs a caller or user can actually hit.
+               - Security issues (injection, secrets reaching a browser or a
+                 log, a fork PR reaching the LAN, and the like).
+               - Data loss, or crash-consistency gaps (a crash or retry leaves
+                 state wrong or unrecoverable).
+               - CI / merge-gate integrity (a required check that can skip into
+                 a pass, a job moved onto `clusters-runner*`, a grep that aborts
+                 a gate, and the like).
+               - Violations of the verified facts / spec §3 rules and the other
+                 repo rules enumerated above.
+               - A missing test ONLY when this PR adds or changes behaviour and
+                 NO test exercises that behaviour at all.
+
+               **Non-blocking** — everything else, including: extra edge-case
+               tests for branches beyond the change's core behaviour,
+               comment/docstring/wording, naming, style, refactors, small
+               performance gains, and speculative hardening against cases
+               nothing currently produces.
+               - One line each. At most ~5; drop the least useful beyond that.
+               - Do not re-litigate the same area on every push: if an earlier
+                 review on this PR already raised it and the author declined or
+                 deferred it, do not repeat it.
+
+               Every finding, in either section, must be clearly actionable.
+               When unsure whether something is Blocking, ask whether merging
+               as-is would let a user, the data, or the gate actually be hurt;
+               if not, it is Non-blocking.
 
             ## Output
 
-            Write your review as a single Markdown document listing all findings
-            grouped by concern. **The last line of that document MUST be exactly
-            this HTML comment, copied verbatim:**
+            Write your review as a single Markdown document with exactly these
+            two sections, in this order, each present even when empty (write
+            `None.` under an empty one):
+
+                ## Blocking
+                ## Non-blocking
+
+            Under `## Blocking`, give each finding a short title, the file and
+            line, the problem and the fix. Under `## Non-blocking`, one line per
+            finding. Do not put findings anywhere else in the document.
+            **The last line of that document MUST be exactly this HTML comment,
+            copied verbatim:**
 
                 <!-- claude-review-sha: ${{ github.sha }} -->
 
@@ -443,7 +483,7 @@ jobs:
           allowed_bots: "*"
           claude_args: |
             --allowedTools "Read,Glob,Grep,LS,Bash(gh:*),Bash(jq:*)" --model "claude-sonnet-5"
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","fail"]},"outstanding_findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string"}},"required":["title"]}},"addressed_count":{"type":"integer"},"reason":{"type":"string"}},"required":["verdict","reason"]}'
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","fail"]},"outstanding_findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string"}},"required":["title"]}},"addressed_count":{"type":"integer"},"non_blocking_count":{"type":"integer"},"reason":{"type":"string"}},"required":["verdict","reason"]}'
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.inputs.pr_number }}
@@ -452,9 +492,10 @@ jobs:
 
             The previous step ran a comprehensive code review and posted a summary comment
             on this PR. Decide whether the PR is ready to merge. It is ready ONLY when every
-            actionable finding from the LATEST review is already addressed — either fixed in
-            the branch (so it no longer appears in the latest review summary) or tracked in an
-            open `pr-feedback` GitHub issue for this PR.
+            actionable (Blocking) finding from the LATEST review is already addressed — either
+            fixed in the branch (so it no longer appears in the latest review summary) or
+            tracked in an open `pr-feedback` GitHub issue for this PR. Non-blocking findings
+            never affect the verdict.
 
             ## Steps
 
@@ -473,27 +514,38 @@ jobs:
                  merged ~2000 unreviewed lines on PR #115.)
                - Also read review bodies:
                  `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.inputs.pr_number }}/reviews`.
-            2. Extract every actionable finding from that summary. Treat ALL findings
-               as actionable — nits included; the review is instructed never to minimize them.
+            2. Extract the actionable findings from that summary. ONLY findings under its
+               `## Blocking` section are actionable. Findings under `## Non-blocking` never
+               fail the gate and need no `pr-feedback` issue — ignore them entirely and do
+               not list them in `outstanding_findings`. If the summary has no `## Blocking`
+               section (an older-format review), treat a finding as actionable only if it
+               is a correctness bug, security issue, data-loss / crash-consistency gap,
+               CI / merge-gate integrity problem, verified-fact / spec §3 violation, or a
+               change with no test at all; everything else is non-blocking.
             3. Fetch open follow-up issues for this PR:
                `gh issue list --repo ${{ github.repository }} --state open --label pr-feedback --search "[PR #${{ github.event.inputs.pr_number }} feedback]" --json number,title,body`
             4. For each finding, mark it ADDRESSED if a matching open `pr-feedback` issue
                covers it. A finding this commit's review no longer lists is already fixed in
                the branch and need not be considered.
-            5. If this commit's review summary reports NO actionable findings, the verdict is
-               `pass`.
+            5. If this commit's review summary reports NO Blocking findings (its `## Blocking`
+               section is empty or `None.`), the verdict is `pass`, however many Non-blocking
+               findings it lists.
 
             ## Verdict
 
-            - `pass` only if EVERY actionable finding in THIS COMMIT's review summary is
-              covered by an open `pr-feedback` issue (or there are no findings at all).
-            - `fail` if ANY actionable finding is neither fixed nor tracked.
+            - `pass` only if EVERY Blocking finding in THIS COMMIT's review summary is
+              covered by an open `pr-feedback` issue (or there are no Blocking findings).
+            - `fail` if ANY Blocking finding is neither fixed nor tracked. Never `fail` on
+              Non-blocking findings.
             - If you cannot locate a review summary comment carrying `${{ github.sha }}`,
               return `fail` with a reason that says so (fail closed). An older summary does
               not substitute for one, however recent or however thorough it looks.
 
-            Return the structured result: `verdict`, `outstanding_findings` (each a short
-            `title` + `severity`), `addressed_count`, and a one-paragraph `reason`.
+            Return the structured result: `verdict`, `outstanding_findings` (the untracked
+            Blocking findings only, each a short `title` + `severity`), `addressed_count`
+            (Blocking findings tracked by an issue), `non_blocking_count` (how many
+            Non-blocking findings the summary lists, for the log only), and a one-paragraph
+            `reason`.
 
       # The same explainer for the classifier step — see the long comment on
       # "Explain a failed code review" above for why this exists and why it has
@@ -874,21 +926,23 @@ jobs:
           printf '%s\n' "$FINDINGS" | sed 's/^/  /' || true
 
           if [ "$VERDICT" = "pass" ]; then
-            echo "All review findings are addressed (fixed in branch or tracked in a pr-feedback issue). Merge gate passes."
-            pass "All review findings are addressed (fixed in this branch or tracked in a \`pr-feedback\` issue)."
+            echo "All blocking review findings are addressed (fixed in branch or tracked in a pr-feedback issue). Merge gate passes."
+            pass "All blocking review findings are addressed (fixed in this branch or tracked in a \`pr-feedback\` issue). Non-blocking findings do not gate the merge."
           fi
 
           # A PR merged before its review finished can no longer take a fix on
           # its branch, so file the findings instead of waiting for someone to
           # apply the label by hand. The label must be applied with the App
           # token: a label added by GITHUB_TOKEN does not trigger
-          # pr-follow-up-issues.yml.
+          # pr-follow-up-issues.yml. Only when the classifier named outstanding
+          # BLOCKING findings: those are all it lists, and pr-follow-up-issues.yml
+          # files only Blocking findings, so a label with none would file nothing.
           merged_at="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || true)"
-          if [ -n "$merged_at" ]; then
+          if [ -n "$merged_at" ] && [ -n "$FINDINGS" ]; then
             [ -n "${APP_TOKEN:-}" ] || echo "::warning::No App token; the label below will not trigger pr-follow-up-issues.yml."
             if gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label claude-make-follow-up-issues >/dev/null; then
               echo "PR was merged at ${merged_at}; applied 'claude-make-follow-up-issues' to file the outstanding findings."
-              fail "This PR was merged before its review findings were addressed, so the \`claude-make-follow-up-issues\` label was applied automatically to file them as \`pr-feedback\` issues.
+              fail "This PR was merged before its blocking review findings were addressed, so the \`claude-make-follow-up-issues\` label was applied automatically to file them as \`pr-feedback\` issues.
 
           **Why:** ${REASON:-_no reason provided_}
 
@@ -898,15 +952,15 @@ jobs:
             echo "::warning::PR is merged but applying 'claude-make-follow-up-issues' failed; apply it by hand."
           fi
 
-          echo "::error::Merge gate failed: review findings are neither fixed in this branch nor tracked in a pr-feedback issue. Push a fix, or apply the 'claude-make-follow-up-issues' label to file them — the gate re-evaluates on the next dispatch."
-          fail "Review findings are neither fixed in this branch nor tracked in a \`pr-feedback\` issue.
+          echo "::error::Merge gate failed: blocking review findings are neither fixed in this branch nor tracked in a pr-feedback issue. Push a fix, or apply the 'claude-make-follow-up-issues' label to file them — the gate re-evaluates on the next dispatch."
+          fail "Blocking review findings are neither fixed in this branch nor tracked in a \`pr-feedback\` issue.
 
           **Why:** ${REASON:-_no reason provided_}
 
           **Outstanding findings**
           ${FINDINGS:-_none listed_}
 
-          Push a fix, or apply the \`claude-make-follow-up-issues\` label to file them as \`pr-feedback\` issues."
+          Push a fix, or apply the \`claude-make-follow-up-issues\` label to file them as \`pr-feedback\` issues. Non-blocking findings in the review do not gate the merge and are not filed."
 
       # ── THIS is the merge gate ──────────────────────────────────────────────
       #
@@ -964,7 +1018,7 @@ jobs:
           # let a cancellation merge the change.
           if [ "$ENFORCE_OUTCOME" = "success" ]; then
             state=success
-            description="Review findings are addressed."
+            description="Blocking review findings are addressed."
           else
             state=failure
             description="Merge gate did not pass (enforce step: ${ENFORCE_OUTCOME})."

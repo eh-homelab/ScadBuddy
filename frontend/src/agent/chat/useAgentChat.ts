@@ -1,9 +1,22 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
 import { TAB_ID } from '../tabId'
+import { answerBody, decisionBody, respond, type RespondError } from '../respond'
 import { messageTraceparent } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
+
+/** The respond route acts as the browser user (agent `routes/approvals.ts` BROWSER_USER). */
+const YOU = { kind: 'browser', id: 'browser', label: 'You' } as const
+
+/**
+ * A settled refusal (#815: 409 already resolved, 410 expired) ends the card with its
+ * reason rather than leaving it at "Sending…" until a resolve frame that may not come.
+ */
+function closed(err: RespondError): { closed?: string } {
+  if (!err.settled) return {}
+  return { closed: err.status === 410 ? 'it expired before your response arrived' : 'it was already resolved elsewhere' }
+}
 
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
@@ -109,25 +122,25 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
-    if (!transport.current) return
-    const result = transport.current.send(
-      clientMessage({ type: 'approval.decision', sessionId, id: approvalId, approve }),
+    // Shown as `sent` until the server's approval.resolved confirms it; a refused one
+    // goes back to pending, buttons live, with the agent's reason (#815).
+    dispatch({ type: 'decided', sessionId, approvalId })
+    respond(`approval:${approvalId}`, decisionBody(approve)).then(
+      (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
+      (err: RespondError) =>
+        dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, ...closed(err) }),
     )
-    // `sent` or `queued` is shown as such until the server's approval.resolved
-    // confirms it; a refused one leaves the card pending, buttons live, to try again.
-    if (result === 'refused') {
-      dispatch({ type: 'not-sent', message: `Your decision was not sent. ${NOT_SENT}` })
-    } else {
-      dispatch({ type: 'decided', sessionId, approvalId, queued: result === 'queued' })
-    }
   }, [])
 
   const answer = useCallback((sessionId: string, questionId: string, answers: string[]) => {
-    if (!transport.current) return
-    const result = transport.current.send(clientMessage({ type: 'question.answer', sessionId, id: questionId, answers }))
-    // A refused one leaves the card pending, to try again; a queued one goes first on reconnect.
-    if (result === 'refused') dispatch({ type: 'not-sent', message: `Your answer was not sent. ${NOT_SENT}` })
-    else dispatch({ type: 'answered', sessionId, questionId, queued: result === 'queued' })
+    const item = latest.current.sessions[sessionId]?.items.find((i) => i.kind === 'question' && i.id === questionId)
+    if (item?.kind !== 'question') return
+    dispatch({ type: 'answered', sessionId, questionId })
+    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).then(
+      (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
+      (err: RespondError) =>
+        dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, ...closed(err) }),
+    )
   }, [])
 
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */

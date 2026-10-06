@@ -131,7 +131,12 @@ async def get_ui_file_at(
     requested = await _resolve_version(history, slug, commit)
     # The directory only: the UI's files need no library checkout, so a pinned library
     # that is missing (and cannot be fetched offline) does not stop the UI mounting.
-    directory, _ = await source_directory(slug, requested, paths=paths, history=history)
+    # The page asks for the last commit to `ui/` (#846), which a later commit elsewhere
+    # leaves behind the template's own: its `ui/` is still the live one, not an export.
+    if requested is not None and requested == await asyncio.to_thread(catalogue.ui_version, slug):
+        directory = paths.model_dir(slug)
+    else:
+        directory, _ = await source_directory(slug, requested, paths=paths, history=history)
     file = await asyncio.to_thread(_ui_file, directory, path)
     # The current revision is answered from the live directory, which an uncommitted
     # edit can change; only an export is immutable.
