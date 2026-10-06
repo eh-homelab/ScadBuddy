@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
 import {
+  APPROVALS_LIST_MAX,
   ATTENTION_POLL_MS,
   attentionCount,
   attentionDetail,
@@ -40,6 +41,22 @@ describe('fetchPendingInput', () => {
     expect(totalOf(only!)).toBe(0)
     expect(attentionLabel(totalOf(only!))).toBe('')
     expect(summaryLabel(only)).toBe('1 summary')
+  })
+
+  it('says when the agent listed only some of the done summaries, and not otherwise', async () => {
+    const done = { kind: 'answer', attention: { reason: 'done', on_timeout: null, summary: 'x' } }
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: true })))
+    const cut = await fetchPendingInput()
+    expect(cut).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: true })
+    expect(summaryLabel(cut)).toBe('2+ summaries')
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: false })))
+    expect(summaryLabel(await fetchPendingInput())).toBe('2 summaries')
+    // An older agent does not say: a full page still reads as possibly cut.
+    const page = Array.from({ length: APPROVALS_LIST_MAX }, () => done)
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: page })))
+    expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX}+ summaries`)
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: page, summaries_truncated: false })))
+    expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX} summaries`)
   })
 
   it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {

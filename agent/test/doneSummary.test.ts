@@ -17,6 +17,14 @@ const touch = (s: number, over: Partial<DoneTouch> = {}): DoneTouch => ({
 })
 
 describe('doneSummary', () => {
+  it('shortens a long id between code points, never through a surrogate pair', () => {
+    // An astral character straddling the cut (UTF-16 units 11 and 12) is dropped whole, not halved into U+FFFD.
+    const id = `${'a'.repeat(11)}\u{1F680}${'b'.repeat(40)}`
+    const text = doneSummary([touch(1, { resourceId: id })], [])
+    expect(text).toContain(`\`${'a'.repeat(11)}…\``)
+    expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
+  })
+
   it('says so when the turn recorded nothing', () => {
     expect(doneSummary([], [])).toBe('ScadBuddy recorded nothing created, changed or deleted in this turn.')
   })

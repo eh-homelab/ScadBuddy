@@ -104,7 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
 
   async function ids_(m: SessionManager) {
     const [approval] = await m.approvals.list(browser, { pending: true })
-    const questions = await m.questions.listPending()
+    const { questions } = await m.questions.listPending()
     return {
       approval: `approval:${approval!.id}`,
       inputHash: approval!.inputHash,
@@ -207,7 +207,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.approval, 'not json')).status).toBe(400)
     expect((await post(ids.approval, { kind: 'approval', decision: 'approve', input_hash: '0'.repeat(64) })).status).toBe(409)
 
-    expect((await m.questions.listPending()).length).toBe(2)
+    expect((await m.questions.listPending()).questions.length).toBe(2)
     expect((await m.approvals.list(browser, { pending: true })).length).toBe(1)
     await m.interrupt(session.id, browser)
     await turn.done
@@ -233,7 +233,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const padded = (n: number) => `{"kind":"answer","text":"hi"}`.padEnd(n, ' ')
     expect((await post(ids.attention, padded(RESPONSE_MAX + 1))).status).toBe(413)
 
-    expect((await m.questions.listPending()).length).toBe(2)
+    expect((await m.questions.listPending()).questions.length).toBe(2)
     expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
     await turn.done
@@ -270,7 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const dismissed = await post(id, { kind: 'answer', choice: 'Dismiss' })
     expect(dismissed.status).toBe(200)
     expect(await dismissed.json()).toEqual({ id, kind: 'answer', outcome: 'answered' })
-    expect(await m.questions.listPending()).toEqual([])
+    expect((await m.questions.listPending()).questions).toEqual([])
     expect((await post(id, { kind: 'answer', choice: 'Dismiss' })).status).toBe(409)
   })
 

@@ -236,9 +236,10 @@ export class QuestionService {
    * first (at most PENDING_CAP), then the undismissed `done` summaries, newest
    * first (at most PENDING_CAP more). The summaries have their own cap: nothing
    * expires them, so under one shared cap enough of them would push a question
-   * a turn is parked on off the badge.
+   * a turn is parked on off the badge. `summariesTruncated`: there were more
+   * summaries than that, so the oldest are not listed and the badge says so.
    */
-  async listPending(): Promise<PendingQuestion[]> {
+  async listPending(): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
     type Pending = {
       id: string
       session_id: string
@@ -259,8 +260,9 @@ export class QuestionService {
     const done = await this.deps.sql<Pending[]>`
       SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
       FROM ai_questions WHERE outcome IS NULL AND attention_reason = 'done' AND expires_at IS NULL
-      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP}`
-    return [...waiting, ...done].map((r) => ({
+      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP + 1}`
+    const summariesTruncated = done.length > PENDING_CAP
+    const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
       id: r.id,
       sessionId: r.session_id,
       kind: r.kind,
@@ -273,6 +275,7 @@ export class QuestionService {
       createdAt: r.created_at.toISOString(),
       expiresAt: r.expires_at?.toISOString() ?? null,
     }))
+    return { questions, summariesTruncated }
   }
 
   /**
