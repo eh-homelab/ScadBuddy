@@ -73,6 +73,8 @@ from scadbuddy.workflows.commands import (
     CONNECT_MARGIN_SECONDS,
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
     late_answer,
     start_command,
@@ -324,15 +326,19 @@ class RenderService:
                     memo=self._memo(),
                     update_id=request_id,
                 )
-            except RPCError as error:
-                if error.status in ENDED_RPC:
+            except (TemporalBusyError, TemporalRefusedError) as error:
+                # `start_command` classifies its `RPCError` (#1316); the cause says which.
+                cause = error.__cause__
+                if not isinstance(cause, RPCError):
+                    raise
+                if cause.status in ENDED_RPC:
                     # The start may have reached Temporal: still accepting if the
                     # execution exists (review #1066 (8) 2).
-                    raise await late_answer(self.client, workflow_id) from error
+                    raise await late_answer(self.client, workflow_id) from cause
                 # An Update that reached the execution as it completed is aborted, the
                 # same race as a `CLOSING` rejection (review #1066 (11) 1). A missing
                 # namespace is NOT_FOUND too: configuration, raised at once.
-                if not execution_gone(error):
+                if not execution_gone(cause):
                     raise
                 answer = RenderAnswer(closing=True)
             except WorkflowUpdateFailedError as error:
