@@ -130,8 +130,9 @@ test.describe('assistant panel (#256)', () => {
     await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible()
     await panel.getByRole('button', { name: 'Stop', exact: true }).click()
 
-    // An interrupted approval resolves as not approved, with no decider.
-    await expect(card).toContainText('Denied.')
+    // An interrupted approval is cancelled, not denied: nobody decided it (#979).
+    await expect(card).toContainText('Cancelled: interrupted by You.')
+    await expect(card).not.toContainText('Denied')
     await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
     await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
