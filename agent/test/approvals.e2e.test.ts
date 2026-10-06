@@ -192,6 +192,31 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     expect(required.tool).toBe(call.id)
   }, 60_000)
 
+  it('logs the call before the approval that asks about it, however far behind the turn is in logging it (#881)', async () => {
+    script = printing(() => 'box.3mf')
+    const m = await replica()
+    // The turn logs what the SDK streams one append at a time, while the SDK asks
+    // canUseTool as soon as Claude Code does. Hold the turn's append of the call
+    // until the approval exists, or 3 s have passed if it never will before the call.
+    const append = m.events.append.bind(m.events)
+    m.events.append = async (sessionId, events, tx) => {
+      if (tx === undefined && events.some((e) => e.type === 'tool.call')) {
+        const deadline = Date.now() + 3000
+        while (Date.now() < deadline && (await m.approvals.list(browser, { sessionId })).length === 0) {
+          await new Promise((r) => setTimeout(r, 50))
+        }
+      }
+      return append(sessionId, events, tx)
+    }
+    const { session, turn, approvalId } = await parked(m)
+    await m.approvals.decide(browser, approvalId, true)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(printed).toEqual(['box.3mf'])
+
+    const order = types(await allEvents(m, session.id)).filter((t) => t === 'tool.call' || t.startsWith('approval'))
+    expect(order).toEqual(['tool.call', 'approval.required', 'approval.resolved'])
+  }, 60_000)
+
   it('the panel’s own approval.decision message decides it (the socket seam); a denial reaches the model', async () => {
     script = printing(() => 'box.3mf')
     const m = await replica()
