@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import io
 import json
-import re
+import os
 import subprocess
 import threading
 import time
@@ -401,7 +401,10 @@ def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
     real = media_api._thumbnail_of
 
     def replaced_first(path: Path, content_type: str) -> Any:
-        legacy.write_bytes(_real_image((300, 400), "PNG"))
+        # As a thumbnail PUT does: a new file renamed over the old one.
+        staged = legacy.with_name("thumbnail.png.tmp")
+        staged.write_bytes(_real_image((300, 400), "PNG"))
+        os.replace(staged, legacy)
         return real(path, content_type)
 
     monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", replaced_first)
@@ -449,15 +452,6 @@ def test_a_file_deleted_after_it_is_opened_is_still_served_whole(
     assert response.status_code == 200, response.text
     assert response.content == original
     assert response.headers["content-type"] == "image/png"
-
-
-def test_the_thumbnail_version_is_the_frontends() -> None:
-    """#1691: the client asks for ``?v=MEDIA_THUMBNAIL_VERSION``; if it is not
-    `THUMBNAIL_VERSION`, no thumbnail is ever cached as ``immutable``."""
-    repo_root = Path(__file__).resolve().parents[3]
-    client_ts = (repo_root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
-    found = re.findall(r"^export const MEDIA_THUMBNAIL_VERSION = (\d+)$", client_ts, re.M)
-    assert found == [str(THUMBNAIL_VERSION)]
 
 
 def test_thumbnails_are_decoded_a_few_at_a_time(

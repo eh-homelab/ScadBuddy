@@ -390,8 +390,7 @@ THUMBNAIL_FORMATS = ("PNG", "JPEG", "WEBP")
 #: thumbnail is cached as ``immutable`` only when it does: bump it whenever the
 #: output changes for the same source (side, quality, resampler, format), and the
 #: frontend's ``MEDIA_THUMBNAIL_VERSION`` with it, so a browser holding an old copy
-#: asks again (#1424). ``test_the_thumbnail_version_is_the_frontends`` fails when
-#: the two differ (#1691).
+#: asks again (#1424). ``client.test.ts`` fails when the two differ (#1691).
 THUMBNAIL_VERSION = 1
 #: How many thumbnails are decoded at once: a 50 MP PNG costs some 200 MB, and a
 #: gallery strip asks for every item's thumbnail together (#1420).
@@ -443,7 +442,9 @@ def _thumbnail_of(path: FilePath, content_type: str) -> _Thumbnail:
     """``path`` shrunk by `_shrink`, or as it is (typed ``content_type``) when it
     cannot be. The stat and the bytes come from one open handle, so the legacy
     item's ETag describes what is served even if a thumbnail PUT replaces the file
-    meanwhile (#1689). ``FileNotFoundError`` when the file is gone."""
+    meanwhile (#1689). ``FileNotFoundError`` when the file is gone. The fallback is
+    read whole, not streamed: an image is capped at `MAX_IMAGE_BYTES`, and at most
+    `MAX_CONCURRENT_THUMBNAILS` are held at once."""
     with path.open("rb") as file:
         stat = os.fstat(file.fileno())
         small = _shrink(file)
