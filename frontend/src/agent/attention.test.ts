@@ -3,7 +3,17 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
-import { ATTENTION_POLL_MS, attentionCount, attentionDetail, attentionLabel, fetchPendingInput, useAttention, useAttentionTitle } from './attention'
+import {
+  ATTENTION_POLL_MS,
+  attentionCount,
+  attentionDetail,
+  attentionLabel,
+  fetchPendingInput,
+  summaryLabel,
+  totalOf,
+  useAttention,
+  useAttentionTitle,
+} from './attention'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -12,9 +22,33 @@ afterEach(() => {
 describe('fetchPendingInput', () => {
   it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0 })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0 })
+  })
+
+  it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
+    setPendingAnswers(1, 1, 2)
+    const counts = await fetchPendingInput()
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2 })
+    expect(totalOf(counts!)).toBe(2)
+    expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
+    expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
+    expect(summaryLabel(counts)).toBe('2 summaries')
+    setPendingAnswers(0, 0, 1)
+    const only = await fetchPendingInput()
+    expect(totalOf(only!)).toBe(0)
+    expect(attentionLabel(totalOf(only!))).toBe('')
+    expect(summaryLabel(only)).toBe('1 summary')
+  })
+
+  it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'answer', attention: { reason: 'done', on_timeout: 'proceed' } }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 1, summaries: 0 })
   })
 
   it('is unknown (null), not zero, when the agent cannot answer', async () => {
@@ -165,9 +199,9 @@ describe('labels', () => {
 
   it('lists the counts by kind for the title, leaving out the kinds with none', () => {
     expect(attentionDetail(null)).toBe('')
-    expect(attentionDetail({ approvals: 2, questions: 1, attention: 0 })).toBe('2 approvals, 1 question')
-    expect(attentionDetail({ approvals: 0, questions: 0, attention: 1 })).toBe('1 attention request')
-    expect(attentionDetail({ approvals: 1, questions: 2, attention: 3 })).toBe('1 approval, 2 questions, 3 attention requests')
+    expect(attentionDetail({ approvals: 2, questions: 1, attention: 0, summaries: 0 })).toBe('2 approvals, 1 question')
+    expect(attentionDetail({ approvals: 0, questions: 0, attention: 1, summaries: 0 })).toBe('1 attention request')
+    expect(attentionDetail({ approvals: 1, questions: 2, attention: 3, summaries: 0 })).toBe('1 approval, 2 questions, 3 attention requests')
   })
 })
 
