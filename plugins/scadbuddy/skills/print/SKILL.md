@@ -145,8 +145,9 @@ print again until they have, since another print would be a second one.
   fallback, or a plate that differs from the last print (spool-first spec
   §4.3, §4.5). An output's flow (Standard or High Flow) is sliced as chosen
   for each side (#484), so choosing the mounted nozzle's flow for its side
-  avoids `hf-mounted`. A library file prints with the flow its author saved,
-  taken as Standard whatever is chosen.
+  avoids `hf-mounted`. When both sides could print their chosen flows and
+  those differ, the print goes to the High Flow side. A library file prints
+  with the flow its author saved, taken as Standard whatever is chosen.
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,

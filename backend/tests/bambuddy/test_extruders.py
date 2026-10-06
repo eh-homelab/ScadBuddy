@@ -196,7 +196,7 @@ def test_the_rack_side_is_sliced_for_the_rights_flow(
     nozzles: list[NozzleChoice], expected: str
 ) -> None:
     """The rack swaps onto the right (physical 0), the dialog's second side."""
-    assert rack_volume_type(nozzles) == expected
+    assert rack_volume_type(nozzles, laid_out=True) == expected
 
 
 # --- #834: which extruders the slicer may put filament on ---------------------------------
@@ -253,6 +253,32 @@ def test_each_side_is_named_for_its_own_chosen_flow() -> None:
         "Standard#0",
         "High Flow#1",
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "nozzles", "expected"),
+    [
+        # A High Flow left and a standard right, each chosen as it is mounted.
+        (
+            _nozzles(("HS00", "0.2"), ("HH01", "0.2")),
+            _choose("0.2", "high_flow", "standard"),
+            ["High Flow#1", "Standard#0"],
+        ),
+        # The same the other way round: a High Flow right and a standard left.
+        (
+            _nozzles(("HH01", "0.2"), ("HS00", "0.2")),
+            _choose("0.2", "standard", "high_flow"),
+            ["Standard#0", "High Flow#1"],
+        ),
+    ],
+)
+def test_two_sides_of_their_chosen_flows_offer_the_high_flow_one(
+    status: PrinterStatus, nozzles: list[NozzleChoice], expected: list[str]
+) -> None:
+    """Both sides can print as chosen, but left to choose the slicer put the print on
+    the Standard right every time (live slices, 2026-10-06), so a High Flow choice
+    changed nothing. The High Flow side is offered alone, as Studio's own stats steer."""
+    assert slicer_nozzle_stats(status, nozzles) == expected
 
 
 @pytest.mark.parametrize(

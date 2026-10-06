@@ -225,10 +225,12 @@ side the slice may use has a nozzle of the chosen size mounted in the other flow
 the one sliced there (`nozzle_type` `HH01` is High Flow), the run and the check before
 Print carry an `hf-mounted` warning (#723; queue item 149 paused on a High Flow nozzle
 sliced as Standard). Since #484 the slice states each side's flow as chosen, and it is
-offered only a side with a nozzle of that flow when one side alone has one (#834), so
-the warning is left for the one side offered when no side has the flow, either side
-when the slicer chooses, and the rack side until a rack pick swaps on a hotend of the
-flow (#1238). A library file prints as its author left it: it is offered no side, and
+offered only a side with a nozzle of that flow when one side alone has one (#834), or
+the High Flow side when both have one and their flows differ (left to choose, the
+slicer put a one-colour print on the Standard right; live slices, 2026-10-06). So the
+warning is left for the one side offered when no side has the flow, either side when
+the slicer chooses, and the rack side until a rack pick swaps on a hotend of the flow
+(#1238). A library file prints as its author left it: it is offered no side, and
 it is taken as Standard on both, whatever flow is chosen, as are its rack preview and a
 manual rack pick (the flow it states is not read). The warning is advisory only, never
 a refusal, and it changes nothing the run sends, since a print may be set up before its

@@ -1269,8 +1269,9 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
 ) -> None:
     """#484 on queue item 149's printer: High Flow for the left, whose HH01 0.4 is the
     flow chosen, and Standard for the right, whose HS01 and rack spares are. Both sides
-    can print as chosen, so the slicer keeps its own grouping, and the file says which
-    flow each side is."""
+    can print as chosen, so the High Flow left is the side offered: left to choose, the
+    slicer put the print on the Standard right (live slices, 2026-10-06). The file says
+    which flow each side is."""
     response, upload = _run_on(
         client,
         model,
@@ -1283,7 +1284,7 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     assert not NOZZLE_KINDS & _kinds(response)
     settings = _uploaded_settings(upload)
     assert settings["nozzle_volume_type"] == ["High Flow", "Standard"]
-    assert "extruder_nozzle_stats" not in settings
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
 

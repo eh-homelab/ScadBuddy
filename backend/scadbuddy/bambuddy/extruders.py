@@ -159,14 +159,14 @@ def high_flow_warnings(
 
     Queue item 149 paused at the first layer on a High Flow left sliced as Standard.
     The slice states the flow chosen for each side (:func:`slicer_volume_types`) and,
-    when one side alone has a nozzle of that flow, offers the slicer only that side
-    (:func:`slicer_nozzle_stats`). A side it may use can still have the other flow
-    mounted: the one side offered when no side has the chosen flow, only the size;
-    either side when the slicer is left to choose; and the rack side, whose spares count
-    as its nozzles. A print may be set up before its nozzle is fitted, so the owner
-    chose a warning, and the dialog shows it in Simple and Advanced mode alike. An
-    unreadable status knows no nozzle, and a nozzle with no type code no flow, so
-    neither is warned of.
+    when one side alone has a nozzle of that flow, offers the slicer only that side, or
+    the High Flow side when both do and their flows differ (:func:`slicer_nozzle_stats`).
+    A side it may use can still have the other flow mounted: the one side offered when
+    no side has the chosen flow, only the size; either side when the slicer is left to
+    choose; and the rack side, whose spares count as its nozzles. A print may be set up
+    before its nozzle is fitted, so the owner chose a warning, and the dialog shows it
+    in Simple and Advanced mode alike. An unreadable status knows no nozzle, and a
+    nozzle with no type code no flow, so neither is warned of.
 
     ``rack_picked``: a rack position is picked for the rack side, which only ever picks
     a hotend of the size and of the flow sliced there (``rack.rank.eligible``), so the
@@ -238,7 +238,7 @@ def slicer_volume_types(nozzles: Sequence[NozzleChoice]) -> list[str]:
     return [VOLUME_TYPE[flows[extruder]] for extruder in SLICER_ORDER]
 
 
-def rack_volume_type(nozzles: Sequence[NozzleChoice], *, laid_out: bool = True) -> str:
+def rack_volume_type(nozzles: Sequence[NozzleChoice], *, laid_out: bool) -> str:
     """The flow the rack side is sliced for, which Bambuddy re-checks a rack pick
     against at dispatch: the right's, the side the rack swaps onto. ``laid_out`` as
     for :func:`high_flow_warnings`: a library file's is taken as Standard."""
@@ -266,16 +266,23 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
 
 def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:
     """The one side :func:`slicer_nozzle_stats` offers the slicer, or ``None`` when it
-    leaves the slicer to choose."""
+    leaves the slicer to choose.
+
+    When both sides have a nozzle of the flow chosen for them and those flows differ,
+    the High Flow side is offered. Left to choose, the slicer put a one-colour print on
+    the Standard right every time, so a High Flow choice for the left changed nothing;
+    offered only the left (["High Flow#1", "Standard#0"]) it sliced High Flow, at the
+    filament's High Flow speed and retraction (live slices on Bambuddy, 2026-10-06,
+    #484). A multi-colour print then goes to that side alone, as #834 sends one."""
     if status is None or not two_nozzles(status):
         return None
     size = nozzles[0].size
     chosen = _flows(nozzles)
     found = {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
-    for has in (
-        {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows},
-        {e for e, flows in found.items() if flows},
-    ):
+    matching = {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
+    if len(matching) == 2 and chosen[LEFT] != chosen[RIGHT]:
+        return LEFT if chosen[LEFT] == "high_flow" else RIGHT
+    for has in (matching, {e for e, flows in found.items() if flows}):
         if len(has) == 1:
             return has.pop()
         if has:
@@ -307,10 +314,13 @@ def slicer_nozzle_stats(
     deployed slicer (bambu-studio-api bambuddy-1.2.5.6, 2026-09-30) read the label as a
     count only and sliced Standard.
 
-    When both sides or neither side has the size, or the status cannot be read, this
-    is ``None`` and the file is left as it was: the slicer keeps its own choice, and
-    nothing is refused on the mounted nozzles (#768). A side the printer reports no
-    size for counts as not having it; only the other side is then offered.
+    When both sides have a nozzle of the flow chosen for them, and those flows differ,
+    the High Flow side is offered (:func:`_offered_side`). When both have it in the same
+    flow, or both have the size in neither's chosen flow, or neither side has the size,
+    or the status cannot be read, this is ``None`` and the file is left as it was: the
+    slicer keeps its own choice, and nothing is refused on the mounted nozzles (#768). A
+    side the printer reports no size for counts as not having it; only the other side
+    is then offered.
     """
     offered = _offered_side(status, nozzles)
     if offered is None:
