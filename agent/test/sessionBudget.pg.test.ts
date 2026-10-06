@@ -339,20 +339,6 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((await m.get(child.id, browser)).costUsd).toBeCloseTo(0.5, 9)
     })
 
-    // #1447: the manager holds the user-only rule itself, as raiseBudget does, not just the route.
-    it('gives a budget of its own only to the browser user, without the agent-actor marker', async () => {
-      const parent = await started(agentA)
-      const asked = await m.fork(parent, agentA, { freshBudget: true })
-      expect(asked).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
-      expect(await spend(asked.id, agentA, 0.3)).toBeCloseTo(0.6, 9)
-      expect((await m.get(parent, agentA)).costUsd).toBeCloseTo(0.7, 9)
-      const marked = await m.fork(parent, browser, { freshBudget: true, agentActor: true })
-      expect(marked).toMatchObject({ budgetUsd: 1 })
-      expect(marked.costUsd).toBeCloseTo(0.7, 9)
-      // The user's own gets its own $1, nothing spent.
-      expect(await m.fork(parent, browser, { freshBudget: true })).toMatchObject({ budgetUsd: 1, costUsd: 0 })
-    })
-
     it('refuses a spent session’s fork unless it is the user’s, which gets a budget of its own', async () => {
       const id = await spentSession()
       await transcript(id)

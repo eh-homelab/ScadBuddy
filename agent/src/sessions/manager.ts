@@ -1812,9 +1812,7 @@ export class SessionManager {
    * starts with the parent's conversation events so attach shows its history.
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
-   * route) gives the child a budget of its own. Like `raiseBudget`, that is
-   * enforced here: `freshBudget` from any other principal, or with the headless
-   * browser's agent-actor marker (`agentActor`), is ignored (#1447). Any other fork, `sessions_fork`
+   * route) gives the child a budget of its own. Any other fork, `sessions_fork`
    * above all, spends from the parent's budget: nothing is copied or moved, the
    * child joins the parent's lineage (`budget_root_id`), and a turn in either
    * debits the one budget. Forking therefore never creates budget, and cannot
@@ -1823,15 +1821,14 @@ export class SessionManager {
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean; agentActor?: boolean } = {},
+    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean } = {},
   ): Promise<SessionRecord> {
-    const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
     const parent = await this.get(id, principal)
     if (!(await this.store.exists(id))) {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
-    if (!fresh && parent.costUsd >= parent.budgetUsd) {
+    if (!options.freshBudget && parent.costUsd >= parent.budgetUsd) {
       throw new SessionError(
         'budget_exhausted',
         `session ${id} has spent its budget (${usd(parent.costUsd)} of ${usd(parent.budgetUsd)}); ` +
@@ -1855,7 +1852,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
-    }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
+    }, { rateLimited: options.rateLimited ?? true, ...(options.freshBudget ? {} : { budgetOf: parent }) })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []

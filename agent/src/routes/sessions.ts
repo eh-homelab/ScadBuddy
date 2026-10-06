@@ -309,10 +309,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const child = await sessions.fork(idOf(c), BROWSER_USER, {
         ...(body.value.title ? { title: body.value.title } : {}),
         rateLimited: true,
-        // A budget of its own is the user's to give, like a raise (#823); the manager refuses it to the
-        // headless browser's marked request, whose fork shares the parent's.
-        freshBudget: true,
-        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
+        // A budget of its own is the user's to give, like a raise (#823); the headless browser's fork shares the parent's.
+        freshBudget: c.req.header(AGENT_ACTOR_HEADER) === undefined,
       })
       return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
     }),
