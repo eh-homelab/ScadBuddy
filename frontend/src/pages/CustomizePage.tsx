@@ -697,6 +697,7 @@ export function CustomizePage() {
         controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
         // The flyout lies over the scene; the readouts move clear of it.
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
+        rejected={Boolean(renderError)}
       />
     </Suspense>
   )

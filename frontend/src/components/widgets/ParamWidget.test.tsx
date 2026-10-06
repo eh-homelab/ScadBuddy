@@ -68,6 +68,19 @@ describe('slider', () => {
     expect(range).toHaveValue('14')
   })
 
+  it('sizes the number box for the widest value its range holds (#367)', () => {
+    // building-brick's stud_fit: "-0.06" was cut to "-0.0" in the fixed 4.5 rem box.
+    setup({ ...param, name: 'stud_fit', caption: 'Stud fit', min: -0.2, max: 0.2, step: 0.02 }, -0.06)
+    const number = screen.getByRole('spinbutton', { name: 'Stud fit value' })
+    expect(number.style.getPropertyValue('--sb-box-chars')).toBe('5')
+  })
+
+  it('makes room for an off-step value with more decimals than the step', () => {
+    setup({ ...param, name: 'wall', caption: 'Wall', min: 1, max: 5, step: 0.1 }, 1.255)
+    const number = screen.getByRole('spinbutton', { name: 'Wall value' })
+    expect(number.style.getPropertyValue('--sb-box-chars')).toBe('5')
+  })
+
   it('reports numbers, not strings', async () => {
     const { onChange, user } = setup(param, 14)
     await user.clear(screen.getByRole('spinbutton', { name: 'Text size value' }))
