@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import {
+  activeDialog,
   findByRole,
   findField,
   isDisabled,
@@ -126,7 +127,15 @@ export function useGlobalAgentTools() {
       const target = element instanceof HTMLSelectElement ? optionValue(element, label, value) : value
       touch(element)
       setControlValue(element, target)
-      return { filled: nameOf(element), value: element.value }
+      const filled = { filled: nameOf(element), value: element.value }
+      // A control that asks first (a preset pick over edits, #359) keeps its old value and
+      // opens a dialog. Say so, or the agent sees only a value that did not change.
+      const dialog = element.value === target ? null : activeDialog()
+      if (!dialog) return filled
+      return {
+        ...filled,
+        confirm: `"${nameOf(dialog)}" opened instead: the value takes only once it is answered. Take a snapshot to see it.`,
+      }
     },
   })
 }

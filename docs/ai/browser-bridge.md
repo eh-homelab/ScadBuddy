@@ -104,6 +104,12 @@ Controls marked user-only on `main` (`grep -rn "{...USER_ONLY}" frontend/src`):
 | [`HistoryPage.tsx`](../../frontend/src/pages/HistoryPage.tsx) | Delete output |
 | [`SettingsPage.tsx`](../../frontend/src/pages/SettingsPage.tsx) | Test connection button, WebMCP toggle, Add to Bambuddy sidebar, Save changes |
 
+A confirmation of a change that stays in the page is not outward and carries no
+`USER_ONLY`: "Replace my changes", which a preset pick over unsaved edits asks for
+(#359), is for the assistant to press when the pick was its own. When `fill` leaves a
+control's value unchanged because a dialog opened to confirm it, its result carries a
+`confirm` note naming that dialog (#1445).
+
 **When you add an outward confirmation**, spread `{...USER_ONLY}` on it, or on a wrapper
 around it. `isUserOnly()` uses `closest()`, so a wrapper covers everything inside.
 
