@@ -201,7 +201,8 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
 #: inline window and its accept bound. Production's 10 s is a promise about latency
 #: that a loaded machine breaks (a 202, or a 503 `command-still-accepting`, where the
 #: test asserts the final answer), so tests wait this long instead. A test of the
-#: deadline itself names one, or sets this default back.
+#: deadline itself names one, or sets this default back. The print route names its own,
+#: which `tests/api/conftest.py` sets (review #1316 4a).
 TEST_ANSWER_DEADLINE = timedelta(seconds=60)
 
 

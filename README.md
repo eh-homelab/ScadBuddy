@@ -424,7 +424,8 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
   field, and while Temporal cannot be reached a changed value is refused with the
-  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save);
+  one Temporal refuses to describe (a denied permission) is a `temporal-refused` 500.
   A retry of an operation whose record was deleted while Temporal still holds its closed
   execution would answer 409 "may have been done" instead of its outcome. Raising the
   namespace's retention after the save is not re-checked.

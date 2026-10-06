@@ -8,6 +8,7 @@ import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match, Mount
 
@@ -28,6 +29,22 @@ _TITLES = {
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
+
+
+class Problem(BaseModel):
+    """An RFC 9457 problem document, as every error response carries it. Its `type`
+    names the problem a client tells apart."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    title: str
+    status: int
+    detail: str
+    instance: str
+    #: On a command's ``temporal-unavailable`` or ``temporal-refused``: whether its start
+    #: may have reached Temporal, so the same request (never a new key) follows it.
+    may_have_started: bool | None = None
 
 
 class ApiError(Exception):
