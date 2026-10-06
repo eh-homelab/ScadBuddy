@@ -44,6 +44,11 @@ _MISSING_FILE = re.compile(
     r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
 )
 
+#: An export OpenSCAD could not write (#952). It logs the line, leaves an empty file
+#: and still exits 0: a lone `rotate_extrude` touching the axis gives lib3mf
+#: degenerate triangles ("Can't add triangle to 3MF model."). Measured on 2026.10.05.
+_EXPORT_ERROR = re.compile(r"^EXPORT-ERROR: (?P<message>.*)$")
+
 #: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
 _PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
 
@@ -174,6 +179,17 @@ def _require_in_range(parameter: Parameter, value: int | float) -> None:
         )
 
 
+def _require_max_length(parameter: Parameter, value: str) -> None:
+    """The customizer's ``// N`` on a string (#1330), in code points: what OpenSCAD's
+    ``len()`` and the customizer's counter count (#920)."""
+    limit = parameter.max_length
+    if limit is not None and len(value) > limit:
+        raise ParameterValueError(
+            parameter.name,
+            f"parameter {parameter.name!r} must be at most {limit} characters, got {len(value)}",
+        )
+
+
 def _require_option(parameter: Parameter, value: ParamValue) -> None:
     """One of the select's options, or a value the template retired (#432)."""
     allowed = [option.value for option in parameter.options]
@@ -252,6 +268,7 @@ def _format_checked(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
         _refuse_path_like(parameter, value)
+        _require_max_length(parameter, value)
         return quote_string(value)
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
@@ -292,6 +309,7 @@ async def _drain(
     notes: list[str],
     diagnostics: DiagnosticCollector,
     plates: list[int],
+    export_errors: list[str],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -306,6 +324,9 @@ async def _drain(
         count = plate_count(line)
         if count is not None:
             plates.append(count)
+        export_error = _EXPORT_ERROR.match(line)
+        if export_error is not None:
+            export_errors.append(export_error["message"])
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
@@ -349,9 +370,12 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
     missing: list[str] = []
     notes: list[str] = []
     plates: list[int] = []
+    export_errors: list[str] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector, plates))
+    drain = asyncio.create_task(
+        _drain(process.stdout, tail, missing, notes, collector, plates, export_errors)
+    )
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -374,9 +398,11 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
         raise
     await drain
     duration = time.monotonic() - started
-    if returncode != 0:
+    if returncode != 0 or export_errors:
         raise OpenSCADError(
-            f"openscad exited with {returncode}",
+            f"openscad exited with {returncode}"
+            if returncode != 0
+            else f"openscad could not export: {export_errors[0]}",
             tail,
             returncode,
             collector.diagnostics,

@@ -124,6 +124,14 @@ describe('Preview', () => {
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
 
+  it('does not blame OpenSCAD for a failure that has no OpenSCAD log (#952)', () => {
+    const error = 'building the per-colour solids failed: BadZipFile: File is not a zip file'
+    render(<Preview job={job({ status: 'failed', error, log_tail: [] })} rendering={false} />)
+    expect(screen.getByText(/ScadBuddy could not finish this render/i)).toBeInTheDocument()
+    expect(screen.getByTestId('render-log')).toHaveTextContent(error)
+    expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
+  })
+
   it('tells a cancelled render apart from a failure: it keeps the log but not the OpenSCAD copy', () => {
     const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
@@ -144,6 +152,16 @@ describe('Preview', () => {
     expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
   })
 
+  it('invites a parameter change before the first render', () => {
+    render(<Preview job={undefined} rendering={false} />)
+    expect(screen.getByText('Change a parameter to render.')).toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', () => {
+    render(<Preview job={undefined} rendering={false} rejected />)
+    expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
+  })
+
   it('names the step a running render is on (#267)', () => {
     render(<Preview job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')
@@ -161,6 +179,40 @@ describe('Preview', () => {
     const notes = screen.getByRole('region', { name: 'Notes from the template' })
     expect(within(notes).queryByText(JOB_WARNINGS[0]!)).not.toBeInTheDocument()
     expect(screen.getByTestId('bbox-readout')).toBeInTheDocument()
+  })
+
+  it("shows OpenSCAD's warnings from a render that finished, with their lines (#937)", () => {
+    render(
+      <Preview
+        job={job({
+          diagnostics: [
+            {
+              severity: 'warning',
+              message: 'module cube() does not support child modules',
+              file: 'model.scad',
+              line: 6,
+            },
+            { severity: 'trace', message: "called by 'assert'", file: 'model.scad', line: 2 },
+          ],
+        })}
+        rendering={false}
+        sourceLink={<a href="/m/name-puzzle/source">Edit source</a>}
+      />,
+    )
+
+    const region = screen.getByRole('region', { name: 'OpenSCAD warnings' })
+    expect(within(region).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'Line 6module cube() does not support child modules',
+    ])
+    expect(within(region).getByRole('link', { name: 'Edit source' })).toHaveAttribute(
+      'href',
+      '/m/name-puzzle/source',
+    )
+  })
+
+  it('shows no OpenSCAD warnings box when the render logged none', () => {
+    render(<Preview job={job({ diagnostics: [] })} rendering={false} />)
+    expect(screen.queryByRole('region', { name: 'OpenSCAD warnings' })).not.toBeInTheDocument()
   })
 
   it('shows no warnings box when the job has none', () => {

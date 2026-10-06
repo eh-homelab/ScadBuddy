@@ -547,7 +547,12 @@ class RenderActivities:
         """Move the row forward; a no-op when it is already past this state or gone."""
         p = self.deps.projection
         if projection.state == "running":
-            await asyncio.to_thread(p.mark_started, projection.job_id)
+            started = await asyncio.to_thread(p.mark_started, projection.job_id)
+            # Only the call that moved the row records it: a retry finds it running.
+            if started is not None and started.started_at is not None and self.deps.metrics:
+                self.deps.metrics.queue_wait.observe(
+                    max(0.0, (started.started_at - started.created_at).total_seconds())
+                )
             return
         if projection.state is None:
             if projection.steps is not None:
