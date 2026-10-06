@@ -100,6 +100,23 @@ test.describe('pasted source', () => {
     await expect(editor).toBeFocused()
   })
 
+  test('Escape with a selection collapses it, and leaves Tab indenting (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    await page.locator('.monaco-editor .view-line').nth(1).click()
+    await page.keyboard.press('Home')
+    await page.keyboard.press('Shift+End')
+    const selected = page.locator('.monaco-editor .selected-text')
+    await expect(selected).not.toHaveCount(0)
+
+    await page.keyboard.press('Escape')
+    await expect(selected).toHaveCount(0)
+    // The Escape was Monaco's, not the way out: Tab still indents.
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+  })
+
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
     await page.goto('/new')
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Half Cube')

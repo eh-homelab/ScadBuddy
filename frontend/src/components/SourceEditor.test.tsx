@@ -244,6 +244,20 @@ describe('SourceEditor', () => {
       expect(instance.options.tabFocusMode).not.toBe(true)
     })
 
+    it('leaves Escape to Monaco with a selection: it collapses it, and Tab still indents', async () => {
+      const user = userEvent.setup()
+      renderBetween()
+      const editor = screen.getByTestId('monaco')
+      await user.click(editor)
+      // Monaco's own key for it; Escape is then its "cancel selection".
+      instance.contextKeys.add('editorHasSelection')
+
+      await user.keyboard('{Escape}')
+      await user.tab()
+      expect(editor).toHaveFocus()
+      expect(instance.options.tabFocusMode).not.toBe(true)
+    })
+
     it('leaves backwards with Escape, then Shift+Tab', async () => {
       const user = userEvent.setup()
       renderBetween()

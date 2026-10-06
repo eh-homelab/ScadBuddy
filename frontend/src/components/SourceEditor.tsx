@@ -268,12 +268,14 @@ export function SourceEditor({
             // #997 — Tab indents, so on its own it can never leave the editor (WCAG 2.1.2).
             // Escape arms Monaco's tab-focus mode for the next key: Tab or Shift+Tab then
             // moves focus on, and any other key, or leaving, puts Tab back to indenting.
-            // Only with no widget open: Escape still closes completion, find and the rest.
+            // Only with no widget open and nothing selected: Escape still closes completion,
+            // find and the rest, collapses a selection and removes secondary cursors.
             instance.addCommand(
               monaco.KeyCode.Escape,
               () => instance.updateOptions({ tabFocusMode: true }),
               '!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && ' +
-                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections',
+                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections && ' +
+                '!editorHasSelection',
             )
             const passing = new Set([
               monaco.KeyCode.Escape,
