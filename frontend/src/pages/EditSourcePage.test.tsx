@@ -45,6 +45,11 @@ function renderEdit(slug = 'name-keychain', query = '') {
 }
 
 describe('EditSourcePage', () => {
+  it('names the model in the breadcrumb, not its slug (#939)', async () => {
+    renderEdit()
+    expect(await screen.findByRole('link', { name: 'Name Keychain' })).toHaveAttribute('href', '/m/name-keychain')
+  })
+
   it('opens prefilled with the model source', async () => {
     renderEdit()
     expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
@@ -155,7 +160,7 @@ describe('EditSourcePage', () => {
     expect(screen.getByRole('heading', { name: 'View source' })).toBeInTheDocument()
     expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
     expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: BUILTIN_SLUG })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: 'Keychain Template' })).toHaveAttribute(
       'href',
       '/m/builtin%3Akeychain-template',
     )
@@ -173,7 +178,10 @@ describe('EditSourcePage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
 
     expect(await screen.findByRole('heading', { name: 'Edit source' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'keychain-template-copy' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Keychain Template copy' })).toHaveAttribute(
+      'href',
+      '/m/keychain-template-copy',
+    )
     const editor = await screen.findByLabelText('OpenSCAD source')
     expect(editor).toHaveValue(keychainSource)
     expect(editor).not.toHaveAttribute('readonly')

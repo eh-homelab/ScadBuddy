@@ -43,12 +43,14 @@ class FakeActivities:
         fail_main: bool = False,
         block_main: asyncio.Event | None = None,
         block_solids: asyncio.Event | None = None,
+        fail_solids: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.projections: list[Projection] = []
         self.fail_main = fail_main
         self.block_main = block_main
         self.block_solids = block_solids
+        self.fail_solids = fail_solids
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
@@ -92,6 +94,9 @@ class FakeActivities:
         self.calls.append("render_solids")
         if self.block_solids is not None:
             await self.block_solids.wait()
+        if self.fail_solids:
+            # What a BadZipFile looks like once its retries are spent (#952).
+            raise ApplicationError("File is not a zip file", type="BadZipFile", non_retryable=True)
 
     @activity.defn(name="finish_piece")
     async def finish_piece(
@@ -185,6 +190,24 @@ async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:
         assert last.state == "failed" and last.failure is not None
         assert last.failure.log_tail == ["ERROR: boom"]
         assert acts.calls == ["prepare", "render_main"]
+
+
+async def test_a_failure_outside_openscad_names_its_stage_and_cause() -> None:
+    """#952: not "ChildWorkflowError: Child Workflow execution failed"."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities(fail_solids=True)
+        async with _worker(client, queue, acts):
+            job = _job(width=7)
+            await client.execute_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+        last = acts.projections[-1]
+        assert last.state == "failed" and last.failure is not None
+        assert last.failure.error == (
+            "building the per-colour solids failed: BadZipFile: File is not a zip file"
+        )
+        assert last.failure.log_tail == []
 
 
 async def test_identical_pieces_render_once_across_two_jobs() -> None:
