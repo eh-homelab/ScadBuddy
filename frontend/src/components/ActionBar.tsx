@@ -106,6 +106,8 @@ export function ActionBar({
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** #967 — what the last Generate or download came to, for the polite live region. */
+  const [announcement, setAnnouncement] = useState('')
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
    * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
@@ -172,6 +174,7 @@ export function ActionBar({
     if (!job) return null
     setGenerating(true)
     setError(null)
+    setAnnouncement('')
     setFiled(null)
     setFileError(null)
     try {
@@ -184,12 +187,16 @@ export function ActionBar({
           onGenerated(created, extra)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
           const filed = await within(() => fileIntoProject(created))
+          setAnnouncement(
+            `Generated ${created.name ?? created.id.slice(0, 8)}. Download 3MF, Send to Bambuddy or Print it.`,
+          )
           return { output: created, filed, extra }
         },
       )
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
       setError(message)
+      setAnnouncement(message)
       throw new AgentToolError('failed', message)
     } finally {
       setGenerating(false)
@@ -256,9 +263,10 @@ export function ActionBar({
   })
 
   async function download() {
-    if (!output) return
+    if (!output || downloading) return
     setDownloading(true)
     setError(null)
+    setAnnouncement('')
     try {
       // Fetched as a blob and saved through lib/embed, so it works inside Bambuddy's
       // sandboxed iframe (a popup that escapes the sandbox, opened before the fetch).
@@ -267,8 +275,11 @@ export function ActionBar({
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return await response.blob()
       }, `${slug}-${output.id}.3mf`)
+      setAnnouncement(`Downloaded ${slug}-${output.id}.3mf.`)
     } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : 'Download failed.')
+      const message = cause instanceof DownloadBlockedError ? cause.message : 'Download failed.'
+      setError(message)
+      setAnnouncement(message)
     } finally {
       setDownloading(false)
     }
@@ -277,6 +288,10 @@ export function ActionBar({
   return (
     <>
       <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
+        {/* #967 — always in the page, so a change to it is announced. */}
+        <p className="sr-only" role="status" data-testid="action-status">
+          {announcement}
+        </p>
         {/* A basis, so a crowded bar wraps its buttons below rather than squeezing "Saved …" to nothing. */}
         <div className="flex min-w-0 grow basis-64 items-center gap-3">
           {job?.colors && job.colors.length > 0 && (
@@ -332,8 +347,13 @@ export function ActionBar({
           <div className="flex">
             <Button
               variant="primary"
-              onClick={() => void generate().catch(() => undefined)}
-              disabled={!ready || generating || creatingProject}
+              onClick={() => {
+                if (!generating) void generate().catch(() => undefined)
+              }}
+              // #967 — busy is aria-disabled, not disabled: a disabled button drops the
+              // keyboard focus it was pressed with to <body>.
+              disabled={!ready || creatingProject}
+              aria-disabled={generating || undefined}
               data-testid="generate"
               className="rounded-r-none"
             >
@@ -342,7 +362,11 @@ export function ActionBar({
             </Button>
             <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
           </div>
-          <Button onClick={() => void download()} disabled={!output || downloading}>
+          <Button
+            onClick={() => void download()}
+            disabled={!output}
+            aria-disabled={downloading || undefined}
+          >
             {downloading && <Spinner />}
             Download 3MF
           </Button>
