@@ -3,23 +3,26 @@ record, written only by its `Operation` workflow's activities."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
 from psycopg import Connection
 from temporalio.client import WorkflowHandle
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.events import Event, OperationEvent
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_operations
 from scadbuddy.workflows.problems import OPERATION_LOST
-from tests.support.temporal import temporal_client
+from tests.support.temporal import DownClient, temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -224,4 +227,63 @@ async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
     killed_op = await store.get("killed")
     assert killed_op is not None and killed_op.status == "failed"
     assert killed_op.error == OPERATION_LOST
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
+
+
+async def _unavailable() -> Any:
+    raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def _denied() -> Any:
+    raise RPCError("request unauthorized", RPCStatusCode.PERMISSION_DENIED, b"")
+
+
+@pytest.mark.parametrize(
+    ("describe", "level"),
+    [(_unavailable, logging.WARNING), (_denied, logging.ERROR)],
+    ids=["unavailable", "denied"],
+)
+async def test_temporal_down_stops_the_operations_pass_once(
+    store: OperationStore,
+    caplog: pytest.LogCaptureFixture,
+    describe: Any,
+    level: int,
+) -> None:
+    """Review #1316 (11) 3: as the print-run pass, a failure about Temporal stops the
+    pass at the first describe with one log line, never one traceback per row (or an
+    escape to the loop's own traceback)."""
+    for op_id in ("one", "two"):
+        await insert(store, op_id, key=op_id, run=str(uuid.uuid4()))
+    client = DownClient(describe)
+
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        ended = await reconcile_lost_operations(cast(Any, client), store, older_than=timedelta(0))
+
+    assert ended == 0
+    assert len(client.timeouts) == 1
+    assert (await store.get("one")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("two")).status == "running"  # type: ignore[union-attr]
+    records = [r for r in caplog.records if r.name == client_module.__name__]
+    assert [r.levelno for r in records] == [level]
+
+
+async def test_one_failing_operation_does_not_stop_the_reconcile(
+    store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (11) 3: one row that cannot be ended is logged and left for the next
+    pass; the others are still ended, as the print-run pass does (review #1316 (9) 3a)."""
+    await insert(store, "bad", key="bad", run=str(uuid.uuid4()))
+    await insert(store, "gone", key="gone", run=str(uuid.uuid4()))
+    finish = store.finish
+
+    async def failing(op_id: str, **kwargs: Any) -> Operation:
+        if op_id == "bad":
+            raise RuntimeError("a database blip")
+        return await finish(op_id, **kwargs)
+
+    monkeypatch.setattr(store, "finish", failing)
+    async with temporal_client() as client:
+        ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+    assert ended == 1
+    assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]

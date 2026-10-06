@@ -26,18 +26,24 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.workflows.client import connect_lazily
-from scadbuddy.workflows.commands import CommandClosedError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+    temporal_failure,
+)
 from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
@@ -48,7 +54,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
-from tests.support.temporal import WorkflowReaper
+from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -239,7 +245,7 @@ def test_another_request_for_the_same_output_is_another_run(
     follow_run(client, first.json()["id"])
     second = start(client, output_id, run_request(copies=2))
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
     assert queued.call_count == 2
@@ -310,7 +316,7 @@ def test_a_retry_after_a_failure_before_any_enqueue_starts_a_new_run(
     assert failed["may_have_queued"] is False
     second = start(client, output_id, request)
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
 
@@ -512,8 +518,183 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert response.headers["Retry-After"] == "5"
+    # Which failure it is depends on the host: a refused port fails the first connect at
+    # once (CI: `TemporalUnreachableError`, nothing written), while one that hangs runs
+    # into the route's bound, which cannot say whether a start got through. Either way
+    # the flag and the detail agree (review #1316 (13) 1a); each path is pinned by the
+    # stub tests below.
+    problem = response.json()
+    if problem["may_have_started"]:
+        assert problem["detail"] == printing_api.TEMPORAL_DOWN_DETAIL
+    else:
+        assert problem["detail"] == printing_api.TEMPORAL_UNREACHABLE_DETAIL
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
+
+
+def _failure(error: BaseException) -> Exception:
+    failure = temporal_failure(error, "print-x")
+    assert failure is not None
+    return failure
+
+
+@respx.mock
+def test_only_a_failed_connect_says_nothing_was_queued(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`TemporalUnreachableError` is the lazy client's failed first connect, which wrote
+    no request, so only it says nothing was queued (review #1316 (9) 1a)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise TemporalUnreachableError("blip")
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert "cannot reach Temporal" in response.text
+    assert "Nothing was queued" in response.text
+    assert response.json()["may_have_started"] is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # An `UNAVAILABLE` response, or a bound that expired with Temporal down: either
+        # may follow a persisted start (review #1316 (9) 1a).
+        TemporalUnavailableError("blip"),
+        temporal_failure(RPCError("blip", RPCStatusCode.UNAVAILABLE, b""), "x"),
+    ],
+)
+@respx.mock
+def test_an_unavailable_temporal_may_have_started_the_run(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise error
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert "cannot reach Temporal" in response.text
+    assert "Nothing was queued" not in response.text
+    assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        # A namespace past its rate limit, or a busy server (review #1316 4).
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        # The rest of the codes Temporal's own client retries, and a cancelled call
+        # (review #1316 1a).
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.CANCELLED,
+    ],
+)
+@respx.mock
+def test_a_transient_rpc_error_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, code: RPCStatusCode
+) -> None:
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        # What `start_command` raises for it (`tests/test_commands.py`).
+        raise _failure(RPCError("blip", code, b""))
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
+    assert "Nothing was queued" not in response.text
+    assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
+    # Temporal answered (or gRPC ended the call): not a network problem (review #1316
+    # (9) 1b).
+    assert "cannot reach" not in response.text
+    assert "could not start this print right now" in response.text
+
+
+@respx.mock
+def test_a_missing_namespace_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A namespace Temporal does not (yet) know is read as the reconciler reads it:
+    worth sending again, never a 500 (review #1316 (12) 1)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise _failure(namespace_not_found_error())
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == printing_api.TEMPORAL_BUSY_DETAIL
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.NOT_FOUND,
+        RPCStatusCode.PERMISSION_DENIED,
+        RPCStatusCode.UNAUTHENTICATED,
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.FAILED_PRECONDITION,
+        RPCStatusCode.UNIMPLEMENTED,
+    ],
+)
+@respx.mock
+def test_a_permanent_rpc_error_is_a_500_logged_at_error(
+    client: TestClient,
+    model: str,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    code: RPCStatusCode,
+) -> None:
+    """Review #1061 (3) 3: a refusal is a misconfiguration, not a blip, so it is never
+    "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise _failure(RPCError("permission denied", code, b""))
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    with caplog.at_level("ERROR"):
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"/api/v1/print/outputs/{output_id}/run", json=body()
+        )
+
+    assert response.status_code == 500, response.text
+    assert response.json()["type"].endswith("/temporal-refused")
+    assert response.json()["may_have_started"] is True
+    assert "permission denied" not in response.text
+    # Some refusals come after the start was persisted (review #1316 4).
+    assert "Nothing was queued" not in response.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
 
 
 def _insert_run(conninfo: str, output_id: str, key: str) -> str:
@@ -695,3 +876,40 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/print/outputs/{output_id}/run", "/api/v1/print/library/{file_id}/run"]
+)
+def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str) -> None:
+    """Review #1316 (10) 3: the 500 and 503 problem types reach ``openapi.json``."""
+    spec = app.openapi()
+    responses = spec["paths"][path]["post"]["responses"]
+    for code, problems in (
+        ("500", [operations_api.TEMPORAL_REFUSED_PROBLEM]),
+        (
+            "503",
+            [operations_api.TEMPORAL_UNAVAILABLE_PROBLEM, operations_api.STILL_ACCEPTING_PROBLEM],
+        ),
+    ):
+        declared = responses[code]
+        assert all(problem in declared["description"] for problem in problems)
+        schema = declared["content"]["application/problem+json"]["schema"]
+        assert {"type", "status", "detail"} <= set(schema["required"])
+    # Each detail the route sends is the one its description quotes (review #1316 (11) 1,
+    # (12) 2), and the 500 names the check's unexpected failure too.
+    assert printing_api.TEMPORAL_REFUSED_DETAIL in responses["500"]["description"]
+    assert "about:blank" in responses["500"]["description"]
+    assert UNEXPECTED_DETAIL in responses["500"]["description"]
+    for detail in (
+        printing_api.TEMPORAL_UNREACHABLE_DETAIL,
+        printing_api.TEMPORAL_DOWN_DETAIL,
+        printing_api.TEMPORAL_BUSY_DETAIL,
+        printing_api.STILL_CHECKING_DETAIL,
+    ):
+        assert detail in responses["503"]["description"]
+    assert "did not answer or could not start it" in responses["503"]["description"]
+    assert "may_have_started" in responses["503"]["description"]
+    assert "may_have_started" in responses["500"]["description"]
+    # The check's refusals pass through with their own status.
+    assert "own status" in responses["default"]["description"]

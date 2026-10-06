@@ -433,14 +433,23 @@ def _ref(backend_id: str, sha: str) -> BlobRef:
     )
 
 
-def _meet(barrier: threading.Barrier) -> Callable[[], None]:
-    def meet() -> None:
-        # Both transactions hold what they hold here, if both got this far; a retry
-        # (or one that waited on the other) passes alone once the wait times out.
-        with contextlib.suppress(threading.BrokenBarrierError):
-            barrier.wait(timeout=2)
+def _met_before_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run `_hold_shared` only once both puts have reached it, each holding its own
+    key's row lock: the one ordering that deadlocks. Met any later, one put could take
+    its FOR SHARE before the other locked its key, and that other then just waits on
+    the first's commit (no deadlock, so no retry to assert). Only the first call of
+    each put meets; the loser's retry after the deadlock goes straight on."""
+    hold = BlobIndex._hold_shared
+    barrier = threading.Barrier(2)
+    met = threading.Event()
 
-    return meet
+    def meeting(*args: Any, **kwargs: Any) -> None:
+        if not met.is_set():
+            barrier.wait(timeout=30)
+            met.set()
+        hold(*args, **kwargs)
+
+    monkeypatch.setattr(BlobIndex, "_hold_shared", staticmethod(meeting))
 
 
 async def test_concurrent_re_puts_of_one_key_reusing_other_objects_hold_each(
@@ -526,7 +535,7 @@ def test_puts_swapping_objects_between_two_keys_do_not_deadlock(
     p, o = _ref("21", "b"), _ref("22", "c")
     index.put("k1", p, slug="demo", meta={})
     index.put("k2", o, slug="demo", meta={})
-    _parked_hold(monkeypatch, _meet(threading.Barrier(2)))
+    _met_before_hold(monkeypatch)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.store.index"):
         results = _both(
             lambda: index.put("k1", o, slug="demo", meta={}, reuse=True),

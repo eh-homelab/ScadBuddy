@@ -30,6 +30,10 @@ from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CommandClosedError,
+    TemporalBusyError,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+    TemporalUnreachableError,
     start_command,
 )
 
@@ -392,3 +396,68 @@ def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> Non
     assert response.json() == {"principal": "token:abc123", "session": "s-1"}
     plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1})
     assert plain.json() == {"principal": None, "session": None}
+
+
+def test_a_refusing_temporal_is_a_500_as_the_reconciler_reads_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the route reads a failed start as the lost-operation
+    reconciler does (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly", as the print-run routes answer it."""
+
+    async def refused_start(*args: Any, **kwargs: Any) -> Any:
+        raise TemporalRefusedError("op-x")
+
+    monkeypatch.setattr(operations_api, "start_command", refused_start)
+    response = post(client, {})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    assert "try again shortly" not in response.text
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    ("error", "nothing_done"),
+    [
+        (TemporalUnreachableError("op-x"), True),
+        (TemporalUnavailableError("op-x"), False),
+        (TemporalBusyError("op-x"), False),
+    ],
+)
+def test_only_a_failed_connect_says_nothing_was_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception, nothing_done: bool
+) -> None:
+    """Review #1316 (9) 1a, as the print-run routes: only a failed first connect wrote
+    nothing. Any other 503 may follow a persisted start, which the same key follows."""
+
+    async def failing_start(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(operations_api, "start_command", failing_start)
+    response = post(client, {})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert ("Nothing was done" in response.text) is nothing_done
+    assert response.json()["may_have_started"] is not nothing_done
+    if not nothing_done:
+        assert "Idempotency-Key" in response.json()["detail"]
+    assert ("cannot reach" in response.text) is not isinstance(error, TemporalBusyError)
+
+
+def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
+    """Review #1316 (13) 2a: every route on `run_operation` answers these, so its
+    `OPERATION_RESPONSES` says so, quoting the details it sends."""
+    responses = app.openapi()["paths"]["/api/v1/outputs/{output_id}/send"]["post"]["responses"]
+    assert operations_api.TEMPORAL_REFUSED_PROBLEM in responses["500"]["description"]
+    assert operations_api.OPERATION_REFUSED_DETAIL in responses["500"]["description"]
+    for detail in (
+        operations_api.OPERATION_UNREACHABLE_DETAIL,
+        operations_api.OPERATION_DOWN_DETAIL,
+        operations_api.OPERATION_BUSY_DETAIL,
+        operations_api.OPERATION_STILL_CHECKING_DETAIL,
+    ):
+        assert detail in responses["503"]["description"]
+    assert "may_have_started" in responses["503"]["description"]
+    assert operations_api.RECORD_GONE_PROBLEM in responses["default"]["description"]
+    schema = responses["503"]["content"]["application/problem+json"]["schema"]
+    assert "may_have_started" in schema["properties"]
