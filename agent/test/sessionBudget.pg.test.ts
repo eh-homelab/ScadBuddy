@@ -35,6 +35,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
   let settings: SettingsStore
   let m: SessionManager
   let next: FakeTurn
+  let runs: ReturnType<typeof scriptedRunner>['runs']
   let app: ReturnType<typeof createApp>
   const failures: unknown[] = []
 
@@ -45,7 +46,8 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
     settings = new SettingsStore(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
-    const { runner } = scriptedRunner(() => next)
+    const { runner, runs: made } = scriptedRunner(() => next)
+    runs = made
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, settings, audit })
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
@@ -243,59 +245,101 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
   })
 
-  // #823: a fork is not a way round the user-only raise. Only the panel's
-  // "continue in a new chat" (the route, without the headless browser's marker)
-  // gives a fresh budget; every other fork carries over what the parent has left.
-  describe('a fork that is not the user’s carries over the parent’s budget', () => {
+  // #823: a fork is not a way round the user-only raise. A fork spends from its
+  // parent's budget: nothing is copied or moved, and a turn in any session of the
+  // lineage uses up the one budget. Only the panel's "continue in a new chat" (the
+  // route, without the headless browser's marker) gives the child a budget of its own.
+  describe('a fork that is not the user’s spends from the parent’s budget', () => {
     /** The scripted runner writes no SDK transcript; a fork needs one. */
     const transcript = (id: string) => m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
     const fork = (id: string, headers: Record<string, string>) =>
       app.request(`/api/v1/ai/sessions/${id}/fork`, { method: 'POST', headers })
-
-    it('gives a tool’s fork (sessions_fork) and the headless browser’s only what the parent has left', async () => {
-      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    /** A turn whose session's own spend comes to `ownUsd` in all (the scripted SDK total). */
+    const spend = async (id: string, by: typeof browser, ownUsd: number) => {
+      next = { reply: 'done', costUsd: ownUsd }
+      await (await m.send(id, by, 'go on')).done
+      return runs.at(-1)!.maxBudgetUsd
+    }
+    /** A session of `owner`'s that has spent $0.40 of its $1, with a transcript to fork. */
+    const started = async (owner: typeof browser = browser) => {
+      const { session, turn } = await m.start(owner, { origin: owner === browser ? 'chat' : 'mcp', prompt: 'make a box' })
       await turn!.done
       await transcript(session.id)
-      expect(await m.get(session.id, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+      return session.id
+    }
 
-      const child = await m.fork(session.id, browser)
-      expect(child.budgetUsd).toBe(0.6)
-      // Moved, not copied: the parent has nothing left to give a second fork.
-      expect(await m.get(session.id, browser)).toMatchObject({ budgetUsd: 0.4, costUsd: 0.4 })
-      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
-      // A fork of the fork shares the child's $0.60 the same way; a session that has spent
-      // nothing keeps a cent, as a budget must stay above zero.
+    it('shares one budget: a fork’s spend is the parent’s, and the parent’s is the fork’s', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      // Neither copied nor moved: both see the one $1, $0.40 of it spent.
+      expect(child).toMatchObject({ budgetUsd: 1, costUsd: 0.4, ownCostUsd: 0 })
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+
+      // The fork's turn is given what the lineage has left, and its spend is the parent's.
+      expect(await spend(child.id, browser, 0.3)).toBeCloseTo(0.6, 9)
+      expect((await m.get(parent, browser)).costUsd).toBeCloseTo(0.7, 9)
+      // And the other way round.
+      expect(await spend(parent, browser, 0.6)).toBeCloseTo(0.3, 9)
+      const after = await m.get(child.id, browser)
+      expect(after).toMatchObject({ budgetUsd: 1, ownCostUsd: 0.3 })
+      expect(after.costUsd).toBeCloseTo(0.9, 9)
+    })
+
+    it('shares it with a fork of a fork', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
       await transcript(child.id)
-      const marked = await fork(child.id, { ...UI, [AGENT_ACTOR_HEADER]: child.id })
-      expect(marked.status).toBe(201)
-      expect(((await marked.json()) as { session: { budget_usd: number } }).session.budget_usd).toBe(0.59)
-      expect((await m.get(child.id, browser)).budgetUsd).toBe(0.01)
+      const grandchild = await m.fork(child.id, browser)
+      expect(grandchild).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+      expect(await spend(grandchild.id, browser, 0.7)).toBeCloseTo(0.6, 9)
+      // $0.40 + $0.70 of the one $1: the whole lineage is spent.
+      for (const id of [parent, child.id, grandchild.id]) {
+        await expect(m.send(id, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+      }
     })
 
-    it('splits what is left between concurrent forks, never giving it twice', async () => {
-      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
-      await turn!.done
-      await transcript(session.id)
-      const results = await Promise.allSettled([m.fork(session.id, browser), m.fork(session.id, browser)])
-      const given = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value.budgetUsd] : []))
-      expect(given).toEqual([0.6])
-      expect(results.filter((r) => r.status === 'rejected')).toEqual([
-        expect.objectContaining({ reason: expect.objectContaining({ code: 'budget_exhausted' }) }),
-      ])
-      expect((await m.get(session.id, browser)).budgetUsd).toBe(0.4)
+    it('creates no budget: forks together spend at most what the parent had', async () => {
+      const parent = await started()
+      const forks = await Promise.all([m.fork(parent, browser), m.fork(parent, browser), m.fork(parent, browser)])
+      expect(forks.map((f) => f.budgetUsd)).toEqual([1, 1, 1])
+      // The parent still has its $1 and nothing more.
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+
+      expect(await spend(forks[0]!.id, browser, 0.3)).toBeCloseTo(0.6, 9)
+      expect(await spend(forks[1]!.id, browser, 0.3)).toBeCloseTo(0.3, 9)
+      // $0.40 + $0.30 + $0.30: the third fork and the parent have nothing left.
+      await expect(m.send(forks[2]!.id, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+      await expect(m.send(parent, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+      // A spent lineage's fork is refused up front.
+      await expect(m.fork(parent, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
     })
 
-    it('rounds what is left down, so a fork never gets more than the parent has, and under a cent is spent', async () => {
-      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
-      await turn!.done
-      await transcript(session.id)
-      await db.sql`UPDATE ai_sessions SET cost_usd = 0.346 WHERE id = ${session.id}`
-      expect((await m.fork(session.id, browser)).budgetUsd).toBe(0.65)
-      await db.sql`UPDATE ai_sessions SET budget_usd = 1, cost_usd = 0.995 WHERE id = ${session.id}`
-      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
+    it('a raise on either session raises the one budget', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      expect((await raise(child.id, { add_usd: 1 })).status).toBe(200)
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 2, costUsd: 0.4 })
+      expect((await raise(parent, { add_usd: 0.5 })).status).toBe(200)
+      expect(await m.get(child.id, browser)).toMatchObject({ budgetUsd: 2.5, costUsd: 0.4 })
+      // Still user-only, on a fork as on any session.
+      expect((await raise(child.id, { add_usd: 1 }, { ...JSON_UI, [AGENT_ACTOR_HEADER]: child.id })).status).toBe(403)
+      expect((await m.get(parent, browser)).budgetUsd).toBe(2.5)
     })
 
-    it('refuses a spent session’s fork unless it is the user’s, which gets a fresh budget', async () => {
+    // #1451: a fork used to move what the parent had left into the forker's session.
+    it('lets no one who merely sees a session move its budget away by forking it', async () => {
+      const parent = await started(agentA)
+      // The browser sees every session but does not own agentA's; this is sessions_fork's path.
+      const child = await m.fork(parent, browser)
+      expect(child.owner).toEqual(browser)
+      // The owner keeps its whole budget and can go on spending it.
+      expect(await m.get(parent, agentA)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+      expect(await spend(parent, agentA, 0.5)).toBeCloseTo(0.6, 9)
+      // The fork spends the same budget, not one of its own (an open question on #1438).
+      expect((await m.get(child.id, browser)).costUsd).toBeCloseTo(0.5, 9)
+    })
+
+    it('refuses a spent session’s fork unless it is the user’s, which gets a budget of its own', async () => {
       const id = await spentSession()
       await transcript(id)
       await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
@@ -305,10 +349,11 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
 
       const ui = await fork(id, UI)
       expect(ui.status).toBe(201)
-      expect(((await ui.json()) as { session: { budget_usd: number; cost_usd: number } }).session).toMatchObject({
-        budget_usd: 1,
-        cost_usd: 0,
-      })
+      const own = ((await ui.json()) as { session: { id: string; budget_usd: number; cost_usd: number } }).session
+      expect(own).toMatchObject({ budget_usd: 1, cost_usd: 0 })
+      // Its own: its turn is given the whole of it, and the spent parent stays spent.
+      expect(await spend(own.id, browser, 0.2)).toBe(1)
+      expect((await m.get(id, browser)).costUsd).toBeGreaterThan(1)
     })
   })
 
