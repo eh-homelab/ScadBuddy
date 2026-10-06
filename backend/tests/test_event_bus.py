@@ -212,6 +212,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "print.progress",
         "print.settled",
         "print.run",
+        "operation.changed",
         "library.changed",
         "library.removed",
         "font.installed",

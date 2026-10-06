@@ -24,6 +24,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.usage import (
+    RACK_SETTLE_CUT_OFF,
     RACK_SETTLE_FALLBACK,
     PickedHotend,
     RackUsageStore,
@@ -210,6 +211,74 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
         getattr(record, "archive_id", None),
         getattr(record, "error", None),
     ) == (OUTPUT, 101, "ApiError")
+    assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113: a settle cut off by the watcher's timeout is not retried (spec §4), so it
+    logs, by id only, the archives it had not recorded, the one in flight included."""
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
+    )
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(
+                OUTPUT,
+                client=archives,
+                links=Links(link(101, 51), link(102, 51)),
+                store=store,
+                now=lambda: AT,
+                archive_timeout=10,
+            )
+        )
+        async with asyncio.timeout(5):
+            while 101 not in archives.reads:
+                await asyncio.sleep(0.01)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "archive_ids", None) == [101, 102]
+    assert getattr(record, "stage", None) == "archives"
+    assert A not in repr(record.__dict__) and record.exc_info is None
+    assert await store.recorded_archives([101, 102]) == set()
+
+
+class HangingLinks(Links):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        self.started.set()
+        await asyncio.Event().wait()
+        return self.links
+
+
+async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113 review: a cut-off before the loop still leaves a record, marked as the
+    read stage: its ids are the links read so far, candidates not yet filtered to the
+    unrecorded ones."""
+    links = HangingLinks()
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(OUTPUT, client=Archives(), links=links, store=store, now=lambda: AT)
+        )
+        await asyncio.wait_for(links.started.wait(), 5)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "archive_ids", None) == []
+    assert getattr(record, "stage", None) == "read"
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 

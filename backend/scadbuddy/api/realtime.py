@@ -73,6 +73,7 @@ from scadbuddy.core.events import (
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
+    OperationEvent,
     OutputEvent,
     PrintEvent,
     PrintRunEvent,
@@ -157,6 +158,9 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case OperationEvent():
+            # Followed by `GET /operations/{id}` (#1053); the event log keeps it.
+            return []
         case SessionBusEvent():
             # The agent's own (#300): the UI follows sessions over the agent's
             # chat socket, which knows who may see which.

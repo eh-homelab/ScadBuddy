@@ -206,6 +206,12 @@ describe('chatReducer', () => {
       waiting,
     )
     expect(timedOut.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', attention })
+    expect(timedOut.sessions.s1?.items[0]).not.toHaveProperty('reconnected')
+    const back = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'the ScadBuddy tab is connected again', reconnected: true })],
+      waiting,
+    )
+    expect(back.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reconnected: true })
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {

@@ -59,6 +59,8 @@ export type FeedItem =
       answers?: string[]
       by?: Owner
       reason?: string
+      /** #815 — the tab came back, which ended a tab_disconnected attention request. */
+      reconnected?: true
     }
   | { kind: 'error'; id: string; message: string }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
@@ -332,7 +334,12 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           i.kind === 'question' && i.id === event.id
             ? event.answered
               ? { ...i, state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
-              : { ...i, state: 'cancelled', ...(event.reason === undefined ? {} : { reason: event.reason }) }
+              : {
+                  ...i,
+                  state: 'cancelled',
+                  ...(event.reason === undefined ? {} : { reason: event.reason }),
+                  ...(event.reconnected ? { reconnected: true as const } : {}),
+                }
             : i,
         ),
       )

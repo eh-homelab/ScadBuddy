@@ -19,11 +19,15 @@ from scadbuddy.bambuddy.filaments import (
     WarningKind,
     normalise_colour,
 )
-from scadbuddy.bambuddy.models import FilamentRequirement, NozzleRackSlot, RackAlgorithm
+from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
+    FilamentRequirement,
+    NozzleRackSlot,
+    RackAlgorithm,
+)
 
-__all__ = ["RackAlgorithm"]
+__all__ = ["DEFAULT_ALGORITHM", "RackAlgorithm"]
 
-DEFAULT_ALGORITHM: RackAlgorithm = "least_used"
 #: The flow every slice carries while Bambuddy has no High Flow presets (#484): the
 #: preview and the manual pick's 422 judge it, since Bambuddy re-checks a pick against
 #: the sliced group at dispatch.

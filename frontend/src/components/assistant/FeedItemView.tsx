@@ -366,7 +366,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                 ? `Your answer was not taken: ${item.reason ?? 'the request is no longer waiting'}.`
                 : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
-                : item.attention
+                : item.reconnected
+                  ? 'The tab is back; the assistant re-checks the page before going on.'
+                  : item.attention
                   ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
                   : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
           </p>

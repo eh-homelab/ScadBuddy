@@ -122,15 +122,20 @@ function Carousel({ slides, onOpen, to, className, label }: Omit<Props, 'fallbac
   const [viewportRef, embla] = useEmblaCarousel(carouselOptions(useReducedMotion()))
   // The carousel's own record of where it is, so the controls and labels never
   // depend on Embla having measured anything; a swipe moves it through `select`.
-  const [index, setIndex] = useState(0)
+  const [selected, setIndex] = useState(0)
   const count = slides.length
+  // Clamped, since the slides can shrink under a mounted carousel (#624): a card keyed
+  // by its template keeps its carousel through a live refetch that drops a picture.
+  const index = Math.min(selected, count - 1)
 
   useEffect(() => {
     if (!embla) return
     const onSelect = () => setIndex(embla.selectedScrollSnap())
     embla.on('select', onSelect)
+    embla.on('reInit', onSelect)
     return () => {
       embla.off('select', onSelect)
+      embla.off('reInit', onSelect)
     }
   }, [embla])
 
