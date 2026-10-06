@@ -216,7 +216,9 @@ export function CustomizePage() {
   // awaits a preset load (or anything else) and then writes starts from what it loaded.
   const actions = useRef<ActionBarHandle>(null)
   const describeRef = useRef<(() => string) | null>(null)
-  const uiVersion = version ?? record?.version ?? undefined
+  // The interface follows the last commit to its `ui/` (#846), not the record's: a commit
+  // to the details, README or media must not tear a mounted interface down.
+  const uiVersion = version ?? record?.ui_version ?? record?.version ?? undefined
 
   // #269 — the source changed elsewhere (another tab, an agent). With no edits the
   // parameters follow it at once; with edits they are the user's, so the page asks.
