@@ -77,8 +77,20 @@ export type ServerEvent = V &
     | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string }
     /** `tool` is the tool.call id the approval gates; only outward calls wait (spec §8.2). */
     | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
-    /** Expired and cancelled approvals resolve as not approved, without `by`. */
-    | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
+    /**
+     * `decision` says how it ended (#979): expired and cancelled ones are not
+     * approved, have no `by`, and carry why (`reason`); `approved` stays for
+     * readers of the log that predate `decision`.
+     */
+    | {
+        type: 'approval.resolved'
+        sessionId: string
+        id: string
+        approved: boolean
+        decision: 'approved' | 'denied' | 'expired' | 'cancelled'
+        by?: Owner
+        reason?: string
+      }
     /**
      * The agent asks the user (#940): `tool` is the AskUserQuestion (or a subagent's ask_user) tool_use id.
      * The turn waits (`waiting_input`) until `question.resolved`.

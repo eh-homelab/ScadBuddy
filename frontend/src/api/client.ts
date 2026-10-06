@@ -387,6 +387,8 @@ export function newRequestId(): string {
 
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+/** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
+export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
@@ -420,26 +422,43 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
+/**
+ * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
+ * giving up: the request may already hold a claim, and that answer names it (review #1066
+ * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
+ */
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
+  finish = false,
   within?: Within,
 ): Promise<T> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
   const began = performance.now()
+  let last = false
   for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught)) throw caught
+      if (last || !unanswered(caught)) throw caught
+      if (signal?.aborted) {
+        if (!finish) throw caught
+        last = true
+        continue
+      }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
       if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
       // The server's Retry-After paces a re-send it answered (review #1061 4a).
       const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
-      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      try {
+        await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      } catch (reason) {
+        if (!finish) throw reason
+        last = true
+      }
     }
   }
 }
@@ -502,6 +521,7 @@ async function followPrintRun(
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    false,
     within,
   )
   const began = performance.now()
@@ -868,17 +888,40 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` (a superseded
+   * preview) stops the re-sends after one more, sent at once: the request may already
+   * hold a claim on a job, and that answer names the job the next render supersedes. A
+   * request already sent is never aborted, for the same reason. Unanswered even then, the
+   * claim is left to the render it made, which runs to its end (review #1066 1.1).
+   * `requestId` is the `Idempotency-Key`: a caller that sends the render again itself
+   * passes the same one, so the server counts every send as one claim (review #1066 (7) 3).
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-      method: 'POST',
-      body: JSON.stringify({
-        inputs,
-        version: version ?? null,
-        ...(supersedes ? { supersedes } : {}),
-      }),
-    }),
+  render: (
+    slug: string,
+    inputs: JsonObject,
+    version?: string,
+    supersedes?: string,
+    signal?: AbortSignal,
+    requestId: string = newRequestId(),
+  ) => {
+    // Sent again while the server is still accepting it (#1053), with one
+    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () =>
+        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs,
+            version: version ?? null,
+            ...(supersedes ? { supersedes } : {}),
+          }),
+        }),
+      signal,
+      true,
+    )
+  },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 

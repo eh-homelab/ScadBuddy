@@ -136,7 +136,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
     await expectPanelAccepts(events)
     expect(events.slice(-2)).toEqual([
-      { v: 1, type: 'approval.resolved', sessionId: session.id, id: approval.id, approved: false },
+      // Says it expired, not just that it was not approved (#979).
+      { v: 1, type: 'approval.resolved', sessionId: session.id, id: approval.id, approved: false, decision: 'expired', reason: 'no decision before it expired' },
       { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
     ])
   })

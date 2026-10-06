@@ -113,6 +113,27 @@ export function textLength(value: string): number {
 }
 
 /**
+ * #921 — why a number field's value is outside the range the model declares, in the
+ * field's own words, or null when it is inside (or the parameter is not a number).
+ * The render would refuse it with a 422; the field says so before any request goes out.
+ */
+export function rangeProblem(param: Param, value: ParamValue | undefined): string | null {
+  if (param.type !== 'number' && param.type !== 'integer' && param.type !== 'slider') return null
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const below = param.min != null && value < param.min
+  const above = param.max != null && value > param.max
+  if (!below && !above) return null
+  const label = param.caption || param.name
+  if (param.min != null && param.max != null) return `${label} must be between ${param.min} and ${param.max}.`
+  return below ? `${label} must be at least ${param.min}.` : `${label} must be at most ${param.max}.`
+}
+
+/** #921 — the first parameter whose value is out of its declared range: nothing renders or generates while there is one. */
+export function outOfRange(schema: CustomizerSchema, values: ParamValues): Param | undefined {
+  return allParams(schema).find((param) => param.name in values && rangeProblem(param, values[param.name]) !== null)
+}
+
+/**
  * #254 — whether `value` is one the parameter's own widget could produce, and the value
  * as that widget would hand it to `onChange` (a select's option in its own type, a
  * colour normalised). An agent's value goes through this before the same `onChange`
