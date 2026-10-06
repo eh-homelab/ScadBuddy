@@ -22,6 +22,29 @@ const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
 const OTHER_TAB = 'tab-bbbbbbbbbbbbbbbbbbbbbb'
 const anonymous: Principal = { id: 'anonymous:session-1', kind: 'anonymous', tiers: ['read', 'write'], clientIp: '10.1.2.3' }
 
+// #1405 review: a CancelRequest names the backend, not the query, so cancelling a
+// lookup that already finished would kill whatever statement the pool ran next on
+// that connection. An abort must never reach the server.
+describe('pairedTab abort', () => {
+  it('rejects with the abort reason and never cancels the query on the server', async () => {
+    let cancels = 0
+    let finish!: (rows: unknown[]) => void
+    const query = Object.assign(new Promise<unknown[]>((resolve) => (finish = resolve)), {
+      cancel: () => {
+        cancels++
+      },
+    })
+    const sql = (() => query) as unknown as ConstructorParameters<typeof PostgresPairingStore>[0]
+    const stop = new AbortController()
+    const lookup = new PostgresPairingStore(sql).pairedTab(anonymous, stop.signal)
+    stop.abort(new Error('the wait ended'))
+    await expect(lookup).rejects.toThrow('the wait ended')
+    finish([])
+    await query
+    expect(cancels).toBe(0)
+  })
+})
+
 describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
   let drop: () => Promise<void>
@@ -58,13 +81,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
     expect(await store.pairedTab(agent)).toBeUndefined()
   })
 
-  // #1394: a tab check that is abandoned cancels its lookup rather than holding a pool slot.
-  it('cancels a pairedTab lookup whose signal aborts', async () => {
+  // #1394: an abandoned tab check stops waiting for its lookup at once.
+  it('stops waiting for a pairedTab lookup whose signal aborts', async () => {
     await expect(store.pairedTab(agent, AbortSignal.abort())).rejects.toThrow()
     const stop = new AbortController()
     const lookup = store.pairedTab(agent, stop.signal)
-    stop.abort()
-    await expect(lookup).rejects.toThrow()
+    stop.abort(new Error('the wait ended'))
+    await expect(lookup).rejects.toThrow('the wait ended')
     expect(await store.pairedTab(agent)).toBeUndefined()
   })
 

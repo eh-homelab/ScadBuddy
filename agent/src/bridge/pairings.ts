@@ -237,11 +237,12 @@ export class PostgresPairingStore implements PairingStore {
       SELECT id, principal_label, expires_at, tab_id FROM ai_browser_pairings
        WHERE principal_kind = ${principal.kind} AND principal_id = ${principal.id}
          AND status = 'paired' AND expires_at > now()`
-    // A cancelled query rejects and gives its pool slot (or queue place) back.
-    // (postgres.js answers cancel() with a promise its types omit; a failed cancel request is not this read's error.)
-    const cancel = () => void Promise.resolve(query.cancel() as unknown).catch(() => undefined)
-    signal?.addEventListener('abort', cancel, { once: true })
-    const [row] = await query.finally(() => signal?.removeEventListener('abort', cancel))
+    // An abort stops waiting for the read; it never cancels it on the server. A
+    // Postgres CancelRequest names the backend, not the query, so one that lands
+    // after this cheap indexed read finished would cancel whatever statement the
+    // pool handed that connection next (#1405 review). The read finishes and
+    // returns its connection on its own.
+    const [row] = signal ? await settledOrAborted(query, signal) : await query
     return row ? { ...viewOf(row), tabId: row.tab_id } : undefined
   }
 
@@ -263,4 +264,15 @@ export class PostgresPairingStore implements PairingStore {
     for (const row of rows) out.set(row.tab_id, [...(out.get(row.tab_id) ?? []), viewOf(row)])
     return out
   }
+}
+
+/** `work`, unless `signal` aborts first: then its reason, and `work` is left to settle unobserved. */
+function settledOrAborted<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    Promise.resolve(work)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', abort))
+  })
 }
