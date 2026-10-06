@@ -1139,6 +1139,7 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
     (review #1066 2.1)."""
     defaults = commands_module.start_command.__kwdefaults__
     assert defaults is not None
+    deadline = defaults["deadline"]
     monkeypatch.setitem(defaults, "deadline", timedelta(seconds=1))
     width = _w()
     async with temporal_client() as client:
@@ -1150,6 +1151,10 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
             request = uuid.uuid4().hex
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, {"width": width}, request_id=request)
+            # Only that submit is meant to outlive its deadline: on a loaded machine a
+            # fresh start's accept can take over the 1 s, and the supersede below must
+            # not be answered still-accepting.
+            defaults["deadline"] = deadline
             accepting.set()
             first = await service.submit(SLUG, {"width": width}, request_id=request)
             again = await service.submit(SLUG, {"width": width}, request_id=request)
