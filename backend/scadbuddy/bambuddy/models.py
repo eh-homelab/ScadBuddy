@@ -7,6 +7,7 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -547,10 +548,18 @@ class SliceResult(BambuddyModel):
 
 class SliceJob(BambuddyModel):
     """``GET /api/v1/slice-jobs/{id}``. Bambuddy leaves this one untyped in its own
-    OpenAPI, so every field past ``status`` is optional."""
+    OpenAPI, so every field past ``status`` is optional.
+
+    A failure arrives as ``error_status`` (the HTTP status) and ``error_detail``
+    (``HTTPException.detail``, which may be a dict or list rather than a string) — see
+    Bambuddy's ``backend/app/api/routes/slice_jobs.py``. ``error``/``error_message`` are
+    kept as fallbacks only.
+    """
 
     id: int | None = None
     status: SliceStatus | str
+    error_status: int | None = None
+    error_detail: Any = None
     error: str | None = None
     error_message: str | None = None
     result: SliceResult | None = None
@@ -563,7 +572,14 @@ class SliceJob(BambuddyModel):
     def failure(self) -> str | None:
         if self.status != "failed":
             return None
-        return self.error or self.error_message or "Bambuddy did not say why"
+        detail = self.error_detail
+        if detail is not None and not isinstance(detail, str):
+            detail = json.dumps(detail)
+        if reason := detail or self.error or self.error_message:
+            return reason
+        if self.error_status is not None:
+            return f"Bambuddy did not say why (HTTP {self.error_status})"
+        return "Bambuddy did not say why"
 
 
 class Spool(BambuddyModel):
