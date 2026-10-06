@@ -296,8 +296,10 @@ export function FilamentPicker({
             : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const chosenSpool = spools.find((spool) => spool.spool_id === chosen)
           return (
-            <fieldset key={slot.slot_id} data-testid={`filament-slot-${slot.slot_id}`}>
-              <legend className="flex items-center gap-2 text-[13px] text-ink">
+            // min-w-0: a fieldset defaults to min-inline-size: min-content, so without it
+            // the slot grows to its widest row and runs off a phone's screen (#944).
+            <fieldset key={slot.slot_id} className="min-w-0" data-testid={`filament-slot-${slot.slot_id}`}>
+              <legend className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink">
                 <Swatch colour={slot.colour} />
                 Slot {slot.slot_id}
                 {slot.material ? <span className="text-muted">{slot.material}</span> : null}
@@ -306,7 +308,7 @@ export function FilamentPicker({
                     to it before slicing, so the plate thumbnail shows it too (#476). */}
                 {chosenSpool && (
                   <span
-                    className="flex items-center gap-1.5 text-[12px] text-muted"
+                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-muted"
                     data-testid={`slot-prints-in-${slot.slot_id}`}
                   >
                     <span aria-hidden="true">→</span>
@@ -338,7 +340,7 @@ export function FilamentPicker({
                   return (
                     <li key={spool.spool_id} className="border-b border-line last:border-b-0">
                       <label
-                        className={`flex cursor-pointer items-center gap-2.5 px-2.5 py-2 transition-colors ${
+                        className={`flex cursor-pointer flex-wrap items-center gap-x-2.5 gap-y-1 px-2.5 py-2 transition-colors ${
                           chosen === spool.spool_id ? 'bg-accent/8' : 'hover:bg-surface-2'
                         }`}
                       >
@@ -352,30 +354,34 @@ export function FilamentPicker({
                           data-testid={`spool-${spool.spool_id}`}
                         />
                         <Swatch colour={spool.colour} size="sm" />
-                        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
+                        {/* The name takes at least 12rem; when the row is narrower than that
+                            plus the details, the details wrap onto a second line (#944). */}
+                        <span className="min-w-0 flex-[1_1_12rem] truncate text-[12px] text-ink">
                           {spoolLabel(spool)}
                         </span>
-                        {elsewhere && (
-                          <span className="shrink-0 text-[11px] text-faint">
-                            used by slot {elsewhere.slot_id}
+                        <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2.5">
+                          {elsewhere && (
+                            <span className="shrink-0 text-[11px] text-faint">
+                              used by slot {elsewhere.slot_id}
+                            </span>
+                          )}
+                          {where && (
+                            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
+                              {where}
+                            </span>
+                          )}
+                          {spool.side && (
+                            <SideBadge
+                              side={spool.side}
+                              resting={resting}
+                              testId={`side-${spool.spool_id}`}
+                            />
+                          )}
+                          <span className="sb-num shrink-0 text-[11px] text-faint">
+                            {spool.remaining_g === null || spool.remaining_g === undefined
+                              ? '—'
+                              : grams(spool.remaining_g)}
                           </span>
-                        )}
-                        {where && (
-                          <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
-                            {where}
-                          </span>
-                        )}
-                        {spool.side && (
-                          <SideBadge
-                            side={spool.side}
-                            resting={resting}
-                            testId={`side-${spool.spool_id}`}
-                          />
-                        )}
-                        <span className="sb-num shrink-0 text-[11px] text-faint">
-                          {spool.remaining_g === null || spool.remaining_g === undefined
-                            ? '—'
-                            : grams(spool.remaining_g)}
                         </span>
                       </label>
                     </li>

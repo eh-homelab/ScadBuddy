@@ -35,14 +35,14 @@ describe('VersionsPage', () => {
 
     const alert = screen.getByRole('alert')
     expect(alert).toHaveTextContent('Could not load this model')
-    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Restore this version/ })).not.toBeInTheDocument()
 
     fail = false
     await user.click(within(alert).getByRole('button', { name: 'Try again' }))
 
     const restored = await rows()
     expect(
-      await within(restored[1] as HTMLElement).findByRole('button', { name: 'Restore this version' }),
+      await within(restored[1] as HTMLElement).findByRole('button', { name: /^Restore this version/ }),
     ).toBeEnabled()
     expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
   })
@@ -100,8 +100,9 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -120,8 +121,9 @@ describe('VersionsPage', () => {
     await screen.findByTestId('diff')
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -138,7 +140,7 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     expect(
-      within(listed[0] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[0] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     ).toBeDisabled()
   })
 
@@ -155,8 +157,9 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('the worktree is locked')
     expect(await rows()).toHaveLength(3)
@@ -182,16 +185,16 @@ describe('VersionsPage', () => {
 
     expect(listed).toHaveLength(2)
     expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
-    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Restore this version/ })).not.toBeInTheDocument()
     expect(
-      within(listed[1] as HTMLElement).getByRole('button', { name: 'Customize this version' }),
+      within(listed[1] as HTMLElement).getByRole('button', { name: /^Customize this version/ }),
     ).toBeEnabled()
   })
 
   it('offers a restore on every revision of a model of the user\'s own', async () => {
     render()
     await rows()
-    expect(screen.getAllByRole('button', { name: 'Restore this version' })).toHaveLength(3)
+    expect(screen.getAllByRole('button', { name: /^Restore this version/ })).toHaveLength(3)
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
   })
 })
@@ -204,5 +207,41 @@ describe('VersionsPage, live (#269)', () => {
     emitRealtime('version.committed', ['model:name-keychain'], { slug: 'name-keychain' })
     await waitFor(async () => expect((await rows()).length).toBe(before + 1))
     expect(screen.getByText('Committed by another tab')).toBeInTheDocument()
+  })
+})
+
+describe('VersionsPage, item context (#975)', () => {
+  it("names each revision's actions after it", async () => {
+    render()
+    const listed = await rows()
+    const short = versionIds.added.slice(0, 7)
+    const oldest = listed[2] as HTMLElement
+    expect(within(oldest).getByRole('button', { name: `Customize this version, ${short}` })).toBeInTheDocument()
+    expect(within(oldest).getByRole('button', { name: `Restore this version, ${short}` })).toBeInTheDocument()
+  })
+
+  it('asks before restoring, and Cancel changes nothing', async () => {
+    const { user } = render()
+    const listed = await rows()
+    await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
+
+    const dialog = screen.getByRole('dialog', { name: `Restore version ${versionIds.added.slice(0, 7)}?` })
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await rows()).toHaveLength(3)
+  })
+
+  it('says what the restore did, and puts focus on the revision it made', async () => {
+    const { user } = render()
+    const listed = await rows()
+    await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+
+    await waitFor(async () => expect(await rows()).toHaveLength(4))
+    const head = (await rows())[0] as HTMLElement
+    await waitFor(() => expect(within(head).getByRole('button', { pressed: true })).toHaveFocus())
+    expect(screen.getByTestId('versions-status')).toHaveTextContent(
+      `Restored ${versionIds.added.slice(0, 7)} as a new version`,
+    )
   })
 })
