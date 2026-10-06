@@ -146,6 +146,10 @@ RENDER_UNSTARTABLE = "RenderUnstartable"
 #: answers `closing`, so the request is still accepting and is sent again (review #1066
 #: (11) 2).
 LEGACY_PENDING = "LegacyPending"
+#: `render_accept`'s failure on another state that passes, answered as `LEGACY_PENDING`
+#: is: Postgres out of reach, or Temporal unable to say whether an older row's workflow
+#: runs (review #1066 (11)).
+ACCEPT_TRANSIENT = "AcceptTransient"
 
 
 class RenderStart(BaseModel):

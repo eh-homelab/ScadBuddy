@@ -156,3 +156,6 @@ class FailInput(BaseModel):
     run_id: str
     slug: str
     error: PrintRunError
+    #: The row says the run began queueing, but it stopped before any ``POST /queue/``:
+    #: the record clears that (review #1316 (8) 2).
+    unqueued: bool = False

@@ -1534,8 +1534,9 @@ export class SessionManager {
     // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
     // is pending fails that call ("Tool permission request failed: AbortError:
     // Tool permission stream closed before response received"), and Claude
-    // Code may still reach the model and end with a `result` before it exits,
-    // so either outcome below can follow. The tool never runs.
+    // Code may still reach the model and end with a `result` before it exits;
+    // so the harness interrupts first (harness/run.ts stopFirst, #1168), which
+    // ends the turn with no model call. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
     // A question never outlives its turn (questions/service.ts), shutdown or not.
@@ -1547,7 +1548,19 @@ export class SessionManager {
     } else {
       await this.approvals.revokeUnused(id, 'the turn ended')
     }
-    if (result) {
+    if (result && stopped !== undefined) {
+      // Stopped, and Claude Code still reported a result: the interrupt's
+      // `error_during_execution` (harness/run.ts stopFirst), or a result that
+      // raced the stop. The turn reads interrupted either way (#1168); what it
+      // spent before it stopped is still counted (see below).
+      const total = result.total_cost_usd
+      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      turns = session.turns + result.num_turns
+      status = 'idle'
+      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      outcome = { kind: 'interrupted' }
+    } else if (result) {
       // `total_cost_usd` of a RESUMED query already includes the earlier
       // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
       // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The

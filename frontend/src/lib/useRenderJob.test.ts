@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { ApiError, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { useRenderJob } from './useRenderJob'
+import { TRANSIENT_RETRIES, useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -236,6 +236,33 @@ describe('useRenderJob', () => {
     expect(result.current.busy).toEqual({ seconds: 2, reason: 'still-accepting' })
     expect(result.current.error).toBeUndefined()
   })
+
+  it.each([TEMPORAL_UNAVAILABLE, STILL_ACCEPTING])(
+    'gives up on a %s 503 after a bounded number of retries, as an error it can try again (review #1066 (11) 1)',
+    async (type) => {
+      submit.mockRejectedValue(
+        new ApiError({ type, title: 'Service Unavailable', status: 503, detail: 'Temporal is down', retry_after: 5 }),
+      )
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5000)
+        })
+      }
+
+      expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 1)
+      expect(result.current.busy).toBeUndefined()
+      expect(result.current.error?.message).toBe('Temporal is down')
+      expect(result.current.rendering).toBe(false)
+
+      submit.mockResolvedValueOnce(accepted(JOB_B))
+      act(() => result.current.retry())
+      await settle()
+      expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 2)
+      expect(result.current.error).toBeUndefined()
+    },
+  )
 
   it('treats any other refusal as an error, not a wait', async () => {
     submit.mockRejectedValueOnce(
