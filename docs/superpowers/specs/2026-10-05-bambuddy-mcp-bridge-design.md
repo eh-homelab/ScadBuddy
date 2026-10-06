@@ -116,7 +116,7 @@ New fields in `StoredSettings` (key/value table, so no migration):
   - While the fallback is in use, a warning: "The assistant's Bambuddy tools use the
     full Bambuddy key, which can print."
   - A switch: "Let the assistant use Bambuddy's API (bambuddy-mcp)", with the state
-    from §4.5 and the registration check from §5 shown next to it.
+    from §4.4 and the registration check from §5 shown next to it.
 
 ## 4. The bridge (backend)
 
@@ -168,7 +168,7 @@ with `asyncio.create_subprocess_exec` as `library/lsp.py` starts `openscad-lsp`.
 - **Talking to it.** The bridge uses the `mcp` SDK's stdio client: `tools/list` once
   after start, then `tools/call` per request.
 - **Start.** It starts when `bambuddy_mcp_enabled` is on, `bambuddy_url` is set, and a
-  key resolves. Otherwise the state is `off`, `no_url` or `no_key` (§4.5).
+  key resolves. Otherwise the state is `off`, `no_url` or `no_key` (§4.4).
 - **Restarts.** On the events in §3, the bridge stops the child and re-reads settings,
   then starts it again if the conditions still hold. This happens in **every** replica,
   because each one hears the NOTIFY.
