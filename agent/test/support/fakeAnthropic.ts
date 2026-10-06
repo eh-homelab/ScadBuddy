@@ -28,6 +28,28 @@ export type Reply =
    */
   | { stall: string; usage?: { input_tokens: number; output_tokens?: number } }
 
+/** Every finished reply's usage: message_start's input, message_delta's output. */
+export const REPLY_TOKENS = { input: 10, output: 5 }
+
+// What the manager prices this fake's usage at: claude-sonnet-4-5's $3 input /
+// $15 output per MTok. Tests compare against these, so the expected costs move
+// with the fake's token counts instead of drifting from them.
+const INPUT_USD_PER_MTOK = 3
+const OUTPUT_USD_PER_MTOK = 15
+
+/** The cost of one finished reply. */
+export const REPLY_COST_USD = (REPLY_TOKENS.input * INPUT_USD_PER_MTOK + REPLY_TOKENS.output * OUTPUT_USD_PER_MTOK) / 1_000_000
+
+/** A reply cut off mid-stream (#991): 100k input tokens, then a few words. */
+export const STALL = { stall: 'Once upon a time', usage: { input_tokens: 100_000 } } satisfies Reply
+
+/**
+ * The cost of the request `STALL` cuts off. Claude Code prices it at nothing;
+ * the manager prices it from the stream, estimating "Once upon a time" at 4
+ * output tokens.
+ */
+export const STALL_COST_USD = (STALL.usage.input_tokens * INPUT_USD_PER_MTOK + 4 * OUTPUT_USD_PER_MTOK) / 1_000_000
+
 type ContentReply = Exclude<Reply, { error: unknown } | { hang: true } | { stall: string }>
 
 export type RecordedRequest = {
@@ -102,7 +124,7 @@ function stalledStart(model: string, reply: Extract<Reply, { stall: string }>): 
 
 function streamEvents(model: string, reply: ContentReply): string {
   const { block, stopReason } = contentOf(reply)
-  const usage = { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  const usage = { input_tokens: REPLY_TOKENS.input, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   const start =
     block.type === 'text' ? { type: 'text', text: '' } : { type: 'tool_use', id: block.id, name: block.name, input: {} }
   const delta =
@@ -129,7 +151,7 @@ function streamEvents(model: string, reply: ContentReply): string {
     sse('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: 5 },
+      usage: { output_tokens: REPLY_TOKENS.output },
     }),
     sse('message_stop', { type: 'message_stop' }),
   ].join('')

@@ -16,11 +16,11 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import SETTLE_TIMEOUT
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import SETTLE_TIMEOUT
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -37,15 +37,7 @@ from scadbuddy.rack.usage import (
     settle_hook,
 )
 from tests.bambuddy.conftest import BASE_URL, recording
-from tests.bambuddy.test_watcher import OUTPUT as WATCHED
-from tests.bambuddy.test_watcher import (
-    Script,
-    kinds,
-    progress,
-    until_idle,
-    watcher_for,
-    write_output,
-)
+from tests.bambuddy.test_follow import NOW, Script, follower_for, kinds, progress, write_output
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool, open_pg_pool
 from tests.rack.helpers import serial
 
@@ -222,7 +214,7 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
 async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#1113: a settle cut off by the watcher's timeout is not retried (spec §4), so it
+    """#1113: a settle cut off by the follow's timeout is not retried (spec §4), so it
     logs, by id only, the archives it had not recorded, the one in flight included."""
     archives = Archives(
         ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
@@ -290,7 +282,7 @@ async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
 async def test_an_archive_that_stalls_costs_only_itself(
     store: RackUsageStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#1086 review: a stall on one archive must not use up the watcher's whole-hook
+    """#1086 review: a stall on one archive must not use up the follow's whole-hook
     timeout and lose the archives after it."""
     archives = Archives(
         ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
@@ -316,7 +308,7 @@ async def test_an_archive_that_stalls_costs_only_itself(
 async def test_a_settle_cut_off_mid_write_still_records_that_archive(
     store: RackUsageStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1086 review: the watcher's timeout cancels the hook, not the write already
+    """#1086 review: the follow's timeout cancels the hook, not the write already
     running in its thread. That archive is recorded anyway, as SETTLE_TIMEOUT says."""
     writing = threading.Event()
     cancelled = threading.Event()
@@ -388,7 +380,7 @@ def paths(tmp_path: Path) -> DataPaths:
 async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     store: RackUsageStore, pool: PgPool, paths: DataPaths
 ) -> None:
-    """The first read the watcher makes finds the item already finished. That read is
+    """The first read the follow makes finds the item already finished. That read is
     also the one that links its archive: ``progress_for`` records the queue item's
     ``archive_id`` before it returns the settled progress, so the hook, which runs after,
     finds the link though nothing linked the print before."""
@@ -424,10 +416,9 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
 
     write_output(paths)
     assert await links.for_output(OUTPUT) == []
-    watcher, seen = watcher_for(paths, read)
-    watcher.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
-    watcher.watch(OUTPUT)
-    await until_idle(watcher)
+    follower, seen = follower_for(paths, read)
+    follower.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
+    assert await follower.follow(OUTPUT, NOW, read_now=True) == "settled"
 
     assert kinds(seen) == ["print.progress", "print.settled"]
     usage = (await store.usage([A]))[A]
@@ -491,7 +482,7 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
     store: RackUsageStore, pool: PgPool, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#1083: the hook's settings read is a blocking database read. Run on the event
-    loop it would freeze the watch, and the watcher's timeout could never fire."""
+    loop it would freeze the follow, and the follow's timeout could never fire."""
     release, returned = threading.Event(), threading.Event()
     settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
 
@@ -501,14 +492,14 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
         return settings
 
     write_output(paths)
-    watcher, seen = watcher_for(paths, Script(progress("done", settled=True, done=1)))
-    watcher.settle_timeout = 0.1
-    watcher.on_settled.append(settle_hook(store, PrintLinkStore(pool), load))
+    follower, seen = follower_for(
+        paths, Script(progress("done", settled=True, done=1)), settle_timeout=0.1
+    )
+    follower.on_settled.append(settle_hook(store, PrintLinkStore(pool), load))
     try:
         with caplog.at_level(logging.DEBUG):
-            watcher.watch(WATCHED)
-            await until_idle(watcher)
-            # The watch finished while the read was still blocked: it never froze the loop.
+            assert await follower.follow(OUTPUT, NOW, read_now=True) == "settled"
+            # The follow finished while the read was still blocked: it never froze the loop.
             assert not returned.is_set()
     finally:
         release.set()

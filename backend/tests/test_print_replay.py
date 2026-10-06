@@ -42,6 +42,10 @@ cancel while ``print_fail`` runs: ``cancelled_during_fail_1061``, recorded by th
 workflow before it, which cancels the record and ends the execution cancelled, and
 ``cancelled_during_fail``, recorded by the patched one, which waits for the record and
 completes.
+
+``FOLLOW_PATCH`` (#1053) is the fourth: an output's run that succeeds starts its
+``FollowPrint``. ``succeeded`` is the run from before it; ``succeeded_followed``,
+recorded by the patched one, follows.
 """
 
 from __future__ import annotations
@@ -73,6 +77,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
     "name",
     [
         "succeeded",
+        "succeeded_followed",
         "refused",
         "enqueue_failed",
         "cancelled_during_print",

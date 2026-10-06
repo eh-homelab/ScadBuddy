@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
 import { SourceWorkbench } from '../components/SourceWorkbench'
@@ -43,7 +43,6 @@ export function EditSourcePage() {
         }
       : null
   const [source, setSource] = useState<string | null>(null)
-  const navigate = useNavigate()
 
   const initial = merge ? merge.merged : upstream.loading ? undefined : loaded.data
   useEffect(() => {
@@ -82,7 +81,7 @@ export function EditSourcePage() {
   async function save(force: boolean) {
     if (merge) await api.resolveUpstreamMerge(slug, source ?? '', merge.base, force)
     else await api.replaceSource(slug, source ?? '', force)
-    await navigate(modelPath(slug))
+    return modelPath(slug)
   }
 
   if (loaded.loading || model.loading || upstream.loading || (source === null && !loaded.error)) {
@@ -190,6 +189,7 @@ export function EditSourcePage() {
           primary
         />
       }
+      dirty={!builtin && initial !== undefined && source !== initial}
       onSave={save}
     />
   )
