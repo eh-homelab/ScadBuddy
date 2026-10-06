@@ -238,6 +238,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         timeout_s: TAB_WAIT_S,
       })
       if (!parsed.ok) throw new Error(parsed.error)
+      const spec = attentionSpec(parsed.input)
+      // A tab wait is never a done summary; this narrows the spec to one that waits.
+      if (spec.reason === 'done') throw new Error('a tab wait is not a done summary')
       const card = attentionCard(parsed.input)
       const verdict = await gate({
         tool: `mcp__scadbuddy__${tool}`,
@@ -246,7 +249,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         // Withdrawn by the turn, or once no call waits on it any more.
         signal: AbortSignal.any([turn, stop.signal]),
         attention: {
-          ...attentionSpec(parsed.input),
+          ...spec,
           // The tab may have come back between the failed call and the row: the
           // hub saw nothing to resolve then, so look once now that there is one.
           onParked: async () => {
