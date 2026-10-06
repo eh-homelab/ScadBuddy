@@ -240,39 +240,54 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       it('give up on a held advisory lock after lock_timeout, and ready() retries (finding 3)', async () => {
         const errors: unknown[] = []
+        // The test's own key (#1249): other pg suites migrate their schemas under
+        // MIGRATION_LOCK in parallel and can hold it past this connection's 200 ms
+        // lock_timeout, so under the shared key the retries below raced them.
+        const lockKey = MIGRATION_LOCK + 1249n
         const holder = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
+        // Another suite migrating, holding the shared lock for the whole test. With
+        // the test's own key it makes no difference.
+        const contender = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
         const waiting = connectDatabase(TEST_DATABASE_URL!, {
           searchPath: schema,
-          migrate: { lockTimeoutMs: 200 },
+          migrate: { lockTimeoutMs: 200, lockKey },
           onMigrationError: (err) => errors.push(err),
         })
         let release!: () => void
         const released = new Promise<void>((resolve) => (release = resolve))
         let locked!: () => void
         const isLocked = new Promise<void>((resolve) => (locked = resolve))
+        let contending!: () => void
+        const isContending = new Promise<void>((resolve) => (contending = resolve))
+        let stopContending!: () => void
+        const contended = new Promise<void>((resolve) => (stopContending = resolve))
         const held = holder.begin(async (tx) => {
-          await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+          await tx`SELECT pg_advisory_xact_lock(${lockKey.toString()}::bigint)`
           locked()
           await released
         })
+        const contention = contender.begin(async (tx) => {
+          await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+          contending()
+          await contended
+        })
         try {
-          await isLocked
+          await Promise.all([isLocked, isContending])
           const started = Date.now()
           expect(await waiting.ready()).toBe(false)
           expect(Date.now() - started).toBeLessThan(5000)
           expect(String(errors[0])).toMatch(/lock timeout/i)
           release()
           await held
-          // Test files running in parallel migrate their own schemas under the
-          // same advisory lock and can hold it past this connection's 200 ms
-          // lock_timeout, so allow ready() a few retries.
-          let ready = false
-          for (let i = 0; i < 20 && !ready; i++) ready = await waiting.ready()
-          expect(ready).toBe(true)
+          // Nothing else takes the test's key, so the first retry gets it.
+          expect(await waiting.ready()).toBe(true)
         } finally {
           release()
+          stopContending()
           await held.catch(() => {})
+          await contention.catch(() => {})
           await holder.end({ timeout: 5 })
+          await contender.end({ timeout: 5 })
           await waiting.close()
         }
       })
