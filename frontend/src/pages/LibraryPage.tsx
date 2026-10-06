@@ -146,7 +146,7 @@ export function LibraryPage() {
               <li
                 key={file.id}
                 data-testid={`library-file-${file.id}`}
-                className="flex flex-col gap-2 rounded-[8px] border border-line bg-surface-2 p-2"
+                className="flex min-w-0 flex-col gap-2 rounded-[8px] border border-line bg-surface-2 p-2"
               >
                 {file.has_thumbnail ? (
                   <img
@@ -201,9 +201,12 @@ const KEPT_TAIL = 8
  * CSS has no middle ellipsis: the head truncates and the tail never shrinks.
  */
 function MiddleTruncated({ name }: { name: string }) {
-  const dot = name.indexOf('.', 1)
-  const stem = dot === -1 ? name : name.slice(0, dot)
-  const split = Math.max(0, stem.length - KEPT_TAIL)
+  // The extension is found from the end: a dot early in a name (`v1.2_shelf….3mf`) is
+  // part of the stem, and must not pull the whole name into the tail that never shrinks.
+  const sliced = name.toLowerCase().endsWith('.gcode.3mf') ? name.length - '.gcode.3mf'.length : -1
+  const last = name.lastIndexOf('.')
+  const dot = sliced > 0 ? sliced : last > 0 ? last : name.length
+  const split = Math.max(0, dot - KEPT_TAIL)
   return (
     <p className="flex min-w-0 text-[13px] text-ink" title={name}>
       <span className="truncate">{name.slice(0, split)}</span>

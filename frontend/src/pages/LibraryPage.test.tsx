@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { libraryFiles } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -105,6 +106,27 @@ describe('LibraryPage', () => {
 
     await waitFor(() => expect(screen.queryByTestId('library-print-89')).toBeNull())
     expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+  })
+
+  it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
+    const filename = 'v1.2_shelf_bracket_with_cable_channel_and_a_long_tail.3mf'
+    server.use(
+      http.get('/api/v1/print/library', () =>
+        HttpResponse.json({
+          folder_id: null,
+          all: false,
+          folders: [],
+          files: [{ ...libraryFiles[0], id: 7001, filename, file_type: '3mf', folder_id: null }],
+          hidden: 0,
+        }),
+      ),
+    )
+    renderPage(<LibraryPage />, { route: '/library' })
+    const card = await screen.findByTestId('library-file-7001')
+    const caption = card.querySelector(`p[title="${filename}"]`)
+    const [head, tail] = Array.from(caption?.querySelectorAll('span') ?? [])
+    expect(head.textContent + tail.textContent).toBe(filename)
+    expect(tail.textContent).toBe('ong_tail.3mf')
   })
 
   it('says when the library cannot be read', async () => {
