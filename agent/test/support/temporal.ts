@@ -33,11 +33,19 @@ type CreateOptions = {
   connectionOptions: { connectTimeout: string }
 }
 
+/**
+ * `TestWorkflowEnvironment.create`: private in the SDK's types only (1.24); it is the static
+ * `createLocal` calls. `test/temporalSdk.test.ts` fails without Temporal if a bump drops it.
+ */
+export function privateCreate(): ((o: CreateOptions) => Promise<TestWorkflowEnvironment>) | undefined {
+  const create = (TestWorkflowEnvironment as unknown as { create?: unknown }).create
+  return typeof create === 'function' ? (create as (o: CreateOptions) => Promise<TestWorkflowEnvironment>) : undefined
+}
+
 export function localTemporal(): Promise<TestWorkflowEnvironment> {
-  // What `createLocal` does, plus the connection options it does not pass on (SDK 1.24:
-  // `create` is private in the types only; it is the static `createLocal` calls).
-  const create = (TestWorkflowEnvironment as unknown as { create(o: CreateOptions): Promise<TestWorkflowEnvironment> })
-    .create
+  // What `createLocal` does, plus the connection options it does not pass on.
+  const create = privateCreate()
+  if (!create) throw new Error('@temporalio/testing no longer has TestWorkflowEnvironment.create; see test/support/temporal.ts')
   return create.call(TestWorkflowEnvironment, {
     server: { type: 'dev-server', executable: { type: 'existing-path', path: TEMPORAL_CLI! } },
     supportsTimeSkipping: false,
