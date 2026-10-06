@@ -183,6 +183,34 @@ def test_a_text_value_past_its_max_length_is_refused(
     assert client.get(_url(model)).json()[0]["params"] == {"label": "x" * 8}
 
 
+def test_a_colour_value_has_to_be_a_hex_colour(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353: a preset's colour is what the colour picker could pick, `#RRGGBB`. A name
+    or anything else was saved, then shown as `#RREEDD` with a black swatch."""
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="col", type="color", initial="#00FF00"),
+            Parameter(name="named", type="color", initial="red"),
+        ]
+    )
+
+    async def with_a_colour(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_colour)
+    for value in ("red", "red; cube(100)", "#12345", "#1234567", "#GGGGGG", "00FF00", ""):
+        refused = client.post(_url(model), json={"name": "X", "params": {"col": value}})
+        assert refused.status_code == 422, value
+        assert refused.json()["parameters"] == ["col"]
+    saved = _save(client, model, "Blue", {"col": "#0000ff"})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"col": "blue"}})
+    assert update.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"col": "#0000ff"}
+    # The template's own default is its business, whatever it spells.
+    _save(client, model, "Default", {"named": "red"})
+
+
 @pytest.mark.parametrize(
     "body",
     [
