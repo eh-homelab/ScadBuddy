@@ -67,8 +67,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
       const att = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(parsed.input)], toolUseId: 'toolu_a', signal, attention })
       const ask = run.questionGate!({ tool: 'AskUserQuestion', questions: [COLOUR, PARTS], toolUseId: 'toolu_q', signal })
       const outward = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
-      verdicts.push(await att, await ask)
-      approved.push((await outward).approved)
+      // Awaited together: an interrupt rejects the approval while the questions are
+      // still settling, and awaited last it would be an unhandled rejection by then.
+      const [a, q, o] = await Promise.all([att, ask, outward])
+      verdicts.push(a, q)
+      approved.push(o.approved)
       yield { ...result, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
     })()
 
