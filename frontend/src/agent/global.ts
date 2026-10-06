@@ -17,6 +17,9 @@ const USER_ONLY_MESSAGE =
   'Only the user can press this: it confirms an action that leaves ScadBuddy or cannot be ' +
   'undone (send, print, delete, save settings). Ask the user to review it and press it.'
 
+/** How long a route must hold still before `navigate` reports it as where it landed. */
+const SETTLE_MS = 100
+
 /** `navigate` accepts in-app paths only: no scheme, no protocol-relative `//host`. */
 function checkRoute(route: string): string {
   if (!route.startsWith('/') || route.startsWith('//') || route.includes('\\')) {
@@ -69,10 +72,17 @@ export function useGlobalAgentTools() {
       // redirect (an unknown path lands on "/") still counts as having moved.
       // One that redirects straight back to where it started never changes it, so the
       // wait is short and its end is an answer, not an error.
-      const landed = await waitFor(() => (current.current !== from ? current.current : undefined), {
+      let landed = await waitFor(() => (current.current !== from ? current.current : undefined), {
         timeout: 1000,
         what: 'the route to change',
       }).catch(() => current.current)
+      // A page may rewrite its own URL a commit later (the catalogue adds `view`): answer
+      // with the route once it holds still for SETTLE_MS, not the one in between (#1485).
+      for (const until = performance.now() + 1000; performance.now() < until; ) {
+        await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
+        if (current.current === landed) break
+        landed = current.current
+      }
       return { route: landed }
     },
 
