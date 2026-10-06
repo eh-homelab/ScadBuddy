@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, api } from '../api/client'
+import { ApiError, api, newRequestId, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
 import type { Job } from '../api/types'
 import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
 import type { ParamValues } from './params'
@@ -37,20 +37,57 @@ export interface RenderState {
    */
   settledFor: ParamValues | undefined
   /**
-   * Seconds until the submit is tried again, while the server's render queue is
-   * full (503 with `retry_after`, only when SCADBUDDY_RENDER_QUEUE_MAX is set).
-   * Not an error: the preview is still coming.
+   * Seconds until the submit is tried again, and why: a 503 with `retry_after` (a full
+   * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; Temporal unavailable; the
+   * request still being accepted; or no answer from ScadBuddy). Not an error: the
+   * preview is still coming.
    */
-  busy: number | undefined
+  busy: RenderBusy | undefined
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
 }
 
-/** How long a refused render asks to wait: only a queue-full 503 carries it. */
+export type BusyReason = 'queue-full' | 'temporal-unavailable' | 'still-accepting' | 'unanswered'
+
+export interface RenderBusy {
+  seconds: number
+  reason: BusyReason
+}
+
+function busyReason(cause: ApiError): BusyReason {
+  switch (cause.problem.type) {
+    case TEMPORAL_UNAVAILABLE:
+      return 'temporal-unavailable'
+    case STILL_ACCEPTING:
+      return 'still-accepting'
+    case UNANSWERED:
+      return 'unanswered'
+    default:
+      return 'queue-full'
+  }
+}
+
+/**
+ * How long a refused render asks to wait: a 503's `retry_after`, from its body (a full
+ * queue) or its `Retry-After` header (the client copies it in: still accepting, Temporal
+ * unavailable, or an unanswered request with one).
+ */
 function retryAfterSeconds(cause: unknown): number | undefined {
   if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
   const seconds = cause.problem['retry_after']
   return typeof seconds === 'number' && seconds > 0 ? seconds : undefined
+}
+
+/**
+ * Whether a refusal left no claim under its key: a full queue's. Its answer is what the
+ * key's run completed with, so sent again under that key it is answered from that run;
+ * the retry takes a new key. Any other refusal may hold a claim, which only a re-send
+ * with the same key keeps as one (review #1066 (7) 3).
+ */
+function claimedNothing(cause: unknown): boolean {
+  if (!(cause instanceof ApiError)) return false
+  const { type } = cause.problem
+  return type !== STILL_ACCEPTING && type !== TEMPORAL_UNAVAILABLE && type !== UNANSWERED
 }
 
 const STALE_CHECK_MS = 250
@@ -75,7 +112,7 @@ export function useRenderJob(
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
-  const [busy, setBusy] = useState<number | undefined>(undefined)
+  const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
   const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
@@ -101,8 +138,9 @@ export function useRenderJob(
 
     /** Wait out a refusal, but give up as soon as a newer submit supersedes this one. */
     async function waitUnlessStale(seconds: number) {
-      const until = Date.now() + seconds * 1000
-      while (Date.now() < until && !isStale()) {
+      // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+      const until = performance.now() + seconds * 1000
+      while (performance.now() < until && !isStale()) {
         await new Promise((resolve) => setTimeout(resolve, STALE_CHECK_MS))
       }
     }
@@ -182,6 +220,7 @@ export function useRenderJob(
       // A full queue is transient ("about one render"): retry after the delay it
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
+      let requestId = newRequestId()
       for (;;) {
         try {
           const { job_id } = await api.render(
@@ -190,13 +229,18 @@ export function useRenderJob(
             version,
             supersedes,
             superseded.signal,
+            requestId,
           )
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
+          // Retried for as long as the server answers with a wait, Temporal being
+          // unavailable included: the banner says so, and the preview comes back
+          // with the render service rather than needing a reload.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
-          setBusy(wait)
+          if (claimedNothing(cause)) requestId = newRequestId()
+          setBusy({ seconds: wait, reason: busyReason(cause as ApiError) })
           await waitUnlessStale(wait)
           if (isStale()) throw cause
         }

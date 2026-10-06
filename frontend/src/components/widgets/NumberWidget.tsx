@@ -1,5 +1,6 @@
 import type { Param } from '../../api/types'
 import { Field } from './Field'
+import { NumberInput } from './NumberInput'
 
 export function NumberWidget({
   param,
@@ -15,17 +16,13 @@ export function NumberWidget({
 
   return (
     <Field id={id} label={param.caption ?? param.name} name={param.name}>
-      <input
+      <NumberInput
         id={id}
-        type="number"
         value={value}
         min={param.min ?? undefined}
         max={param.max ?? undefined}
         step={step}
-        onChange={(event) => {
-          const next = Number(event.target.value)
-          onChange(param.type === 'integer' ? Math.round(next) : next)
-        }}
+        onCommit={(next) => onChange(param.type === 'integer' ? Math.round(next) : next)}
         className="sb-field sb-num"
       />
     </Field>

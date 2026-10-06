@@ -187,6 +187,31 @@ describe('CustomizePage', () => {
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
   })
 
+  it('says it cannot reach the render service, not that the queue is full', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'Temporal is unavailable',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent('ScadBuddy cannot reach its render service; retrying in 1 s')
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
   it('re-renders after a parameter change and updates the dimensions', async () => {
     const { user } = render()
     await firstRender()
@@ -474,6 +499,25 @@ describe('CustomizePage', () => {
       if (body.inputs.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
     }
     // Two debounced renders and a schema refetch do not fit the default budget.
+  }, 20000)
+
+  it('renders a retyped number once, never the empty field as 0 (#1323)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    await user.clear(padding)
+    // Longer than the debounce: an empty field that committed 0 would render it now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    await user.type(padding, '-12')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(before), { timeout: 4000 })
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
+    expect(sent).toEqual([-12])
   }, 20000)
 
   it('links to the versions panel', async () => {
