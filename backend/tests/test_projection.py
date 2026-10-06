@@ -302,7 +302,8 @@ def test_a_newer_render_supersedes_a_running_one(
     )
     assert submitted.superseded is not None and submitted.superseded.id == first.id
     dropped = announcing.read(first.id)
-    assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
+    # #1323: it had started, so the error must not say "before it started".
+    assert dropped.state == "cancelled" and dropped.error == "superseded by a newer render"
     assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded", "job.pending"]
 
 
