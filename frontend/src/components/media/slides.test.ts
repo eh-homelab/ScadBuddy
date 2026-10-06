@@ -13,7 +13,7 @@ describe('toSlides (#275)', () => {
       kind: 'image',
       src: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6',
       poster: undefined,
-      thumbnail: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6/thumbnail',
+      thumbnail: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6/thumbnail?v=1',
       alt: 'Printed in blue and orange',
       caption: 'Printed in blue and orange',
       contentType: 'image/png',
@@ -21,7 +21,7 @@ describe('toSlides (#275)', () => {
     expect(slides[3]).toMatchObject({
       kind: 'video',
       poster: '/api/v1/models/creme-coaster/media/d4e5f6a1b2c3/poster',
-      thumbnail: '/api/v1/models/creme-coaster/media/d4e5f6a1b2c3/thumbnail',
+      thumbnail: '/api/v1/models/creme-coaster/media/d4e5f6a1b2c3/thumbnail?v=1',
       contentType: 'video/mp4',
     })
   })

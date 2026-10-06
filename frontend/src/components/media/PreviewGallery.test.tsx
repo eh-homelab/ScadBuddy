@@ -27,7 +27,7 @@ describe('PreviewGallery (#280, #624)', () => {
     const strip = screen.getByRole('list', { name: 'Gallery' })
     const sources = [...strip.querySelectorAll('img')].map((img) => img.getAttribute('src'))
     expect(sources).toHaveLength(items.length)
-    for (const src of sources) expect(src).toMatch(/\/thumbnail$/)
+    for (const src of sources) expect(src).toMatch(/\/thumbnail\?v=\d+$/)
     expect(container.querySelector(`img[src$="/media/${items[0]!.id}"]`)).toBeNull()
   })
 
