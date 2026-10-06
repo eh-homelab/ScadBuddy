@@ -103,6 +103,23 @@ async function firstRender() {
 }
 
 describe('CustomizePage', () => {
+  it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
+    // The schema's title is the .scad file's name, "model" for every model.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...fixtures.keychainSchema, title: 'model' }),
+      ),
+      http.get('/api/v1/models/:slug', async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      }),
+    )
+    render()
+    const heading = await screen.findByRole('heading', { level: 1 })
+    expect(heading).not.toHaveTextContent(/^model$/)
+    expect(heading).toHaveTextContent('name-keychain')
+  })
+
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -158,6 +175,19 @@ describe('CustomizePage', () => {
     render()
     await firstRender()
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
   })
 
   it('says the queue is full and renders anyway once the delay passes', async () => {

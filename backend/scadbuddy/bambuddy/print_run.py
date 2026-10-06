@@ -20,7 +20,13 @@ from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
-from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
+from scadbuddy.bambuddy.extruders import (
+    RACK_SIDE,
+    high_flow_warning,
+    high_flow_warnings,
+    slicer_nozzle_stats,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -506,11 +512,15 @@ async def check_print(
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
-    # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
+    # The one mounted-nozzle advisory kept (#723): a warning, never a refusal. Not for
+    # the rack side when the preview picks it a hotend (#1238).
+    rack_picked = rack_view is not None and rack_view.position is not None
     return PrintCheck(
         errors=errors,
         warnings=[
-            *high_flow_warnings(prepared.printer_status, request.choices.nozzles),
+            *high_flow_warnings(
+                prepared.printer_status, request.choices.nozzles, rack_picked=rack_picked
+            ),
             *rack_notes,
         ],
         rack=rack_view,
@@ -996,6 +1006,10 @@ def finish_run(
     """Report what was queued, with each plate's rack picks and warnings (``queued``,
     one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
     warnings = list(planned.warnings)
+    if queued and all(plate.picks for plate in queued):
+        # Every plate had the rack side's hotend picked from the rack, which is always a
+        # Standard one of the size: the High Flow mounted there now is swapped out (#1238).
+        warnings = [warning for warning in warnings if warning != high_flow_warning(RACK_SIDE)]
     for plate in queued or []:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate.warnings if warning not in warnings]

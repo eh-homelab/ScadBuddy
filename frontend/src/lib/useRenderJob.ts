@@ -82,7 +82,9 @@ export function useRenderJob(
   const extraRef = useLatest(extra)
 
   useEffect(() => {
-    if (!slug || !params || Object.keys(params).length === 0) return
+    // An empty `params` is a model with no customizer parameters (#941): its defaults
+    // are still a render. A caller with nothing to render yet passes undefined.
+    if (!slug || !params) return
 
     const mine = ++generation.current
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -98,8 +100,8 @@ export function useRenderJob(
 
     /** Wait out a refusal, but give up as soon as a newer submit supersedes this one. */
     async function waitUnlessStale(seconds: number) {
-      const until = Date.now() + seconds * 1000
-      while (Date.now() < until && !isStale()) {
+      const until = performance.now() + seconds * 1000
+      while (performance.now() < until && !isStale()) {
         await new Promise((resolve) => setTimeout(resolve, STALE_CHECK_MS))
       }
     }

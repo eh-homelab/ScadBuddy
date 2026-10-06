@@ -4,14 +4,25 @@ activities replaced by fakes that record their calls."""
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.client import Client, WorkflowFailureError
+from temporalio.bridge.proto.workflow_activation import WorkflowActivation
+from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
+from temporalio.client import Client, WorkflowFailureError, WorkflowHandle
 from temporalio.exceptions import ApplicationError, CancelledError, FailureError
-from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import (
+    UnsandboxedWorkflowRunner,
+    Worker,
+    WorkflowInstance,
+    WorkflowInstanceDetails,
+    WorkflowRunner,
+)
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo
@@ -43,12 +54,14 @@ class FakeActivities:
         fail_main: bool = False,
         block_main: asyncio.Event | None = None,
         block_solids: asyncio.Event | None = None,
+        fail_solids: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.projections: list[Projection] = []
         self.fail_main = fail_main
         self.block_main = block_main
         self.block_solids = block_solids
+        self.fail_solids = fail_solids
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
@@ -92,6 +105,9 @@ class FakeActivities:
         self.calls.append("render_solids")
         if self.block_solids is not None:
             await self.block_solids.wait()
+        if self.fail_solids:
+            # What a BadZipFile looks like once its retries are spent (#952).
+            raise ApplicationError("File is not a zip file", type="BadZipFile", non_retryable=True)
 
     @activity.defn(name="finish_piece")
     async def finish_piece(
@@ -124,11 +140,14 @@ def _job(revision: str | None = REVISION, **params: int) -> Job:
     )
 
 
-def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
-    return Worker(
+def _worker(
+    client: Client, queue: str, acts: FakeActivities, runner: WorkflowRunner | None = None
+) -> Worker:
+    worker = Worker(
         client,
         task_queue=queue,
         workflows=[TemplatePipeline, RenderPiece],
+        workflow_runner=runner or SandboxedWorkflowRunner(),
         activities=[
             acts.cached_piece,
             acts.prepare,
@@ -138,6 +157,72 @@ def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
             acts.project,
         ],
     )
+    if runner is not None:
+        # A held activation (`_HoldsItsSignal`) is not a deadlock. `debug_mode`
+        # would also turn the detector off, but it runs activations on the event
+        # loop, which a held one would then block, test and all.
+        assert worker._workflow_worker is not None
+        worker._workflow_worker._deadlock_timeout_seconds = None
+    return worker
+
+
+class _HoldsItsSignal(WorkflowRunner):
+    """The default runner, except that ``workflow_id``'s first activation that signals
+    another workflow hands its completion back to the server, signal command and all,
+    only once ``release`` is set. What the test does meanwhile reaches the workflow
+    while that signal is in flight (#1590)."""
+
+    def __init__(self, workflow_id: str) -> None:
+        self.inner = SandboxedWorkflowRunner()
+        self.workflow_id = workflow_id
+        self.signalling = threading.Event()
+        self.release = threading.Event()
+
+    def prepare_workflow(self, defn: Any) -> None:
+        self.inner.prepare_workflow(defn)
+
+    def set_worker_level_failure_exception_types(self, types: Any) -> None:
+        self.inner.set_worker_level_failure_exception_types(types)
+
+    def create_instance(self, det: WorkflowInstanceDetails) -> WorkflowInstance:
+        instance = self.inner.create_instance(det)
+        if det.info.workflow_id != self.workflow_id:
+            return instance
+        runner = self
+
+        class Held:
+            def activate(self, act: WorkflowActivation) -> WorkflowActivationCompletion:
+                completion = instance.activate(act)
+                commands = completion.successful.commands
+                if not runner.signalling.is_set() and any(
+                    c.HasField("signal_external_workflow_execution") for c in commands
+                ):
+                    runner.signalling.set()
+                    runner.release.wait(30)
+                return completion
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(instance, name)
+
+        return cast(WorkflowInstance, Held())
+
+
+async def _until_its_signal_is_answered(handle: WorkflowHandle[Any, Any]) -> None:
+    """Until ``handle``'s workflow has run a task after its signal to another one
+    completed: the signal's `await` has returned, so the job waits on the piece."""
+    while True:
+        names = [
+            e.WhichOneof("attributes")
+            async for e in handle.fetch_history_events()
+            if e.WhichOneof("attributes") is not None
+        ]
+        done = "external_workflow_execution_signaled_event_attributes"
+        if (
+            done in names
+            and "workflow_task_completed_event_attributes" in names[names.index(done) :]
+        ):
+            return
+        await asyncio.sleep(0.05)
 
 
 async def _until_the_piece_is_waited_on(client: Client, width: int) -> None:
@@ -185,6 +270,24 @@ async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:
         assert last.state == "failed" and last.failure is not None
         assert last.failure.log_tail == ["ERROR: boom"]
         assert acts.calls == ["prepare", "render_main"]
+
+
+async def test_a_failure_outside_openscad_names_its_stage_and_cause() -> None:
+    """#952: not "ChildWorkflowError: Child Workflow execution failed"."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities(fail_solids=True)
+        async with _worker(client, queue, acts):
+            job = _job(width=7)
+            await client.execute_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+        last = acts.projections[-1]
+        assert last.state == "failed" and last.failure is not None
+        assert last.failure.error == (
+            "building the per-colour solids failed: BadZipFile: File is not a zip file"
+        )
+        assert last.failure.log_tail == []
 
 
 async def test_identical_pieces_render_once_across_two_jobs() -> None:
@@ -329,6 +432,7 @@ async def test_cancelling_a_job_that_waits_on_another_jobs_piece_leaves_the_piec
                 TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
             )
             await _until_the_piece_is_waited_on(client, 5)
+            await _until_its_signal_is_answered(hb)
             await hb.cancel()
             with pytest.raises(WorkflowFailureError) as raised:
                 await hb.result()
@@ -336,6 +440,43 @@ async def test_cancelling_a_job_that_waits_on_another_jobs_piece_leaves_the_piec
             gate.set()
             await ha.result()
         assert acts.calls.count("render_main") == 1
+        assert [p.state for p in acts.projections if p.job_id == a.id and p.state][-1] == "done"
+        assert [p.state for p in acts.projections if p.job_id == b.id and p.state][
+            -1
+        ] == "cancelled"
+
+
+async def test_a_job_cancelled_while_its_signal_to_the_piece_is_in_flight_is_cancelled() -> None:
+    """The SDK shields a signal in flight from the workflow's cancellation, and
+    (temporalio 1.34) drops a cancel that lands before the signal resolves: the job
+    then waited on the piece, and ended with its outcome as if never cancelled
+    (#1590). The cancel lands in that window here every time."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = FakeActivities(block_solids=gate)
+        a, b = _job(width=6), _job(width=6)
+        runner = _HoldsItsSignal(f"render-{b.id}")
+        async with _worker(client, queue, acts, runner):
+            ha = await client.start_workflow(
+                TemplatePipeline.run, a, id=f"render-{a.id}", task_queue=queue
+            )
+            while "render_solids" not in acts.calls:
+                await asyncio.sleep(0.05)
+            hb = await client.start_workflow(
+                TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
+            )
+            try:
+                assert await asyncio.to_thread(runner.signalling.wait, 30)
+                await hb.cancel()  # recorded before the server sees the signal
+            finally:
+                runner.release.set()
+            await _until_the_piece_is_waited_on(client, 6)
+            with pytest.raises(WorkflowFailureError) as raised:
+                await asyncio.wait_for(hb.result(), timeout=30)
+            assert isinstance(raised.value.cause, CancelledError)
+            gate.set()
+            await ha.result()
         assert [p.state for p in acts.projections if p.job_id == a.id and p.state][-1] == "done"
         assert [p.state for p in acts.projections if p.job_id == b.id and p.state][
             -1
