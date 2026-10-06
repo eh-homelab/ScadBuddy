@@ -1005,9 +1005,9 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (q) {
     const haystack = [
       print.output_name ?? '',
-      print.slug,
+      print.slug ?? '',
       archive?.print_name ?? '',
-      JSON.stringify(print.provenance.params),
+      JSON.stringify(print.provenance?.params ?? {}),
     ]
     if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
   }

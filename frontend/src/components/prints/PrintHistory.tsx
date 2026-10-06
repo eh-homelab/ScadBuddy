@@ -261,7 +261,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
               key={print.archive_id}
               print={print}
               view={query.view}
-              templateName={fixedSlug ? undefined : (templateNames.get(print.slug) ?? print.slug)}
+              templateName={fixedSlug ? undefined : templateLabel(print, templateNames)}
               onOpenMedia={openMedia}
             />
           ))}
@@ -322,6 +322,11 @@ function MorePrints({
       </Button>
     </div>
   )
+}
+
+/** The template a print was made from, or that it was a Bambuddy library file (#976). */
+function templateLabel(print: PrintSummary, names: Map<string, string>): string {
+  return print.slug === null ? 'Bambuddy library file' : (names.get(print.slug) ?? print.slug)
 }
 
 /**

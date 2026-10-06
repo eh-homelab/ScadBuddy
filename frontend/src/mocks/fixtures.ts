@@ -1251,6 +1251,7 @@ function printOf(
     archive_id,
     output_id: output.id,
     slug: output.slug,
+    library_file_id: null,
     output_name: output.name ?? null,
     printer_id: 1,
     printer_name: '3DP-31B-598',
@@ -1383,7 +1384,7 @@ export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media
 
 // #311 — print 35 printed twice: the first run was cancelled, the second completed.
 const reprinted = prints.find((print) => print.archive_id === 35)
-if (reprinted) {
+if (reprinted?.provenance) {
   reprinted.provenance.model_version = versionIds.edited
   reprinted.outcome.runs = [
     {

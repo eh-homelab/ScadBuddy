@@ -1,9 +1,11 @@
 """The prints API (#308, epic #305; print-history plan §2.4).
 
 A print is one Bambuddy archive linked to one of ScadBuddy's outputs
-(``output_bambuddy_prints``, #306), keyed by the archive's id. The list is driven by
-that table, so an archive printed from anywhere else is never listed: this is
-ScadBuddy's print history, not a copy of Bambuddy's. Bambuddy stays the source of
+(``output_bambuddy_prints``, #306), or to a Bambuddy library file ScadBuddy printed
+(``library_bambuddy_prints``, #976), keyed by the archive's id. The list is driven by
+those tables, so an archive printed from anywhere else is never listed: this is
+ScadBuddy's print history, not a copy of Bambuddy's. A library file's print has no
+template, parameters or files of ScadBuddy's: only the archive's. Bambuddy stays the source of
 truth for the print; its reads are kept 30 s (`ArchiveCache`) and nothing else of it
 is stored.
 
@@ -45,6 +47,7 @@ from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
+from scadbuddy.bambuddy.linking import link_library_prints
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRun,
@@ -112,8 +115,13 @@ class PrintCover(_Response):
 
 class PrintSummary(_Response):
     archive_id: int
-    output_id: str
-    slug: str
+    #: The output printed; None for a library file's print (``library_file_id``).
+    output_id: str | None
+    #: The output's template; None for a library file's print.
+    slug: str | None
+    #: The Bambuddy library file printed, for a print of one (#976); else None.
+    library_file_id: int | None
+    #: The output's name, or a library file's print's name in Bambuddy.
     output_name: str | None
     #: Bambuddy's (``completed``, ``failed``, ``printing``, …), or
     #: ``deleted_in_bambuddy`` for a linked archive Bambuddy no longer has.
@@ -132,7 +140,7 @@ class PrintSummary(_Response):
     attachment_count: int
     #: The output's parameters whose value differs from the template's defaults at
     #: the revision it was rendered from (the current one when that is gone). None
-    #: when no schema could be read for it.
+    #: when no schema could be read for it, and for a library file's print.
     params_diff: dict[str, ParamValue] | None
     run_count: int
 
@@ -245,12 +253,13 @@ class PrintOutcome(_Response):
 class PrintLinks(_Response):
     #: Bambuddy's archives page; None when the archive is gone from it.
     bambuddy_url: str | None
-    #: The template's customizer in the UI, relative to it.
-    customize_url: str
+    #: The template's customizer in the UI, relative to it; None for a library file's.
+    customize_url: str | None
 
 
 class PrintDetail(PrintSummary):
-    provenance: PrintProvenance
+    #: The output the print came from; None for a library file's print.
+    provenance: PrintProvenance | None
     files: list[PrintFile]
     media: PrintMedia
     outcome: PrintOutcome
@@ -281,15 +290,20 @@ def _cover(archive: ArchiveDetail) -> PrintCover | None:
 
 def _summary(
     link: LinkedPrint,
-    meta: OutputMeta,
+    meta: OutputMeta | None,
     archive: ArchiveDetail | None,
     params_diff: dict[str, ParamValue] | None,
 ) -> PrintSummary:
+    if meta is not None:
+        name = meta.name
+    else:
+        name = (archive.print_name if archive is not None else None) or link.name
     return PrintSummary(
         archive_id=link.archive_id,
-        output_id=meta.id,
-        slug=meta.slug,
-        output_name=meta.name,
+        output_id=None if meta is None else meta.id,
+        slug=None if meta is None else meta.slug,
+        library_file_id=link.library_file_id,
+        output_name=name,
         status=DELETED_STATUS if archive is None else archive.status or UNKNOWN_STATUS,
         printer_id=(
             archive.printer_id
@@ -403,7 +417,7 @@ def _matches(
     summary: PrintSummary,
     link: LinkedPrint,
     archive: ArchiveDetail | None,
-    output: _Output,
+    output: _Output | None,
 ) -> bool:
     if filters.status is not None and summary.status != filters.status:
         return False
@@ -420,10 +434,16 @@ def _matches(
     if filters.q:
         needle = filters.q.casefold()
         haystack = (
-            output.meta.name or "",
-            output.meta.slug,
             (archive.print_name or "") if archive is not None else "",
-            json.dumps(output.params, sort_keys=True),
+            *(
+                (
+                    output.meta.name or "",
+                    output.meta.slug,
+                    json.dumps(output.params, sort_keys=True),
+                )
+                if output is not None
+                else (link.name or "",)
+            ),
         )
         if not any(needle in text.casefold() for text in haystack):
             return False
@@ -464,8 +484,9 @@ async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
     response_model=PrintPage,
     summary="ScadBuddy's print history",
     description=(
-        "The Bambuddy archives ScadBuddy's outputs printed, newest first, a page at a "
-        "time. Filters: the template (`slug`), Bambuddy's `status` (or "
+        "The Bambuddy archives ScadBuddy's outputs and the Bambuddy library files it "
+        "printed produced, newest first, a page at a time. Filters: the template (`slug`, "
+        "which leaves out every library file's print), Bambuddy's `status` (or "
         "`deleted_in_bambuddy`), `printer_id`, the day the print started (`from`, `to`, "
         "inclusive) and `q`, matched against the output's and the print's names and "
         f"the parameter values. One request examines at most {MAX_SCANNED} linked prints, "
@@ -508,6 +529,7 @@ async def list_prints(
     scanned = 0
 
     async with client_for(store.load()) as client:
+        await link_library_prints(client, links)
         while True:
             wanted = min(limit, MAX_SCANNED - scanned)
             batch = await links.page(limit=wanted, before=before, output_ids=output_ids)
@@ -517,20 +539,24 @@ async def list_prints(
             )
             for index, (link, archive) in enumerate(zip(batch, archives, strict=True)):
                 before = link.archive_id
-                if link.output_id not in known:
-                    known[link.output_id] = await asyncio.to_thread(
-                        _read_output, outputs, link.output_id
-                    )
-                output = known[link.output_id]
-                if output is None:
-                    continue  # The output went between its link and this read.
-                summary = _summary(link, output.meta, archive, None)
+                output = None
+                if link.output_id is not None:
+                    if link.output_id not in known:
+                        known[link.output_id] = await asyncio.to_thread(
+                            _read_output, outputs, link.output_id
+                        )
+                    output = known[link.output_id]
+                    if output is None:
+                        continue  # The output went between its link and this read.
+                summary = _summary(link, output.meta if output else None, archive, None)
                 if not _matches(filters, summary, link, archive, output):
                     continue
-                # Only for a print that is shown: the first of each template revision
-                # can take a schema export (#609 review).
-                diff = await defaults.diff(output)
-                items.append(summary.model_copy(update={"params_diff": diff}))
+                if output is not None:
+                    # Only for a print that is shown: the first of each template
+                    # revision can take a schema export (#609 review).
+                    diff = await defaults.diff(output)
+                    summary = summary.model_copy(update={"params_diff": diff})
+                items.append(summary)
                 if archive is not None:
                     present.add(archive.id)
                 if len(items) == limit:
@@ -564,26 +590,9 @@ async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
 
 
 def _files(
-    outputs: OutputStore, meta: OutputMeta, archive: ArchiveDetail | None
+    outputs: OutputStore, meta: OutputMeta | None, archive: ArchiveDetail | None
 ) -> list[PrintFile]:
-    files: list[PrintFile] = []
-    directory = outputs.directory(meta.id)
-    name = download_filename(meta)
-    own: tuple[tuple[Literal["output_3mf", "preview_glb"], str, str, str], ...] = (
-        ("output_3mf", MODEL_NAME, "model.3mf", name),
-        ("preview_glb", PREVIEW_NAME, "preview.glb", name.removesuffix(".3mf") + ".glb"),
-    )
-    for kind, file_name, route, download in own:
-        path = directory / file_name
-        if path.is_file():
-            files.append(
-                PrintFile(
-                    kind=kind,
-                    name=download,
-                    size=path.stat().st_size,
-                    url=f"/api/v1/outputs/{meta.id}/{route}",
-                )
-            )
+    files = [] if meta is None else _output_files(outputs, meta)
     if archive is None:
         return files
     files.append(
@@ -603,6 +612,28 @@ def _files(
                 url=_prints_url(archive.id, "files/source"),
             )
         )
+    return files
+
+
+def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
+    files: list[PrintFile] = []
+    directory = outputs.directory(meta.id)
+    name = download_filename(meta)
+    own: tuple[tuple[Literal["output_3mf", "preview_glb"], str, str, str], ...] = (
+        ("output_3mf", MODEL_NAME, "model.3mf", name),
+        ("preview_glb", PREVIEW_NAME, "preview.glb", name.removesuffix(".3mf") + ".glb"),
+    )
+    for kind, file_name, route, download in own:
+        path = directory / file_name
+        if path.is_file():
+            files.append(
+                PrintFile(
+                    kind=kind,
+                    name=download,
+                    size=path.stat().st_size,
+                    url=f"/api/v1/outputs/{meta.id}/{route}",
+                )
+            )
     return files
 
 
@@ -686,10 +717,10 @@ def _outcome(
     summary="One print: provenance, files, media and outcome",
     description=(
         "The print's summary, with the output it came from (template, revision, "
-        "parameters), every file (ScadBuddy's 3MF and preview mesh, the sliced file "
-        "and slicer project Bambuddy kept), its photos, timelapse and plate image, and "
-        "its outcome and runs. `printer_media=1` also lists what the printer holds "
-        "for it, which asks the printer."
+        "parameters; none for a library file's print), every file (ScadBuddy's 3MF and "
+        "preview mesh, the sliced file and slicer project Bambuddy kept), its photos, "
+        "timelapse and plate image, and its outcome and runs. `printer_media=1` also "
+        "lists what the printer holds for it, which asks the printer."
     ),
 )
 async def get_print(
@@ -705,18 +736,21 @@ async def get_print(
     printer_media: bool = False,
 ) -> PrintDetail:
     link = await _require_print(links, archive_id)
-    output = await asyncio.to_thread(_read_output, outputs, link.output_id)
-    if output is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"the output that printed archive {archive_id} is gone",
-        )
+    output = None
+    if link.output_id is not None:
+        output = await asyncio.to_thread(_read_output, outputs, link.output_id)
+        if output is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"the output that printed archive {archive_id} is gone",
+            )
     defaults = _Defaults(paths=paths, history=history, config=config, fetcher=fetcher)
-    meta = output.meta
+    meta = output.meta if output is not None else None
 
     async with client_for(store.load()) as client:
         archive = await cache.archive(client, archive_id)
-        summary = _summary(link, meta, archive, await defaults.diff(output))
+        diff = await defaults.diff(output) if output is not None else None
+        summary = _summary(link, meta, archive, diff)
         media = PrintMedia()
         runs: list[ArchiveRun] = []
         on_printer = None
@@ -733,18 +767,25 @@ async def get_print(
 
     return PrintDetail(
         **summary.model_dump(),
-        provenance=PrintProvenance(
-            slug=meta.slug,
-            model_version=meta.model_version,
-            params=output.params,
-            output_id=meta.id,
-            edit_url=edit_path(meta.id),
+        provenance=(
+            PrintProvenance(
+                slug=output.meta.slug,
+                model_version=output.meta.model_version,
+                params=output.params,
+                output_id=output.meta.id,
+                edit_url=edit_path(output.meta.id),
+            )
+            if output is not None
+            else None
         ),
         files=files,
         media=media,
         outcome=_outcome(summary, archive, runs),
         printer_media=on_printer,
-        links=PrintLinks(bambuddy_url=bambuddy_url, customize_url=f"/m/{meta.slug}"),
+        links=PrintLinks(
+            bambuddy_url=bambuddy_url,
+            customize_url=f"/m/{output.meta.slug}" if output is not None else None,
+        ),
     )
 
 

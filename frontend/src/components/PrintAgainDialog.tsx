@@ -94,7 +94,7 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
       ) : (
         <>
           <p className="text-[13px] text-ink">
-            Queue <span className="font-medium">{print.output_name ?? print.slug}</span> again on{' '}
+            Queue <span className="font-medium">{print.output_name ?? print.slug ?? `print #${print.archive_id}`}</span> again on{' '}
             <span className="font-medium">{printer}</span>, with Bambuddy&apos;s default print options.
           </p>
           {error && (
