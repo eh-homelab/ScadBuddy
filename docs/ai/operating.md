@@ -225,7 +225,14 @@ comment above `previousKek` in `main.ts` and from `CredentialStore.rewrapFrom()`
    The log line reads `secret key rotation: re-wrapped N credential(s) from key <old> to <new>`.
 4. A row the old key cannot open (altered, or in the v1 format) is left as it is and
    counted as `failed` in the same log line.
-5. Remove the previous-key mount and restart again.
+5. The same pass re-wraps the durable sessions' payload keys (`ai_payload_keys`,
+   `PgPayloadKeys.rewrapFrom()` in
+   [`agent/src/temporal/payloadKeys.ts`](../../agent/src/temporal/payloadKeys.ts), §13),
+   also conditional on `kek_id`, logging `secret key rotation: re-wrapped N payload
+   key(s)`. The payloads themselves are not touched. `agent-durable` opens a key with
+   the mounted KEK its `kek_id` names (`payload_keys.py`), so mount both files in that
+   container too until the rotation is done.
+6. Remove the previous-key mount and restart again (both containers).
 
 If the previous file cannot be loaded, the log says so and nothing is re-wrapped
 (`main.ts`).
@@ -573,6 +580,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   ([§8](#8-per-query-limits));
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  `session_mode` (`SETTING_SESSION_MODE` in `manager.ts`, written by
+  `PUT /api/v1/ai/settings/session-mode`, §13);
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
   ([§12](#12-the-http-request-tool-827)); and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
@@ -607,6 +616,14 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
   hash, the review, the approval and the enabled flag. See §9.
+
+- Durable sessions (#1056, §13): `ai_payload_keys` (one sealed data key per
+  `session-<uuid>`/`flow-<uuid>` subject, `20261004T2102Z_payload_keys.sql`);
+  `ai_durable_segments` (each segment attempt's cost and Claude session id),
+  `ai_durable_streams` (the projector's offset, chain, lease and `sending` mark) and
+  `ai_durable_snapshots` (the latest `AgentState`) (`20261005T0120Z_durable_sessions.sql`,
+  `20261005T1629Z_durable_stream_chain.sql`). `agent-durable` writes them and runs no
+  migrations of its own.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
@@ -813,3 +830,100 @@ so a change applies from the next turn.
   that volume for it.
 - Every request is listed in Settings → **AI activity** under **HTTP requests**, with
   its method, host, status and size.
+
+## 13. Durable sessions (#1056)
+
+A session's `mode` (`ai_sessions.mode`, fixed when it starts) is `classic` (the
+harness in this service) or `durable`: a `DurableSession` workflow, `session-<id>` on
+task queue `agent`, run by the `agent-durable` container
+([`agent-durable/scadbuddy_durable/workflow.py`](../../agent-durable/scadbuddy_durable/workflow.py)).
+The design is spec
+[`2026-10-01-durable-printing-agents-flows-design.md`](../superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md)
+§6, as built in its §10 phase 5. The container itself (variables, health, volumes) is
+in the README, "Durable assistant sessions".
+
+### 13.1 What it needs
+
+- **In the agent:** the database, the KEK (each durable session's payloads are sealed
+  under its own key, created with its row) and `SCADBUDDY_TEMPORAL_ADDRESS` (its sends
+  and approvals go to the workflow, and its tools run on the `agent-tools` worker). Without
+  any of them `mode: "durable"` is refused (`400`, "durable sessions need …"), and a start
+  that names no mode is `classic` whatever `session_mode` says (`defaultMode()` in
+  [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
+- **In the pod:** a running `agent-durable`. Without one a send is still accepted:
+  after 5 s (`DURABLE_ACCEPT_WAIT_MS`) the log gets a non-fatal `error` with code
+  `worker_pending` (the panel shows it as a notice), the session stays `running`, and
+  the turn runs when a worker polls.
+
+### 13.2 Choosing the mode
+
+`session_mode` in `ai_settings` is the default (`classic` when unset), set in Settings →
+Assistant → "Default mode for new chats" or with
+`GET`/`PUT /api/v1/ai/settings/session-mode` `{mode}`
+([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts); guarded and
+audited like the session limits). A start may name `mode`: the chat socket's first
+`user.message`, `POST /api/v1/ai/sessions` and `sessions_start`. On an existing session
+`mode` is refused ("mode is chosen when a session starts and cannot change"). The panel
+remembers its last choice in `localStorage` (`scadbuddy.assistant.mode`). A durable
+session cannot be forked (`409` `unsupported`). It gets ScadBuddy's skills only: no
+`ai_plugins`, no plugin packages, no subagents.
+
+### 13.3 Stop, and a run that ended badly
+
+- **Stop** cancels the running execution; with none running it answers `false`, and a
+  session that says it runs goes back to `idle`. The workflow returns its state as its
+  result, and the next message starts a new execution from it (the same Claude
+  conversation; calls that were cut off are reported to the model as interrupted,
+  "whether it took effect is unknown"). A message sent while the stopped run is still
+  closing waits for it up to 30 s (`DURABLE_SEND_DEADLINE_MS`), outside the chat
+  socket's queue, then is refused as busy ("this session's previous run is still
+  stopping; send again").
+- **A terminated or failed execution** leaves no result. The workflow saves its state to
+  `ai_durable_snapshots` as it goes, and the next message resumes from the latest one.
+  Each call that had no answer yet is given one by its status (interrupted, ran but its
+  result was lost, rejected, or did not run), so none runs twice under its id. Calls
+  the audit log saw run after the snapshot are named to the model in one line ("These
+  tool calls ran after this session's last saved point, and their results were lost:
+  …"). Only a session with no snapshot at all continues without its history; its log
+  then says so (`error` code `resumed_fresh`).
+- **A session stuck `running`** with no run running (terminated, or the agent died
+  between claiming a send and starting the run) is set `idle` by the projector: at once,
+  or, while a send's `sending` mark is on its stream row, once the mark has stayed
+  unchanged for 60 s (2 × the send deadline, on a monotonic clock).
+
+### 13.4 Approvals
+
+A durable approval's id is `durable:<session id>:<tool_use_id>`. Approve and deny (the
+panel, `/api/v1/ai/approvals`, `sessions_approve`/`sessions_deny`) go to the workflow's
+`review` Update after the same ownership check as a classic approval; a call no longer
+waiting (expired, decided) answers `409`. The expiry is `approval_expiry_seconds` as it
+was when the execution started, one timer per waiting call. Listing every pending
+approval (the browser user and grant holders) asks up to 100 durable sessions waiting
+for approval, within 15 s; one Temporal does not answer for is left out. Approvals live
+in the workflow, never in `ai_approvals`.
+
+### 13.5 Forgetting a durable session
+
+There is no delete route. An operator runs, in the `agent` container:
+
+```bash
+node dist/forget-subject.js session-<uuid>
+```
+
+([`agent/src/forget-subject.ts`](../../agent/src/forget-subject.ts),
+[`agent/src/durable/forget.ts`](../../agent/src/durable/forget.ts)). It reads the
+agent's variables and, in order: deletes the session's `ai_payload_keys` row (every copy
+of its payloads in Temporal, history, Visibility and Archival, is then unreadable;
+caches drop the key within 60 s); terminates the workflow if open and deletes it
+(`DeleteWorkflowExecution`, waiting up to 60 s for it to go); then deletes the
+session's rows (`ai_sessions`, its events, `ai_durable_*`, and the transcript entries of
+every Claude session id in `ai_durable_segments`) in one transaction. It prints JSON
+(`keyDeleted`, `workflow`: `terminated`, `closed` or `absent`, `rows`) and records an
+`operator` audit row (`forget_subject`).
+
+- With no `SCADBUDDY_TEMPORAL_ADDRESS` the workflow step is skipped (`absent`, with a
+  note).
+- With an address but Temporal unreachable it fails loudly: exit 1, the key is gone
+  but the rows are kept, and the audit row says which step failed. Run it again once
+  Temporal answers; it completes the rest (`keyDeleted: false`).
+- `ai_audit` rows are kept; only the retention sweep removes them.

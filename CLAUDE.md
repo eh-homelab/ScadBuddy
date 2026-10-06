@@ -96,6 +96,30 @@ against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
 manual `ai-evals.yml` workflow) and skips cleanly without one.
 
+Agent durable (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job). Use the
+Dockerfile's uv (0.12.19): an old uv cannot build the git-pinned plugin.
+
+```bash
+cd agent-durable
+uv sync --frozen
+uv run --frozen ruff check .
+uv run --frozen ruff format --check .
+uv run --frozen mypy              # strict; files = scadbuddy_durable, scripts, tests
+uv run --frozen pytest
+docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # asserts CLAUDE_CODE_VERSION
+```
+
+Its tests take the backend's variables: `requires_postgres` tests skip without
+`SCADBUDDY_TEST_DATABASE_URL`, and `requires_temporal` ones without
+`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` (a Temporal CLI) or `temporal` on `PATH`, from which
+they start a dev server. `requires_engine` (`tests/test_engine.py`) runs the bundled
+Claude Code against `agent/test/support/fakeAnthropicServer.ts` and also needs `node` on
+`PATH`. `tests/conftest.py` points `SCADBUDDY_AGENT_TOOLS_MANIFEST` at
+`tests/fixtures/tools.json`. The end-to-end test, chat socket to durable turn, is the
+agent's `test/durable.e2e.test.ts`: after `pnpm build` in `agent/`, it needs
+`SCADBUDDY_TEST_AGENT_DURABLE=<absolute path of agent-durable/>`, the database, a
+Temporal CLI and uv (`SCADBUDDY_TEST_UV` or `PATH`), and skips without any of them.
+
 Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
 `agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
 `pnpm gen:api` (`scripts/gen-api.mjs`) exports the spec with uv, then writes the
@@ -375,6 +399,26 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   §4, "Architecture") describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
   09-27 template-pipelines spec makes Postgres and Temporal required.
+- `agent-durable/` — durable assistant sessions (#1056, spec 2026-10-01 §6 and its
+  §10 phase 5 "As built"): `python -m scadbuddy_durable.worker`, shipped as the
+  Dockerfile's `agent-durable` target and run as a third container in the pod. One
+  Temporal worker on `agent` runs the `DurableSession` workflow (`workflow.py`, on the
+  `temporalio-claude-agent-sdk` plugin, git-pinned in `uv.lock` and never vendored)
+  and the plugin's segment activity (`runner.py` `SessionRunner`: the credential,
+  opened by `secrets.py`/`credentials.py`, and the remaining budget per segment). The
+  same process runs the projector (`projector.py`: each running session's live output
+  into `ai_session_events`, `translate.py` the protocol) and `/healthz` on 8082.
+  `config.py` `ENV_VARS` is all it reads: `SCADBUDDY_DATABASE_URL`, the two
+  `SCADBUDDY_SECRET_KEY*_FILE`s, `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and
+  `SCADBUDDY_AGENT_DURABLE_HEALTH_PORT` (`tools.py` also takes
+  `SCADBUDDY_AGENT_TOOLS_MANIFEST`, which the image sets). Tools are
+  `activity_as_tool` stubs declared from the agent's `dist/tools.json`; the agent's
+  `agent-tools` worker runs them. It runs no migrations: its tables (`ai_durable_*`,
+  `ai_payload_keys`) are the agent's. Names that cross to TypeScript
+  (`models.py`: the workflow, queue, Updates, Queries) are copied in
+  `agent/src/durable/client.ts`, the agent's side (sends, Stop, approvals); a change
+  to one is a change to both. `plugin/` is the skills-only plugin a segment loads
+  (`skills` links to `plugins/scadbuddy/skills`; the image copies them).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
   `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
@@ -484,14 +528,31 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   there. It is used on the hosted runners in `ci.yml` and `build-image.yml`.
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
-  `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
+  `agent*` stages and the `frontend`, `agent`, `agent-durable` and `freshness` jobs.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
   Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
-  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
+  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit, together with
+  `claude-agent-sdk` in `agent-durable/pyproject.toml` (0.2.160 bundles 2.1.283):
+  `CLAUDE_CODE_VERSION` is one global `ARG` that the `agent` and `agent-durable` stages
+  both assert. `agent-durable/tests/test_cli_version.py` hardcodes the version too
+  (`test_pin_matches_the_locked_sdk`); change it in that commit.
+- The `@temporalio/*` packages move together. `agent/test/support/temporal.ts` calls the
+  SDK's type-private `TestWorkflowEnvironment.create`; `agent/test/temporalSdk.test.ts`
+  fails by name, without Temporal, when a bump removes it.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
-  with `scope=agent`, so they do not overwrite the backend image's cache index.
+  with `scope=agent`, so they do not overwrite the backend image's cache index. The
+  `agent-durable` jobs use `scope=agent-durable` with `mode=min`.
+- The `agent-durable` job in `ci.yml` is gated on the tree (`agent-durable/pyproject.toml`
+  exists), not on paths, so every PR checks the shared secret vectors
+  (`agent/test/secretVectors.test.ts`) and the durable e2e; `CI Summary` asserts it.
+  `build-image.yml`'s `agent-durable` job publishes
+  `ghcr.io/eh-homelab/scadbuddy-agent-durable`, `continue-on-error` until the clusters
+  manifest runs it; the package must be made public after its first publish, like the
+  others. `agent-durable-pin.yml` checks weekly (and on a PR touching the lock) that the
+  pinned ai-integrations commit still fetches, with uv's cache off, and opens an issue
+  from the schedule only.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a

@@ -341,17 +341,26 @@ below, 5 pin `b1cf3848`.
     - The workflow runs one background task, `_snapshots`. It waits until
       `mark = (agent.segments, agent.total_tool_calls, tuple((c["id"], c["status"]) for c
       in agent.tool_calls))` changes, then awaits the local activity `save_snapshot`
-      (`SnapshotInput(session_id, state=agent.state(), in_flight=[{id, name, status}
-      started/waiting], version=segments + total_tool_calls)`, 10 s timeout, retried).
+      (`SnapshotInput(session_id, state=agent.state(), in_flight=[{id, name, status}],
+      version=segments + total_tool_calls)`, 10 s timeout, retried). As built (Task 9
+      review): `in_flight` is every call of the unanswered batch, the
+      `agent.tool_calls` whose id is not yet in `state.recent_call_ids`, whatever its
+      status. A call that finished joins `recent_call_ids` only when the next segment
+      commits, so "started/waiting" alone would let a finished call run again.
     - The activity upserts only when `excluded.version >= ai_durable_snapshots.version`, so
       an out-of-order write never moves a snapshot backwards. A new run snapshots at once
       (the initial mark is `None`).
     - Restore: `SessionInput.restored: Restored | None` (`in_flight: list[InFlight]`).
       `DurableSession.__init__` passes `restore_state(state, restored.in_flight)` to the
       agent when it is set. `restore_state` is a pure function in `models.py`: copy the
-      state; for each in-flight call set `pending[id] = ToolOutcome(content=<_outcome_after_stop's
-      text for its status, reason "the previous run of this session stopped unexpectedly">,
-      is_error=True)` and append the id to `recent_call_ids` (cap 256). Then set
+      state; for each in-flight call set `pending[id] = ToolOutcome(content=<the text for
+      its status>, is_error=True)` and append the id to `recent_call_ids` (cap 256). The
+      texts, with reason "the previous run of this session stopped unexpectedly"
+      (`models.py` `_outcome`): `started` or `cancelled`, `_outcome_after_stop`'s
+      "interrupted (…); whether it took effect is unknown"; `done` or `failed`, "This tool
+      call ran, but its result was lost when <reason>. Check its effect before running
+      it again."; `rejected`, "A human reviewer rejected this action. Do not retry it.";
+      `waiting for approval` (or anything else), "This tool call did not run: <reason>." Then set
       `task_prompt = None`, `task_segments = 0` and `fork_next = True`. If
       `checkpoint is None`, set `session_id = None`, as `_end_task` does.
 

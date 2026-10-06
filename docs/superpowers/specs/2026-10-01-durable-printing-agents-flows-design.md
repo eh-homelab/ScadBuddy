@@ -1172,6 +1172,93 @@ Each phase is its own implementation plan and ships alone.
 5. **Durable session mode** (§6.1, §6.2, §6.4): `agent-durable/`, the plugin pin, the
    `SessionStore`, the credential port, the event subscriber, HITL, the mode UI and
    setting.
+   - As built (#1056, plan `2026-10-04-durable-phase-5-sessions.md`, whose "Deviations"
+     the user decided and whose "Rulings" hold the rest). The plugin is pinned to
+     `b1cf3848b15ad5cd1f009bd19524e3f751140439`, #33's head on 2026-10-04, not
+     `766c647`: §3.2's two limitations are solved there, so the "one tool call per
+     message" rule is dropped (calls of one message run at once, each with its own
+     approval) and the agent gets `tool_activities=()` and `builtin_tools=["Skill"]`.
+     The conversation stays in Postgres (`agent-durable/scadbuddy_durable/store.py`, a
+     `SessionStore` on `ai_session_entries`). The per-session credential and budget come
+     from `SessionRunner` (`runner.py`), the plugin's `SegmentRunner` protocol building
+     one `ClaudeAgentSdkRunner` per segment; it also records each attempt in
+     `ai_durable_segments` and the row's `cost_usd` and `turns`, so no separate activity
+     does. Every segment's `cwd` is `/srv/agent` (`segments_cwd`).
+     - **Mode.** `mode` on `ai_sessions` is phase 4's column. The default is the
+       `session_mode` setting (`GET`/`PUT /api/v1/ai/settings/session-mode`,
+       `agent/src/routes/sessionMode.ts`), else `classic`. An omitted mode is `classic`
+       too while durable sessions cannot start (no KEK or no Temporal), so the setting
+       cannot break new chats; an explicit `durable` then answers 400. A durable start
+       creates the `session-<id>` payload key in the row's transaction. `fork` of a
+       durable session answers 409 `unsupported`. Settings has "Default mode for new
+       chats" with its own Save (`frontend/src/components/SessionModeSetting.tsx`); the
+       composer's Advanced picker (`ModePicker.tsx`) remembers the choice in
+       `scadbuddy.assistant.mode`.
+     - **Sends** (`agent/src/sessions/manager.ts` `sendDurable`,
+       `agent/src/durable/client.ts`). The claim (`user.turn`, `running`) is one
+       transaction, then update-with-start `send_message` on `session-<id>` (queue
+       `agent`, `USE_EXISTING`, `ALLOW_DUPLICATE`, every `run` argument passed), aborted
+       after D = 30 s (`DURABLE_SEND_DEADLINE_MS`). With no worker accepting within 5 s
+       the send answers anyway and the log gets a non-fatal `error` with code
+       `worker_pending`, which the panel shows as a notice; the turn runs when a worker
+       starts. The validator refuses a second message while one runs (`busy`).
+     - **Stop** cancels the running execution. The workflow catches the cancellation
+       and *completes* with `agent.state()` (deviation 4), so the next message starts a
+       new execution from that result. While the cancel is in progress the validator
+       refuses messages (`STOPPING`, `workflow.cancellation_reason()`), and a send that
+       finds the run stopping waits for it to close, up to D, then answers `busy`. The
+       chat socket moves on once the send is claimed (`routes/chat.ts` `sendClaimed`),
+       so a Stop or an approval is never queued behind that wait; a Stop during it aborts
+       the unsent message.
+     - **Recovery** (deviation 4, ruling 15). The workflow saves `AgentState` to
+       `ai_durable_snapshots` (a local activity, whenever the segment count or a tool
+       call's status moves; a version never goes backwards). Its `in_flight` is every
+       call of the unanswered batch, whatever its status. After a terminate or failure
+       the next send starts from the snapshot with `restored.in_flight`, and
+       `restore_state` (`models.py`) gives each call a result by status: started or
+       cancelled, "interrupted …; whether it took effect is unknown"; done or failed,
+       "ran, but its result was lost …"; rejected, the reviewer's rejection; waiting,
+       "did not run". The audit's `tool_call` rows newer than the snapshot and in
+       neither list become one model-only context line ("These tool calls ran after
+       this session's last saved point, and their results were lost: …"). Only a
+       session with no snapshot logs `resumed_fresh`.
+     - **The projector** (`projector.py`, one per worker process) holds a 20 s lease per
+       session in `ai_durable_streams` (renewed every 5 s) and appends each translated
+       batch with its status and offset in one transaction. The offset counts in a
+       `chain` (the first run's id, which Continue-As-New keeps and a new start does
+       not); a follower of another chain reads from 0, and stores only over what it
+       read. `sending` marks a send whose update-with-start has not answered. A session
+       that says it runs with no run running is settled `idle` (open approvals resolved
+       as stopped, or "the session's run ended"), at once with no mark, or once the mark
+       stayed unchanged for more than 2×D on the event loop's monotonic clock. Turn
+       boundaries are found by parsing each event's JSON `type` and `status`, never by
+       matching its text.
+     - **Approvals.** Ids are `durable:<session>:<tool_use_id>`; a decision is the
+       `review` Update after `decide`'s ownership check, and a refusal is 409
+       `conflict`. Expiry is a workflow timer per waiting call, from the
+       `approval_expiry_seconds` fixed when the execution started; the
+       `pending_approvals` Query reports each call's `expires_at`. The all-pending list
+       (the browser user and grant holders) includes durable sessions' waiting calls (at
+       most 100 sessions, 15 s; one that does not answer is left out).
+     - **Codec and forgetting** (§6.5). `SubjectPayloadCodec` in both languages
+       (`agent/src/temporal/codec.ts`, `agent-durable/scadbuddy_durable/codec.py`) seals
+       `session-*`/`flow-*` payloads under `ai_payload_keys`, keys cached 60 s; the agent
+       re-wraps them on KEK rotation with the credentials. `forgetSubject`
+       (`agent/src/durable/forget.ts`) has one caller, the operator CLI
+       `node dist/forget-subject.js session-<uuid>`: key, then terminate and
+       `DeleteWorkflowExecution`, then the rows. With Temporal configured but
+       unreachable it exits 1 with the rows kept and an `operator` audit row saying
+       which step failed; a re-run completes. `ai_audit` rows survive (only the
+       retention sweep deletes them). No `SessionStore.delete` path calls it yet.
+     - **Image and CI.** `--target agent-durable`
+       (`ghcr.io/eh-homelab/scadbuddy-agent-durable`) is Python on its own slim base,
+       uid 10001, `/healthz` on 8082, with `HOME` and `CLAUDE_CONFIG_DIR` under
+       `/var/lib/scadbuddy-agent-durable`; it asserts the Python SDK's bundled Claude
+       Code against `CLAUDE_CODE_VERSION`. The `agent-durable` CI job runs on every PR
+       once the directory exists (not on a path list) and is part of `CI Summary`. The
+       pin watch (`agent-durable-pin.yml`) needs a real fetch (`uv sync --frozen
+       --no-cache`), since `uv lock --check` does not fetch, and opens its issue only
+       from the schedule.
 6. **Flows** (§7): the harness verification, `ProjectWorkflow`, host functions, records,
    routes, Reset, and the Workflows page.
 

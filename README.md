@@ -815,12 +815,13 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   |---|---|
   | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
   | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
-  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?, mode?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
   | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
   | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-mode` | `{mode}`, `classic` or `durable`: the mode of a session whose start names none (#1056, next section); audited |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`
@@ -851,6 +852,49 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `continue-on-error`, so it cannot hold back a backend deploy, and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
+
+### Durable assistant sessions (#1056)
+
+A session started in **durable** mode runs as a Temporal workflow, `DurableSession`
+(`session-<id>`, task queue `agent`), instead of in the agent's process: it survives
+restarts, and its approvals wait in the workflow. The agent service still owns the
+session (its socket, routes and tables); the workflow runs in a **third container in
+the ScadBuddy pod**, `agent-durable` (`agent-durable/`, the Dockerfile's
+`--target agent-durable`, published as `ghcr.io/eh-homelab/scadbuddy-agent-durable` by
+the `agent-durable` job in `build-image.yml`). Its tool calls run as activities on the
+agent's `agent-tools` worker, so the agent needs `SCADBUDDY_TEMPORAL_ADDRESS` as well.
+Operating details, Stop and recovery, and deleting a durable session are in
+[`docs/ai/operating.md`](docs/ai/operating.md) §13.
+
+- **Variables** (`agent-durable/scadbuddy_durable/config.py`): the `agent`
+  container's `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (mount the same Secret), and
+  `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE` (default
+  `scadbuddy`). `SCADBUDDY_AGENT_DURABLE_HEALTH_PORT` moves `/healthz` off `8082`. No
+  Bambuddy key and no AI settings: the Claude credential is read from
+  `ai_credentials`, opened per segment, and passed only to that segment's Claude Code.
+- **Without the database or the Temporal address** it runs and `/healthz` answers
+  `200` with `"durable": "disabled (no database)"` (or `no Temporal address`). With a
+  database it needs the key file, and exits 1 without one. Otherwise `/healthz` answers
+  `503` with `"status": "starting"` while it connects to Temporal, `200` `ok` once
+  connected with the database answering, and `503` `unavailable` when either is gone. The image's `HEALTHCHECK` reads it; point liveness
+  and readiness probes at `:8082/healthz`.
+- **Filesystem.** It runs as uid 10001 with `HOME` and `CLAUDE_CONFIG_DIR` under
+  `/var/lib/scadbuddy-agent-durable` and `/srv/agent` as every segment's working
+  directory. Run the root filesystem read-only with `emptyDir`s at `/tmp`,
+  `/var/lib/scadbuddy-agent-durable` and `/srv/agent` (the CI smoke test runs it with
+  `--read-only`).
+- **Memory.** At most 4 segments run at once (`MAX_CONCURRENT_ACTIVITIES` in
+  `worker.py`), each a Claude Code process of about 270 MB (the plugin's README).
+- **The mode.** The assistant's composer has an Advanced picker (Classic/Durable)
+  while a chat is empty, and Settings → Assistant has "Default mode for new chats"
+  (the `session-mode` route above). A durable session shows a Durable badge. Durable
+  sessions get ScadBuddy's skills only: no plugins, no subagents. While the agent has
+  no key-encryption key or no Temporal, a chat that names no mode starts classic
+  whatever the default says.
+- Until the clusters manifest runs the container, its publish job is
+  `continue-on-error`, and the new GHCR package needs the same one-time **public**
+  visibility step as the others (see the header of `build-image.yml`).
 
 ### Switching continuous deploy off
 
