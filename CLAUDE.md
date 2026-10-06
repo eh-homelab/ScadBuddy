@@ -18,7 +18,7 @@ cd backend
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy              # strict; files = scadbuddy, tests
-uv run --frozen pytest
+uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
@@ -35,6 +35,12 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+Under pytest-xdist each worker makes its schemas in a database of its own
+(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+because advisory locks and NOTIFY channels are per database: workers sharing one would
+serialise every `migrate` and hear each other's events. So the test role needs
+`CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
+Temporal dev server.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py

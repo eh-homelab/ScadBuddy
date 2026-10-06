@@ -222,9 +222,9 @@ async def test_staging_the_check_does_not_block_the_event_loop(
 
     real_copy = shutil.copy2
 
-    def slow_copy(src: StrPath, dst: StrPath) -> StrPath:
+    def slow_copy(src: StrPath, dst: StrPath, *, follow_symlinks: bool = True) -> StrPath:
         time.sleep(0.3)
-        return real_copy(src, dst)
+        return real_copy(src, dst, follow_symlinks=follow_symlinks)
 
     async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
         Path(args[1]).write_text(json.dumps({"parameters": []}), encoding="utf-8")

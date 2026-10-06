@@ -15,13 +15,15 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
 from scadbuddy.workflows.previews import preview_schedule_id_for
-from tests.conftest import write_openscad_3mf
+from tests.conftest import TEST_ANSWER_DEADLINE, write_openscad_3mf
 from tests.support.temporal import (
     WorkflowReaper,
     temporal_available,
@@ -73,6 +75,17 @@ def workflow_reaper(temporal_address: str) -> Iterator[WorkflowReaper]:
 @pytest.fixture(autouse=True)
 def _temporal(temporal_address: str) -> None:
     """The API tests skip without a Temporal: the app renders nowhere else (#546)."""
+
+
+@pytest.fixture(autouse=True)
+def _print_answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The print route's own answer deadline (`COMMAND_ANSWER_DEADLINE`, and
+    `ACCEPT_BUDGET` built on it) waits as long as `start_command`'s test default
+    (`tests.conftest.TEST_ANSWER_DEADLINE`): under load its first start answered a 503
+    `command-still-accepting`. Only the API tests reach that route (review #1316 4a)."""
+    longer = (TEST_ANSWER_DEADLINE - COMMAND_ANSWER_DEADLINE).total_seconds()
+    monkeypatch.setattr(printing_api, "COMMAND_ANSWER_DEADLINE", TEST_ANSWER_DEADLINE)
+    monkeypatch.setattr(printing_api, "ACCEPT_BUDGET", printing_api.ACCEPT_BUDGET + longer)
 
 
 @pytest.fixture

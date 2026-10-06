@@ -18,11 +18,11 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
-    CONNECT_MARGIN_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
+    TemporalUnreachableError,
     start_command,
 )
 from tests.support.temporal import current_address, temporal_client
@@ -35,6 +35,10 @@ class EchoInput(BaseModel):
     delay_s: float = 0.0
     #: Complete as soon as the first Update has answered.
     finish_at_once: bool = False
+    #: The `accepted` Update answers only once the `release` signal came. Not a timer: a
+    #: durable timer follows the server's wall clock, which jumps on a loaded host, so
+    #: a 4 s `workflow.sleep` outlived a 10 s deadline there.
+    hold: bool = False
 
 
 class EchoAnswer(BaseModel):
@@ -49,6 +53,7 @@ class EchoCommand:
         self.arg = arg
         self.updates = 0
         self.finished = False
+        self.released = False
 
     @workflow.run
     async def run(self, arg: EchoInput) -> int:
@@ -63,11 +68,17 @@ class EchoCommand:
         self.updates += 1
         if self.arg.delay_s:
             await workflow.sleep(self.arg.delay_s)
+        if self.arg.hold:
+            await workflow.wait_condition(lambda: self.released)
         return EchoAnswer(updates=self.updates, run_id=workflow.info().run_id)
 
     @workflow.signal
     def finish(self) -> None:
         self.finished = True
+
+    @workflow.signal
+    def release(self) -> None:
+        self.released = True
 
 
 @pytest.fixture
@@ -151,14 +162,17 @@ async def test_an_update_slower_than_the_deadline_is_still_accepting(
 ) -> None:
     workflow_id = f"echo-{uuid.uuid4().hex}"
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
-        # Slower than the outer bound: `rpc_timeout` alone does not end the call, since
+        # Held past the outer bound: `rpc_timeout` alone does not end the call, since
         # the SDK polls again when the server answers a poll with no outcome (#1095 CI).
-        slow = EchoInput(delay_s=CONNECT_MARGIN_SECONDS + 2)
+        held = EchoInput(hold=True)
         with pytest.raises(CommandStillAcceptingError):
-            await echo(client, queue, workflow_id, slow, deadline=timedelta(seconds=0.3))
-        # The execution goes on, and the same request attaches to it.
-        again = await echo(client, queue, workflow_id, slow)
-        await client.get_workflow_handle(workflow_id).signal("finish")
+            await echo(client, queue, workflow_id, held, deadline=timedelta(seconds=0.3))
+        # The execution goes on, and the same request attaches to it. Released first, so
+        # this answer waits on no timer.
+        handle = client.get_workflow_handle(workflow_id)
+        await handle.signal("release")
+        again = await echo(client, queue, workflow_id, held)
+        await handle.signal("finish")
     assert again.updates == 2
 
 
@@ -184,14 +198,28 @@ async def test_a_callers_deadline_is_its_own_timeout_not_still_accepting(queue: 
     could not tell that it expired (review #1066 (9), the render route's 503)."""
     from scadbuddy.workflows.client import connect_lazily
 
-    with pytest.raises(TimeoutError):
-        async with asyncio.timeout(1):
-            await echo(
-                connect_lazily("127.0.0.1:1", "default"),
-                queue,
-                "echo-caller-bound",
-                deadline=timedelta(seconds=5),
-            )
+    # A frontend that accepts and never answers: a refused port fails the connect at
+    # once, before the caller's bound, and tested nothing.
+    held: list[asyncio.StreamWriter] = []
+
+    async def silent(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(1):
+                await echo(
+                    connect_lazily(f"127.0.0.1:{port}", "default"),
+                    queue,
+                    "echo-caller-bound",
+                    deadline=timedelta(seconds=5),
+                )
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
 
 
 class Proxy:
@@ -232,15 +260,17 @@ class Proxy:
 async def test_temporal_lost_after_connecting_is_unavailable_not_still_accepting(
     client: Client, queue: str
 ) -> None:
-    """Once connected, an outage surfaces as the Update's RPC timeout: nothing started,
-    so the route must say Temporal is unavailable (#1052 review)."""
+    """Once connected, an outage surfaces as the Update's RPC timeout: the route must say
+    Temporal is unavailable (#1052 review). The connection had carried requests, so it
+    is not the connect failure that proves nothing started (review #1316 (9) 1a)."""
     proxy = Proxy(current_address(client))
     via = await Client.connect(await proxy.start(), data_converter=pydantic_data_converter)
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
         await echo(via, queue, f"echo-{uuid.uuid4().hex}", EchoInput(finish_at_once=True))
         await proxy.cut()
-        with pytest.raises(TemporalUnavailableError):
+        with pytest.raises(TemporalUnavailableError) as raised:
             await echo(via, queue, f"echo-{uuid.uuid4().hex}", deadline=timedelta(seconds=4))
+    assert not isinstance(raised.value, TemporalUnreachableError)
 
 
 async def test_an_update_slower_than_the_default_deadline_is_still_accepting(
