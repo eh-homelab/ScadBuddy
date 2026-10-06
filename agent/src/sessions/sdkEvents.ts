@@ -109,6 +109,47 @@ function summarise(content: unknown): string {
   return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text
 }
 
+/**
+ * Which of a turn's tool calls its event log shows yet (#881). The turn logs
+ * the SDK's stream one append at a time, while the SDK asks canUseTool as soon
+ * as Claude Code does, so a call can reach the approval gate while its
+ * `tool.call` still waits behind the turn's earlier appends. The gate waits on
+ * `until` before it logs `approval.required`, so the panel never sees an
+ * approval for a call it has not been shown.
+ */
+export class ShownCalls {
+  private readonly shown = new Set<string>()
+  private readonly waiting = new Map<string, (() => void)[]>()
+  private closed = false
+
+  /** The call's `tool.call` is in the log. */
+  mark(id: string): void {
+    this.shown.add(id)
+    for (const wake of this.waiting.get(id) ?? []) wake()
+    this.waiting.delete(id)
+  }
+
+  /** The turn's stream has ended: nothing more will be shown, so no one waits. */
+  close(): void {
+    this.closed = true
+    for (const wakes of this.waiting.values()) for (const wake of wakes) wake()
+    this.waiting.clear()
+  }
+
+  /** Resolves once the call is shown, the stream has ended, or `signal` aborts. */
+  until(id: string, signal: AbortSignal): Promise<void> {
+    if (this.closed || this.shown.has(id) || signal.aborted) return Promise.resolve()
+    return new Promise((resolve) => {
+      const wake = () => {
+        signal.removeEventListener('abort', wake)
+        resolve()
+      }
+      signal.addEventListener('abort', wake, { once: true })
+      this.waiting.set(id, [...(this.waiting.get(id) ?? []), wake])
+    })
+  }
+}
+
 export class SdkEventMapper {
   private readonly sessionId: string
   private readonly tierOf: TierResolver

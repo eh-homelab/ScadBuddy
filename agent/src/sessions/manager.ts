@@ -74,7 +74,7 @@ import {
   type ServerEvent,
   type SessionStatus,
 } from './protocol.js'
-import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
+import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
@@ -1077,6 +1077,7 @@ export class SessionManager {
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf)
+    const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
     // MCP call, or the decision an orphan resumes under), else a root.
@@ -1139,6 +1140,7 @@ export class SessionManager {
         await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        for (const e of events) if (e.type === 'tool.call') shownCalls.mark(e.id)
         for (const e of events) traced.observe(e)
         if (auditor) for (const e of events) await auditor.observe(e)
       }
@@ -1237,6 +1239,7 @@ export class SessionManager {
           secrets: () => secrets,
           signal: controller.signal,
           trace: traced,
+          shown: (toolUseId, signal) => shownCalls.until(toolUseId, signal),
         })
         const sandbox =
           this.deps.headlessBrowser?.sandbox && browserSetting === true
@@ -1373,6 +1376,7 @@ export class SessionManager {
           traced.fail(err)
         }
       } finally {
+        shownCalls.close()
         forwarded?.release()
         packages?.release()
         local.settling = true
