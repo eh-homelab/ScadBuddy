@@ -55,6 +55,10 @@ SCAN_BEFORE = timedelta(days=1)
 #: first, and how many at once (#976).
 LIBRARY_LINK_LIMIT = 50
 LIBRARY_LINK_CONCURRENCY = 8
+#: A queue item's own word for an item the scheduler passed over: it will not print,
+#: and `stages.stage_of` does not know it (Bambuddy's queue-item status enum is
+#: pending, printing, completed, failed, skipped, cancelled).
+QUEUE_SKIPPED = "skipped"
 
 
 async def link_item(
@@ -194,7 +198,11 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
     failure, a database one included, is logged and leaves the item to the next call
     (#1662).
     """
-    pending = await links.pending_library(LIBRARY_LINK_LIMIT)
+    try:
+        pending = await links.pending_library(LIBRARY_LINK_LIMIT)
+    except (psycopg.Error, DatabaseRequiredError):
+        logger.exception("could not read the library prints to link")
+        return
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
 
     async def link(queue_item_id: int) -> None:
@@ -212,7 +220,11 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
                 return
             if item.archive_id is not None:
                 await links.link_library(queue_item_id, item.archive_id, item.library_file_name)
-            elif stage_of(item.status) in ("done", "failed", "cancelled"):
+            elif item.status == QUEUE_SKIPPED or stage_of(item.status) in (
+                "done",
+                "failed",
+                "cancelled",
+            ):
                 # Settled before it was dispatched: it will never name an archive.
                 await links.library_gone(queue_item_id)
 

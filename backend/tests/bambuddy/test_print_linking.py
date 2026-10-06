@@ -452,13 +452,13 @@ async def test_a_library_run_queued_long_ago_is_still_linked_once_dispatched(
 async def test_a_library_item_settled_without_an_archive_is_not_read_again(
     bambuddy: BambuddyClient, links: PrintLinkStore
 ) -> None:
-    await _library_items(links, 51, 52)
-    respx.get(f"{API}/queue/51").mock(
-        return_value=httpx.Response(200, json=queue_item(51, status="cancelled", archive_id=None))
-    )
-    respx.get(f"{API}/queue/52").mock(
-        return_value=httpx.Response(200, json=queue_item(52, status="pending", archive_id=None))
-    )
+    await _library_items(links, 51, 52, 53)
+    for item_id, item_status in ((51, "cancelled"), (52, "pending"), (53, "skipped")):
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
 
     await link_library_prints(bambuddy, links)
 
@@ -491,3 +491,14 @@ async def test_a_database_error_on_one_library_item_does_not_stop_the_others(
     assert await links.linked(90) is None
     assert await links.linked(91) is not None
     assert await _pending(links) == {51}
+
+
+async def test_a_database_error_reading_the_library_items_links_nothing_and_raises_nothing(
+    bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing(limit: int) -> list[object]:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(links, "pending_library", failing)
+
+    await link_library_prints(bambuddy, links)
