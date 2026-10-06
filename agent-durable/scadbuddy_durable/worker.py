@@ -12,7 +12,7 @@ import signal
 import socket
 import sys
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,7 @@ from scadbuddy_durable.credentials import CredentialSource
 from scadbuddy_durable.models import TASK_QUEUE
 from scadbuddy_durable.payload_keys import PayloadKeys
 from scadbuddy_durable.projector import Projector
-from scadbuddy_durable.runner import CWD, SessionRunner
+from scadbuddy_durable.runner import SessionRunner
 from scadbuddy_durable.secrets import Kek, SecretKeyError, load_kek
 from scadbuddy_durable.segments import Segments, Snapshots, make_save_snapshot
 from scadbuddy_durable.store import PostgresSessionStore
@@ -53,7 +53,10 @@ class WorkerDeps:
     keks: Sequence[Kek]
     prompt_append: str
     plugin_dir: str = PLUGIN_DIR
-    cwd: str = CWD
+    # The segments' cwd: the worker's working directory, the image's WORKDIR (/srv/agent),
+    # so every worker in the image shares it (store.py keys transcripts by it). Outside the
+    # image, wherever the worker was started: /srv/agent need not exist there.
+    cwd: str = field(default_factory=os.getcwd)
 
 
 def client_with_codec(client: Client, pool: AsyncConnectionPool, keks: Sequence[Kek]) -> Client:

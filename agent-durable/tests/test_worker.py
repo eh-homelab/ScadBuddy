@@ -77,6 +77,13 @@ async def test_build_worker_registers_the_workflow_and_two_activities(
     assert isinstance(codec, SubjectPayloadCodec)
 
 
+def test_segments_run_in_the_workers_working_directory(
+    unused_pool: AsyncConnectionPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert WorkerDeps(pool=unused_pool, keks=[KEK], prompt_append="policy").cwd == str(tmp_path)
+
+
 async def test_healthz_is_starting_until_temporal_connects() -> None:
     health = Health(database_probe=None)
     port = _free_port()
