@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { libraryFiles } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -17,7 +18,7 @@ describe('LibraryPage', () => {
   it('lists the root 3MFs with Print, and hides the sliced file', async () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-89')
-    expect(within(card).getByRole('button', { name: 'Print' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: /^Print / })).toBeInTheDocument()
     expect(screen.queryByTestId('library-file-104')).toBeNull()
     expect(screen.getByText(/1 more under Advanced/)).toBeInTheDocument()
   })
@@ -27,7 +28,7 @@ describe('LibraryPage', () => {
     await screen.findByTestId('library-file-89')
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     const sliced = await screen.findByTestId('library-file-104')
-    expect(within(sliced).queryByRole('button', { name: 'Print' })).toBeNull()
+    expect(within(sliced).queryByRole('button', { name: /^Print / })).toBeNull()
     expect(within(sliced).getByText(/print it from Bambuddy/i)).toBeInTheDocument()
     unmount()
     renderPage(<LibraryPage />, { route: '/library' })
@@ -107,6 +108,28 @@ describe('LibraryPage', () => {
     expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
   })
 
+  it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
+    const filename = 'v1.2_shelf_bracket_with_cable_channel_and_a_long_tail.3mf'
+    server.use(
+      http.get('/api/v1/print/library', () =>
+        HttpResponse.json({
+          folder_id: null,
+          all: false,
+          folders: [],
+          files: [{ ...libraryFiles[0], id: 7001, filename, file_type: '3mf', folder_id: null }],
+          hidden: 0,
+        }),
+      ),
+    )
+    renderPage(<LibraryPage />, { route: '/library' })
+    const card = await screen.findByTestId('library-file-7001')
+    const caption = card.querySelector(`p[title="${filename}"]`)
+    const parts = Array.from(caption?.querySelectorAll('span') ?? [], (span) => span.textContent)
+    expect(parts.join('')).toBe(filename)
+    expect(parts).toHaveLength(2)
+    expect(parts[1]).toBe('ong_tail.3mf')
+  })
+
   it('says when the library cannot be read', async () => {
     server.use(
       http.get('/api/v1/print/library', () =>
@@ -118,5 +141,33 @@ describe('LibraryPage', () => {
     )
     renderPage(<LibraryPage />, { route: '/library' })
     expect(await screen.findByRole('alert')).toHaveTextContent('could not reach Bambuddy')
+  })
+})
+
+describe('LibraryPage, item context (#975)', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+  })
+
+  it("names each card's Print after its file", async () => {
+    renderPage(<LibraryPage />, { route: '/library' })
+    const card = await screen.findByTestId('library-file-89')
+    const filename = card.querySelector('p')?.textContent ?? ''
+    expect(filename).not.toBe('')
+    expect(within(card).getByRole('button', { name: `Print ${filename}` })).toBeInTheDocument()
+  })
+
+  it('marks the open folder, and reads its count apart from its name', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const nav = screen.getByRole('navigation', { name: 'Library folders' })
+    expect(within(nav).getByRole('button', { name: 'Top level' })).toHaveAttribute('aria-current', 'true')
+
+    const bulk = within(nav).getByRole('button', { name: 'Bulk, 300 files' })
+    await user.click(bulk)
+    expect(bulk).toHaveAttribute('aria-current', 'true')
+    expect(within(nav).getByRole('button', { name: 'Top level' })).not.toHaveAttribute('aria-current')
+    expect(within(nav).getByRole('button', { name: 'MakerWorld, 1 file' })).toBeInTheDocument()
   })
 })

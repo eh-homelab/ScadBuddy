@@ -220,7 +220,7 @@ class Metrics:
         )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
-            "Time from submit until a worker took the job (or expired it).",
+            "Time from submit until its workflow began the render.",
             buckets=RENDER_BUCKETS,
             registry=r,
         )

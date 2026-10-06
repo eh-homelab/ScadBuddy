@@ -334,6 +334,51 @@ describe('assistant panel', () => {
     expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   })
 
+  describe('keyboard focus (#992)', () => {
+    it('Stop by keyboard leaves focus in the composer, not on <body>', async () => {
+      const { user } = await openAndSend()
+      screen.getByRole('button', { name: 'Stop' }).focus()
+      await user.keyboard('{Enter}')
+      await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+      expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
+    })
+
+    it('picking a session by keyboard puts focus in its composer, and marks it the open one', async () => {
+      const { user } = await openAndSend()
+      await user.click(screen.getByRole('button', { name: 'New chat' }))
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const picker = screen.getByRole('navigation', { name: 'Sessions' })
+      within(picker).getByRole('button', { name: /Make the name bigger/ }).focus()
+      await user.keyboard('{Enter}')
+
+      expect(screen.queryByRole('navigation', { name: 'Sessions' })).not.toBeInTheDocument()
+      await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus())
+
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const reopened = screen.getByRole('navigation', { name: 'Sessions' })
+      const open = within(reopened).getByRole('button', { name: /Make the name bigger/ })
+      expect(open).toHaveAttribute('aria-current', 'true')
+      expect(open).toHaveTextContent('Open')
+      for (const other of within(reopened).getAllByRole('button').filter((b) => b !== open)) {
+        expect(other).not.toHaveAttribute('aria-current')
+        expect(other).not.toHaveTextContent(/\bOpen\b/)
+      }
+    })
+
+    it("picking an agent's session puts focus on Take over, since its composer is locked", async () => {
+      const { user } = renderShell()
+      await user.click(screen.getByRole('button', { name: 'Assistant' }))
+      await user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+      within(screen.getByRole('navigation', { name: 'Sessions' }))
+        .getByRole('button', { name: /Tune the gridfinity bin/ })
+        .focus()
+      await user.keyboard('{Enter}')
+
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Take over' })).toHaveFocus())
+    })
+  })
+
   it('lists sessions with origin and owner, and takes over one an agent controls', async () => {
     const { user } = renderShell()
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
@@ -355,6 +400,8 @@ describe('assistant panel', () => {
     expect(sentOf('session.handoff')).toEqual([{ v: 1, type: 'session.handoff', sessionId: EXTERNAL_SESSION_ID }])
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled())
     expect(screen.queryByText('Controlled by Claude Desktop')).not.toBeInTheDocument()
+    // #992 — Take over is gone: focus is where the next message is typed.
+    expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
   })
 
   it("opens a session that changed the page's model in the panel, closed or already open (#931)", async () => {

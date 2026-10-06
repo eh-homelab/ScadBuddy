@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any
+from typing import Any, NoReturn
 
 import psycopg
 import pytest
@@ -64,7 +64,10 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
+    temporal_failure,
 )
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -371,6 +374,13 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
     assert took < 5
 
 
+def _classified(error: RPCError, id: str) -> NoReturn:
+    """Raise ``error`` as `start_command` does: classified, the RPC error its cause."""
+    failure = temporal_failure(error, id)
+    assert failure is not None
+    raise failure from error
+
+
 class _Described:
     """A client whose `describe` finds the execution, or answers NOT_FOUND."""
 
@@ -439,8 +449,8 @@ async def test_a_start_that_grpc_ended_is_answered_as_a_late_one(
     still accepting when the execution exists, never "nothing was done" (review #1066
     (8) 2)."""
 
-    async def ended(*_: object, **__: Any) -> RenderAnswer:
-        raise RPCError("ended", code, b"")
+    async def ended(*_: object, **kwargs: Any) -> RenderAnswer:
+        _classified(RPCError("ended", code, b""), kwargs["id"])
 
     monkeypatch.setattr(submit_module, "start_command", ended)
     service = make_service(_Described(exists=exists), "unused")
@@ -640,8 +650,13 @@ async def test_an_update_aborted_by_a_closing_execution_starts_again(
     async def answering(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
         if len(calls) == 1:
-            raise RPCError(
-                "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+            _classified(
+                RPCError(
+                    "workflow update was aborted by closing workflow",
+                    RPCStatusCode.NOT_FOUND,
+                    b"",
+                ),
+                kwargs["id"],
             )
         return RenderAnswer(job=job)
 
@@ -665,8 +680,11 @@ async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
 
     async def aborting(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        raise RPCError(
-            "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+        _classified(
+            RPCError(
+                "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+            ),
+            kwargs["id"],
         )
 
     monkeypatch.setattr(submit_module, "start_command", aborting)
@@ -1569,12 +1587,12 @@ async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
 
     async def refusing(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        raise namespace_not_found()
+        _classified(namespace_not_found(), kwargs["id"])
 
     monkeypatch.setattr(submit_module, "start_command", refusing)
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        with pytest.raises(RPCError):
+        with pytest.raises(TemporalBusyError):
             await service.submit(SLUG, {"width": _w()})
         await service.aclose()
 
@@ -1828,7 +1846,7 @@ async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
     "refusal",
     [
         TemporalUnavailableError("render-x"),
-        RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
+        TemporalRefusedError("render-x"),
     ],
 )
 async def test_a_render_start_that_fails_counts_as_a_start_workflow_error(
