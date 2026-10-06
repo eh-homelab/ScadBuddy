@@ -205,6 +205,7 @@ describe('PresetPicker', () => {
     await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
     const name = screen.getByRole('textbox', { name: 'Name on the tag' })
     await user.type(name, 'x')
+    const edited = (name as HTMLInputElement).value
 
     // The pick asks first, and fill says so rather than returning the old value bare.
     const filled = await bridge.call('fill', { label: 'Preset', value: 'Mum' })
@@ -216,7 +217,8 @@ describe('PresetPicker', () => {
         confirm: expect.stringContaining('"Apply preset Mum?" opened instead') as unknown,
       },
     })
-    expect(name).not.toHaveValue('Mum')
+    expect(name).toHaveValue(edited)
+    expect(select).toHaveValue('')
 
     // Replacing the values on screen stays in the page, so the assistant may confirm it.
     expect(await bridge.call('click', { role: 'button', name: 'Replace my changes' })).toMatchObject({ ok: true })

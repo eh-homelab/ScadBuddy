@@ -105,10 +105,13 @@ Controls marked user-only on `main` (`grep -rn "{...USER_ONLY}" frontend/src`):
 | [`SettingsPage.tsx`](../../frontend/src/pages/SettingsPage.tsx) | Test connection button, WebMCP toggle, Add to Bambuddy sidebar, Save changes |
 
 A confirmation of a change that stays in the page is not outward and carries no
-`USER_ONLY`: "Replace my changes", which a preset pick over unsaved edits asks for
-(#359), is for the assistant to press when the pick was its own. When `fill` leaves a
-control's value unchanged because a dialog opened to confirm it, its result carries a
-`confirm` note naming that dialog (#1445).
+`USER_ONLY`: the assistant can press "Replace my changes", which a preset pick over
+unsaved edits asks for (#359). Nothing in the page tells whose edits those are, so the
+guard is the instruction, not the code: when `fill` leaves a control's value unchanged
+because it opened a dialog, its result carries a `confirm` note naming the dialog and
+telling the agent to ask the user before confirming over changes the user made
+(#1445). The `customize` skill says the same. A dialog that was already open when
+`fill` ran never produces the note.
 
 **When you add an outward confirmation**, spread `{...USER_ONLY}` on it, or on a wrapper
 around it. `isUserOnly()` uses `closest()`, so a wrapper covers everything inside.
