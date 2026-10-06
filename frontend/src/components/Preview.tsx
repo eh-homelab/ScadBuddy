@@ -243,6 +243,7 @@ export function Preview({
         <RenderError
           cancelled={cancelled}
           log={(job.log_tail ?? []).join('\n')}
+          error={job.error ?? undefined}
           warnings={job.warnings ?? []}
           covered={covered}
         />
@@ -371,14 +372,19 @@ export function RenderWarnings({ warnings, inline = false }: { warnings: string[
 function RenderError({
   cancelled = false,
   log,
+  error,
   warnings,
   covered,
 }: {
   cancelled?: boolean
   log?: string
+  error?: string
   warnings: string[]
   covered?: string
 }) {
+  // No OpenSCAD log: the render failed in ScadBuddy's own stages (#952), so the
+  // job's error says what happened and OpenSCAD is not to blame.
+  const ownFailure = !cancelled && !log && !!error
   return (
     <div
       className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
@@ -387,14 +393,16 @@ function RenderError({
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         {cancelled
           ? 'This render was cancelled. A newer request replaced it before it finished — your parameters were not the problem.'
-          : 'OpenSCAD could not render these parameters.'}
+          : ownFailure
+            ? 'ScadBuddy could not finish this render.'
+            : 'OpenSCAD could not render these parameters.'}
       </p>
       {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre
         data-testid="render-log"
         className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted"
       >
-        {log ?? 'No log output was captured.'}
+        {(ownFailure ? error : log) || 'No log output was captured.'}
       </pre>
     </div>
   )

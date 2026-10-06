@@ -350,6 +350,29 @@ async def test_a_failed_run_names_the_files_it_could_not_open(tmp_path: Path) ->
     assert raised.value.missing_files == ("pic.svg", "mask.png")
 
 
+#: #952, measured on 2026.09.28: a lone rotate_extrude that touches the axis exports
+#: degenerate triangles lib3mf refuses. OpenSCAD logs it, writes an empty 3MF and
+#: still exits 0.
+EXPORT_ERROR_OPENSCAD = """#!/bin/sh
+echo "EXPORT-ERROR: Can't add triangle to 3MF model."
+echo "Top level object is a 3D object (PolySet):"
+"""
+
+
+async def test_an_export_error_fails_the_run_though_openscad_exits_0(tmp_path: Path) -> None:
+    binary = tmp_path / "export-error-openscad"
+    binary.write_text(EXPORT_ERROR_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert str(raised.value) == "openscad could not export: Can't add triangle to 3MF model."
+    assert raised.value.returncode == 0
+    assert any("EXPORT-ERROR" in line for line in raised.value.log_tail)
+
+
 # ── #281: free-text values that would steer import()/surface() off the model ──
 
 TEXT_PARAMETER = Parameter(name="label", type="string", initial="/default/is/the/templates")

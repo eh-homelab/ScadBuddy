@@ -124,6 +124,14 @@ describe('Preview', () => {
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
 
+  it('does not blame OpenSCAD for a failure that has no OpenSCAD log (#952)', () => {
+    const error = 'building the per-colour solids failed: BadZipFile: File is not a zip file'
+    render(<Preview job={job({ status: 'failed', error, log_tail: [] })} rendering={false} />)
+    expect(screen.getByText(/ScadBuddy could not finish this render/i)).toBeInTheDocument()
+    expect(screen.getByTestId('render-log')).toHaveTextContent(error)
+    expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
+  })
+
   it('tells a cancelled render apart from a failure: it keeps the log but not the OpenSCAD copy', () => {
     const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
