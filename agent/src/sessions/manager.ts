@@ -12,7 +12,7 @@ import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import {
@@ -398,9 +398,6 @@ export type SessionRecord = {
  * query's `total_cost_usd` does not hold that part.
  */
 type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
-
-/** USD: how far below `cost_usd - unpriced_cost_usd` a resumed total may read and still be the restored one (#991). */
-const RESTORED_EPSILON = 1e-9
 
 const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
   ...record(row),
@@ -1569,11 +1566,10 @@ export class SessionManager {
     // which is added back. If the restore ever fails the total comes back
     // smaller than what it should have carried, and it is added instead.
     // `priced` is taken back out of a float sum, so it can come out an ulp or
-    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1); a
-    // failed restore is short by a whole turn's spend, far more than RESTORED_EPSILON.
+    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1):
+    // compared with fallback.ts's tolerance (`carries`), as fallback.ts does.
     const priced = session.costUsd - session.unpricedCostUsd
-    const spent = (total: number) =>
-      total >= priced - RESTORED_EPSILON ? total + session.unpricedCostUsd : session.costUsd + total
+    const spent = (total: number) => (carries(total, priced) ? total + session.unpricedCostUsd : session.costUsd + total)
     let costUsd = session.costUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when

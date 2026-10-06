@@ -32,6 +32,8 @@ export type FakeTurn =
   | {
       stall: { model: string; usage: Record<string, number>; text?: string }
       resultCostUsd?: number
+      /** Dies with this error right after the text, instead of waiting for an abort. */
+      dies?: string
     }
   | { throws: string }
 
@@ -66,6 +68,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         yield stream({ type: 'message_start', message: { id: msgId, model, usage } })
         yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
         yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })
+        if (turn.dies !== undefined) throw new Error(turn.dies)
         const stopped = new Promise<void>((resolve) => {
           if (run.signal?.aborted) resolve()
           run.signal?.addEventListener('abort', () => resolve(), { once: true })

@@ -249,6 +249,18 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.5, 10)
     })
 
+    it('charges a turn that died mid-reply, with no stop, and shows it on the meter', async () => {
+      const { session } = await m.start(browser, { origin: 'chat' })
+      next = { stall, dies: 'Claude Code process exited with code 1' }
+      const outcome = await (await m.send(session.id, browser, 'write a long essay')).done
+      expect(outcome).toMatchObject({ kind: 'failed' })
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(CUT, 10)
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect((events.findLast((e) => e.type === 'session.result') as { costUsd: number }).costUsd).toBeCloseTo(CUT, 10)
+      await expectPanelAccepts(events)
+    })
+
     it('counts a first turn stopped before anything else was spent', async () => {
       const { session } = await m.start(browser, { origin: 'chat' })
       next = { stall, resultCostUsd: 0 }
