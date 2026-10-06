@@ -32,6 +32,7 @@ from scadbuddy.api.models import (
     etag_matches,
     require_model_exists,
 )
+from scadbuddy.api.realtime import refuse_foreign_origin
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.paths import model_path
@@ -147,6 +148,9 @@ async def model_language_server(websocket: WebSocket, slug: SlugPath) -> None:
     libraries on ``OPENSCADPATH``, so the model's ``include``/``use`` of its sibling
     files and of its libraries resolve as they do on render."""
     state: AppState = getattr(websocket.app.state, STATE_ATTR)
+    # First: another site's page learns nothing, not even whether the model exists.
+    if await refuse_foreign_origin(websocket, state, "language-server"):
+        return
     if not state.catalogue.exists(slug):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -159,6 +163,8 @@ async def scratch_language_server(websocket: WebSocket) -> None:
     """openscad-lsp for source that is not a model yet, in an empty directory that
     lasts as long as the session."""
     state: AppState = getattr(websocket.app.state, STATE_ATTR)
+    if await refuse_foreign_origin(websocket, state, "language-server"):
+        return
     await _serve(websocket, state, None)
 
 

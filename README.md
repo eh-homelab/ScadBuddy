@@ -186,7 +186,7 @@ on shutdown.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
-  replaced before it started is cancelled, and identical waiting requests share
+  replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
