@@ -214,7 +214,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
       )
       expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
-      // `Agent` is listed by its older name (measured on Claude Code 2.1.283).
+      // `Agent` is listed by its older name (measured on Claude Code 2.1.283 and 2.1.287).
       expect([...init.tools].sort()).toEqual(['Skill', 'Task', ...registry].sort())
       // No server of its own: its tools are the in-process `scadbuddy` server.
       expect(init.mcp_servers.map((s) => s.name)).toEqual(['scadbuddy'])
@@ -251,7 +251,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     // refused every permission request itself ("The user doesn't want to take
     // this action right now"), asking neither canUseTool nor the user. That hit
     // the subagent's own calls and those of the turn Claude Code starts when it
-    // reports back, read tools included (measured on Claude Code 2.1.283).
+    // reports back, read tools included (measured on Claude Code 2.1.283 and 2.1.287).
     describe('a subagent asked to run in the background (#946)', () => {
       /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
       function backgroundScript(tool: string, input: Record<string, unknown>) {
@@ -307,7 +307,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
 
     // #940: a subagent asks the user too. Claude Code refuses AskUserQuestion
     // inside a subagent ("AskUserQuestion is not available inside subagents",
-    // measured on Claude Code 2.1.283) and never hands the call to canUseTool,
+    // measured on Claude Code 2.1.283 and 2.1.287) and never hands the call to canUseTool,
     // so a session with a question gate also gets ASK_USER_TOOL, an in-process
     // MCP tool that parks on the same gate; a subagent's MCP calls reach the
     // host like any other.

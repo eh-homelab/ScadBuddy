@@ -23,7 +23,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 // #940: the agent asks the user structured questions with Claude Code's own
 // AskUserQuestion tool, which the SDK hands to `canUseTool`; the host answers
 // by allowing the call with `answers` added to its input. Measured here
-// against the real SDK (0.3.283) and its bundled binary, pointed at the local
+// against the real SDK and its bundled binary, pointed at the local
 // fake Anthropic endpoint. Nothing reaches Anthropic.
 
 let cliMissing: string | undefined

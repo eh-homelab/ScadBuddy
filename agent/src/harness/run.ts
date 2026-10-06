@@ -71,7 +71,7 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     take this action right now", asking neither canUseTool nor the user. Its
 //     calls, and those of the turn Claude Code starts when it reports back,
 //     were refused that way, read tools included (measured on Claude Code
-//     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
+//     2.1.283 and 2.1.287, test/harnessWiring.test.ts). In the turn, every call goes
 //     through the permission seam below, and an outward one parks at the gate.
 //   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
 //     Claude Code's retries on one credential when there is another to fall
@@ -561,7 +561,7 @@ export function runHarness(run: HarnessRun): Query {
  * error and calls it again: a reply nobody asked for, and spend. Interrupted,
  * it refuses the pending call and ends the turn with an
  * `error_during_execution` result, and the model is not called. Measured on
- * SDK 0.3.283 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
+ * SDK 0.3.283 and 0.3.287 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
  * Returns what the caller calls once the stream has ended.
  */
 function stopFirst(q: Query, signal: AbortSignal | undefined, abort: AbortController): () => void {

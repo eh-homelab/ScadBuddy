@@ -113,7 +113,7 @@ describe.skipIf(skip !== undefined)(`a harness run with an installed plugin pack
   // vet.ts refuses a package with dynamic context injection before this
   // point; this pins the second layer. Every query sets
   // `disableSkillShellExecution` (harness/options.ts), and measured on CLI
-  // 2.1.283 the CLI then replaces both forms, inline and a ```! block that
+  // 2.1.283 and 2.1.287 the CLI then replaces both forms, inline and a ```! block that
   // does not start its line, with a placeholder instead of running them.
   // (Without that setting the same skill reached Bash, and the harness denied
   // it: "Permission to use Bash has been denied".)

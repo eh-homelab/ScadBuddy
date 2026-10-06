@@ -72,7 +72,8 @@ The same file tests credential resolution. The database case runs when
 The first run of the harness found a bug. Given a raw zod shape, the MCP server bundled
 in `@anthropic-ai/claude-agent-sdk` 0.3.283 refused any omitted `.default()` field
 ("expected nonoptional, received undefined"). So, for example, `update_source` without
-`force` never ran in-process. `createHarnessServer` now passes a whole `z.object`, and
+`force` never ran in-process. `createHarnessServer` passed a whole `z.object` until SDK
+0.3.287, which fills the default from a raw shape (#1540).
 [`agent/test/projections.test.ts`](../../agent/test/projections.test.ts) covers it.
 
 ### Live run (opt-in)

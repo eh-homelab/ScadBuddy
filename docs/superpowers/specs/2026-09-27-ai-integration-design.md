@@ -421,10 +421,11 @@ outward call that the seam approved runs at once, because the harness projection
 `runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
 prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
 arguments with its own bundled zod 4.4.3, which refused any call that left out a
-`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
-therefore offers such top-level fields as optional, with the same default in the JSON
-Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
-`sdkShape`; `agent/test/harnessWiring.test.ts`).
+`.default()` field of our zod 4.6.5 ("expected nonoptional"), so the harness projection
+passed a whole `z.object` instead of the raw shape. Measured on SDK 0.3.287 (#1540): its
+server (zod 4.5.4) marks such a field defaulted and fills the default, so the projection
+passes the raw shape (`agent/src/tools/projections.ts` `createHarnessServer`;
+`agent/test/projections.test.ts`).
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
@@ -792,7 +793,7 @@ including `disabled`. Where it is enforced:
   to approve as an option's Markdown `preview`), not a registry tool. The SDK hands each
   call to `canUseTool`, which parks it like an approval; the user's answer is returned
   by allowing the call with `answers` added to its input, and Claude Code passes them to
-  the model as the tool result (measured on SDK 0.3.283,
+  the model as the tool result (measured on SDK 0.3.283 and 0.3.287,
   `agent/test/questions.sdk.test.ts`). Only a session the browser user owns is offered
   the tool, and only the browser user answers, over the chat socket's
   `question.answer`; no tool result and no other principal can. The session waits in
@@ -801,7 +802,7 @@ including `disabled`. Where it is enforced:
   handoff, a shutdown and every other end of the turn cancel it, and the model is told
   nobody answered. Nothing answers a question by itself. A subagent cannot use
   `AskUserQuestion` (Claude Code refuses it there without asking `canUseTool`, measured
-  on 2.1.283), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
+  on 2.1.283 and 2.1.287), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
   in-process tool with the same input that parks on the same gate
   (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
   (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each

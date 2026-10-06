@@ -141,8 +141,9 @@ export const HttpRequestInput = {
     .describe(`Deadline for the whole request, redirects included (default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_TIMEOUT_MS})`),
 }
 // Defaults are applied here, not with zod's `.default()`: the MCP server
-// bundled in the SDK validates tool input without applying them (measured:
-// "expected nonoptional, received undefined").
+// bundled in the SDK validated tool input without applying them (measured on
+// SDK 0.3.283: "expected nonoptional, received undefined"; 0.3.287 applies
+// them, #1540).
 export type HttpRequestInputArgs = z.infer<z.ZodObject<typeof HttpRequestInput>>
 export type HttpRequestArgs = Omit<HttpRequestInputArgs, 'method' | 'timeout_ms'> & { method: HttpMethod; timeout_ms: number }
 

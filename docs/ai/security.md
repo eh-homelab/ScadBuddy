@@ -609,7 +609,7 @@ is refused, with every problem listed, if it has any of the following:
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
   skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
   Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
-  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
+  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead of running
   them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
   resulting Bash call.
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
