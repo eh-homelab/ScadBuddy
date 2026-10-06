@@ -209,7 +209,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     const events = await allEvents(m, session.id)
     await expectPanelAccepts(events.map((e) => e.event))
     expect(events.map((e) => e.event)).toContainEqual(
-      expect.objectContaining({ type: 'approval.resolved', id: approvalId, approved: false, by: browser }),
+      expect.objectContaining({ type: 'approval.resolved', id: approvalId, approved: false, decision: 'denied', by: browser }),
     )
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
   }, 60_000)
@@ -277,7 +277,15 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     await expect(m.approvals.decide(browser, approvalId, true)).rejects.toMatchObject({ code: 'conflict' })
     const events = await allEvents(m, session.id)
     await expectPanelAccepts(events.map((e) => e.event))
-    expect(events.map((e) => e.event)).toContainEqual({ v: 1, type: 'approval.resolved', sessionId: session.id, id: approvalId, approved: false })
+    expect(events.map((e) => e.event)).toContainEqual({
+      v: 1,
+      type: 'approval.resolved',
+      sessionId: session.id,
+      id: approvalId,
+      approved: false,
+      decision: 'cancelled',
+      reason: 'interrupted by You',
+    })
   }, 60_000)
 
   it('handoff cancels the pending approval: the parked call is refused and the turn ends', async () => {
