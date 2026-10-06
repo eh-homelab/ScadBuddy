@@ -80,9 +80,11 @@ Stacked on PR #1063 (`feat/1053-operations`).
    - The cost is that a later supersede does not cancel that job: it renders to the end, and
      `piece_key` dedupes its openscad work.
    - Pinning it would need an update id per request, which the route has no key for.
-10. **An `accepted` that reaches an execution already released to zero** answers
-    `closing: true`. `submit` then waits up to `CLOSING_WAIT` (5 s) for the execution to close
-    and starts again. This mirrors the repeat race in phase 1's `PrintRun`.
+10. **An `accepted` that reaches an execution already released to zero** (or whose render
+    raised) is rejected by its validator (`RenderClosing`), not answered: a rejected Update is
+    not in history, so the same id starts the next run (review #1066 (7) 1). `submit` then
+    waits up to `CLOSING_WAIT` (5 s) for the execution to close and starts again. This
+    mirrors the repeat race in phase 1's `PrintRun`.
 
 ## Global Constraints
 
@@ -226,7 +228,8 @@ Stacked on PR #1063 (`feat/1053-operations`).
     2. Run `execute_local_activity(ACCEPT_ACTIVITY, AcceptRender(...), result_type=Job,
        start_to_close_timeout=SHORT, retry_policy=PROJECT_RETRY)`.
     3. If its `ApplicationError` has `type == QUEUE_FULL`, set `self.queue_full`, wait for
-       `all_handlers_finished`, and raise `ApplicationError(type=REFUSED, non_retryable=True)`.
+       `all_handlers_finished`, and return: the run completes, since a refusal is
+       back-pressure and must not read as a failed workflow (review #1066 3.1).
     4. Set `self.job`, `self.claims = 1`, and `self.work = asyncio.create_task(self._render(job))`,
        then await it. If `self.released` is set, swallow the `CancelledError`.
     5. Wait for `all_handlers_finished`.

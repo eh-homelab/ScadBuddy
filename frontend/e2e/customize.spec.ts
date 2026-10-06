@@ -295,6 +295,23 @@ test.describe('customizer', () => {
     const warnings = page.getByRole('region', { name: 'Render warnings' })
     await expect(warnings).toHaveText(/From ScadBuddy\s*OpenSCAD could not open pic\.svg/)
   })
+
+  test('keeps the page when a preview fails to load, and loads the next one (#361)', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+    await name.fill('noglb')
+    await expect(page.getByTestId('preview-failed')).toContainText('Could not load the preview.')
+    // Only the viewer failed: the header, the parameters and the actions stay.
+    await expect(page.getByRole('heading', { name: 'Name Keychain' })).toBeVisible()
+    await expect(page.getByTestId('generate')).toBeVisible()
+
+    await name.fill('Nova')
+    await expect(page.getByTestId('preview-failed')).toHaveCount(0)
+    await expect(page.getByTestId('preview-canvas')).toBeVisible()
+    await expect(page.getByTestId('bbox-readout')).toContainText('46.7 × 37.2 × 6.8 mm')
+  })
 })
 
 test.describe('font picker', () => {

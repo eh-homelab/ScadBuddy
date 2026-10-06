@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import lsp
@@ -687,3 +688,45 @@ def test_the_real_server_completes_and_documents_through_the_bridge(
     assert any(label.startswith("plate(") for label in labels)
     assert "A plate the width of the tag." in responses[3]["contents"]["value"]
     assert responses[4][0]["uri"] == CLIENT_ROOT + "helper.scad"
+
+
+def _lsp_routes(model: str) -> list[str]:
+    return [f"/api/v1/models/{model}/lsp", "/api/v1/lsp"]
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://scad.example.com", "null"])
+def test_a_foreign_origin_is_refused(
+    settings: Settings, model: str, pid_file: Path, which: int, origin: str
+) -> None:
+    """Browsers do not apply the same-origin policy to sockets, so a page on another
+    origin could otherwise start a language server in a model's directory and hold the
+    permits every real editor needs (#1317); the realtime socket's rule (#266)."""
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = _lsp_routes(model)[which]
+    with TestClient(app) as client:
+        client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers={"origin": origin}),
+        ):
+            pass
+        assert refused.value.code == 1008
+        assert not pid_file.exists()
+        # The refusal took no permit: the one there is still serves the UI.
+        with client.websocket_connect(route, headers={"origin": "https://scad.example.com"}) as ok:
+            assert "result" in _initialize(ok)
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+@pytest.mark.parametrize(
+    "origin", ["https://scad.example.com:443", "http://localhost:5173", "https://scad.lan"]
+)
+def test_the_ui_origins_are_accepted(
+    app: FastAPI, client: TestClient, model: str, which: int, origin: str
+) -> None:
+    state = getattr(app.state, STATE_ATTR)
+    state.settings = state.settings.model_copy(update={"allowed_origins": "https://scad.lan"})
+    client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+    with client.websocket_connect(_lsp_routes(model)[which], headers={"origin": origin}) as ok:
+        assert "result" in _initialize(ok)

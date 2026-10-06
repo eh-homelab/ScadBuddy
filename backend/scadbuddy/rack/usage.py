@@ -44,6 +44,12 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: covers one or two slow archives; it can cut the hook off mid-write, and that
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
+#: The whole budget of a settle's settings read, its wait for a connection included (#1111):
+#: well inside the follow's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
+#: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
+#: off records nothing: its archives are recorded only by that output's next settle,
+#: which a one-off output may never have. That loss is the price of freeing the thread.
+SETTINGS_READ_TIMEOUT = 10.0
 
 #: What each advisory store write or read below logs when it swallows an exception, by
 #: type (#1112). Named so the tests' programming-error guard reads the same strings.
@@ -51,6 +57,9 @@ RACK_SEEN_FALLBACK = "could not record the rack's hotends"
 RACK_PICKS_FALLBACK = "could not record the rack picks"
 RACK_SETTLE_READ_FALLBACK = "could not read a settled print's rack picks"
 RACK_SETTLE_FALLBACK = "could not record a rack nozzle's print"
+#: Logged when the follow cuts a settle off (#1113): it is not retried (spec §4), so
+#: this names, by id, the archives it had not recorded. Not a fallback: it re-raises.
+RACK_SETTLE_CUT_OFF = "a rack settle was cut off with archives unrecorded"
 RACK_STORE_FALLBACKS = frozenset(
     {RACK_SEEN_FALLBACK, RACK_PICKS_FALLBACK, RACK_SETTLE_READ_FALLBACK, RACK_SETTLE_FALLBACK}
 )
@@ -372,7 +381,12 @@ async def record_settled(
     settle seen twice writes nothing the second time. Each failure is logged by type
     and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
     Nothing is retried now: an archive skipped here is recorded by the output's next
-    settle, which reads every linked archive not yet recorded."""
+    settle, which reads every linked archive not yet recorded. A settle cut off by the
+    follow logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``, stage
+    ``archives``). One cut off during the initial reads logs stage ``read`` with the
+    links read so far, which may include archives already recorded. A cut-off before
+    this function starts (the hook's settings load) is not logged here."""
+    linked: list[tuple[int, int]] = []
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
@@ -381,6 +395,18 @@ async def record_settled(
         ]
         picked = await store.picked_items(item for _, item in linked)
         recorded = await store.recorded_archives(archive for archive, _ in linked)
+    except asyncio.CancelledError:
+        # Cut off before the loop: the ids are the links read so far (candidates, not yet
+        # filtered to the unrecorded), none if the link read itself was in flight.
+        logger.warning(
+            RACK_SETTLE_CUT_OFF,
+            extra={
+                "output_id": output_id,
+                "stage": "read",
+                "archive_ids": [archive for archive, _ in linked],
+            },
+        )
+        raise
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_READ_FALLBACK,
@@ -408,11 +434,26 @@ async def record_settled(
         )
 
     written = 0
-    for archive_id, queue_item_id in linked:
-        if queue_item_id not in picked or archive_id in recorded:
-            continue
+    pending = [
+        (archive_id, queue_item_id)
+        for archive_id, queue_item_id in linked
+        if queue_item_id in picked and archive_id not in recorded
+    ]
+    for index, (archive_id, queue_item_id) in enumerate(pending):
         try:
             written += await record_one(archive_id, queue_item_id)
+        except asyncio.CancelledError:
+            # Ids only (spec §7). The one in flight is named too: its write may still
+            # land, its read did not.
+            logger.warning(
+                RACK_SETTLE_CUT_OFF,
+                extra={
+                    "output_id": output_id,
+                    "stage": "archives",
+                    "archive_ids": [archive for archive, _ in pending[index:]],
+                },
+            )
+            raise
         except Exception as exc:
             logger.warning(
                 RACK_SETTLE_FALLBACK,
@@ -426,7 +467,7 @@ async def record_settled(
 
 
 def settle_hook(
-    store: RackUsage, links: PrintLinkStore, load: Callable[[], StoredSettings]
+    store: RackUsage, links: PrintLinkStore, load: Callable[[float], StoredSettings]
 ) -> SettledHook:
     """The print follow's ``on_settled`` hook for the rack (spec §4).
 
@@ -439,10 +480,10 @@ def settle_hook(
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the follow stops
-        # waiting on it at its timeout (#1083). The thread itself runs on: the settings
-        # pool has no statement timeout (only this store's queries do), so a stuck
-        # settings read holds its thread and connection until Postgres answers.
-        settings = await asyncio.to_thread(load)
+        # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
+        # stuck on a slow Postgres gives its thread back to the shared executor rather
+        # than holding it until Postgres answers.
+        settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 

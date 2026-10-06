@@ -929,10 +929,11 @@ export function SettingsPage() {
                   className="sb-field"
                 />
               </FieldRow>
+              {/* The operations record (#1053). */}
               <FieldRow
                 id="operation-retention"
                 label="Keep finished Bambuddy operations for (days)"
-                help="Sends, reprints, project filing and the like (#1053). Empty keeps every record; a number deletes those that finished longer ago. Keep it at least as long as Temporal's namespace retention, or a retried request whose record is gone is told it may have been done instead of its outcome."
+                help="Sends, reprints, project filing and the like. Empty keeps every record; a number deletes those that finished longer ago. Keep it at least as long as Temporal's namespace retention, or a retried request whose record is gone is told it may have been done instead of its outcome."
                 error={errors.operation_retention_seconds}
               >
                 <input

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowUpdateFailedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -27,7 +28,11 @@ from scadbuddy.api.deps import (
     StateDep,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.operations import IdempotencyKey, still_accepting, temporal_unavailable
+from scadbuddy.api.operations import (
+    TEMPORAL_UNAVAILABLE_PROBLEM,
+    IdempotencyKey,
+    still_accepting,
+)
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
@@ -49,7 +54,7 @@ from scadbuddy.render.job_models import (
     PlateInfo,
     QueueFullError,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -71,10 +76,33 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["jobs"])
 
-#: A render whose `accepted` Update failed for a reason a re-send would not change.
+#: A render whose `accepted` Update failed, or whose start Temporal refused, for a
+#: reason a re-send would not change.
 RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
+
+#: The `RPCError`s worth sending the same request again for; any other is a 500
+#: (review #1066 (8) 2). The codes Temporal's own client retries (`RETRYABLE_ERROR_CODES`
+#: in the sdk-core temporalio 1.33.0 bundles, `crates/client/src/retry.rs`), so one
+#: reaching us outlived those retries, and the two gRPC ends an unanswered call with.
+#: The rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
+#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are configuration.
+TRANSIENT_RPC = frozenset(
+    {
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.CANCELLED,
+    }
+)
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -99,8 +127,13 @@ class RenderRequest(BaseModel):
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
     # The job this render replaces -- the preview's previous submit. Dropped unrendered
     # if no worker has taken it yet, so a slider drag does not queue every stop on
-    # the way. Harmless when it has already started or finished.
-    supersedes: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
+    # the way. Harmless when it has already started or finished. Needs an
+    # `Idempotency-Key`: a re-send without one would release the job again (#1053).
+    supersedes: str | None = Field(
+        default=None,
+        pattern=JOB_ID_PATTERN,
+        description="The job this render replaces; needs an `Idempotency-Key` header (422 without)",
+    )
 
 
 class RenderAccepted(BaseModel):
@@ -216,18 +249,37 @@ def require_job(render: RenderService, job_id: str) -> Job:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "the Bambuddy blob store has no commit of the template to snapshot for the render"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); or Temporal, where renders run, is unreachable or refused "
-                "the start (`temporal-unavailable`, nothing was queued); or the render is "
+                "limit is set); or Temporal, where renders run, is unreachable or could not "
+                "take the start now (`temporal-unavailable`; `may_have_started` is false "
+                "only when nothing reached Temporal, and true means send the same request "
+                "again with the same `Idempotency-Key` to follow a start it may hold); or "
+                "the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
-                "again, with the same `Idempotency-Key`, to follow it as one request). "
-                "Retry after `Retry-After` seconds"
+                "again, with the same `Idempotency-Key`, to follow it as one request; "
+                "without a key, each send is one more claim on the job); or, on the "
+                "Bambuddy blob store, the revision's first snapshot is still uploading "
+                "(problem `code` `snapshot_pending`). Retry after `Retry-After` seconds"
             )
         },
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
-            "description": "The render's execution refused it (`render-unstartable`)"
+            "description": (
+                "The render's execution, or Temporal, refused it (`render-unstartable`: "
+                "a configuration error, see the logs). With `may_have_started` true "
+                "(Temporal refused, after a start it may have persisted), send the same "
+                "request again with the same `Idempotency-Key` to follow it; false, the "
+                "render's first step failed and no job exists"
+            )
+        },
+        status.HTTP_507_INSUFFICIENT_STORAGE: {
+            "description": "the blob store has no room for the template's source snapshot"
         },
     },
 )
@@ -245,6 +297,13 @@ async def render_model(
     fonts: FontsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted:
+    if body.supersedes is not None and idempotency_key is None:
+        # A re-send without a key would release the job once more, and with it another
+        # request's claim (review #1066 2.1).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a render that supersedes another needs an Idempotency-Key header",
+        )
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
@@ -294,14 +353,17 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError):
-        # Any refusal of the start, as the print and operation routes answer it.
-        raise temporal_unavailable("renders") from None
+    except (RPCError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
     except WorkflowUpdateFailedError as error:
+        # The worker's failure text is for the log, not the client (review #1066 5.1).
+        logger.error("the render could not be started: %s", error.cause, exc_info=True)
+        # The run answered (`RENDER_UNSTARTABLE`, review #1066 (10) 1): no job exists.
         raise ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
-            f"the render could not be started: {error.cause}",
+            "the render could not be started",
             type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=False,
         ) from None
     except StoreFullError as error:
         # `submit` pins the template's snapshot in the blob store before the job exists.
@@ -312,10 +374,66 @@ async def render_model(
     except SnapshotUnavailableError as error:
         # The bambuddy store renders from a snapshot of a commit, and there is none.
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    except SnapshotPendingError as error:
+        # The revision's first snapshot is still uploading (#686); it carries on.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+            code="snapshot_pending",
+        ) from None
     return RenderAccepted(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,
         inputs=inputs,
+    )
+
+
+def _temporal_problem(error: RPCError | TemporalUnavailableError) -> ApiError:
+    """What the route answers when Temporal did not take the render's start, as the
+    print route does: only a failed connect wrote nothing; any other may follow a start
+    Temporal persisted, which the same request sent again follows (review #1066 (8) 2).
+    ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
+    `Idempotency-Key` when it is true, so a detail tells a client to send again only
+    then (review #1066 (10) 3, 4)."""
+    if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
+        # A wrong namespace or a denied permission: configuration. Temporal's message
+        # stays in the log. The refusal may still follow a start it persisted.
+        logger.error("Temporal refused to start a render", exc_info=error)
+        return ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Temporal refused to start this render; see ScadBuddy's logs. Send the same"
+            " request again to follow it if it started.",
+            type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=True,
+        )
+    logger.warning("could not start a render on Temporal", exc_info=error)
+    started = not (
+        isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError)
+    )
+    if not started:
+        # The lazy client's first connect failed (`start_command`): nothing was sent.
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
+            " again shortly."
+        )
+    elif isinstance(error, TemporalUnavailableError):
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
+            " again shortly to follow it if it started."
+        )
+    else:
+        detail = (
+            "Temporal could not start this render right now. Send the same request again"
+            " shortly to follow it if it started."
+        )
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail,
+        type_=TEMPORAL_UNAVAILABLE_PROBLEM,
+        headers={"Retry-After": "5"},
+        may_have_started=started,
     )
 
 
