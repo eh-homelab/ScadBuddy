@@ -141,7 +141,10 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
     const stored = isJsonObject(preset.inputs)
       ? (preset.inputs as JsonObject)
       : joinInputs(preset.params ?? {}, NO_EXTRA)
-    const migrated = migrate ? await migrate(stored) : stored
+    // Awaited only when it is a promise: a pick needing no migration applies at once, as
+    // before (#1445: the assistant's confirm reads the values right after its click).
+    const answer = migrate ? migrate(stored) : stored
+    const migrated = answer instanceof Promise ? await answer : answer
     if (migrated === null || turn !== picking.current) return
     const applied = applyPreset(schema, { ...preset, inputs: migrated })
     setSelection({ preset, applied: applied.values })
