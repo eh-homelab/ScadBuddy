@@ -29,19 +29,23 @@ export type FeedItem =
       tool: string
       summary: string
       /**
-       * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `queued` when it is waiting for the connection
-       * to come back (sent first on reconnect); `approved`/`denied` from
-       * `approval.resolved`, the server's confirmation.
+       * `pending` until the user decides; `sent` while the decision is on its way
+       * (`POST /api/v1/ai/pending-input/{id}`, #815), back to `pending` if it was
+       * refused; `closed` (with `reason`) when it was refused because the entry was
+       * already resolved or expired, so no resolve frame need arrive for the card to
+       * end; `approved`/`denied` from `approval.resolved`, the server's confirmation,
+       * which also replaces `closed` when it does arrive.
        */
-      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'sent' | 'approved' | 'denied' | 'closed'
       by?: Owner
+      reason?: string
     }
   /**
    * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
-   * `sent` once the answer left the panel; `queued` when it waits for the connection to
-   * come back (sent first on reconnect); `answered` or `cancelled` (its turn ended
-   * first, `reason`) from `question.resolved`, the server's confirmation.
+   * `sent` while the answer is on its way, back to `pending` if it was refused,
+   * `closed` (`reason`) if it was refused as already resolved or expired;
+   * `answered` or `cancelled` (its turn ended first, `reason`) from
+   * `question.resolved`, the server's confirmation.
    */
   | {
       kind: 'question'
@@ -51,7 +55,7 @@ export type FeedItem =
       questions: Question[]
       /** #815 — set when this is an attention request rather than a question. */
       attention?: Attention
-      state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'
+      state: 'pending' | 'sent' | 'answered' | 'cancelled' | 'closed'
       answers?: string[]
       by?: Owner
       reason?: string
@@ -91,13 +95,11 @@ export interface SessionState {
    */
   budgetSpent?: boolean
   /**
-   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
-   * Their decision goes out right after the attach, so the replayed card shows `sent`,
-   * not live buttons, until `approval.resolved`.
+   * #815 — approvals and questions whose response was still on its way (`sent`) when the
+   * feed was cleared for a replay. The replayed card shows `sent`, not live buttons, so
+   * the respond route's answer (`responded`/`respond-failed`) still finds it (#1395).
    */
-  queuedDecisions?: string[]
-  /** #940 — the same for answers to questions: the replayed card shows `sent`. */
-  queuedAnswers?: string[]
+  sending?: string[]
 }
 
 export interface ChatState {
@@ -120,9 +122,21 @@ export type ChatAction =
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
-  /** #940 — the user's answer to a question left the panel (or waits for the reconnect). */
-  | { type: 'answered'; sessionId: string; questionId: string; queued?: boolean }
+  | { type: 'decided'; sessionId: string; approvalId: string }
+  /** #940 — the user's answer to a question left the panel. */
+  | { type: 'answered'; sessionId: string; questionId: string }
+  /**
+   * #815 — the respond route took a decision or an answer: the card shows it at once,
+   * without waiting for the socket's resolve frame (which may be reconnecting).
+   */
+  | { type: 'responded'; sessionId: string; id: string; outcome: 'approved' | 'denied' | 'answered'; answers?: string[]; by: Owner }
+  /**
+   * #815 — the respond route refused a decision or an answer. The card is live again,
+   * with `message` beside it, unless `closed` is set: the entry was already resolved
+   * or expired, so the card ends there with that reason (a resolve frame, if one
+   * still arrives, replaces it with the real outcome).
+   */
+  | { type: 'respond-failed'; sessionId: string; id: string; message: string; closed?: string }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -289,7 +303,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -297,7 +311,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === event.id
-            ? { ...i, state: event.approved ? 'approved' : 'denied', by: event.by }
+            ? { ...withoutReason(i), state: event.approved ? 'approved' : 'denied', by: event.by }
             : i,
         ),
       )
@@ -310,7 +324,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           tool: event.tool,
           questions: event.questions,
           ...(event.attention ? { attention: event.attention } : {}),
-          state: s.queuedAnswers?.includes(event.id) ? 'sent' : 'pending',
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -319,9 +333,10 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         mapItems(s, (i) =>
           i.kind === 'question' && i.id === event.id
             ? event.answered
-              ? { ...i, state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
-              : {
-                  ...i,
+              ? { ...withoutReason(i), state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
+              : // A closed card's reason is not this one's (#1401).
+                {
+                  ...withoutReason(i),
                   state: 'cancelled',
                   ...(event.reason === undefined ? {} : { reason: event.reason }),
                   ...(event.reconnected ? { reconnected: true as const } : {}),
@@ -445,8 +460,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             items: [],
             // Replayed from the log; the numbers stay for a log that has none.
             budgetSpent: false,
-            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
-            queuedAnswers: s.items.flatMap((i) => (i.kind === 'question' && i.state === 'queued' ? [i.id] : [])),
+            sending: s.items.flatMap((i) => ((i.kind === 'approval' || i.kind === 'question') && i.state === 'sent' ? [i.id] : [])),
           }))
         : next
     }
@@ -458,20 +472,53 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'answered':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'question' && i.id === action.questionId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'question' && i.id === action.questionId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
+    case 'responded':
+      return patchSession(state, action.sessionId, (s) =>
+        mapItems(s, (i) => {
+          if ((i.kind !== 'approval' && i.kind !== 'question') || i.id !== action.id || i.state !== 'sent') return i
+          if (i.kind === 'approval' && action.outcome !== 'answered') return { ...i, state: action.outcome, by: action.by }
+          if (i.kind === 'question' && action.outcome === 'answered') {
+            return { ...i, state: 'answered', by: action.by, ...(action.answers ? { answers: action.answers } : {}) }
+          }
+          return i
+        }),
+      )
+    case 'respond-failed': {
+      const { closed } = action
+      if (closed !== undefined) {
+        return patchSession(state, action.sessionId, (s) =>
+          mapItems(s, (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
+              ? { ...i, state: 'closed', reason: closed }
+              : i,
+          ),
+        )
+      }
+      return patchSession(state, action.sessionId, (s) =>
+        push(
+          mapItems(s, (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' ? { ...i, state: 'pending' } : i,
+          ),
+          { kind: 'error', id: `error-${s.items.length}`, message: action.message },
+        ),
+      )
+    }
   }
+}
+
+/** The item without the reason its previous state gave; a new state brings its own. */
+function withoutReason<T extends { reason?: string }>(item: T): Omit<T, 'reason'> {
+  const { reason: _reason, ...rest } = item
+  return rest
 }
 
 /** A turn is live: running, or parked on a human (an approval, or a question, #940). */
