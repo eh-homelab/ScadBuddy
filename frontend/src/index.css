@@ -1,6 +1,13 @@
 @import 'tailwindcss';
 
 /*
+ * #971 — the stacked (below lg) layout on a short window: a 1440x900 laptop at 200%
+ * zoom is 720x450. There the page scrolls rather than splitting the height into slivers.
+ */
+@custom-variant short (@media (max-width: 1023.98px) and (max-height: 640px));
+@custom-variant stacked-tall (@media (max-width: 1023.98px) and (min-height: 640.02px));
+
+/*
  * ScadBuddy reads as an instrument panel inside Bambuddy's dark chrome: steel-dark
  * surfaces, hairline rules, a 4 px rhythm. The only saturated colour in the UI is
  * the model's own filament colours — everything else stays quiet so the swatches
