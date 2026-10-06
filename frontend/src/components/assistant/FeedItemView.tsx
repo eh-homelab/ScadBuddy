@@ -164,9 +164,9 @@ function ApprovalCard({
         <p className="mt-1.5 text-[12px] text-muted" role="status">
           {item.state === 'sent'
             ? 'Sending your answer…'
-            : item.state === 'queued'
-              ? 'Not connected: your answer goes first when the assistant reconnects.'
-            : item.state === 'approved'
+            : item.state === 'closed'
+              ? `Your decision was not taken: ${item.reason ?? 'the request is no longer waiting'}.`
+              : item.state === 'approved'
               ? `Approved${item.by ? ` by ${item.by.label}` : ''}.`
               : `Denied${item.by ? ` by ${item.by.label}` : ''}.`}
         </p>
@@ -261,7 +261,7 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
         </div>
       ) : (
         <p className="mt-1.5 text-[12px] text-muted" role="status">
-          {item.state === 'sent' || item.state === 'queued'
+          {item.state === 'sent'
             ? 'Dismissing…'
             : item.state === 'answered'
               ? `Dismissed${item.by ? ` by ${item.by.label}` : ''}.`
@@ -404,9 +404,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
           <p className="text-[12px] text-muted" role="status">
             {item.state === 'sent'
               ? 'Sending your answer…'
-              : item.state === 'queued'
-                ? 'Not connected: your answer goes first when the assistant reconnects.'
-              : item.state === 'answered'
+              : item.state === 'closed'
+                ? `Your answer was not taken: ${item.reason ?? 'the request is no longer waiting'}.`
+                : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
                 : item.reconnected
                   ? 'The tab is back. The assistant re-reads the page before it changes anything.'

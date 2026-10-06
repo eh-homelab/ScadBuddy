@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,13 +20,17 @@ from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.watcher import SETTLE_TIMEOUT
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.rack import usage
 from scadbuddy.rack.usage import (
     RACK_SETTLE_CUT_OFF,
     RACK_SETTLE_FALLBACK,
+    SETTINGS_READ_TIMEOUT,
     PickedHotend,
     RackUsageStore,
     record_settled,
@@ -41,7 +46,7 @@ from tests.bambuddy.test_watcher import (
     watcher_for,
     write_output,
 )
-from tests.conftest import PgPool, open_pg_pool
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool, open_pg_pool
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
@@ -420,13 +425,66 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     write_output(paths)
     assert await links.for_output(OUTPUT) == []
     watcher, seen = watcher_for(paths, read)
-    watcher.on_settled.append(settle_hook(store, links, lambda: settings))
+    watcher.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
     watcher.watch(OUTPUT)
     await until_idle(watcher)
 
     assert kinds(seen) == ["print.progress", "print.settled"]
     usage = (await store.usage([A]))[A]
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
+
+
+async def test_the_hook_passes_its_read_timeout_and_a_failed_read_spares_the_next(
+    store: RackUsageStore, pool: PgPool
+) -> None:
+    """#1111: the hook passes ``SETTINGS_READ_TIMEOUT`` to its settings read, and a read
+    that failed does not stop the next settle from reading. The stub cannot show the
+    bound ends a read; ``test_a_real_stuck_settings_read_gives_its_thread_back`` does."""
+    asked: list[float] = []
+
+    def load(timeout: float) -> StoredSettings:
+        asked.append(timeout)
+        if len(asked) == 1:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        return StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+
+    hook = settle_hook(store, PrintLinkStore(pool), load)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        await hook(OutputMeta.model_construct(id=OUTPUT))
+    with respx.mock(base_url=BASE_URL, assert_all_called=False):
+        await hook(OutputMeta.model_construct(id=OUTPUT))
+    assert asked == [SETTINGS_READ_TIMEOUT, SETTINGS_READ_TIMEOUT]
+    assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
+
+
+async def test_a_real_stuck_settings_read_gives_its_thread_back(
+    store: RackUsageStore,
+    pool: PgPool,
+    tmp_path: Path,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111, end to end: the hook's read through the real settings store, held on a
+    locked table, ends within the bound, so its thread returns to the executor."""
+    monkeypatch.setattr(usage, "SETTINGS_READ_TIMEOUT", 0.2)
+    settings_store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
+    settings_store.open()
+    try:
+        hook = settle_hook(store, PrintLinkStore(pool), settings_store.load)
+        with psycopg.connect(pg_conninfo) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=30)
+            elapsed = time.monotonic() - started
+    finally:
+        settings_store.close()
+    # Ended at the hook's bound, not the real SETTINGS_READ_TIMEOUT or the wait_for.
+    assert elapsed < 2
 
 
 async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
@@ -437,7 +495,7 @@ async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
     release, returned = threading.Event(), threading.Event()
     settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
 
-    def load() -> StoredSettings:
+    def load(timeout: float) -> StoredSettings:
         release.wait(timeout=10)
         returned.set()
         return settings

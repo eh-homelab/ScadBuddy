@@ -310,8 +310,10 @@ the UI approval". As built:
   (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
   of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
   session id itself.
-- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
-  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/pending-input/approval:<id>`
+  ([`agent/src/routes/pendingInput.ts`](../../agent/src/routes/pendingInput.ts), #815), or
+  the older `POST /api/v1/ai/approvals/:id/approve` or `/deny`
+  ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), both as
   the browser user. `authorize` refuses a principal deciding its own request even with
   an approval grant, so an MCP client cannot approve what it prepared (covered in
   `agent/test/mcpConfirm.pg.test.ts`).
