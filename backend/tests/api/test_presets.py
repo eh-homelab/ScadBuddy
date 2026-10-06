@@ -161,6 +161,56 @@ def test_a_dropdown_value_has_to_be_one_of_its_options(
     assert update.status_code == 422
 
 
+def test_a_text_value_past_its_max_length_is_refused(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1330: a `// 8` text limit is enforced on a save and an update, not only in the
+    browser."""
+    schema = CustomizerSchema(
+        parameters=[Parameter(name="label", type="string", initial="hi", max_length=8)]
+    )
+
+    async def with_a_limit(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_limit)
+    refused = client.post(_url(model), json={"name": "X", "params": {"label": "x" * 16}})
+    assert refused.status_code == 422
+    assert refused.json()["parameters"] == ["label"]
+    saved = _save(client, model, "Short", {"label": "x" * 8})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"label": "x" * 9}})
+    assert update.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"label": "x" * 8}
+
+
+def test_a_colour_value_has_to_be_a_hex_colour(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353: a preset's colour is what the colour picker could pick, `#RRGGBB`. A name
+    or anything else was saved, then shown as `#RREEDD` with a black swatch."""
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="col", type="color", initial="#00FF00"),
+            Parameter(name="named", type="color", initial="red"),
+        ]
+    )
+
+    async def with_a_colour(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_colour)
+    for value in ("red", "red; cube(100)", "#12345", "#1234567", "#GGGGGG", "00FF00", ""):
+        refused = client.post(_url(model), json={"name": "X", "params": {"col": value}})
+        assert refused.status_code == 422, value
+        assert refused.json()["parameters"] == ["col"]
+    saved = _save(client, model, "Blue", {"col": "#0000ff"})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"col": "blue"}})
+    assert update.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"col": "#0000ff"}
+    # The template's own default is its business, whatever it spells.
+    _save(client, model, "Default", {"named": "red"})
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -239,6 +289,36 @@ def test_a_preset_can_be_deleted(client: TestClient, model: str, pg_conninfo: st
 def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
     missing = "0" * 32
     assert client.patch(_url(model, missing), json={"name": "X"}).status_code == 404
+
+
+def test_problems_read_for_people(client: TestClient, model: str) -> None:
+    """#357: no internal ids, no Python quoting, and a clash names the preset that
+    has the name, as it is spelled, not the spelling just typed."""
+    saved = _save(client, model, "C· d6 Numbers - Red team", {"width": 25})
+    clash = client.post(_url(model), json={"name": "c· d6 numbers - red TEAM", "params": {}})
+    assert clash.status_code == 409
+    assert clash.json()["detail"] == 'A preset named "C· d6 Numbers - Red team" already exists.'
+    assert clash.json()["existing"] == "C· d6 Numbers - Red team"
+    other = _save(client, model, "Small", {"width": 5})
+    rename = client.patch(_url(model, other["id"]), json={"name": "C· D6 NUMBERS - RED TEAM"})
+    assert rename.json()["detail"] == clash.json()["detail"]
+
+    assert client.delete(_url(model, saved["id"])).status_code == 204
+    for gone in (
+        client.delete(_url(model, saved["id"])),
+        client.patch(_url(model, saved["id"]), json={"name": "X"}),
+        _duplicate(client, model, saved["id"], "Copy"),
+    ):
+        assert gone.status_code == 404
+        detail = gone.json()["detail"]
+        assert detail == "That preset no longer exists; it may have been deleted elsewhere."
+        assert gone.json()["preset_id"] == saved["id"]
+
+
+def test_an_unknown_template_preset_is_a_404_not_read_only(client: TestClient, model: str) -> None:
+    """#357: a `template-*` id the template does not have was refused as read-only."""
+    assert client.delete(_url(model, "template-0")).status_code == 404
+    assert client.patch(_url(model, "template-0"), json={"name": "X"}).status_code == 404
 
 
 def test_an_unknown_model_is_a_404(client: TestClient) -> None:

@@ -56,7 +56,12 @@ import httpx
 
 from scadbuddy.library.scad import NotOpenSCADError, decode_source
 
-IMPORT_TIMEOUT = 30.0
+#: The whole fetch, every hop and lookup included. It must end before the gateway
+#: does: Envoy's default route timeout on `scadbuddy.internal` is 15 s, and past it
+#: the client already holds a plain-text 504 while an import finishing behind it
+#: still creates the model, so the retry 409s (#966). 10 s leaves the parse check
+#: that follows the fetch room to answer inside those 15 s too.
+IMPORT_TIMEOUT = 10.0
 
 #: A page, not a file. Most often a GitHub `blob/` link pasted instead of its raw
 #: one, which would otherwise reach OpenSCAD and fail as a baffling parse error.
@@ -140,7 +145,8 @@ _RESOLVER = ThreadPoolExecutor(max_workers=RESOLVER_THREADS, thread_name_prefix=
 #: so it counts threads that are really busy.
 _RESOLVER_SLOTS = threading.BoundedSemaphore(RESOLVER_THREADS)
 
-#: Well inside `IMPORT_TIMEOUT`, so a slow resolver leaves the fetch its time.
+#: A lookup's own limit. An import's lookup runs inside `IMPORT_TIMEOUT` as well,
+#: which cuts it first; a library clone (#93) has no such budget around it.
 RESOLVE_TIMEOUT = 10.0
 
 #: Hops followed after the first request. Raw links redirect once or twice at most.

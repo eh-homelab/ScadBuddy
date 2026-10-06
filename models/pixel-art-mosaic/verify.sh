@@ -16,6 +16,9 @@
 #   - every magnet pocket is a real pocket: straight up from the bed at its
 #     centre the first material is its roof (magnet_thickness + 0.2 up), and
 #     just outside its rim there is backing from the bed up
+#   - pockets that would run into each other drop to fewer (4 -> 2 -> 1) with
+#     a NOTE, the ones left keep a wall between them, and a pad reaches past
+#     the plaque only when one magnet is bigger than it, with a NOTE (#516)
 #   - a refused name never reaches surface(); a missing file leaves only the
 #     backing; "image_threshold" (the PNG choice's name before #318) renders
 #     the same parts as "png_threshold"
@@ -56,6 +59,14 @@ CASES+=(
     # pockets used to be cut from nothing (review on #417).
     'heart-cut-magnets-4|pattern="heart";background_mode="cut";mount="magnet";magnet_count=4'
     'star-cut-magnets-2|pattern="star";background_mode="cut";mount="magnet";magnet_count=2;magnet_diameter=15'
+    # #516: pockets that would run into each other drop to fewer (4 -> 1 on a
+    # 16 mm mosaic, 2 -> 1 for 25 mm magnets on 40 mm, 4 -> 2 on a 120 x 40
+    # strip), with a NOTE, and the pads stay inside the plaque. A single
+    # magnet too big for the plaque keeps its pad past the edge, and says so.
+    'small-magnets-4-to-1|pattern="blocky_face";pixel_size=2;mount="magnet";magnet_count=4;frame_width=0'
+    'big-magnets-2-to-1|pattern="blocky_face";mount="magnet";magnet_count=2;magnet_diameter=25'
+    'tall-magnets-4-to-2|image_file="sample-sunset.png";columns=24;rows=8;pixel_size=5;mount="magnet";magnet_count=4;magnet_diameter=20'
+    'magnet-past-edge|pattern="blocky_face";pixel_size=2;mount="magnet";magnet_diameter=20;frame_width=0'
     'no-frame-no-mount|pattern="blocky_face";frame_width=0;mount="none";pixel_size=8'
     'cat-5-bands-cut-magnet|image_file="sample-cat.png";bands=5;png_background="lightest";background_mode="cut";mount="magnet"'
     'cat-5-bands-fill|image_file="sample-cat.png";bands=5;png_background="lightest"'
@@ -288,8 +299,33 @@ for line in open(os.path.join(OUT, "cases.txt")):
     check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))
     check(name, abs(max(zs) - top) <= 1e-3, "height %.2f == %.2f" % (max(zs), top))
     check(name, max(xs) - min(xs) <= BED_X and max(ys) - min(ys) <= BED_Y, "fits the %dx%d plate" % (BED_X, BED_Y))
+    # Magnet pockets (#516): as many as asked while each, with MAGNET_WALL
+    # all round, fits its share of the mosaic; else 2, else 1, with a NOTE.
+    magnet = p["mount"] == "magnet"
+    pd = p["magnet_diameter"] + p["magnet_clearance"]
+    span = pd + 2 * 1.6
+    asked = int(p["magnet_count"])
+    fits = {4: GW / 2 >= span and GH / 2 >= span, 2: GW / 2 >= span and GH >= span, 1: True}
+    mc = next(n for n in (4, 2, 1) if n <= asked and fits[n])
+    mag_at = ([(-GW / 4, -GH / 4), (GW / 4, -GH / 4), (-GW / 4, GH / 4), (GW / 4, GH / 4)] if mc == 4
+              else [(-GW / 4, 0), (GW / 4, 0)] if mc == 2 else [(0, 0)])
+    if magnet:
+        check(name, ("NOTE: magnet_count reduced from %d to %d" % (asked, mc) in log) == (mc < asked),
+              "magnet pockets: %d of %d asked%s" % (mc, asked, ", with a NOTE" if mc < asked else ""))
+        for i, (ax, ay) in enumerate(mag_at):
+            for bx, by in mag_at[i + 1:]:
+                check(name, math.hypot(ax - bx, ay - by) >= pd + 1.6 - 1e-6,
+                      "pockets at (%.1f, %.1f) and (%.1f, %.1f) keep a wall between them" % (ax, ay, bx, by))
     if p["background_mode"] != "cut" and (loaded or not use_image):
         x0, x1, y0, y1 = -GW / 2 - fw, GW / 2 + fw, -GH / 2 - fw, GH / 2 + fw
+        if magnet:
+            # A pad past the plaque's edge is only for a magnet that cannot
+            # fit inside it, and the log says so.
+            past = span / 2 > min(GW / 2 + fw, GH / 2 + fw) + 1e-6
+            check(name, ("NOTE: the magnet pocket" in log) == past,
+                  "the log %s the pocket's pad reaches past the plaque" % ("says" if past else "does not say"))
+            if past:
+                x0, x1, y0, y1 = min(x0, -span / 2), max(x1, span / 2), min(y0, -span / 2), max(y1, span / 2)
         rt = p["hole_diameter"] / 2 + 2.5
         d = 1.2 + p["hole_diameter"] / 2
         if p["mount"] == "hanger":
@@ -312,9 +348,7 @@ for line in open(os.path.join(OUT, "cases.txt")):
     # Magnet pockets: a roof over each, backing round each.
     if p["mount"] == "magnet":
         tris = [(V[a], V[b], V[c]) for a, b, c, _ in T]
-        n = int(p["magnet_count"])
-        at = ([(-GW / 4, -GH / 4), (GW / 4, -GH / 4), (-GW / 4, GH / 4), (GW / 4, GH / 4)] if n == 4
-              else [(-GW / 4, 0), (GW / 4, 0)] if n == 2 else [(0, 0)])
+        at = mag_at
         depth = p["magnet_thickness"] + 0.2
         rim = (p["magnet_diameter"] + p["magnet_clearance"]) / 2 + 0.8
         for mx, my in at:

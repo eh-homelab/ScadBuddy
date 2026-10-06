@@ -46,12 +46,13 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.core.config import DEFAULT_LIBRARY_MAX_BYTES
@@ -395,6 +396,130 @@ def same_repository(first: str, second: str) -> bool:
     return bare(first) == bare(second)
 
 
+#: `pg_advisory_lock` key a removal holds and a lease's insert shares ("SCADLEAS").
+REMOVAL_LOCK = 0x5343_4144_4C45_4153
+#: Seconds a lease row lives unless its holder renews it; a holder renews every third.
+LEASE_TTL = 60.0
+
+
+class CheckoutLeases:
+    """The render leases in Postgres (#872), so a removal in one process sees a render
+    in another: the render worker and the API each build their own gate.
+
+    A row lives ``ttl`` seconds by the database's clock unless renewed, so a holder
+    that crashed blocks a removal for one TTL at most. A removal holds
+    :data:`REMOVAL_LOCK` exclusively while it checks and deletes, and a lease is
+    inserted holding it shared: a lease is either seen by the removal's check or taken
+    after the removal ends (and then finds the checkout gone, :func:`require_checkouts`).
+    """
+
+    def __init__(self, pool: ConnectionPool[Any], root: Path, *, ttl: float = LEASE_TTL) -> None:
+        self.pool = pool
+        self.root = root
+        self.ttl = ttl
+
+    def take(self, holder: str, checkouts: Sequence[Path]) -> uuid.UUID:
+        """Record a lease for ``holder`` on ``checkouts``; waits out a removal."""
+        token = uuid.uuid4()
+        rows = [(token, holder, path.parent.name, path.name, self.ttl) for path in checkouts]
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (REMOVAL_LOCK,))
+            conn.execute("DELETE FROM library_leases WHERE expires_at <= now()")
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO library_leases (token, holder, library, commit, expires_at)"
+                    " VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s))",
+                    rows,
+                )
+        return token
+
+    def renew(self, token: uuid.UUID) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE library_leases SET expires_at = now() + make_interval(secs => %s)"
+                " WHERE token = %s",
+                (self.ttl, token),
+            )
+
+    def drop(self, token: uuid.UUID) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("DELETE FROM library_leases WHERE token = %s", (token,))
+
+    def holders(self, directory: Path) -> list[str]:
+        """The live holders of ``directory`` -- one checkout, or a library's directory
+        of them -- in the order they took their leases."""
+        try:
+            parts = directory.relative_to(self.root).parts
+        except ValueError:
+            return []
+        if len(parts) not in (1, 2):
+            return []
+        # A library's directory matches every commit of it.
+        commit = parts[1] if len(parts) == 2 else None
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT holder FROM library_leases WHERE library = %s"
+                " AND (%s::text IS NULL OR commit = %s) AND expires_at > now()"
+                " GROUP BY holder ORDER BY min(taken_at), holder",
+                (parts[0], commit, commit),
+            )
+            return [_first_column(row) for row in cur.fetchall()]
+
+    @contextlib.contextmanager
+    def removing(self) -> Iterator[None]:
+        """Hold :data:`REMOVAL_LOCK` exclusively: no lease is inserted meanwhile. A
+        transaction's lock, so however the block ends it goes with the transaction and
+        never back to the pool on its connection."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
+            yield
+
+
+def _first_column(row: Any) -> str:
+    """A row's one column, whatever the pool's row factory."""
+    return str(next(iter(row.values())) if isinstance(row, dict) else row[0])
+
+
+@contextlib.asynccontextmanager
+async def _in_thread(manager: contextlib.AbstractContextManager[None]) -> AsyncIterator[None]:
+    """A blocking context manager entered and exited off the event loop."""
+    await asyncio.to_thread(manager.__enter__)
+    try:
+        yield
+    except BaseException as error:
+        if not await asyncio.to_thread(manager.__exit__, type(error), error, error.__traceback__):
+            raise
+    else:
+        await asyncio.to_thread(manager.__exit__, None, None, None)
+
+
+@contextlib.asynccontextmanager
+async def _shared_lease(
+    leases: CheckoutLeases, holder: str, checkouts: Sequence[Path]
+) -> AsyncIterator[None]:
+    """A lease row held, and renewed every third of its TTL, until the block exits."""
+    token = await asyncio.to_thread(leases.take, holder, checkouts)
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(leases.ttl / 3)
+            try:
+                await asyncio.to_thread(leases.renew, token)
+            except Exception:
+                logger.exception("could not renew a checkout lease", extra={"holder": holder})
+
+    renewing = asyncio.create_task(renew())
+    try:
+        yield
+    finally:
+        renewing.cancel()
+        try:
+            await asyncio.to_thread(leases.drop, token)
+        except Exception:
+            # It lapses at its expiry instead.
+            logger.exception("could not release a checkout lease", extra={"holder": holder})
+
+
 class CheckoutGate:
     """Keeps removing a library checkout apart from pinning or rendering one (#253).
 
@@ -409,9 +534,15 @@ class CheckoutGate:
     lease on them: taken only while no removal runs, and a removal refuses -- it
     does not wait out a render that may take the whole render timeout -- while one
     is held on anything it would delete (:meth:`leased`).
+
+    With ``leases`` the render leases are also kept in Postgres, and a removal also
+    holds their removal lock, so a render in another process (the render worker,
+    #872) is seen by a removal here and the other way round. Pins stay in-process
+    (#1131).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, leases: CheckoutLeases | None = None) -> None:
+        self.shared = leases
         self._condition = asyncio.Condition()
         self._pins = 0
         self._removing = False
@@ -439,7 +570,11 @@ class CheckoutGate:
             await self._condition.wait_for(lambda: not self._removing and self._pins == 0)
             self._removing = True
         try:
-            yield
+            if self.shared is None:
+                yield
+            else:
+                async with _in_thread(self.shared.removing()):
+                    yield
         finally:
             async with self._condition:
                 self._removing = False
@@ -454,7 +589,11 @@ class CheckoutGate:
             await self._condition.wait_for(lambda: not self._removing)
             token = self.hold(holder, checkouts)
         try:
-            yield
+            if self.shared is None:
+                yield
+            else:
+                async with _shared_lease(self.shared, holder, checkouts):
+                    yield
         finally:
             # Whatever ends the attempt -- done, failed, cancelled by shutdown.
             self.release(token)
@@ -471,14 +610,16 @@ class CheckoutGate:
 
     def leased(self, directory: Path) -> list[str]:
         """The holders reading ``directory`` -- one checkout, or a library's
-        directory of them -- each once, in the order they took their leases."""
-        return list(
-            dict.fromkeys(
-                holder
-                for holder, checkouts in self._leases.values()
-                if any(path == directory or path.parent == directory for path in checkouts)
-            )
-        )
+        directory of them -- each once, in the order they took their leases: this
+        process's, then other processes'. Queries Postgres when the leases are shared,
+        so an ``async`` caller hands it to :func:`asyncio.to_thread`."""
+        local = [
+            holder
+            for holder, checkouts in self._leases.values()
+            if any(path == directory or path.parent == directory for path in checkouts)
+        ]
+        shared = self.shared.holders(directory) if self.shared is not None else []
+        return list(dict.fromkeys([*local, *shared]))
 
 
 def require_checkouts(checkouts: Sequence[Path]) -> None:

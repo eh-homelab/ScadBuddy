@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -17,7 +18,8 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
-from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -83,6 +85,7 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "archive_id": 35,
         "output_id": output_id,
         "slug": model,
+        "library_file_id": None,
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,
@@ -589,3 +592,88 @@ def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
     assert _day(link, dated(datetime(2026, 9, 27, 2, 0, tzinfo=perth))) == date(2026, 9, 26)
     assert _day(link, dated(datetime(2026, 9, 26, 23, 30, tzinfo=UTC))) == date(2026, 9, 26)
     assert _day(link, None) == date(2026, 9, 26)
+
+
+def _print_89(*runs: ArchiveRun) -> print_history.PrintOutcome:
+    """#950's /prints/89: a 15.01 g archive whose one run read a whole spool."""
+    summary = print_history.PrintSummary.model_construct(
+        status="completed", printer_id=1, printer_name=None
+    )
+    archive = ArchiveDetail(id=89, status="completed", filament_used_grams=15.01, cost=13.91)
+    return print_history._outcome(summary, archive, list(runs))
+
+
+def _run(run_id: int, grams: float | None, cost: float | None) -> ArchiveRun:
+    return ArchiveRun(id=run_id, status="completed", filament_used_grams=grams, cost=cost)
+
+
+def test_a_run_reading_far_over_the_archive_is_flagged_and_does_not_set_the_cost() -> None:
+    outcome = _print_89(_run(1, 1004.2, 13.91))
+
+    (run,) = outcome.runs
+    assert run.filament_used_grams == 1004.2, "what Bambuddy recorded is still shown"
+    assert run.filament_reading_suspect
+    # The run's own price per gram, at the archive's 15.01 g.
+    assert run.cost == pytest.approx(0.21)
+    assert outcome.cost == pytest.approx(0.21)
+    assert outcome.filament_used_grams == 15.01
+
+
+def test_runs_that_agree_with_the_archive_are_taken_as_they_are() -> None:
+    outcome = _print_89(_run(1, 14.9, 13.91), _run(2, 6.0, 0.1))
+
+    assert [run.filament_reading_suspect for run in outcome.runs] == [False, False]
+    assert [run.cost for run in outcome.runs] == [13.91, 0.1]
+    assert outcome.cost == 13.91
+
+
+def record_library(client: TestClient, queue_item_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record_library(89, queue_item_id, plate_id=1, printer_id=1)
+    )
+
+
+@respx.mock
+def test_library_prints_are_linked_only_for_the_first_unfiltered_page(
+    client: TestClient, model: str
+) -> None:
+    """#1663: a later page or a slug filter cannot show a print linked now."""
+    configure(client)
+    record_library(client, 51)
+    item = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "pending"})
+    )
+
+    later = client.get("/api/v1/prints", params={"cursor": "100"})
+    filtered = client.get("/api/v1/prints", params={"slug": model})
+
+    assert later.status_code == 200, later.text
+    assert filtered.status_code == 200, filtered.text
+    assert not item.called
+
+    first = client.get("/api/v1/prints")
+
+    assert first.status_code == 200, first.text
+    assert item.call_count == 1
+
+
+@respx.mock
+def test_the_list_answers_when_linking_a_library_print_fails_on_the_database(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1662: the link is logged and retried on the next list, never a 500."""
+    configure(client)
+    record_library(client, 51)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing", "archive_id": 90})
+    )
+
+    async def failing(self: PrintLinkStore, *args: object) -> None:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(PrintLinkStore, "link_library", failing)
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []

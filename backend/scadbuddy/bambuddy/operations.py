@@ -19,6 +19,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
+from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import chosen_project
@@ -29,7 +30,12 @@ from scadbuddy.bambuddy.projects import (
     attach_results,
     ensure_project,
 )
-from scadbuddy.bambuddy.send import delete_inbox_copies, register_sidebar, send_output
+from scadbuddy.bambuddy.send import (
+    delete_inbox_copies,
+    register_sidebar,
+    resolve_print_options,
+    send_output,
+)
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -170,13 +176,29 @@ def bambuddy_kinds_over(
                 f"no printer is known for archive {archive_id}; queue it from Bambuddy",
             )
         plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
-        return {"printer_id": printer_id, "plate_id": plate_id}
+        # The model whose remembered print options apply, as for a print from the dialog.
+        # A library file's print (#976) has no output and so no model: global and the
+        # printer's options only.
+        if link.output_id is None:
+            return {"printer_id": printer_id, "plate_id": plate_id, "slug": None}
+        meta = await require(outputs, link.output_id)
+        return {"printer_id": printer_id, "plate_id": plate_id, "slug": meta.slug}
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
+        settings = await asyncio.to_thread(settings_store.load)
+        # The remembered options (#1329): global, the printer's, the model's, as a run
+        # applies them (#88). One copy, and no project: those are the dialog's own
+        # controls, as `enqueue_plate` leaves them.
+        remembered = resolve_print_options(
+            settings, checked.get("slug"), checked["printer_id"], PrintOptions()
+        ).queue_fields()
+        remembered.pop("quantity", None)
+        remembered.pop("project_id", None)
+        async with client_for(settings) as client:
             item = await client.enqueue(
                 QueueItemCreate(
+                    **remembered,
                     archive_id=archive_id,
                     printer_id=checked["printer_id"],
                     plate_id=checked["plate_id"],

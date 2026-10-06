@@ -106,6 +106,13 @@ import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
 
+/**
+ * #1424 — the backend's `THUMBNAIL_VERSION` (`api/media.py`): a media thumbnail is
+ * cached as `immutable` only when asked for at this version. Bump the two together;
+ * `client.test.ts` fails when they differ (#1691).
+ */
+export const MEDIA_THUMBNAIL_VERSION = 1
+
 /** What a model thumbnail's URL is keyed on (#179). */
 export type ThumbnailKeyed = Pick<
   ModelSummary,
@@ -767,12 +774,13 @@ export const api = {
 
   /**
    * #624 — a small copy of an image or of a video's poster, for a strip of
-   * thumbnails; undefined for a video with no poster, which has none.
+   * thumbnails; undefined for a video with no poster, which has none. It is
+   * cached as `immutable`, so the URL carries the thumbnail version (#1424).
    */
   mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
     item.kind === 'video' && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than

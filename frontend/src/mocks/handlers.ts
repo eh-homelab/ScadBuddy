@@ -134,6 +134,7 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  renderColors: {} as Record<string, string[]>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
   /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
@@ -207,7 +208,7 @@ function runJob(jobId: string): void {
       }
       job.status = 'done'
       job.bbox_mm = bboxOf(job.params ?? {})
-      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.colors = state.renderColors[job.slug] ?? colorsOf(job.slug, job.params ?? {})
       job.plates = state.plates[job.slug] ?? []
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
@@ -256,6 +257,7 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.renderColors = {}
   state.mediaFiles.clear()
   state.pulledTimelapses.clear()
   state.reprints = []
@@ -314,6 +316,15 @@ export function setMockMergeFiles(slug: string, files: MergeFiles): void {
  */
 export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
   state.plates[slug] = plates
+}
+
+/**
+ * #938 — the colours every finished render of `slug` reports, in extruder order, as a
+ * template whose geometry leaves a colour parameter unused (or hard-codes one) would.
+ * Unset, a render uses every colour parameter, in order.
+ */
+export function setMockRenderColors(slug: string, colors: string[]): void {
+  state.renderColors[slug] = colors
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -1005,9 +1016,9 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (q) {
     const haystack = [
       print.output_name ?? '',
-      print.slug,
+      print.slug ?? '',
       archive?.print_name ?? '',
-      JSON.stringify(print.provenance.params),
+      JSON.stringify(print.provenance?.params ?? {}),
     ]
     if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
   }
@@ -1168,13 +1179,29 @@ function presetRefusal(
   if (own === null && saved.length >= MAX_PRESETS) {
     return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
   }
-  const clash = (state.presets[slug] ?? []).some(
+  const clash = (state.presets[slug] ?? []).find(
     (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
   )
   if (clash) {
-    return problem(409, 'Conflict', `'${slug}' already has a preset named '${name}'`, { name })
+    // #357: names the preset that has the name, as it is spelled.
+    return problem(409, 'Conflict', `A preset named "${clash.name}" already exists.`, {
+      name,
+      existing: clash.name,
+    })
   }
   return undefined
+}
+
+/** `api/presets.py`'s words for a preset that is gone, and for one the template ships (#357). */
+const PRESET_GONE = 'That preset no longer exists; it may have been deleted elsewhere.'
+const PRESET_READ_ONLY =
+  'This preset ships with the template and is read-only; duplicate it to change it.'
+
+/** A write to a `template-*` id: read-only when the template has it, else gone (#357). */
+function templatePresetRefusal(slug: string, id: string) {
+  return (state.presets[slug] ?? []).some((p) => p.id === id)
+    ? problem(403, 'Forbidden', PRESET_READ_ONLY, { preset_id: id })
+    : problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
 }
 
 function slugify(value: string): string {
@@ -2293,7 +2320,7 @@ export const handlers = [
     const id = String(params['id'])
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!source) return problem(404, 'Preset not found')
+    if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
@@ -2320,9 +2347,9 @@ export const handlers = [
     const body = (await request.json()) as ParamPresetUpdate
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!existing) return problem(404, 'Preset not found')
+    if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const name = body.name?.trim().replace(/\s+/g, ' ')
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
@@ -2354,9 +2381,9 @@ export const handlers = [
   http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const presets = state.presets[slug] ?? []
-    if (!presets.some((p) => p.id === id)) return problem(404, 'Preset not found')
+    if (!presets.some((p) => p.id === id)) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     state.presets[slug] = presets.filter((p) => p.id !== id)
     return new HttpResponse(null, { status: 204 })
   }),

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -336,6 +336,28 @@ describe('render_model', () => {
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
   })
 
+  it('waits out renderWaitMs in elapsed time, whatever the wall clock does (#1485)', async () => {
+    let polls = 0
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now')
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => {
+        polls += 1
+        // The clock steps an hour on during the first poll.
+        if (polls === 1) stepped.mockImplementation(() => now.call(Date) + 3_600_000)
+        return HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: polls < 3 ? 'running' : 'done' })
+      }),
+    )
+    try {
+      const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 60_000 }))
+      expect(firstText(result)).toMatchObject({ status: 'done' })
+    } finally {
+      stepped.mockRestore()
+    }
+  })
+
   it('reports a cancelled render as a tool error with its log, settling immediately rather than waiting out renderWaitMs', async () => {
     server.use(
       http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
@@ -424,7 +446,10 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   const OUT = '0123456789abcdef0123456789abcdef'
   const FILAMENTS = {
     library_file_id: 5,
-    slots: [{ slot_id: 1 }, { slot_id: 2 }],
+    slots: [
+      { slot_id: 1, colour_matches: [10, 12] },
+      { slot_id: 2, colour_matches: [11, 12] },
+    ],
     spools: [{ spool_id: 10, material: 'PLA' }, { spool_id: 11, material: 'PETG' }, { spool_id: 12, material: 'PLA' }],
     suggested: [
       { slot_id: 1, spool_id: 10 },
@@ -718,6 +743,17 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       },
       choices: { nozzles: [{ size: '0.2', flow: 'standard' }], tier: null, process_name: '0.06mm Fine @BBL H2C 0.2 nozzle' },
     })
+  })
+
+  it('drops a remembered spool whose colour no longer fits the slot (#933)', async () => {
+    const run: { body?: unknown } = {}
+    server.use(
+      // Spool 10 is still in the inventory but no longer matches slot 2's colour.
+      choicesView({ filament_plan: [{ slot_id: 2, spool_id: 10 }] }),
+      ...capturedRun(run),
+    )
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(run.body).toMatchObject({ filament_plan: { slots: FILAMENTS.suggested } })
   })
 
   it('reads the filament step for all plates itself', async () => {
@@ -1516,6 +1552,23 @@ describe('library pins as operations (#1054)', () => {
     const answer = firstText(result)
     expect(answer).toMatchObject(expected)
     expect(answer).not.toHaveProperty('status')
+  })
+
+  it('remove_library_checkout hands back a removal still running past the follow, not "removed" (review #1119)', async () => {
+    const removing = { ...op, kind: 'library_remove', subject: 'library:BOSL2' }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/libraries/BOSL2`, () => HttpResponse.json(removing, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json(removing)),
+    )
+    const result = await runTool(
+      { ...tool('remove_library_checkout'), gated: false },
+      { name: 'BOSL2' },
+      ctx({ commandFollowMs: 50 }),
+    )
+    expect(result.isError).toBeFalsy()
+    const answer = firstText(result)
+    expect(answer).toMatchObject({ status: 'running', operation_id: 'op-7' })
+    expect(answer).not.toHaveProperty('removed')
   })
 })
 

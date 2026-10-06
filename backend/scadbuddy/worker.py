@@ -44,7 +44,12 @@ from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    LibraryStore,
+)
 from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
@@ -109,9 +114,6 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    checkouts = CheckoutGate()
-    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(libraries, asyncio.Semaphore(INSTALL_CONCURRENCY), checkouts)
     # The projection's job events go out on the API's bus: `publish_in` writes and
     # NOTIFYs in the row's transaction, so the listener is never started here.
     events = PgNotifyEventBus(
@@ -121,6 +123,10 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         settings.database_url, pool_size=settings.database_pool_size, events=events
     )
     projection.open()
+    # The leases in Postgres, where the API's removals see them (#872).
+    checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
+    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
+    fetcher = CheckoutFetcher(libraries, asyncio.Semaphore(INSTALL_CONCURRENCY), checkouts)
     assets = AssetStore(
         paths.assets,
         projection.pool,
@@ -645,6 +651,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             store=PrintRunStore(pool, events=events),
             observer=observer,
             rack=rack,
+            links=links,
         )
     )
     return PrintWorkerDeps(
