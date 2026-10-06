@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytest
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.types import Message
 
+from scadbuddy.api import media as media_api
 from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
 from scadbuddy.api.media import MAX_CONCURRENT_THUMBNAILS, THUMBNAIL_VERSION
 from scadbuddy.core.paths import DataPaths
@@ -389,6 +391,69 @@ def test_the_legacy_items_thumbnail_answers_304_to_its_etag(
         assert small.size == (144, 192)
 
 
+def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: a thumbnail PUT landing between the 304 check and the decode."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    old = client.get(_thumbnail_url(model, "thumbnail")).headers["etag"]
+    real = media_api._thumbnail_of
+
+    def replaced_first(path: Path, content_type: str) -> Any:
+        # As a thumbnail PUT does: a new file renamed over the old one.
+        staged = legacy.with_name("thumbnail.png.tmp")
+        staged.write_bytes(_real_image((300, 400), "PNG"))
+        os.replace(staged, legacy)
+        return real(path, content_type)
+
+    monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", replaced_first)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 200, response.text
+    assert response.headers["etag"] == media_api._legacy_etag(legacy.stat()) != old
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (144, 192)
+
+
+def test_a_legacy_file_deleted_mid_request_is_a_404(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: deleted between the 304 check and the decode."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    real = media_api._thumbnail_of
+
+    def deleted_first(path: Path, content_type: str) -> Any:
+        legacy.unlink()
+        return real(path, content_type)
+
+    monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", deleted_first)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 404, response.text
+
+
+def test_a_file_deleted_after_it_is_opened_is_still_served_whole(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: the fallback reads the handle the decode had open, not the path."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    original = _real_image((400, 300), "PNG")
+    legacy.write_bytes(original)
+
+    def deleted_undecoded(file: IO[bytes]) -> bytes | None:
+        legacy.unlink()
+        return None
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", deleted_undecoded)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 200, response.text
+    assert response.content == original
+    assert response.headers["content-type"] == "image/png"
+
+
 def test_thumbnails_are_decoded_a_few_at_a_time(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -397,7 +462,7 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
     running = 0
     most = 0
 
-    def slow(path: Path) -> bytes | None:
+    def slow(file: IO[bytes]) -> bytes | None:
         nonlocal running, most
         with lock:
             running += 1
@@ -407,7 +472,7 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
             running -= 1
         return None
 
-    monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", slow)
+    monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
     with ThreadPoolExecutor(max_workers=8) as pool:
         codes = list(
             pool.map(lambda _: client.get(_thumbnail_url(model, item["id"])).status_code, range(8))
