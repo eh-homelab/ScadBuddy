@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
-import { ANSWER_MAX, type Question as AskedQuestion } from '../../agent/chat/protocol'
+import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { Button } from '../ui/Button'
@@ -214,7 +214,7 @@ function previewOf(q: AskedQuestion, c: Choice): string | undefined {
 }
 
 /** #815 — what an attention request's timer does, as its card says it. */
-function attentionTimer(a: NonNullable<QuestionItem['attention']>): string {
+function attentionTimer(a: Exclude<NonNullable<QuestionItem['attention']>, DoneAttention>): string {
   const at = new Date(a.expiresAt)
   // A wait can last a day: past today, the day is named, or tomorrow's 09:05 would read as this morning's.
   const today = at.toDateString() === new Date().toDateString()
@@ -228,6 +228,48 @@ function attentionTimer(a: NonNullable<QuestionItem['attention']>): string {
     case 'wait':
       return `It waits for you until ${when.replace(/^by /, '')}, then stops.`
   }
+}
+
+/**
+ * #815 §4 — the agent's `done` summary: its message, ScadBuddy's own list of what the
+ * turn touched, and one Dismiss button. Nothing waits on it, so there is nothing to
+ * reply: dismissing answers it with its first option, which takes it off the badge.
+ */
+function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: string; onAnswer: (answers: string[]) => void }) {
+  const headingId = `question-${item.id}`
+  const message = item.questions[0]?.question ?? ''
+  const dismiss = item.questions[0]?.options[0]?.label ?? 'Dismiss'
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="rounded-[6px] border border-line bg-surface-2 px-3 py-2.5 text-[13px]"
+      data-testid="agent-done"
+    >
+      <h3 id={headingId} className="text-[12.5px] font-semibold">
+        The assistant is done
+      </h3>
+      <p className="mt-1 whitespace-pre-wrap">{message}</p>
+      <div className="mt-2 rounded-[6px] border border-line bg-bg px-2.5 py-2 text-[12.5px]" data-testid="agent-done-summary">
+        <p className="mb-1 text-[11.5px] text-muted">What ScadBuddy recorded this turn doing</p>
+        <Markdown text={summary} />
+      </div>
+      {item.state === 'pending' ? (
+        <div className="mt-2" data-agent-user-only="">
+          <Button type="button" variant="primary" size="sm" onClick={() => onAnswer([dismiss])}>
+            Dismiss
+          </Button>
+        </div>
+      ) : (
+        <p className="mt-1.5 text-[12px] text-muted" role="status">
+          {item.state === 'sent' || item.state === 'queued'
+            ? 'Dismissing…'
+            : item.state === 'answered'
+              ? `Dismissed${item.by ? ` by ${item.by.label}` : ''}.`
+              : `Closed: ${item.reason ?? 'replaced by a newer summary'}.`}
+        </p>
+      )}
+    </section>
+  )
 }
 
 /**
@@ -256,7 +298,7 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
             ? 'A question for you'
             : 'Questions for you'}
       </h3>
-      {item.attention && item.state === 'pending' && (
+      {item.attention && !isDone(item.attention) && item.state === 'pending' && (
         <p className="mt-1 text-[12px] text-muted" data-testid="agent-attention-timer">
           {attentionTimer(item.attention)}
         </p>
@@ -366,7 +408,9 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
                 ? 'Not connected: your answer goes first when the assistant reconnects.'
               : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
-                : item.attention
+                : item.reconnected
+                  ? 'The tab is back; the assistant re-checks the page before going on.'
+                  : item.attention
                   ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
                   : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
           </p>
@@ -416,7 +460,11 @@ export function FeedItemView({
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
     case 'question':
-      return <QuestionCard item={item} onAnswer={(answers) => onAnswer(item.id, answers)} />
+      return isDone(item.attention) ? (
+        <DoneCard item={item} summary={item.attention.summary} onAnswer={(answers) => onAnswer(item.id, answers)} />
+      ) : (
+        <QuestionCard item={item} onAnswer={(answers) => onAnswer(item.id, answers)} />
+      )
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />
     case 'error':

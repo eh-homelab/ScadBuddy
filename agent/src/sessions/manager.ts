@@ -55,7 +55,9 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { isQuestionTool } from '../harness/questions.js'
+import { attentionCard, attentionSpec, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
+import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -166,6 +168,121 @@ export function cents(amount: number): number {
 
 /** abortAll()'s abort reason: a shutdown, which leaves pending approvals pending. */
 export const SHUTTING_DOWN = 'shutting down'
+
+/**
+ * #815 §2: how a turn's browser_* call that found no tab waits for it, as a
+ * `tab_disconnected` attention request on the turn's question gate: shown on the
+ * panel and the badge, resolved `reconnected` when the session's tab is back
+ * (bridge/hub.ts `onSessionTab`), or by the user's reply, or by its timer, which
+ * lets the agent carry on without the tab (never approving anything). Calls that
+ * fail together wait on one request, not one each (#815 §5 would supersede them).
+ */
+export const TAB_WAIT_S = 300
+/**
+ * How many tab waits one turn may open. A tab back on another replica answers
+ * `reconnected` while this replica still has none, so each retry can fail and
+ * wait again; this bounds that, and tab waits are outside the model's own rate
+ * limit (questions/service.ts).
+ */
+export const TAB_WAITS_PER_TURN = 3
+const CARRY_ON = 'Carry on without the tab'
+
+export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
+  let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
+  // Once the user said to carry on, or nobody came back in time, the rest of the
+  // turn does not ask again: each later call that finds no tab fails at once.
+  let gaveUp: string | undefined
+  let started = 0
+  return ({ tool, toolUseId, signal, isBack }) => {
+    // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
+    if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
+    if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
+    if (!open && started >= TAB_WAITS_PER_TURN) {
+      gaveUp =
+        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is still not reachable from here (it may be ` +
+        'connected to another agent replica). Carry on without the tab for the rest of this turn.'
+      return Promise.resolve({ back: false, message: gaveUp })
+    }
+    if (!open) started += 1
+    // One wait for the turn's calls: a call that stops waiting (its own signal)
+    // leaves the others waiting, and the last one to stop withdraws the request.
+    open ??= start(tool, toolUseId, isBack)
+    const shared = open
+    shared.waiters += 1
+    return new Promise<TabWait>((resolve, reject) => {
+      const withdrawn = () => {
+        resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
+        shared.waiters -= 1
+        if (shared.waiters === 0) {
+          // Withdrawn: a call that comes after must open a wait of its own, not join this one.
+          if (open === shared) open = undefined
+          shared.stop.abort()
+        }
+      }
+      if (signal.aborted) return withdrawn()
+      signal.addEventListener('abort', withdrawn, { once: true })
+      shared.wait.then(resolve, reject).finally(() => signal.removeEventListener('abort', withdrawn))
+    })
+  }
+
+  function start(tool: string, toolUseId: string | undefined, isBack: () => Promise<boolean>): NonNullable<typeof open> {
+    const stop = new AbortController()
+    const wait = (async (): Promise<TabWait> => {
+      const parsed = parseAttention({
+        reason: 'tab_disconnected',
+        message:
+          `I need your ScadBuddy tab for ${tool}, but it is not connected. Open ScadBuddy (or reload it) and open ` +
+          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
+          'on with what needs no tab.',
+        options: [IM_BACK, CARRY_ON],
+        timeout_s: TAB_WAIT_S,
+      })
+      if (!parsed.ok) throw new Error(parsed.error)
+      const spec = attentionSpec(parsed.input)
+      // A tab wait is never a done summary; this narrows the spec to one that waits.
+      if (spec.reason === 'done') throw new Error('a tab wait is not a done summary')
+      const card = attentionCard(parsed.input)
+      const verdict = await gate({
+        tool: `mcp__scadbuddy__${tool}`,
+        questions: [card],
+        toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
+        // Withdrawn by the turn, or once no call waits on it any more.
+        signal: AbortSignal.any([turn, stop.signal]),
+        attention: {
+          ...spec,
+          // The tab may have come back between the failed call and the row: the
+          // hub saw nothing to resolve then, so look once now that there is one.
+          onParked: async () => {
+            if (await isBack()) await reconnected()
+          },
+        },
+      })
+      if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
+      // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
+      // other reply is the user's own words, which the model must read, so the
+      // call is not run and its error carries them.
+      if (verdict.answered) {
+        const reply = verdict.answers[card.question] ?? ''
+        if (reply === IM_BACK) return { back: true, why: 'user_back' }
+        if (reply !== CARRY_ON) {
+          return { back: false, message: `The user replied ${JSON.stringify(reply)} instead; the call was not run. Act on their reply.` }
+        }
+        gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`
+        return { back: false, message: gaveUp }
+      }
+      if ('timedOut' in verdict && verdict.timedOut) {
+        gaveUp = timedOutText(TAB_WAIT_S)
+        return { back: false, message: gaveUp }
+      }
+      return { back: false, message: verdict.message }
+    })()
+    const handle = { wait, waiters: 0, stop }
+    void wait.finally(() => {
+      if (open === handle) open = undefined
+    }).catch(() => undefined)
+    return handle
+  }
+}
 
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
@@ -333,7 +450,12 @@ export type SessionManagerDeps = {
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
-  mcpServers?: (session: SessionRecord, turn: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers?: (
+    session: SessionRecord,
+    turn: TurnPrincipal,
+    /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
+    extras?: { waitForTab?: WaitForTab },
+  ) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
   ownPlugin?: string
@@ -1132,6 +1254,21 @@ export class SessionManager {
               }
             : undefined
         browserDirs = browser !== undefined
+        // AskUserQuestion (#940): only the user in the panel answers, so only a
+        // session the browser user owns is given the tool. Any other owner's turn
+        // would wait on someone who is not asked.
+        const questionGate = asksUser
+          ? this.questions.gate({
+              sessionId: id,
+              turnId,
+              secrets: () => secrets,
+              signal: controller.signal,
+              // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
+              stopTurn: (why) => controller.abort(new Error(why)),
+              // The claim set updated_at = now(): the turn's start by the database's clock.
+              turnStartedAt: new Date(session.updatedAt),
+            })
+          : undefined
         const run: Omit<HarnessRun, 'credential'> = {
           paths: this.deps.paths,
           prompt,
@@ -1143,21 +1280,7 @@ export class SessionManager {
           signal: controller.signal,
           tierOf,
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-          // AskUserQuestion (#940): only the user in the panel answers, so only
-          // a session the browser user owns is given the tool. Any other
-          // owner's turn would wait on someone who is not asked.
-          ...(asksUser
-            ? {
-                questionGate: this.questions.gate({
-                  sessionId: id,
-                  turnId,
-                  secrets: () => secrets,
-                  signal: controller.signal,
-                  // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-                  stopTurn: (why) => controller.abort(new Error(why)),
-                }),
-              }
-            : {}),
+          ...(questionGate ? { questionGate } : {}),
           // The data/instruction boundary (#258, safety/untrusted.ts): only the
           // user's messages are instructions; tool results are data. Then which
           // browser each browser_* tool drives.
@@ -1169,7 +1292,15 @@ export class SessionManager {
           ...(this.deps.mcpServers || browser || http
             ? {
                 mcpServers: {
-                  ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
+                  ...(this.deps.mcpServers
+                    ? this.deps.mcpServers(
+                        session,
+                        principal,
+                        questionGate
+                          ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
+                          : {},
+                      )
+                    : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
                   // The one way past the backend's agent-actor gate: a human
                   // approves one exact outward request (harness/headlessGrants.ts).

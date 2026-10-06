@@ -271,8 +271,13 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
   `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
   `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts);
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
+  badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
+  the one read of every parked call, approvals and answers, that the badge counts; a
+  browser_* call that finds no tab in such a session parks the same way as a
+  `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
@@ -365,9 +370,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
