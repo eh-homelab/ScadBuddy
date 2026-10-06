@@ -262,11 +262,12 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     script = printing(() => 'box.3mf')
     const m = await replica()
     const { session, turn, approvalId } = await parked(m)
+    const callsWhenParked = fake.messageCalls().length
     // Any watcher may interrupt (spec §8.6); here the browser user.
     expect(await m.interrupt(session.id, browser)).toBe(true)
-    // Either outcome (manager.ts finish): the abort may land before or after
-    // Claude Code reports the failed permission request to the model.
-    expect(['interrupted', 'result']).toContain((await turn.done).kind)
+    // The turn ends there (#1168): the model is not called again to reply to the abort.
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect(fake.messageCalls()).toHaveLength(callsWhenParked)
     expect(printed).toEqual([])
     expect(await m.approvals.get(approvalId, browser)).toMatchObject({
       decision: 'cancelled',
@@ -278,6 +279,11 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     const events = await allEvents(m, session.id)
     await expectPanelAccepts(events.map((e) => e.event))
     expect(events.map((e) => e.event)).toContainEqual({ v: 1, type: 'approval.resolved', sessionId: session.id, id: approvalId, approved: false })
+    expect(events.some((e) => e.event.type === 'assistant.text.done')).toBe(false)
+    expect(events.map((e) => e.event).slice(-2)).toEqual([
+      { v: 1, type: 'error', sessionId: session.id, code: 'interrupted', message: 'the turn was interrupted' },
+      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
+    ])
   }, 60_000)
 
   it('handoff cancels the pending approval: the parked call is refused and the turn ends', async () => {
