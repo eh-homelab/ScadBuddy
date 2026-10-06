@@ -765,6 +765,7 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      pinned={version !== undefined}
     />
   )
   const templateUi = customUi && (
@@ -1019,6 +1020,7 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    pinned={version !== undefined}
                   />
                 </>
               }

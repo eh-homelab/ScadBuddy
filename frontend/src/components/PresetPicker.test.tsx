@@ -7,7 +7,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
-import { BUILTIN_SLUG, keychainSchema } from '../mocks/fixtures'
+import { BUILTIN_SLUG, keychainSchema, versionIds } from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
@@ -604,6 +604,27 @@ describe('PresetPicker', () => {
     await user.selectOptions(select, 'Lid')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+  })
+
+  it('on a pinned revision, applies presets but saves none (#355)', async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET') writes.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
+    const { user } = render(`name-keychain?version=${versionIds.added}`)
+    const select = await picker()
+    expect(screen.getByText('Presets are saved against the current version.')).toBeInTheDocument()
+
+    await user.selectOptions(select, 'Mum')
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    expect(name).toHaveValue('Mum')
+    await user.type(name, 'my')
+    expect(screen.getByTestId('preset-modified')).toBeInTheDocument()
+    // The server checks a preset against the current revision, which refuses this
+    // one's own parameters: neither is offered.
+    expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save as preset…' })).toBeDisabled()
+    expect(writes.filter((write) => write.includes('/presets'))).toEqual([])
   })
 
   it('Reset to defaults clears the UI state a preset brought', async () => {
