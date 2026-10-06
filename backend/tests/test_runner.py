@@ -553,6 +553,29 @@ def test_a_value_outside_the_range_is_refused_by_name(
     assert refused.value.parameter == "n"
 
 
+def _text(**changes: object) -> Parameter:
+    return Parameter(name="label", type="string", max_length=5).model_copy(update=changes)
+
+
+@pytest.mark.parametrize("value", ["", "abcde", "ab😀de"])
+def test_a_string_within_its_max_length_is_taken(value: str) -> None:
+    """Code points, as OpenSCAD's len() and the customizer's counter count (#920)."""
+    format_scad_value(_text(), value)
+
+
+def test_a_string_past_its_max_length_is_refused_by_name() -> None:
+    """#1330: `// 5` was only the browser's to enforce."""
+    with pytest.raises(
+        ParameterValueError, match="'label' must be at most 5 characters, got 6"
+    ) as refused:
+        format_scad_value(_text(), "abcdef")
+    assert refused.value.parameter == "label"
+
+
+def test_a_string_without_a_max_length_takes_any_length() -> None:
+    format_scad_value(_text(max_length=None), "x" * 500)
+
+
 def test_the_step_is_not_enforced() -> None:
     # plant-label ships `thickness = 2.5; // [1.6:0.2:5]`, off its own grid.
     assert format_scad_value(_slider(min=1.6, max=5, step=0.2), 2.5) == "2.5"
