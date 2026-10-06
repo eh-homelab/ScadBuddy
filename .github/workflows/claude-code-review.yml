@@ -482,7 +482,7 @@ jobs:
           # closed with no verdict. Must match the review step's allowed_bots.
           allowed_bots: "*"
           claude_args: |
-            --allowedTools "Read,Glob,Grep,LS,Bash(gh:*),Bash(jq:*)" --model "claude-sonnet-5"
+            --allowedTools "Read,Glob,Grep,LS,Bash(gh:*),Bash(jq:*)" --model "claude-sonnet-5-5"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","fail"]},"outstanding_findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string"}},"required":["title"]}},"addressed_count":{"type":"integer"},"non_blocking_count":{"type":"integer"},"reason":{"type":"string"}},"required":["verdict","reason"]}'
           prompt: |
             REPO: ${{ github.repository }}
