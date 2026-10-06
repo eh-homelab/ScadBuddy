@@ -422,9 +422,9 @@ jobs:
   # The same shape as `frontend` (same Node major, corepack-pinned pnpm,
   # frozen lockfile), plus the sidecar image: `--target agent` is a separate
   # image with nothing in common with the OpenSCAD stages, so it is built and
-  # smoke-tested here rather than in `image`. The build itself asserts the
-  # Claude Code version the Agent SDK bundles (the Dockerfile's
-  # CLAUDE_CODE_VERSION), so an SDK bump that moves it reds this job on the PR.
+  # smoke-tested here rather than in `image`. The build itself asserts that the
+  # Claude Code binary the Agent SDK bundles is the version the SDK declares
+  # (agent/src/check-cli-version.ts).
   #
   # No test here calls Anthropic: test/run.test.ts points the SDK at a local
   # fake Anthropic-format endpoint as its gateway (ANTHROPIC_BASE_URL, #255).

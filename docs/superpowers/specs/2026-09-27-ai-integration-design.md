@@ -77,11 +77,14 @@ dependency of `agent/`.
   store lookup key derives from the working directory, so resume from a `cwd` matching
   the original run's" (§6 therefore gives every session a stable service-owned `cwd`).
   [Sessions][sdk-sessions]
-- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283: the bundled Claude
-  Code binary prints `2.1.283 (Claude Code)` on stdout for `--version` and exits 0, so
-  the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
-  `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
-  filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283, and again in #1540 on
+  0.3.287: the bundled Claude Code binary prints its version (`2.1.287 (Claude Code)`)
+  on stdout for `--version` and exits 0, the version the SDK's `package.json` declares
+  as `claudeCodeVersion`, so the image build asserts the binary is that version
+  (`agent/src/check-cli-version.ts`; the SDK itself is pinned exactly, so #1540 dropped
+  the second pin, `CLAUDE_CODE_VERSION`). In that SDK's `sdk.d.ts`, `settingSources: []`
+  means "disable filesystem settings (SDK isolation mode)", so it loads nothing from the
+  host (§4.4).
 - Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
   SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
   `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
@@ -419,12 +422,13 @@ projection, bound to the session owner's principal, and a `tierOf` that maps
 `mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
 outward call that the seam approved runs at once, because the harness projection tells
 `runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
-prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validated
 arguments with its own bundled zod 4.4.3, which refused any call that left out a
-`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
-therefore offers such top-level fields as optional, with the same default in the JSON
-Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
-`sdkShape`; `agent/test/harnessWiring.test.ts`).
+`.default()` field of our zod 4.6.5 ("expected nonoptional"), so the harness projection
+passed each tool's whole `z.object` instead of its raw shape. SDK 0.3.287 (bundled zod
+4.5.4) fills the default from the raw shape, which the projection now passes (measured
+2026-10-06; `agent/src/tools/projections.ts` `createHarnessServer`,
+`agent/test/projections.test.ts`).
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted

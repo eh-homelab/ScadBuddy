@@ -7,9 +7,9 @@ import { promisify } from 'node:util'
 
 // The Agent SDK "runs the Claude Code binary"
 // (https://code.claude.com/docs/en/agent-sdk/overview), shipped as a per-platform
-// optional dependency. The image pins that binary's version the way the
-// Dockerfile pins OPENSCAD_VERSION (#261, spec §4.4), and these helpers are how
-// the build and the tests read it.
+// optional dependency. The image build asserts that binary is the version the
+// SDK declares (#261, spec §4.4; check-cli-version.ts, #1540), and these
+// helpers are how the build and the tests read both.
 //
 // Measured on @anthropic-ai/claude-agent-sdk 0.3.283, 2026-09-27:
 //   - the SDK's package.json declares `"claudeCodeVersion": "2.1.283"`;

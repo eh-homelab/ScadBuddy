@@ -276,7 +276,7 @@ jobs:
           fi
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
-      # The build runs the Dockerfile's CLAUDE_CODE_VERSION assertion once per
+      # The build runs the Dockerfile's bundled Claude Code assertion once per
       # platform, against that platform's bundled binary (arm64 under QEMU).
       #
       # `type=gha` on a hosted runner only, as above; `scope=agent` is the

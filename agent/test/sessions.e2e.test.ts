@@ -34,6 +34,19 @@ function conversation(request: RecordedRequest | undefined): string {
   return JSON.stringify(request?.body?.messages ?? [])
 }
 
+/**
+ * Each model request's credential and `thinking.display`. Claude Code 2.1.287
+ * sends a gateway `thinking.display: "updates"` (with its
+ * `thinking-display-updates-2026-08-18` beta), and sends a request the gateway
+ * refused with a 400 or 422 once more, on the same credential, without the
+ * two, in case they were what it refused; no `api_retry` message says so
+ * (measured 2026-10-06). 2.1.283 sent neither, so it never sent a refused
+ * request again.
+ */
+function asked(calls: RecordedRequest[]): [string | undefined, string | undefined][] {
+  return calls.map((c) => [c.headers.authorization, c.body?.thinking?.display])
+}
+
 describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
@@ -265,8 +278,14 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    expect(fake.messageCalls().map((c) => c.headers.authorization)).toEqual([`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`])
-    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    // A's 429 falls back to B. Claude Code sends B's refused request once more
+    // without thinking.display (`asked`), still on B, and it is refused again.
+    expect(asked(fake.messageCalls())).toEqual([
+      [`Bearer ${TOKEN_A}`, 'updates'],
+      [`Bearer ${TOKEN_B}`, 'updates'],
+      [`Bearer ${TOKEN_B}`, undefined],
+    ])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, costUsd: 0 })
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)
     expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
@@ -317,6 +336,48 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
   }, 60_000)
 
+  it('a gateway that refuses thinking.display costs one refused request a turn, and no fallback (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-strict-aaaa'
+    const TOKEN_B = 'gw-sessions-strict-bbbb'
+    script = (r) =>
+      r.body?.thinking?.display === undefined
+        ? { text: 'a box' }
+        : { error: { status: 400, type: 'invalid_request_error', message: 'thinking.display: Extra inputs are not permitted' } }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const reports: string[] = []
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => (attempt, outcome) => {
+          reports.push(`${attempt.id}: ${outcome.class}`)
+          return Promise.resolve()
+        },
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+    // Claude Code's resend without the field is answered, on the same credential.
+    expect(asked(fake.messageCalls())).toEqual([
+      [`Bearer ${TOKEN_A}`, 'updates'],
+      [`Bearer ${TOKEN_A}`, undefined],
+    ])
+    expect(reports).toEqual(['a: ok'])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+    // The next turn is a new Claude Code process, which sends the field again.
+    expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(asked(fake.messageCalls().slice(2))).toEqual([
+      [`Bearer ${TOKEN_A}`, 'updates'],
+      [`Bearer ${TOKEN_A}`, undefined],
+    ])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 2 })
+  }, 60_000)
+
   it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
     script = (r) =>
       conversation(r).includes('tool_result')
@@ -331,8 +392,10 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    // Two model requests: the tool call, which counts, and the refused one, which does not.
-    expect(fake.messageCalls()).toHaveLength(2)
+    // Three model requests: the tool call, which counts, then the refused one
+    // and Claude Code's resend of it without thinking.display (`asked`), which
+    // do not.
+    expect(fake.messageCalls().map((c) => c.body?.thinking?.display)).toEqual(['updates', 'updates', undefined])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 1 })
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)

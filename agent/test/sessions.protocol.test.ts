@@ -109,6 +109,25 @@ describe('SdkEventMapper', () => {
       ['t3', true, SUMMARY_MAX],
     ])
   })
+
+  it('reads a tool.result from the block the model was sent, never from the SDK’s tool_use_result', () => {
+    // SDK 0.3.287 can leave the result out of `tool_use_result`: an MCP tool's
+    // structuredContent over 1,048,576 JSON characters becomes
+    // `structuredContentOmitted: true`, and a WebFetch or WebSearch call that
+    // steps aside for a "now" message is `{ detachedToolCall: true }` (sdk.d.ts).
+    const events = mapAll([
+      user([{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'refused' }], {
+        tool_use_result: { structuredContentOmitted: true },
+      }),
+      user([{ type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: 'found 3' }] }], {
+        tool_use_result: { detachedToolCall: true },
+      }),
+    ])
+    expect(events.map((e) => (e.type === 'tool.result' ? [e.id, e.ok, e.summary] : e.type))).toEqual([
+      ['t1', false, 'refused'],
+      ['t2', true, 'found 3'],
+    ])
+  })
 })
 
 describe('scrubForLog', () => {

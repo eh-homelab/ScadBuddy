@@ -89,7 +89,7 @@ cd agent
 corepack enable
 pnpm install --frozen-lockfile
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
-docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
+docker build --target agent -t scadbuddy-agent:dev .   # asserts the bundled Claude Code
 ```
 
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
@@ -451,9 +451,14 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
-- `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
-  Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
-  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
+- `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`; the
+  Claude Code binary it bundles is the version it declares (`claudeCodeVersion`),
+  which the `agent` image build asserts (`agent/src/check-cli-version.ts`). There is
+  no second pin to bump (#1540). An SDK bump changes the harness under every query,
+  so its `agent` job, whose e2e tests run that binary, is the re-verification:
+  re-measure the facts §3 of `2026-09-27-ai-integration-design.md` and the code
+  comments cite ("measured on Claude Code 2.1.N") before moving the version they
+  name.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,

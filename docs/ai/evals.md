@@ -72,7 +72,8 @@ The same file tests credential resolution. The database case runs when
 The first run of the harness found a bug. Given a raw zod shape, the MCP server bundled
 in `@anthropic-ai/claude-agent-sdk` 0.3.283 refused any omitted `.default()` field
 ("expected nonoptional, received undefined"). So, for example, `update_source` without
-`force` never ran in-process. `createHarnessServer` now passes a whole `z.object`, and
+`force` never ran in-process. `createHarnessServer` passed a whole `z.object` instead
+until SDK 0.3.287, which fills the default from the raw shape, and
 [`agent/test/projections.test.ts`](../../agent/test/projections.test.ts) covers it.
 
 ### Live run (opt-in)
@@ -102,7 +103,8 @@ SCADBUDDY_EVAL_ANTHROPIC_API_KEY is not set`). The command still exits 0.
 `SCADBUDDY_EVAL_REPORT=<file>` writes a JSON report. For each scenario it records
 pass/fail per check, the tool calls, the gate's requests, cost, turns and the model id
 the run used. The report also records the Claude Code version the SDK declares (the
-build pins `CLAUDE_CODE_VERSION`; see the [`Dockerfile`](../../Dockerfile)).
+image build asserts the bundled binary is that version; see the
+[`Dockerfile`](../../Dockerfile)).
 
 Each scenario starts its own Claude Code process with `maxTurns` 12 and
 `maxBudgetUsd` 0.5 (`runScenario` defaults), under a 5-minute deadline.

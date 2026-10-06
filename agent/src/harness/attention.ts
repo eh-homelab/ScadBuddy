@@ -88,10 +88,10 @@ export type AttentionInput = z.output<typeof AttentionInputSchema>
 
 /**
  * The shape the tool is declared with. The SDK's MCP server validates a call
- * against it first, and a `.default()` field the model left out fails there
- * ("expected nonoptional, received undefined", measured on SDK 0.3.283; the
- * calls in test/attention.sdk.test.ts omit them), so the defaults are left to
- * `parseAttention`.
+ * against it first, and on SDK 0.3.283 a `.default()` field the model left out
+ * failed there ("expected nonoptional, received undefined"; 0.3.287 fills it,
+ * measured 2026-10-06; the calls in test/attention.sdk.test.ts omit them), so
+ * the defaults are left to `parseAttention`.
  * `reason` is a string here so `approval_pending` reaches parseAttention's own
  * explanation rather than a bare enum error.
  */

@@ -1,9 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
@@ -14,29 +11,9 @@ import { BACKEND, services } from './helpers/mcp.js'
 // Spec §5.1: "A test asserts both lists are identical, apart from browser-only
 // tools." The browser_* tools (#254, src/tools/browser.ts) are in both lists,
 // so the lists must be equal outright: names, descriptions, input schemas and
-// annotations.
-//
-// One normalisation: the two servers turn the same zod union of primitives
-// into JSON Schema differently. The Agent SDK's bundled server writes
-// `{"type": ["boolean", "null"]}`, @modelcontextprotocol/sdk writes
-// `{"anyOf": [{"type": "boolean"}, {"type": "null"}]}`, which mean the same.
-// Both are rewritten to a sorted `anyOf` before comparing; nothing else is.
-
-function normalise(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalise)
-  if (!value || typeof value !== 'object') return value
-  const entries = Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, normalise(v)] as const)
-  const out: Record<string, unknown> = Object.fromEntries(entries)
-  if (Array.isArray(out.type)) {
-    out.anyOf = (out.type as string[]).map((type) => ({ type }))
-    delete out.type
-  }
-  const anyOf = out.anyOf as { type?: unknown }[] | undefined
-  if (anyOf?.every((o) => typeof o.type === 'string' && Object.keys(o).length === 1)) {
-    out.anyOf = [...anyOf].sort((a, b) => String(a.type).localeCompare(String(b.type)))
-  }
-  return out
-}
+// annotations. (The Agent SDK 0.3.283 server wrote a union of primitives as
+// `{"type": [...]}` where @modelcontextprotocol/sdk writes `anyOf`, so this
+// compared normalised lists; 0.3.287 writes the same, measured 2026-10-06.)
 
 async function listVia(server: McpServer) {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -58,7 +35,7 @@ describe('registry projections', () => {
     const external = await listVia(createExternalServer(ALL_TOOLS, svc))
 
     expect(inProcess.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
-    expect(normalise(inProcess)).toEqual(normalise(external))
+    expect(inProcess).toEqual(external)
     // A defaulted field lists its literal default on both sides, not just the
     // same thing (claude-review of #526, finding 1).
     for (const listing of [inProcess, external]) {
@@ -103,21 +80,6 @@ describe('registry projections', () => {
     await client.close()
     expect(result.isError, JSON.stringify(result)).toBe(true)
     expect(called).toBe(false)
-  })
-
-  it('re-check the whole-z.object cast when the Agent SDK moves off 0.3.283', async () => {
-    // src/tools/projections.ts hands the SDK's tool() a z.object behind an
-    // `as unknown as` cast, because the 0.3.283 server mishandles a raw shape
-    // with `.default()` fields. The cast silences the types, so a bump must
-    // re-run the two tests above by hand, then drop the cast if the SDK now
-    // fills defaults from a raw shape, and move this pin either way.
-    const sdkEntry = fileURLToPath(import.meta.resolve('@anthropic-ai/claude-agent-sdk'))
-    const manifest = JSON.parse(await readFile(path.join(path.dirname(sdkEntry), 'package.json'), 'utf8')) as {
-      version: string
-    }
-    expect(manifest.version, 'the z.object cast in createHarnessServer was measured on 0.3.283; re-check it').toBe(
-      '0.3.283',
-    )
   })
 
   it('mark read tools readOnly and outward tools destructive', () => {

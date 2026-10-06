@@ -44,6 +44,8 @@ export type MessagesBody = {
   messages?: { role: string; content: unknown }[]
   system?: unknown
   max_tokens?: number
+  /** e.g. `{ type: 'enabled', budget_tokens: 31999, display: 'updates' }`. */
+  thinking?: { type?: string; display?: string }
 }
 
 export type FakeAnthropic = {
