@@ -393,14 +393,16 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('shows the nozzle step’s note in Advanced only, and never holds Print on it', async () => {
-    const plate = "The 3DP-31B-598's last print used Engineering Plate. Swap to Textured PEI Plate."
+  it('shows the mounted High Flow warning in Simple and Advanced, and never holds Print on it (#797)', async () => {
+    const highFlow =
+      'The left nozzle is High Flow and this print is sliced for Standard flow, so if it ' +
+      'prints on the left, the printer pauses at the first layer.'
     server.use(
       http.post('/api/v1/print/outputs/:id/check', () =>
         HttpResponse.json({
           errors: [],
           warnings: [
-            { kind: 'plate-differs', message: plate },
+            { kind: 'hf-mounted', message: highFlow },
             { kind: 'not-installed', message: 'No 0.6 mm nozzle is installed. Install one before this prints.' },
           ],
         }),
@@ -408,16 +410,16 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     renderPicker()
     await loaded()
-    // Simple mode: the plate warning, and no nozzle-step note.
+    // Simple mode: the mounted High Flow warning, and no nozzle-step note.
     const simple = await screen.findAllByTestId('print-verdict-warning')
     expect(simple).toHaveLength(1)
-    expect(simple[0]).toHaveTextContent('Swap to Textured PEI Plate')
+    expect(simple[0]).toHaveTextContent('The left nozzle is High Flow')
     expect(screen.queryByText(/No 0.6 mm nozzle is installed/)).toBeNull()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await showAdvanced()
     const advanced = await screen.findAllByTestId('print-verdict-warning')
-    expect(advanced[0]).toHaveTextContent('Swap to Textured PEI Plate')
+    expect(advanced[0]).toHaveTextContent('The left nozzle is High Flow')
     expect(advanced).toHaveLength(2)
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })

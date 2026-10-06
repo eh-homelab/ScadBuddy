@@ -71,7 +71,8 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**
  * The notes about the nozzle step, shown in Advanced mode only (#772): the rack's
- * `not-installed`. High Flow is sliced as High Flow since #484, so it has no note.
+ * `not-installed`. A side the slice may use with a nozzle of the chosen size mounted in
+ * the other flow (`hf-mounted`, #797, #484) is not one of them, so Simple shows it.
  */
 const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
 

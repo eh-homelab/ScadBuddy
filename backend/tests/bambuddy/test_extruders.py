@@ -18,6 +18,8 @@ from scadbuddy.bambuddy.extruders import (
     LEFT,
     RIGHT,
     extruder_of,
+    high_flow_warning,
+    high_flow_warnings,
     rack_volume_type,
     side_of,
     slicer_nozzle_stats,
@@ -25,7 +27,7 @@ from scadbuddy.bambuddy.extruders import (
     with_sides,
 )
 from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
-from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.models import FlowType, NozzleChoice, PrinterStatus
 from tests.bambuddy.conftest import recording
 
 
@@ -290,3 +292,115 @@ def test_a_nozzle_of_the_other_flow_still_beats_another_size(
 )
 def test_otherwise_the_slicer_is_left_to_choose(status: PrinterStatus | None, size: str) -> None:
     assert slicer_nozzle_stats(status, _size(size)) is None
+
+
+# --- #723, #797: a side the slice may use with the other flow mounted --------------------
+#
+# The slice states each side's flow (#484) and is offered a side with a nozzle of that
+# flow when one side alone has it (#834), so a mounted nozzle of the size in the other
+# flow pauses the print only where the slice may still use it.
+
+HF_LEFT_SLICED_STANDARD = (
+    "The left nozzle is High Flow and this print is sliced for a Standard nozzle there, so "
+    'if it prints on the left, the printer pauses at the first layer ("the left nozzle is '
+    'not matched with slicing file"). Fit a Standard nozzle there before it starts.'
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "warned"),
+    [
+        (_nozzles(("HH01", "0.2"), ("HS01", "0.6")), RIGHT),
+        (_nozzles(("HS01", "0.6"), ("HH01", "0.2")), LEFT),
+    ],
+)
+def test_the_one_side_offered_in_the_other_flow_is_warned_about(
+    status: PrinterStatus, warned: int
+) -> None:
+    """Standard chosen, and the only nozzle of the size is High Flow: the slice is offered
+    that side as Standard (above), queue item 149's pause. Warned, never refused."""
+    assert high_flow_warnings(status, _size("0.2")) == [high_flow_warning(warned, "standard")]
+
+
+def test_the_warning_says_which_side_and_both_flows() -> None:
+    [warning] = high_flow_warnings(_nozzles(("HS01", "0.6"), ("HH01", "0.2")), _size("0.2"))
+    assert warning.kind == "hf-mounted"
+    assert warning.message == HF_LEFT_SLICED_STANDARD
+
+
+def test_either_side_the_slicer_may_choose_is_warned_about() -> None:
+    """High Flow chosen for the left and Standard for the right, with the 0.2s mounted
+    the other way round: neither side has its flow, so the slicer is left to choose, and
+    each side is warned of in its own flow."""
+    status = _nozzles(("HH01", "0.2"), ("HS00", "0.2"))
+    nozzles = _choose("0.2", "high_flow", "standard")
+    assert slicer_nozzle_stats(status, nozzles) is None
+    assert high_flow_warnings(status, nozzles) == [
+        high_flow_warning(RIGHT, "standard"),
+        high_flow_warning(LEFT, "high_flow"),
+    ]
+    assert high_flow_warning(LEFT, "high_flow").message.startswith(
+        "The left nozzle is Standard and this print is sliced for a High Flow nozzle there"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "nozzles"),
+    [
+        # Queue item 149's printer, a standard right and a High Flow left: the right.
+        (_nozzles(("HS01", "0.4"), ("HH01", "0.4")), STANDARD_04),
+        # The same the other way round, with no spare of the size: the left.
+        (_nozzles(("HS00", "0.2"), ("HH01", "0.2")), _choose("0.2", "high_flow")),
+    ],
+)
+def test_a_side_the_slice_is_not_offered_is_not_warned_about(
+    status: PrinterStatus, nozzles: list[NozzleChoice]
+) -> None:
+    """The one side with the flow chosen is offered (#834), so the other flow mounted on
+    the other side is never printed with."""
+    assert high_flow_warnings(status, nozzles) == []
+
+
+@pytest.mark.parametrize(
+    ("mounted", "nozzles", "flow"),
+    [
+        # #1238: a High Flow 0.4 on both sides and standard spares, Standard chosen: the
+        # right is offered for its spares.
+        ((("HH01", "0.4"), ("HH01", "0.4")), STANDARD_04, "standard"),
+        # Queue item 149's printer with High Flow chosen: the left has it and the right
+        # only among its spares, so either may print.
+        ((("HS01", "0.4"), ("HH01", "0.4")), _choose("0.4", "high_flow"), "high_flow"),
+    ],
+)
+def test_the_rack_side_is_not_warned_about_once_the_rack_picks_it_a_hotend(
+    mounted: tuple[tuple[str, str], tuple[str, str]], nozzles: list[NozzleChoice], flow: FlowType
+) -> None:
+    """The right's mounted nozzle is of the other flow until a rack pick swaps on a spare
+    of the flow sliced there (#1238)."""
+    status = _nozzles(*mounted)
+    assert high_flow_warnings(status, nozzles) == [high_flow_warning(RIGHT, flow)]
+    assert high_flow_warnings(status, nozzles, rack_picked=True) == []
+
+
+def test_a_library_file_may_print_on_either_side() -> None:
+    """#313: a library file prints as its author left it, so it is offered no side and
+    queue item 149's High Flow left is warned of, as before #484."""
+    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
+    assert high_flow_warnings(status, STANDARD_04, laid_out=False) == [
+        high_flow_warning(LEFT, "standard")
+    ]
+
+
+def test_no_warning_without_a_mounted_nozzle_of_the_size_or_a_status() -> None:
+    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), _size("0.2")) == []
+    assert high_flow_warnings(None, STANDARD_04) == []
+
+
+def test_a_nozzle_with_no_type_code_is_no_flow_to_warn_of() -> None:
+    """The offered right reports its size but no type, so nothing says it is Standard."""
+    status = _nozzles(("", "0.2"), ("HS01", "0.6"))
+    assert slicer_nozzle_stats(status, _choose("0.2", "high_flow")) == [
+        "High Flow#0",
+        "High Flow#1",
+    ]
+    assert high_flow_warnings(status, _choose("0.2", "high_flow")) == []

@@ -64,6 +64,13 @@ class PrintSource(Protocol):
         overrides; none for a file ScadBuddy did not render."""
         ...
 
+    @property
+    def lays_out(self) -> bool:
+        """Whether the run lays the file out for the printer (#105), so it states the
+        side the slicer may use (#834) and each side's flow (#484); a library file
+        prints as its author left it."""
+        ...
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
@@ -128,6 +135,10 @@ class OutputSource:
     @property
     def options_slug(self) -> str | None:
         return self.meta.slug
+
+    @property
+    def lays_out(self) -> bool:
+        return True
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return [plate.index for plate in plates_of(self.store.directory(self.meta.id) / MODEL_NAME)]
@@ -276,6 +287,10 @@ class LibrarySource:
     @property
     def print_settings(self) -> dict[str, str]:
         return {}
+
+    @property
+    def lays_out(self) -> bool:
+        return False
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)

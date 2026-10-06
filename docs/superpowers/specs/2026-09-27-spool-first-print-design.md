@@ -146,7 +146,7 @@ sizes, so both are handled without ever naming a printer preset ScadBuddy invent
 | Nozzles | Printer preset |
 |---|---|
 | Any flow, any single size | Always Bambu's own: `printer_preset_name()` returns `Bambu Lab H2C <nozzles[0].size> nozzle` regardless of flow — 0.2 → `GM042`, 0.4 → `GM041`, 0.6 → `GM043`, 0.8 → `GM044`. **No local or `ScadBuddy ·` printer preset is ever created.** |
-| Either side High Flow | Same Bambu preset as above, plus an `hf-unsupported` warning: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (filed upstream as bambuddy#3176). |
+| Either side High Flow | Same Bambu preset as above. The flow goes in the 3MF instead, each side's as chosen (`nozzle_volume_type`, #484); before that this added an `hf-unsupported` warning, since Bambuddy has no High Flow presets (bambuddy#3176). |
 | Mixed sizes | Always a `mixed-sizes` **error** ("The two nozzles are different sizes. Bambuddy can't slice mixed nozzle sizes yet."), surfaced as a 422 before slicing. There is no Advanced override — the earlier plan to keep one behind a "firmware may refuse" warning is withdrawn, since the 400 is Bambuddy's local-preset tier refusing the request outright, not the firmware; an override would only ever error. The UI reflects this: nozzle size is one radio group setting both sides, in both Simple and Advanced mode (§2 step 3). |
 
 Why a printer preset was the plan at all: on the H2C the flow type is a **printer**
@@ -221,15 +221,18 @@ through the one 0.2 mm nozzle while the other extruder had a different size fitt
 printer handles its nozzles itself, and the H2C swaps hotends from its rack (§6), so
 those refusals and warnings are gone, from the run, the check before Print (#755) and
 the dialog alike. One warning stays, by the owner's rulings on #772 and #797: when a
-mounted nozzle of the chosen size is High Flow (`nozzle_type` `HH01`), whatever flow is
-chosen, the run and the check before Print carry an `hf-mounted` warning (#723; queue
-item 149 paused on it), since the slice is always Standard flow until Bambuddy supports
-High Flow presets (#484). It is advisory only, never a refusal, and it changes nothing
-the run sends, since a print may be set up before its nozzle is fitted. A High Flow
-choice also gets the resolver's `hf-unsupported` note (§4.1), and an unreadable printer
-status gives no warning rather than assuming a side. The dialog shows `hf-mounted` in
-Simple and Advanced mode alike, and it never holds Print; the nozzle step's own notes
-(`hf-unsupported`, `not-installed`) stay Advanced only.
+side the slice may use has a nozzle of the chosen size mounted in the other flow than
+the one sliced there (`nozzle_type` `HH01` is High Flow), the run and the check before
+Print carry an `hf-mounted` warning (#723; queue item 149 paused on a High Flow nozzle
+sliced as Standard). Since #484 the slice states each side's flow as chosen, and it is
+offered only a side with a nozzle of that flow when one side alone has one (#834), so
+the warning is left for the one side offered when no side has the flow, either side
+when the slicer chooses, and the rack side until a rack pick swaps on a hotend of the
+flow (#1238); a library file is offered no side. It is advisory only, never a refusal,
+and it changes nothing the run sends, since a print may be set up before its nozzle is
+fitted. An unreadable printer status gives no warning rather than assuming a side. The
+dialog shows `hf-mounted` in Simple and Advanced mode alike, and it never holds Print;
+the nozzle step's own note (`not-installed`) stays Advanced only.
 
 That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL
@@ -323,10 +326,11 @@ filament/plate-temperature warning.
 - **Errors** block the Print button (422) and name the slot or setting: no filament
   preset for a slot (§4.3.4); mixed nozzle sizes (§4.1 — there is no override).
 - **Warnings** show and allow printing: spool not loaded; nozzle not installed; a
-  mounted High Flow nozzle of the chosen size (`hf-mounted`, §4.3 — shown in Simple and
-  Advanced mode alike, and never blocks Print); High Flow slicing as Standard (§4.1); no
-  size-specific preset for a spool, falling back to Bambu's Generic (§4.3); plate
-  differs from the last print (§4.4 — there is no plate/filament-temperature warning).
+  nozzle of the chosen size mounted in the other flow on a side the slice may use
+  (`hf-mounted`, §4.3 — shown in Simple and Advanced mode alike, and never blocks
+  Print); no size-specific preset for a spool, falling back to Bambu's Generic (§4.3);
+  plate differs from the last print (§4.4 — there is no plate/filament-temperature
+  warning).
 
 ### 4.6 Template print settings (#770)
 

@@ -25,6 +25,8 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
+from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
@@ -1246,12 +1248,12 @@ def _run_on(
 
 
 @respx.mock
-def test_a_mounted_high_flow_nozzle_is_no_longer_warned_about(
+def test_a_mounted_high_flow_nozzle_the_slice_is_not_offered_is_not_warned_about(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """#484: queue item 149 paused on a High Flow left sliced as Standard (#723, #797).
-    The file now states the flow, and with Standard chosen the standard right is the side
-    offered, so the warning is gone."""
+    The file now states the flow, and with Standard chosen it offers the slicer only the
+    standard right (#834), so the left is never printed with and nothing is warned of."""
     response, upload = _run_on(client, model, paths, BOTH_04_LEFT_HF, nozzles=[{"size": "0.4"}])
 
     assert response.status_code == 200, response.text
@@ -1284,6 +1286,73 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     assert "extruder_nozzle_stats" not in settings
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
+
+
+def _mounted(right: tuple[str, str], left: tuple[str, str]) -> dict[str, Any]:
+    """Status changes that mount ``right`` and ``left`` (a nozzle type and size each), the
+    rack saying the same of its two mounted hotends (ids 0 and 1). Its spares stay the
+    recorded 0.4s."""
+    nozzles = [{"nozzle_type": kind, "nozzle_diameter": size} for kind, size in (right, left)]
+    rack: list[dict[str, Any]] = recording("printer-status-rack.json")["nozzle_rack"]
+    for entry in rack:
+        if entry["id"] in (RIGHT, LEFT):
+            entry.update(nozzles[entry["id"]])
+    return {"nozzles": nozzles, "nozzle_rack": rack}
+
+
+#: The review of #1582: (a) Standard chosen, and the one side with a 0.2 has it High
+#: Flow, so that side is offered (#834); (b) High Flow chosen for the left and Standard
+#: for the right, with the 0.2s mounted the other way round, so neither side has its
+#: flow and the slicer may use either. Each: the status, the nozzles chosen, the sides
+#: warned of with the flow sliced there, and the file's nozzle stats and flows.
+FLOW_MISMATCHES = [
+    pytest.param(
+        _mounted(("HS01", "0.6"), ("HH01", "0.2")),
+        [{"size": "0.2"}],
+        [(LEFT, "standard")],
+        ["Standard#1", "Standard#0"],
+        ["Standard", "Standard"],
+        id="the-one-side-of-the-size",
+    ),
+    pytest.param(
+        _mounted(("HH01", "0.2"), ("HS00", "0.2")),
+        [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "standard"}],
+        [(RIGHT, "standard"), (LEFT, "high_flow")],
+        None,
+        ["High Flow", "Standard"],
+        id="neither-side-of-its-flow",
+    ),
+]
+
+
+def _high_flow(warnings: list[dict[str, Any]]) -> list[str]:
+    return [warning["message"] for warning in warnings if warning["kind"] == "hf-mounted"]
+
+
+@respx.mock
+@pytest.mark.parametrize(("status", "nozzles", "warned", "stats", "flows"), FLOW_MISMATCHES)
+def test_the_run_warns_of_a_side_it_may_print_on_whose_nozzle_is_the_other_flow(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    status: dict[str, Any],
+    nozzles: list[dict[str, str]],
+    warned: list[tuple[int, FlowType]],
+    stats: list[str] | None,
+    flows: list[str],
+) -> None:
+    """#723, #797 after #484: the file states each side's flow as chosen, and a side the
+    slicer may still use has the size mounted in the other flow, so the printer would
+    pause there at the first layer. A warning, and the file is the one sent anyway."""
+    response, upload = _run_on(client, model, paths, status, nozzles=nozzles)
+
+    assert response.status_code == 200, response.text
+    assert _high_flow(response.json()["warnings"]) == [
+        high_flow_warning(side, flow).message for side, flow in warned
+    ]
+    settings = _uploaded_settings(upload)
+    assert settings.get("extruder_nozzle_stats") == stats
+    assert settings["nozzle_volume_type"] == flows
 
 
 @respx.mock
@@ -1378,7 +1447,8 @@ def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response
 def test_the_check_says_nothing_of_the_mounted_nozzles_flow(
     client: TestClient, model: str, paths: DataPaths, status: dict[str, Any], flow: str
 ) -> None:
-    """#484: the slice states the flow chosen, so neither the mounted High Flow nozzle
+    """#484: the slice states the flow chosen and is offered a side with it (#834), or the
+    rack picks the right a hotend of it (#1238), so neither the mounted High Flow nozzle
     (#723, #797) nor a High Flow choice (#862) is warned about before Print."""
     output_id = two_colour_output(client, model, paths)
     upload = upload_route()
@@ -1389,6 +1459,34 @@ def test_the_check_says_nothing_of_the_mounted_nozzles_flow(
 
     assert check.status_code == 200, check.text
     assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
+    assert not upload.called
+
+
+@respx.mock
+@pytest.mark.parametrize(("status", "nozzles", "warned", "stats", "flows"), FLOW_MISMATCHES)
+def test_the_check_warns_of_a_side_the_slice_may_use_whose_nozzle_is_the_other_flow(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    status: dict[str, Any],
+    nozzles: list[dict[str, str]],
+    warned: list[tuple[int, FlowType]],
+    stats: list[str] | None,
+    flows: list[str],
+) -> None:
+    """The run's warning above, said before Print, and nothing refused (#797)."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**status)
+
+    check = _check(client, output_id, nozzles=nozzles)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert _high_flow(check.json()["warnings"]) == [
+        high_flow_warning(side, flow).message for side, flow in warned
+    ]
     assert not upload.called
 
 

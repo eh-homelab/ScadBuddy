@@ -575,3 +575,97 @@ def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: 
     assert response.status_code == 200, response.text
     assert not [c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]
     assert not [w for w in response.json()["warnings"] if w["kind"].startswith("rack-")]
+
+
+def _both_sides_high_flow() -> None:
+    """The rack recording with a 0.4 High Flow mounted on both sides (#1238)."""
+    status = invented_status()
+    high_flow = {"nozzle_type": "HH01", "nozzle_diameter": "0.4"}
+    status["nozzles"] = [high_flow, high_flow]
+    for entry in status["nozzle_rack"]:
+        if entry["id"] in (0, 1):
+            entry.update(high_flow)
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+
+
+def _high_flow_sides(warnings: list[dict[str, Any]]) -> set[str]:
+    return {
+        side
+        for warning in warnings
+        if warning["kind"] == "hf-mounted"
+        for side in ("left", "right")
+        if warning["message"].startswith(f"The {side} nozzle")
+    }
+
+
+@respx.mock
+def test_a_rack_pick_drops_the_rack_sides_high_flow_warning(client: TestClient, model: str) -> None:
+    """#1238: the rack swaps a Standard hotend onto the rack side (the right), so the
+    mounted High Flow there no longer matters. Nor does the left's: Standard is chosen,
+    and only the right has it, in its spares, so only the right is offered (#834)."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id)
+
+    assert result["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(result["warnings"]) == set()
+
+
+@respx.mock
+def test_without_a_rack_pick_the_rack_sides_high_flow_warning_stands(
+    client: TestClient, model: str
+) -> None:
+    """Left to Bambuddy, nothing is picked here, so nothing says what the right gets."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id, rack_algorithm="bambuddy")
+
+    assert result["rack"]["position"] is None
+    assert _high_flow_sides(result["warnings"]) == {"right"}
+
+
+@respx.mock
+def test_a_run_that_picked_from_the_rack_drops_the_rack_sides_high_flow_warning(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == set()
+
+
+@respx.mock
+def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
+    client: TestClient,
+) -> None:
+    """A library file prints as its author left it (#313): it is offered no side, so the
+    left's warning stands beside the rack pick that drops the right's (#1238)."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post(
+        "/api/v1/print/library/89/check",
+        json={**body(**CHECK_04), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
+from scadbuddy.bambuddy.extruders import VOLUME_TYPE
 from scadbuddy.bambuddy.models import ExternalLink
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
@@ -93,7 +94,8 @@ def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
-_STANDARD = "Standard"
+#: The flow the slicer assumes when the file states none (#484).
+_STANDARD = VOLUME_TYPE["standard"]
 
 
 @dataclass(frozen=True)

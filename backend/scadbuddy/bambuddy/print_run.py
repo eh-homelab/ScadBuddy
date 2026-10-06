@@ -21,6 +21,10 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
+    RACK_SIDE,
+    VOLUME_TYPE,
+    high_flow_warning,
+    high_flow_warnings,
     rack_volume_type,
     slicer_nozzle_stats,
     slicer_volume_types,
@@ -477,8 +481,9 @@ async def check_print(
     makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
     the catalogue refuses — in the run's own words. It no longer refuses by the mounted
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
-    slice through the one 0.2 mm nozzle, and since the slice states the flow chosen
-    (#484) it no longer warns of a mounted High Flow nozzle (#723, #797). What needs
+    slice through the one 0.2 mm nozzle. It warns only of a side the slice may use whose
+    mounted nozzle of the size is not of the flow sliced there (#723, #797, #484), and
+    not of the rack side once the preview picks it a hotend (#1238). What needs
     the uploaded file is still found by the run. Only the run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
     check, as it would fail the run. With no printer chosen or configured there is
@@ -508,7 +513,22 @@ async def check_print(
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
-    return PrintCheck(errors=errors, warnings=rack_notes, rack=rack_view)
+    # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
+    # for the rack side when the preview picks it a hotend (#1238).
+    rack_picked = rack_view is not None and rack_view.position is not None
+    return PrintCheck(
+        errors=errors,
+        warnings=[
+            *high_flow_warnings(
+                prepared.printer_status,
+                request.choices.nozzles,
+                rack_picked=rack_picked,
+                laid_out=source.lays_out,
+            ),
+            *rack_notes,
+        ],
+        rack=rack_view,
+    )
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
@@ -941,6 +961,7 @@ async def plan_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
+    hardware += high_flow_warnings(printer_status, choices.nozzles, laid_out=source.lays_out)
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
@@ -992,6 +1013,12 @@ def finish_run(
     """Report what was queued, with each plate's rack picks and warnings (``queued``,
     one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
     warnings = list(planned.warnings)
+    if queued and all(plate.picks for plate in queued):
+        # Every plate had the rack side's hotend picked from the rack, which is always one
+        # of the size and of the flow sliced there: the one mounted now is swapped out
+        # (#1238), whichever flow the slice is for.
+        swapped = [high_flow_warning(RACK_SIDE, flow) for flow in VOLUME_TYPE]
+        warnings = [warning for warning in warnings if warning not in swapped]
     for plate in queued or []:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate.warnings if warning not in warnings]
