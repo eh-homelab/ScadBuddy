@@ -1168,13 +1168,29 @@ function presetRefusal(
   if (own === null && saved.length >= MAX_PRESETS) {
     return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
   }
-  const clash = (state.presets[slug] ?? []).some(
+  const clash = (state.presets[slug] ?? []).find(
     (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
   )
   if (clash) {
-    return problem(409, 'Conflict', `'${slug}' already has a preset named '${name}'`, { name })
+    // #357: names the preset that has the name, as it is spelled.
+    return problem(409, 'Conflict', `A preset named "${clash.name}" already exists.`, {
+      name,
+      existing: clash.name,
+    })
   }
   return undefined
+}
+
+/** `api/presets.py`'s words for a preset that is gone, and for one the template ships (#357). */
+const PRESET_GONE = 'That preset no longer exists; it may have been deleted elsewhere.'
+const PRESET_READ_ONLY =
+  'This preset ships with the template and is read-only; duplicate it to change it.'
+
+/** A write to a `template-*` id: read-only when the template has it, else gone (#357). */
+function templatePresetRefusal(slug: string, id: string) {
+  return (state.presets[slug] ?? []).some((p) => p.id === id)
+    ? problem(403, 'Forbidden', PRESET_READ_ONLY, { preset_id: id })
+    : problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
 }
 
 function slugify(value: string): string {
@@ -2282,7 +2298,7 @@ export const handlers = [
     const id = String(params['id'])
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!source) return problem(404, 'Preset not found')
+    if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
@@ -2309,9 +2325,9 @@ export const handlers = [
     const body = (await request.json()) as ParamPresetUpdate
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!existing) return problem(404, 'Preset not found')
+    if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const name = body.name?.trim().replace(/\s+/g, ' ')
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
@@ -2343,9 +2359,9 @@ export const handlers = [
   http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const presets = state.presets[slug] ?? []
-    if (!presets.some((p) => p.id === id)) return problem(404, 'Preset not found')
+    if (!presets.some((p) => p.id === id)) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     state.presets[slug] = presets.filter((p) => p.id !== id)
     return new HttpResponse(null, { status: 204 })
   }),

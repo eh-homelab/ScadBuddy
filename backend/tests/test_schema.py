@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scadbuddy.api.params import require_valid_preset_params
 from scadbuddy.render.runner import format_scad_value
 from scadbuddy.render.schema import (
@@ -324,6 +326,18 @@ def test_a_retired_value_is_kept_on_its_select_only() -> None:
     assert by_name["count"].retired == [3]
     assert by_name["label"].retired == []
     assert [o.value for o in by_name["kind"].options] == ["auto", "png_threshold"]
+
+
+MODELS = Path(__file__).resolve().parents[2] / "models"
+
+
+@pytest.mark.parametrize("slug", sorted(p.parent.name for p in MODELS.glob("*/model.scad")))
+def test_no_bundled_caption_talks_about_the_app(slug: str) -> None:
+    """A parameter's comment is the caption the customizer shows (#367): a note to
+    the template's maintainers ("the app fills this dropdown from the fonts installed
+    in the image") reads as noise to the person choosing a typeface."""
+    source = (MODELS / slug / "model.scad").read_text(encoding="utf-8")
+    assert "the app fills this dropdown" not in source
 
 
 #: The battery crate's `cell = "AA"; // [AAA, AA, C, D, 9V, 18650, CR2032]` (#356):

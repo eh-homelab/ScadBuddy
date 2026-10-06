@@ -29,6 +29,8 @@ import {
   checkParamValue,
   defaultValues,
   diffFromDefaults,
+  outOfRange,
+  rangeProblem,
   sameValues,
   type ParamValues,
 } from '../lib/params'
@@ -260,6 +262,10 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // #921 — a number outside its declared range is flagged on its field; the render
+  // would only answer 422, so none is started and Generate waits until it is fixed.
+  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
   const {
@@ -269,15 +275,15 @@ export function CustomizePage() {
     busy: renderBusy,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled && seed ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
-  const upToDate = settled && settledFor === debounced && !rendering
+  const upToDate = settled && settledFor === debounced && !rendering && !invalid
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
   const output =
-    settled && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
@@ -697,6 +703,7 @@ export function CustomizePage() {
         controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
         // The flyout lies over the scene; the readouts move clear of it.
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
+        rejected={Boolean(renderError)}
       />
     </Suspense>
   )
@@ -716,7 +723,7 @@ export function CustomizePage() {
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
-          disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
+          disabled={uiGenerate.generating || rendering || !settled || Boolean(invalid) || job?.status !== 'done'}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -793,11 +800,13 @@ export function CustomizePage() {
 
   return (
     // #971 — `short:` scrolls the stacked page on a short window; full screen is the view
-    // alone, so none of it applies there.
+    // alone, so none of it applies there. #362 — minmax(0, 1fr), not the implicit auto
+    // column: an auto track grows to its widest child's min-content (a long preset name,
+    // a row of slider boxes), which on a phone held every pane wider than the screen.
     <div
-      className={`grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
+      className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
     >
-      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971). */}
+      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971, #362). */}
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
@@ -973,11 +982,11 @@ export function CustomizePage() {
           data-testid="workspace"
           // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
           // frame) the `window` mode is this element covering the window.
-          className={`grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] ${
+          className={`grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] ${
             full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
-          <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
             {uiPresets}
             {uiOrigin}
           </div>
@@ -988,7 +997,7 @@ export function CustomizePage() {
       <div
         ref={workspace}
         data-testid="workspace"
-        className={`grid min-h-0 grid-cols-1 ${
+        className={`grid min-h-0 grid-cols-[minmax(0,1fr)] ${
           full
             ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
                 fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
@@ -1002,12 +1011,12 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
                 {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                 {uiPresets}
                 {uiOrigin}
@@ -1047,7 +1056,7 @@ export function CustomizePage() {
         </div>
 
         <div
-          className={`grid min-h-0 grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
+          className={`grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
         >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
@@ -1071,6 +1080,12 @@ export function CustomizePage() {
               className="border-t border-line px-3 py-2 text-[12px] text-muted"
             >
               The render queue is full; this preview will be retried in {renderBusy} s.
+            </p>
+          )}
+          {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
+          {invalid && templateUi && (
+            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+              {invalid}
             </p>
           )}
           {renderError && (

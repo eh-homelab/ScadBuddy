@@ -15,12 +15,14 @@ import { CustomizePage } from './CustomizePage'
 // WebGL does not exist in jsdom: the viewer is a stand-in that renders the page's own
 // buttons, which it lays over the scene (as CustomizePage.test.tsx does).
 // It counts its mounts, so a test can tell a moved viewer from one that stayed put.
+// In a layout effect, which runs in the commit that inserts its node: a passive
+// effect runs later, so a check that waits for the node could see it uncounted (#1311).
 const previews = vi.hoisted(() => ({ mounts: 0 }))
 vi.mock('../components/Preview', async () => {
-  const { useEffect } = await import('react')
+  const { useLayoutEffect } = await import('react')
   return {
     Preview: ({ leading, controls }: { leading?: ReactNode; controls?: ReactNode }) => {
-      useEffect(() => {
+      useLayoutEffect(() => {
         previews.mounts += 1
       }, [])
       return (
@@ -507,9 +509,17 @@ describe('the page slot', () => {
         return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
       }),
     )
+    // The count the viewer had at the moment its node landed: what any check that
+    // waits for the node (as the `waitFor` below does) can see (#1311).
+    let countedAtInsert: number | undefined
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
         root.innerHTML = '<sb-preview></sb-preview>'
+        new MutationObserver(() => {
+          if (countedAtInsert === undefined && root.querySelector('[data-testid="preview"]')) {
+            countedAtInsert = previews.mounts
+          }
+        }).observe(root, { childList: true, subtree: true })
       },
     }))
     // The viewer is lazy: load it first, so "no preview yet" is the page's choice.
@@ -524,6 +534,7 @@ describe('the page slot', () => {
     release()
     await waitFor(() => expect(shadow().querySelector('[data-testid="preview"]')).not.toBeNull(), { timeout: 5000 })
     expect(previews.mounts).toBe(1)
+    expect(countedAtInsert).toBe(1)
   })
 
   it("reports the template Generate's error, and takes one click at a time", async () => {

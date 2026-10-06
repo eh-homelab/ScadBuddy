@@ -144,7 +144,11 @@ import { TurnTrace } from '../telemetry/turn.js'
 // turn is given what is left as `maxBudgetUsd`, and a spent session refuses
 // sends. Settings writes the two keys (routes/sessionLimits.ts, #790); only
 // the browser user can raise one session's budget (`raiseBudget`), because
-// that spends money.
+// that spends money. A fork does not get a budget of its own: it spends from
+// its parent's, and so does a fork of that fork (#823). The budget belongs to
+// the lineage's root session (`budget_root_id`); every check and every meter
+// reads the root's budget against what all of the lineage has spent, and a
+// raise on any member raises the root's.
 
 /** ai_settings keys (non-secret, spec §9). */
 export const SETTING_MODEL = 'model'
@@ -382,8 +386,12 @@ export type SessionRecord = {
   scope: Record<string, unknown>
   parentId: string | null
   maxTurns: number
+  /** The budget this session spends from, shared with its forks and its parent's lineage (#823). */
   budgetUsd: number
+  /** What that lineage has spent, every member's turns included: what `budgetUsd` is checked against. */
   costUsd: number
+  /** What this session's own turns have spent. */
+  ownCostUsd: number
   turns: number
   /** A turn holds the claim (on some replica) right now. */
   turnActive: boolean
@@ -583,6 +591,7 @@ type Row = {
   max_turns: number
   budget_usd: number
   cost_usd: number
+  pool_cost_usd: number
   turns: number
   turn_active: boolean
   created_at: Date
@@ -592,12 +601,20 @@ type Row = {
 /** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
 const LIVE_OFFER = 'pending_owner_until > now()'
 
+/** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
+const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
+/** The budget a session spends from: its root's (20261006T0100Z_session_budget_root.sql). */
+const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
+/** What every session spending from that budget has spent. Read at the statement's snapshot. */
+const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
+
 const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, max_turns, budget_usd, cost_usd, turns,
+  status, title, tags, scope, parent_id, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  ${POOL_COST} AS pool_cost_usd, turns,
   (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
 
 function record(row: Row): SessionRecord {
@@ -617,7 +634,8 @@ function record(row: Row): SessionRecord {
     parentId: row.parent_id,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
-    costUsd: row.cost_usd,
+    costUsd: row.pool_cost_usd,
+    ownCostUsd: row.cost_usd,
     turns: row.turns,
     turnActive: row.turn_active,
     createdAt: row.created_at.toISOString(),
@@ -828,16 +846,21 @@ export class SessionManager {
     id: string,
     principal: Owner,
     fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
-    options: { rateLimited?: boolean } = {},
+    options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
-    const { maxTurns, budgetUsd } = await this.limits()
+    const { maxTurns, budgetUsd: fresh } = await this.limits()
+    // A session spending from another's budget (a fork, #823) keeps that budget as its own
+    // budget_usd only as a fallback; the root's is the one that counts (POOL_BUDGET).
+    const from = options.budgetOf
+    const budgetUsd = from ? from.budgetUsd : fresh
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, max_turns, budget_usd)
+                                 status, title, tags, scope, parent_id, max_turns, budget_usd, budget_root_id)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd},
+                ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null})`
     }
     if (options.rateLimited) {
       await this.deps.sql.begin(async (tx) => {
@@ -913,7 +936,7 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND cost_usd < budget_usd
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
@@ -943,7 +966,7 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND status <> 'done' AND cost_usd < budget_usd
+       WHERE id = $1 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}`,
       [approval.sessionId, turnId, this.leaseMs],
@@ -1354,7 +1377,7 @@ export class SessionManager {
           run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
           ...(this.deps.probe ? { probe: this.deps.probe } : {}),
           // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
-          ...(resume ? { priorCostUsd: session.costUsd } : {}),
+          ...(resume ? { priorCostUsd: session.ownCostUsd } : {}),
           onRefused: (evidence, judged) => {
             refused = { evidence, ...judged }
           },
@@ -1536,7 +1559,7 @@ export class SessionManager {
     let status: SessionStatus
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
-    let costUsd = session.costUsd
+    let costUsd = session.ownCostUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when
     // the turn was aborted: only an abort ends a wait (approvals/service.ts).
@@ -1565,7 +1588,7 @@ export class SessionManager {
       // raced the stop. The turn reads interrupted either way (#1168); what it
       // spent before it stopped is still counted (see below).
       const total = result.total_cost_usd
-      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      costUsd = total >= session.ownCostUsd ? total : session.ownCostUsd + total
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
@@ -1579,7 +1602,7 @@ export class SessionManager {
       // restore ever fails the total comes back smaller than what is recorded,
       // and it is added instead.
       const total = result.total_cost_usd
-      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      costUsd = total >= session.ownCostUsd ? total : session.ownCostUsd + total
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -1621,19 +1644,23 @@ export class SessionManager {
     if (keepWaiting) status = 'waiting_approval'
     tail.push(event({ type: 'session.status', sessionId: id, status }))
 
-    const [released] = await this.deps.sql<{ budget_usd: number }[]>`
+    const [released] = await this.deps.sql<{ id: string }[]>`
       UPDATE ai_sessions
       SET status = ${status}, cost_usd = ${costUsd}, turns = ${turns},
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
       WHERE id = ${id} AND turn_id = ${turnId}
-      RETURNING budget_usd`
+      RETURNING id`
     if (!released) return { kind: 'lost_claim' }
-    // Read from the row, not `session`: the user may have raised it while the turn ran.
-    const budgetUsd = released.budget_usd
+    // Read again, not from `session`: the user may have raised the budget while the turn
+    // ran, and a fork or the parent sharing it may have spent from it (#823). The meter
+    // shows what the whole lineage has spent, which is what the budget is checked against.
+    const after = await this.row(id)
+    const budgetUsd = after?.budgetUsd ?? session.budgetUsd
+    const spent = after?.costUsd ?? costUsd
     const worded = tail.map((e): ServerEvent => {
-      if (e.type === 'session.result') return { ...e, budgetUsd }
+      if (e.type === 'session.result') return { ...e, costUsd: spent, budgetUsd }
       if (e.type === 'error' && e.code === 'error_max_budget_usd') {
-        return { ...e, message: `this chat used its ${usd(budgetUsd)} budget (${usd(costUsd)} spent)` }
+        return { ...e, message: `this chat used its ${usd(budgetUsd)} budget (${usd(spent)} spent)` }
       }
       return e
     })
@@ -1821,15 +1848,34 @@ export class SessionManager {
    * branch with fresh UUIDs"; "When provided, read/write session data via this
    * store"). The child is owned by whoever forked it, records its parent, and
    * starts with the parent's conversation events so attach shows its history.
+   *
+   * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
+   * route) gives the child a budget of its own. Like `raiseBudget`, that is
+   * enforced here: `freshBudget` from any other principal, or with the headless
+   * browser's agent-actor marker (`agentActor`), is ignored (#1447). Any other fork, `sessions_fork`
+   * above all, spends from the parent's budget: nothing is copied or moved, the
+   * child joins the parent's lineage (`budget_root_id`), and a turn in either
+   * debits the one budget. Forking therefore never creates budget, and cannot
+   * stand in for the user-only `raiseBudget` (#823).
    */
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin; rateLimited?: boolean } = {},
+    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean; agentActor?: boolean } = {},
   ): Promise<SessionRecord> {
+    const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
     const parent = await this.get(id, principal)
     if (!(await this.store.exists(id))) {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
+    }
+    // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
+    if (!fresh && parent.costUsd >= parent.budgetUsd) {
+      throw new SessionError(
+        'budget_exhausted',
+        `session ${id} has spent its budget (${usd(parent.costUsd)} of ${usd(parent.budgetUsd)}); ` +
+          'only you can continue it in a new chat or raise its budget, in the ScadBuddy UI',
+        { costUsd: parent.costUsd, budgetUsd: parent.budgetUsd },
+      )
     }
     const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
     // A fork is a new session and counts against the same limit as a start (PR #715
@@ -1847,7 +1893,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
-    }, { rateLimited: options.rateLimited ?? true })
+    }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []
@@ -1883,7 +1929,9 @@ export class SessionManager {
   }
 
   /**
-   * Adds `addUsd` to one session's budget (#790). User-only and owner-only:
+   * Adds `addUsd` to the budget a session spends from (#790): its own, or for a
+   * fork its lineage's, which the parent and every other fork of it share
+   * (#823). User-only and owner-only:
    * it spends money, so only the browser user may raise it, and only on a
    * session it owns (take one over first). `agentActor` is set when the
    * request carried the headless browser's agent-actor marker
@@ -1912,13 +1960,17 @@ export class SessionManager {
         `session ${id} is controlled by ${session.owner.label}; take it over before raising its budget`,
       )
     }
-    // One statement, so two raises add up and the owner cannot change in between.
-    const [row] = await this.deps.sql.unsafe<Row[]>(
-      `UPDATE ai_sessions SET budget_usd = round((budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND round((budget_usd + $2)::numeric, 2) <= $5
-       RETURNING ${COLUMNS}`,
+    // One statement on the lineage's root, so two raises add up and the owner cannot change
+    // in between; the owner checked is this session's, which need not be the root's.
+    const [hit] = await this.deps.sql.unsafe<{ id: string }[]>(
+      `UPDATE ai_sessions r SET budget_usd = round((r.budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
+         FROM ai_sessions s
+        WHERE s.id = $1 AND s.owner_kind = $3 AND s.owner_id = $4 AND r.id = coalesce(s.budget_root_id, s.id)
+          AND round((r.budget_usd + $2)::numeric, 2) <= $5
+       RETURNING s.id`,
       [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],
     )
+    const row = hit ? await this.row(id) : undefined
     if (!row) {
       const now = (await this.row(id)) ?? session
       throw sameOwner(principal, now.owner)
@@ -1928,7 +1980,7 @@ export class SessionManager {
           )
         : new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
     }
-    const raised = record(row)
+    const raised = row
     await this.deps.audit?.record({
       kind: 'settings',
       action: 'session_budget_usd',
