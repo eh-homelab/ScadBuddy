@@ -4,6 +4,7 @@ import type { LibraryEntry, LibraryListing } from '../api/types'
 import { PrintPicker } from '../components/PrintPicker'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { formatBytes } from '../lib/format'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -149,9 +150,8 @@ export function LibraryPage() {
                 ) : (
                   <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
                 )}
-                <p className="truncate text-[13px] text-ink" title={file.filename}>
-                  {file.filename}
-                </p>
+                <MiddleTruncated name={file.filename} />
+                <FileFacts file={file} />
                 {file.printable ? (
                   <Button variant="primary" data-testid={`library-print-${file.id}`} onClick={() => setPrinting(file)}>
                     Print
@@ -176,5 +176,42 @@ export function LibraryPage() {
         />
       </div>
     </div>
+  )
+}
+
+/** The last characters of a name's stem that stay when it is cut, with its extension. */
+const KEPT_TAIL = 8
+
+/**
+ * #935 — a long name cut in the middle, not at the end. Generated names share a long
+ * prefix (`bag-clip-3155628dc2bb…`), so cutting the end hides the only part that differs.
+ * CSS has no middle ellipsis: the head truncates and the tail never shrinks.
+ */
+function MiddleTruncated({ name }: { name: string }) {
+  const dot = name.indexOf('.', 1)
+  const stem = dot === -1 ? name : name.slice(0, dot)
+  const split = Math.max(0, stem.length - KEPT_TAIL)
+  return (
+    <p className="flex min-w-0 text-[13px] text-ink" title={name}>
+      <span className="truncate">{name.slice(0, split)}</span>
+      <span className="shrink-0 whitespace-pre">{name.slice(split)}</span>
+    </p>
+  )
+}
+
+/** When it was added and how big it is: what tells two files of one name apart (#935). */
+function FileFacts({ file }: { file: LibraryEntry }) {
+  const added = file.created_at ? new Date(file.created_at) : null
+  const facts = [
+    added && !Number.isNaN(added.getTime()) ? (
+      <time key="added" dateTime={file.created_at ?? undefined}>
+        {added.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+      </time>
+    ) : null,
+    file.file_size != null ? <span key="size">{formatBytes(file.file_size)}</span> : null,
+  ].filter((fact) => fact !== null)
+  if (facts.length === 0) return null
+  return (
+    <p className="sb-num -mt-1 flex flex-wrap gap-x-2 text-[11px] text-faint">{facts}</p>
   )
 }

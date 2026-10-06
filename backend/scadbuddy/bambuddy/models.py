@@ -471,6 +471,8 @@ class LibraryListRow(BambuddyModel):
     thumbnail_path: str | None = None
     print_count: int = 0
     sliced_for_model: str | None = None
+    #: When it was added to the library; naive, and UTC like Bambuddy's other times.
+    created_at: datetime | None = None
 
 
 class LibraryPlate(BambuddyModel):
