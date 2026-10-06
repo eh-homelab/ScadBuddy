@@ -427,6 +427,12 @@ lockfile is missing a hash.
   credential-bearing endpoints outright.
 - **The full-key fallback** lets an approved `bambuddy_call` print. The Settings
   warning and §3's help text steer users to a scoped key.
+- **Bridge writes are not operations.** Since #1063, ScadBuddy's own Bambuddy writes run
+  as durable `Operation` workflows, with an `Idempotency-Key` and an `operations`
+  record. A `bambuddy_call` goes straight from the child to Bambuddy. It is not
+  idempotent, not retried, and not in `operations`; only AI activity records it. That is
+  why ScadBuddy-owned writes (send, print, projects) stay with ScadBuddy's tools, and the
+  tool descriptions say so. Moving bridge writes onto `Operation` is out of scope.
 - **GPL-3.0 obligations** are met by shipping the licence and the corresponding source
   in the image (§4.1). Changing the process boundary, for example importing the package,
   would change that analysis and needs a fresh look.
