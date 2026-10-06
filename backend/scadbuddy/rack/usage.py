@@ -21,9 +21,9 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import SettledHook
 from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
-from scadbuddy.bambuddy.watcher import SettledHook
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
@@ -40,12 +40,12 @@ STATEMENT_TIMEOUT_MS = 15_000
 #: stalled read costs that archive and not the ones after it. The write that follows is
 #: bounded by ``STATEMENT_TIMEOUT_MS`` instead: a write cut off here would run on in its
 #: thread and could land after a warning that said it had not. Read, write and a wait
-#: for a pool connection can take ~35 s, so the watcher's ``SETTLE_TIMEOUT`` (60 s)
+#: for a pool connection can take ~35 s, so the follow's ``SETTLE_TIMEOUT`` (60 s)
 #: covers one or two slow archives; it can cut the hook off mid-write, and that
 #: archive's write then still lands (``tests/rack/test_settle.py``).
 ARCHIVE_TIMEOUT = 15.0
 #: The whole budget of a settle's settings read, its wait for a connection included (#1111):
-#: well inside the watcher's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
+#: well inside the follow's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
 #: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
 #: off records nothing: its archives are recorded only by that output's next settle,
 #: which a one-off output may never have. That loss is the price of freeing the thread.
@@ -57,7 +57,7 @@ RACK_SEEN_FALLBACK = "could not record the rack's hotends"
 RACK_PICKS_FALLBACK = "could not record the rack picks"
 RACK_SETTLE_READ_FALLBACK = "could not read a settled print's rack picks"
 RACK_SETTLE_FALLBACK = "could not record a rack nozzle's print"
-#: Logged when the watcher cuts a settle off (#1113): it is not retried (spec §4), so
+#: Logged when the follow cuts a settle off (#1113): it is not retried (spec §4), so
 #: this names, by id, the archives it had not recorded. Not a fallback: it re-raises.
 RACK_SETTLE_CUT_OFF = "a rack settle was cut off with archives unrecorded"
 RACK_STORE_FALLBACKS = frozenset(
@@ -382,7 +382,7 @@ async def record_settled(
     and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
     Nothing is retried now: an archive skipped here is recorded by the output's next
     settle, which reads every linked archive not yet recorded. A settle cut off by the
-    watcher logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``, stage
+    follow logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``, stage
     ``archives``). One cut off during the initial reads logs stage ``read`` with the
     links read so far, which may include archives already recorded. A cut-off before
     this function starts (the hook's settings load) is not logged here."""
@@ -469,9 +469,9 @@ async def record_settled(
 def settle_hook(
     store: RackUsage, links: PrintLinkStore, load: Callable[[float], StoredSettings]
 ) -> SettledHook:
-    """The watcher's ``on_settled`` hook for the rack (spec §4).
+    """The print follow's ``on_settled`` hook for the rack (spec §4).
 
-    It links nothing itself: the watcher's settled read is a ``progress_for`` call, which
+    It links nothing itself: the follow's settled read is a ``progress_for`` call, which
     records each queue item's ``archive_id`` before it returns the settled progress, and
     the hook runs after that read. So a print dispatched and settled between two polls is
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
@@ -479,7 +479,7 @@ def settle_hook(
     async def hook(meta: OutputMeta) -> None:
         if not links.available:
             return
-        # A settings read is a database read: off the event loop, so the watcher stops
+        # A settings read is a database read: off the event loop, so the follow stops
         # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
         # stuck on a slow Postgres gives its thread back to the shared executor rather
         # than holding it until Postgres answers.

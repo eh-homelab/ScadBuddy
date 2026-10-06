@@ -19,6 +19,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
+from scadbuddy.bambuddy.follow import FOLLOW_SLOTS
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
@@ -30,6 +31,7 @@ from scadbuddy.workflows.commands import (
     namespace_not_found,
     temporal_failure,
 )
+from scadbuddy.workflows.follow import FollowPrint, follow_queue
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 from scadbuddy.workflows.printing import PrintRunWorkflow
@@ -108,8 +110,9 @@ def bambuddy_worker(
     *,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
-    """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun`` and
-    ``Operation``. Unversioned: a change to either that alters its commands is made with
+    """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
+    ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves).
+    Unversioned: a change to any of them that alters its commands is made with
     ``workflow.patched``, so a run started on the old code finishes on the new.
     ``tests/test_print_replay.py`` replays committed ``PrintRun`` histories to hold that;
     a new activity name also needs ``patched``, or an old replica takes its task and
@@ -118,15 +121,37 @@ def bambuddy_worker(
     A new workflow type, or activity names no ``patched`` can guard, cannot be rolled:
     the release that adds them needs a ``Recreate`` rollout (or the old replicas scaled
     to 0 first). #1053 is one: it adds ``Operation`` and its ``op_*`` and
-    ``op.<kind>.*`` activities (README, "Bambuddy writes on the ``bambuddy`` queue").
+    ``op.<kind>.*`` activities, and ``FollowPrint`` with its ``follow_print`` activity
+    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue").
     Rolled anyway, an unregistered workflow task only stalls, but an activity's failure
     counts against its retry policy: an effect that runs once is recorded ``failed``
     ("may have been done") without reaching Bambuddy, and a check can answer 500."""
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[PrintRunWorkflow, OperationWorkflow],
+        workflows=[PrintRunWorkflow, OperationWorkflow, FollowPrint],
         activities=activities,
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
+    )
+
+
+def follow_worker(
+    client: Client,
+    task_queue: str,
+    follow_print: Callable[..., Any],
+    *,
+    graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+) -> Worker:
+    """``FollowPrint``'s activity on its own queue beside ``task_queue`` (review #1091
+    1): each follow holds its slot for as long as the print moves, so it never takes a
+    slot from the ``bambuddy`` worker's short activities. Its `FOLLOW_SLOTS` are set
+    here, not left to the SDK's default (review #1091 2). An attempt ends at once on a
+    shutdown (`FollowActivities`)."""
+    return Worker(
+        client,
+        task_queue=follow_queue(task_queue),
+        activities=[follow_print],
+        max_concurrent_activities=FOLLOW_SLOTS,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
 
@@ -180,6 +205,7 @@ __all__ = [
     "bambuddy_worker",
     "connect",
     "drained",
+    "follow_worker",
     "is_current",
     "make_current",
     "pydantic_data_converter",

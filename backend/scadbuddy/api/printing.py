@@ -29,7 +29,6 @@ from scadbuddy.api.deps import (
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
-    PrintWatcherDep,
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
@@ -84,6 +83,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnreachableError,
     start_command,
 )
+from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
     PRINT_RUN_WORKFLOW,
@@ -588,7 +588,7 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
+    follows: FollowsDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
@@ -604,10 +604,11 @@ async def get_progress(
         )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
-    # (#268). The watcher may not be, after a restart without a database, for a print
-    # sent before the watcher existed, or once it gave up on a quiet print.
+    # (#268, #1053). Its follow may have given up on a quiet print, or been sent before
+    # there was one. In the background: a Temporal that does not answer never holds this
+    # read up. It needs only the client and queue, never the print runs' store.
     if progress is not None and not progress.settled:
-        watcher.watch(meta.id)
+        follows.ensure(meta.id)
     return progress
 
 

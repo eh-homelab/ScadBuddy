@@ -273,9 +273,9 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
     assert asyncio.run(rack_usage(client).picked_items([51])) == set()
 
 
-def test_the_rack_feature_hooks_the_settle_write_into_the_watcher(client: TestClient) -> None:
+def test_the_rack_feature_hooks_the_settle_write_into_the_follow(client: TestClient) -> None:
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    assert len(state.print_watcher.on_settled) == 1
+    assert len(state.print_follower.on_settled) == 1
 
 
 CHECK_04 = {"nozzles": [{"size": "0.4"}], "tier": "standard"}
