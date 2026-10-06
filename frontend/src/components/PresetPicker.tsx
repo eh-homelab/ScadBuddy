@@ -388,11 +388,19 @@ export function PresetPicker({ slug, schema, values, extra, onApply, resetKey }:
         </select>
       </div>
 
+      {/* #352 — its own line above the buttons: beside them it wrapped word by word
+          into a narrow column, and a long name pushed it out of the panel.
+          #351 — always in the page, so "Changed from …" is announced as it appears;
+          out of the flow while empty, so it adds no gap. */}
+      <p
+        role="status"
+        data-testid={modified ? 'preset-modified' : undefined}
+        title={modified ? `Changed from ${selected?.name ?? ''}` : undefined}
+        className={modified ? 'min-w-0 truncate text-[12px] text-faint' : 'sr-only'}
+      >
+        {modified && <>Changed from {selected?.name}</>}
+      </p>
       <div className="flex flex-wrap items-center justify-end gap-1">
-        {/* #351 — always in the page, so "Changed from …" is announced as it appears. */}
-        <span role="status" className="mr-auto text-[12px] text-faint">
-          {modified && <span data-testid="preset-modified">Changed from {selected?.name}</span>}
-        </span>
         {editable && modified && (
           <Button
             size="sm"

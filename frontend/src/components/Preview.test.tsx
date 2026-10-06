@@ -152,6 +152,16 @@ describe('Preview', () => {
     expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
   })
 
+  it('invites a parameter change before the first render', () => {
+    render(<Preview job={undefined} rendering={false} />)
+    expect(screen.getByText('Change a parameter to render.')).toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', () => {
+    render(<Preview job={undefined} rendering={false} rejected />)
+    expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
+  })
+
   it('names the step a running render is on (#267)', () => {
     render(<Preview job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')

@@ -22,6 +22,8 @@
 #     the mesh rather than from those formulas, the surface under both ends
 #     of the name faces forward (within 40 degrees sideways); `NOTE:` lines report
 #     every clamp
+#   - stacked rings: a `NOTE:` exactly when snapping to whole rings (at least
+#     two) changes the cup or tray height that was asked for
 #
 # The checking runs on the host with python3 and the standard library.
 set -euo pipefail
@@ -74,9 +76,17 @@ done
 CASES+=(
     'tray-only-6-colours|pieces="tray";pattern_colors=6;tray_compartments=6;tray_height=60;stripe_height=10'
     'rings-tray-only-blocks|pieces="tray";shape="stacked_rings";pattern="blocks";pattern_colors=6;tray_compartments=4'
+    # #516: a 10 mm tray on 12 mm rings is two rings, 24 mm: well over twice
+    # what was asked, and it must say so. The cup snaps 95 -> 100 on 10 mm rings.
+    'rings-tray-snapped-up|pieces="tray";shape="stacked_rings";tray_height=10;ring_height=12'
+    'rings-cup-snapped|pieces="cup";shape="stacked_rings";cup_height=95;ring_height=10'
     'stacked-layout|tray_length=250;cup_width=130;shape="hex";tray_width=150;cup_height=120'
     'tall-thin-cup-clamped|pieces="cup";cup_width=50;cup_height=200;name="Pens"'
     'tall-thin-rings-clamped|pieces="cup";shape="stacked_rings";cup_width=50;cup_height=200;ring_height=6'
+    # #1616: a ring taller than about 14 mm at the default wall (8 mm at
+    # the thinnest) curved in past the cavity, which shaved the top ring
+    'tall-rings-default-wall|shape="stacked_rings";ring_height=20'
+    'thin-wall-rings|pieces="cup";shape="stacked_rings";wall=1.2;ring_height=12'
     'thin-wall-deep-inlay|wall=1.2;text_depth=2;shape="square"'
     'thin-wall-inlay-fits|wall=1.2;text_depth=0.4;shape="square"'
     'wide-tray-clamped|pieces="tray";tray_length=80;tray_width=150;shape="hex";tray_compartments=2'
@@ -272,6 +282,16 @@ for line in open(os.path.join(OUT, "cases.txt")):
           "cup %.1f mm, tray %.1f mm tall, inlay %.2f mm deep" % (cup_h, tray_h, td))
     if show_cup and p["cup_height"] > hmax:
         check(name, "NOTE: cup_height reduced" in log, "the log says the cup was shortened for stability")
+    # Rings snap the height to whole rings (at least 2), and say so (#516).
+    # A cup over the stability cap already gets the cup_height NOTE instead.
+    if show_tray:
+        snapped = abs(tray_h - p["tray_height"]) > 1e-6
+        check(name, ("NOTE: tray_height changed" in log) == snapped,
+              "the log %s the tray height changed (%.1f -> %.1f mm)" % ("says" if snapped else "does not say", p["tray_height"], tray_h))
+    if show_cup and p["cup_height"] <= hmax:
+        snapped = abs(cup_h - p["cup_height"]) > 1e-6
+        check(name, ("NOTE: cup_height changed" in log) == snapped,
+              "the log %s the cup height changed (%.1f -> %.1f mm)" % ("says" if snapped else "does not say", p["cup_height"], cup_h))
     if has_name and p["name_on"] != "none" and td < p["text_depth"] - 1e-6:
         check(name, "NOTE: text_depth reduced" in log, "the log says the inlay was made shallower")
     else:
