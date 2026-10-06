@@ -1290,6 +1290,12 @@ export class SessionManager {
           maxTurns: session.maxTurns,
           maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
           signal: controller.signal,
+          // A shutdown leaves a waiting approval for after the restart (finish), so
+          // its call is not refused; any other stop refuses it, and the turn ends there.
+          stopMessage: (reason) => {
+            const why = reason instanceof Error ? reason.message : 'the turn was interrupted'
+            return why === SHUTTING_DOWN ? undefined : `The turn was stopped (${why}); nothing was run.`
+          },
           tierOf,
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
@@ -1530,12 +1536,14 @@ export class SessionManager {
     // An approval still pending here belongs to a call that was waiting when
     // the turn was aborted: only an abort ends a wait (approvals/service.ts).
     // A shutdown keeps it, and the session waiting on it, for after the
-    // restart; anything else (an interrupt) cancels it. Measured on SDK
-    // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
-    // is pending fails that call ("Tool permission request failed: AbortError:
-    // Tool permission stream closed before response received"), and Claude
-    // Code may still reach the model and end with a `result` before it exits,
-    // so either outcome below can follow. The tool never runs.
+    // restart; anything else (an interrupt) cancels it. An interrupt refuses
+    // the waiting call with `interrupt` first, and Claude Code ends the turn in
+    // an `error_during_execution` result without asking the model again
+    // (harness/run.ts stopWaitingCalls, #1168). A shutdown aborts the query as
+    // the call waits, which fails it ("Tool permission request failed:
+    // AbortError: Tool permission stream closed before response received"), and
+    // Claude Code may still reach the model and end with a `result` before it
+    // exits (test/approvals.sdk.test.ts). Either way the tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
     // A question never outlives its turn (questions/service.ts), shutdown or not.
@@ -1570,10 +1578,16 @@ export class SessionManager {
         outcome = { kind: 'failed', message: refusal }
       } else {
         turns = session.turns + result.num_turns
-        status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
+        status = result.subtype === 'error_during_execution' && stopped === undefined ? 'failed' : 'idle'
         // Its budget is filled in from the row once the claim is released below.
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-        if (result.subtype === 'error_max_budget_usd') {
+        if (stopped !== undefined) {
+          // A stopped turn can still end in a result: a call waiting in
+          // canUseTool is refused with `interrupt` (harness/run.ts
+          // stopWaitingCalls), and Claude Code reports that as an
+          // `error_during_execution` result (#1168). It was interrupted all the same.
+          tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+        } else if (result.subtype === 'error_max_budget_usd') {
           // The SDK's own text names this turn's share of the budget as an
           // unrounded float; the session's budget, in cents, is what the user
           // set. Worded below, once the row says what the budget is now.
@@ -1582,7 +1596,7 @@ export class SessionManager {
           const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
           tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
         }
-        outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
+        outcome = stopped !== undefined ? { kind: 'interrupted' } : { kind: 'result', subtype: result.subtype, costUsd, turns }
       }
     } else if (stopped !== undefined) {
       status = 'idle'

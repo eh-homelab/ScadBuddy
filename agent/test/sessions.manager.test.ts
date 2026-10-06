@@ -237,6 +237,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
     })
 
+    // #1168: a Stop while a call waits refuses the call with `interrupt`, and
+    // Claude Code ends the turn in an error result rather than as an abort. It
+    // is still an interrupt: no failed turn, no "the turn stopped" error.
+    it('a stopped turn that still ends in a result is recorded as interrupted, its spend counted', async () => {
+      const paths = await tempPaths()
+      const { runner, runs } = scriptedRunner(() => ({ refusedOnStop: true, costUsd: 0.03 }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session } = await m.start(browser, { origin: 'chat' })
+      const turn = await m.send(session.id, browser, 'ask me something')
+      expect(await m.interrupt(session.id, browser)).toBe(true)
+      expect(await turn.done).toEqual({ kind: 'interrupted' })
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false, costUsd: 0.03 })
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect(events.slice(-3)).toMatchObject([
+        { type: 'session.result', costUsd: 0.03 },
+        { type: 'error', code: 'interrupted', message: 'the turn was interrupted' },
+        { type: 'session.status', status: 'idle' },
+      ])
+      expect(events.some((e) => e.type === 'error' && e.code === 'error_during_execution')).toBe(false)
+      // The harness refuses a waiting call on an interrupt, but not on a
+      // shutdown, whose approval waits for after the restart.
+      const stopMessage = runs[0]!.stopMessage!
+      expect(stopMessage(new Error('interrupted by You'))).toMatch(/interrupted by You/)
+      expect(stopMessage(new Error('shutting down'))).toBeUndefined()
+    })
+
     it('interrupts a turn running on another replica through the database flag', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ hang: true }))

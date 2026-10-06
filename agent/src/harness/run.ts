@@ -6,6 +6,7 @@ import {
   type McpHttpServerConfig,
   type McpSdkServerConfigWithInstance,
   type Options,
+  type PermissionResult,
   type Query,
   query,
   type SDKUserMessage,
@@ -125,8 +126,18 @@ export type HarnessRun = {
    * when there is another credential to fall back to (fallback.ts, #1093).
    */
   maxRetries?: number
-  /** Aborting stops the query and its Claude Code process. */
+  /**
+   * Aborting stops the query and its Claude Code process. A call waiting in
+   * `canUseTool` is first refused with `interrupt`, so the turn ends without
+   * another model request (#1168, `stopWaitingCalls`).
+   */
   signal?: AbortSignal
+  /**
+   * What a call waiting in `canUseTool` is refused with when `signal` aborts
+   * for `reason`; undefined aborts the query at once, leaving the call to fail
+   * as the permission stream closes. The abort reason's message by default.
+   */
+  stopMessage?: (reason: unknown) => string | undefined
   /**
    * In-process SDK MCP servers only (`createSdkMcpServer`), keyed by server
    * name; their tools are `mcp__{name}__{tool}`. Remote or stdio servers are
@@ -300,13 +311,56 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | 
   })
 }
 
-function linkedController(signal: AbortSignal | undefined): AbortController {
+/** How long a stopped query whose waiting calls were refused gets to end on its own before it is aborted. */
+export const STOP_GRACE_MS = 10_000
+
+function stopReason(reason: unknown): string {
+  return reason instanceof Error ? reason.message : 'the turn was interrupted'
+}
+
+/**
+ * The SDK's AbortController for a run, and `canUseTool` wrapped so a stop
+ * reaches a call that waits in it (#1168). Aborting the query while a call
+ * waits closes the permission stream: Claude Code hands the model "Tool
+ * permission request failed: AbortError: Tool permission stream closed before
+ * response received" as the tool error and asks it once more, and the reply
+ * reads a deliberate Stop as a glitch (measured on SDK 0.3.283,
+ * test/approvals.sdk.test.ts). So each waiting call is refused first, with
+ * `interrupt` ("deny and interrupt", sdk.d.ts PermissionResult), and Claude
+ * Code ends the turn without another request; the query is aborted once
+ * STOP_GRACE_MS has passed, in case it has not ended by then. A stop with
+ * nothing waiting, or one `stopMessage` declines, aborts at once.
+ */
+function stopWaitingCalls(
+  signal: AbortSignal | undefined,
+  stopMessage: (reason: unknown) => string | undefined,
+): { controller: AbortController; wrap: (inner: CanUseTool) => CanUseTool } {
   const controller = new AbortController()
-  if (signal) {
-    if (signal.aborted) controller.abort(signal.reason)
-    else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  if (!signal) return { controller, wrap: (inner) => inner }
+  const waiting = new Set<(result: PermissionResult | null) => void>()
+  let refusal: string | undefined
+  const onStop = () => {
+    refusal = stopMessage(signal.reason)
+    if (refusal === undefined || waiting.size === 0) {
+      controller.abort(signal.reason)
+      return
+    }
+    for (const answer of waiting) answer({ behavior: 'deny', message: refusal, interrupt: true })
+    waiting.clear()
+    setTimeout(() => controller.abort(signal.reason), STOP_GRACE_MS).unref()
   }
-  return controller
+  if (signal.aborted) controller.abort(signal.reason)
+  else signal.addEventListener('abort', onStop, { once: true })
+  const wrap =
+    (inner: CanUseTool): CanUseTool =>
+    (toolName, input, options) => {
+      if (refusal !== undefined) return Promise.resolve({ behavior: 'deny', message: refusal, interrupt: true })
+      return new Promise<PermissionResult | null>((resolve, reject) => {
+        waiting.add(resolve)
+        inner(toolName, input, options).then(resolve, reject).finally(() => waiting.delete(resolve))
+      })
+    }
+  return { controller, wrap }
 }
 
 /** canUseTool with AskUserQuestion answered through the question gate (#940). */
@@ -420,6 +474,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     }
   }
   const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
+  const stops = stopWaitingCalls(run.signal, run.stopMessage ?? stopReason)
   const options: Options = {
     ...base,
     env: {
@@ -432,8 +487,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
-    abortController: linkedController(run.signal),
-    canUseTool: questions ? answeringQuestions(questions, permission) : permission,
+    abortController: stops.controller,
+    canUseTool: stops.wrap(questions ? answeringQuestions(questions, permission) : permission),
     hooks: mergeHooks(
       mergeHooks(
         {

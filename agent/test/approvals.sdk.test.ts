@@ -157,7 +157,9 @@ describe.skipIf(cliMissing !== undefined)(`canUseTool parks outward calls${cliMi
     expect(followUp).toMatch(/"is_error":true/)
   }, 60_000)
 
-  it('aborting the query while parked signals the gate and stops without running the tool', async () => {
+  // A shutdown declines to refuse the call (sessions/manager.ts: its approval
+  // waits for after the restart), so the query is aborted as it waits.
+  it('aborting the query while parked, with no stop message, signals the gate and stops without running the tool', async () => {
     script = printScript('unreachable')
     const stop = new AbortController()
     const parked = deferred<AbortSignal>()
@@ -165,7 +167,7 @@ describe.skipIf(cliMissing !== undefined)(`canUseTool parks outward calls${cliMi
       parked.resolve(request.signal)
       return new Promise<ApprovalVerdict>(() => {})
     }
-    const running = collect({ prompt: 'Print the box', approvalGate: gate, signal: stop.signal })
+    const running = collect({ prompt: 'Print the box', approvalGate: gate, signal: stop.signal, stopMessage: () => undefined })
     const signal = await parked.promise
     stop.abort()
     // The query ends. How depends on a race: the SDK fails the pending
@@ -178,5 +180,36 @@ describe.skipIf(cliMissing !== undefined)(`canUseTool parks outward calls${cliMi
     expect(handled).toEqual([])
     // The SDK aborts the pending permission request's signal on the way down.
     await expect.poll(() => signal.aborted, { timeout: 5_000 }).toBe(true)
+  }, 60_000)
+
+  // #1168: a Stop while a call waits ends the turn there. Aborting the query
+  // outright closed the permission stream, and Claude Code handed the model
+  // "Tool permission stream closed" as the tool error and made one more call,
+  // which replied to it. The harness denies the waiting call with `interrupt`
+  // first, so Claude Code stops without asking the model anything.
+  it('a stop while parked asks the model nothing more, and tells the transcript why', async () => {
+    script = printScript('The permission stream closed; could you try again?')
+    const stop = new AbortController()
+    const parked = deferred<void>()
+    const gate: ApprovalGate = () => {
+      parked.resolve()
+      return new Promise<ApprovalVerdict>(() => {})
+    }
+    const running = collect({ prompt: 'Print the box', approvalGate: gate, signal: stop.signal })
+    await parked.promise
+    const callsWhenParked = fake.messageCalls().length
+    stop.abort(new Error('interrupted by You'))
+    const { messages, error } = await running
+    expect(handled).toEqual([])
+    expect(fake.messageCalls()).toHaveLength(callsWhenParked)
+    // Claude Code ends the turn as a user interrupt: an error result (which the
+    // SDK then throws, as for any error result), and the transcript the next
+    // turn resumes from says the user stopped it, not that a stream closed.
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution', terminal_reason: 'aborted_tools' })
+    expect(String(error)).toMatch(/error result/)
+    const said = JSON.stringify(messages)
+    expect(said).toContain('[Request interrupted by user for tool use]')
+    expect(said).not.toContain('could you try again')
+    expect(said).not.toContain('Tool permission stream closed')
   }, 60_000)
 })

@@ -228,6 +228,30 @@ describe.skipIf(cliMissing !== undefined)(`AskUserQuestion through the question 
     expect(followUp).toMatch(/"is_error":true/)
   }, 60_000)
 
+  // #1168: Stop while the question waits ends the turn there, with no model
+  // call to reply to "Tool permission stream closed".
+  it('a stop while the question waits asks the model nothing more', async () => {
+    script = askScript({ questions: QUESTIONS }, 'The stream closed; could you answer again?')
+    const stop = new AbortController()
+    let parked!: () => void
+    const waiting = new Promise<void>((r) => (parked = r))
+    const running = collect({
+      prompt: 'Ask me',
+      signal: stop.signal,
+      questionGate: () => {
+        parked()
+        return new Promise(() => {})
+      },
+    })
+    await waiting
+    const calls = fake.messageCalls().length
+    stop.abort(new Error('interrupted by You'))
+    const { result } = await running
+    expect(fake.messageCalls()).toHaveLength(calls)
+    expect(result).toMatchObject({ subtype: 'error_during_execution', terminal_reason: 'aborted_tools' })
+    expect(result?.permission_denials.map((d) => d.tool_name)).toEqual([ASK_USER_QUESTION])
+  }, 60_000)
+
   it('refuses input that is not a well-formed question without asking anyone', async () => {
     script = askScript({ questions: [{ question: 'Pick?', header: 'H', multiSelect: false, options: [] }] }, 'ok')
     const asked: QuestionRequest[] = []

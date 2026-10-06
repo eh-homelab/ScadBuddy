@@ -23,6 +23,12 @@ export type FakeTurn =
     }
   /** Waits until the query is aborted, then throws as the SDK does. */
   | { hang: true }
+  /**
+   * Waits for the stop, then ends as Claude Code does when the call waiting in
+   * canUseTool is refused with `interrupt` (harness/run.ts stopWaitingCalls):
+   * an `error_during_execution` result, then the SDK's throw (#1168).
+   */
+  | { refusedOnStop: true; costUsd?: number }
   | { throws: string }
 
 /**
@@ -51,6 +57,23 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         return
       }
       if ('throws' in turn) throw new Error(turn.throws)
+      if ('refusedOnStop' in turn) {
+        await new Promise<void>((resolve) => {
+          if (run.signal?.aborted) resolve()
+          run.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          errors: ['[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use'],
+          terminal_reason: 'aborted_tools',
+          num_turns: 1,
+          total_cost_usd: turn.costUsd ?? 0.01,
+          session_id,
+        } as unknown as SDKMessage
+        throw new Error('Claude Code returned an error result: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use')
+      }
       yield stream({ type: 'message_start', message: { id: msgId } })
       yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
       yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: turn.reply } })
