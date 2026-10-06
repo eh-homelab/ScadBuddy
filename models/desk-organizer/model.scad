@@ -215,6 +215,14 @@ if (cup_height > CUP_H_MAX && pieces != "tray")
     echo(str("NOTE: cup_height reduced from ", cup_height, " to ", CUP_H,
              " mm so the cup stays stable (at most twice its ", CUP_FOOT, " mm footprint)"));
 TRAY_H = RINGS ? ring_count(tray_height) * ring_height : tray_height;
+// Whole rings, at least two: say so whenever that is not what was asked. A
+// cup over the stability cap already got the NOTE above, with this height.
+if (RINGS && cup_height <= CUP_H_MAX && CUP_H != cup_height && pieces != "tray")
+    echo(str("NOTE: cup_height changed from ", cup_height, " to ", CUP_H,
+             " mm (whole ", ring_height, " mm rings, at least 2)"));
+if (RINGS && TRAY_H != tray_height && pieces != "cup")
+    echo(str("NOTE: tray_height changed from ", tray_height, " to ", TRAY_H,
+             " mm (whole ", ring_height, " mm rings, at least 2)"));
 function piece_h(kind) = kind == "cup" ? CUP_H : TRAY_H;
 
 TD = min(text_depth, wall - BEHIND_TEXT);
