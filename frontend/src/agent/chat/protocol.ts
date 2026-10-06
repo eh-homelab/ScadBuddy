@@ -131,12 +131,25 @@ export const QuestionSchema = z.object({
 export type Question = z.infer<typeof QuestionSchema>
 
 /** #815 — what makes a `question.asked` an attention request (agent `src/sessions/protocol.ts` `AttentionView`). */
-export const AttentionSchema = z.object({
-  reason: z.enum(['tab_disconnected', 'question', 'blocked', 'done']),
-  onTimeout: z.enum(['proceed', 'wait', 'stop']),
-  expiresAt: z.string().min(1),
-})
+export const AttentionSchema = z.union([
+  z.object({
+    reason: z.enum(['tab_disconnected', 'question', 'blocked', 'done']),
+    onTimeout: z.enum(['proceed', 'wait', 'stop']),
+    expiresAt: z.string().min(1),
+  }),
+  /**
+   * A `done` summary (#815 §4): no timer, nothing waits on it, and it stays until the
+   * user dismisses it. `summary` is ScadBuddy's own Markdown list of what the turn
+   * touched (agent `src/questions/doneSummary.ts`).
+   */
+  z.object({ reason: z.literal('done'), summary: z.string() }),
+])
 export type Attention = z.infer<typeof AttentionSchema>
+/** A `done` summary's attention block. */
+export type DoneAttention = Extract<Attention, { summary: string }>
+
+/** Whether `a` is a `done` summary, which is dismissed rather than answered. */
+export const isDone = (a: Attention | undefined): a is DoneAttention => a !== undefined && 'summary' in a
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
@@ -279,6 +292,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string()).optional(),
     by: OwnerSchema.optional(),
     reason: z.string().optional(),
+    /** #815 — an attention request for a disconnected tab ended because the tab is back. */
+    reconnected: z.literal(true).optional(),
   }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
   z.object({

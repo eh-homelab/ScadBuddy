@@ -206,21 +206,26 @@ on shutdown.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
-  replaced before it started is cancelled, and identical waiting requests share
+  replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
   references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
-    matches a job still open (pending or running) joins it and is never refused.
+    matches a job still open (pending or running) joins it and is never refused, and
+    the waiting preview a request supersedes does not count against the limit.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
     (`render_jobs`), so accepted renders survive a restart. A row is written by its
     workflow's first activity, so it exists only once Temporal has the render; with
     Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
     every five minutes the API fails the rows nothing will settle: one whose workflow
-    closed without settling it (terminated by hand, say), and a pending one an older
-    release left with no workflow running.
+    closed without settling it (terminated by hand, say), and a pending or running one
+    an older release left with no workflow running. Each pass lists the open
+    `TemplatePipeline` runs from Visibility once and describes only rows over 30 s old
+    that the listing leaves out; `scadbuddy_render_settle_failed_total` and
+    `scadbuddy_render_settle_errors_total` count what it failed and the passes that
+    could not finish.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
@@ -432,15 +437,23 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   `bambuddy/follow.py`) slots per process: each print holds one while it moves (a
   poke's old attempt holds its own for up to about 24 s more). Past them, new prints
   wait on the queue unfollowed: watch `scadbuddy_print_follows_running`, and the
-  warning "every follow slot is taken". A replica still on the old build takes the
-  new tasks on the `bambuddy` queue and fails them as unregistered; nothing is
-  corrupted (the task is retried), but each Bambuddy write that lands there stalls
-  until the old pod is gone. Roll this release
-  out with `Recreate`, or scale the old replicas to 0 before the new ones start.
+  warning "every follow slot is taken". This release **must** roll out with `Recreate`
+  (or the old replicas scaled to 0 before the new ones start). The homelab deployment
+  sets `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
+  takes those tasks and fails them as unregistered. A workflow task is retried, so an
+  `Operation` or `FollowPrint` there only stalls. An activity task's failure counts
+  against its retry policy: the effect of a reprint, a timelapse pull or a project write
+  runs at most once, so one such task on an old replica records the operation `failed`
+  as "may have been done" although nothing reached Bambuddy, and a check whose three
+  attempts all land there is refused with a 500.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
-  should be at least the Temporal namespace's retention. A retry of an operation whose
-  record was deleted while Temporal still holds its closed execution answers 409 "may
-  have been done" instead of its outcome.
+  must be at least the Temporal namespace's retention (`DescribeNamespace`'s
+  `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
+  field, and while Temporal cannot be reached a changed value is refused with the
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  A retry of an operation whose record was deleted while Temporal still holds its closed
+  execution would answer 409 "may have been done" instead of its outcome. Raising the
+  namespace's retention after the save is not re-checked.
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
   a rolling update stays safe; a release that adds a workflow or activity type to the
   queue says so here and needs the same `Recreate` rollout.
@@ -458,6 +471,10 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
+  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
+  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
+  trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
@@ -778,7 +795,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
-  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  and the agent's questions are answered through
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
+  still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
@@ -851,8 +871,8 @@ revision), by hand and merging does exactly what the pipeline does. Do not
 
 ### Tracing (#988)
 
-The API and the render worker export OpenTelemetry traces over OTLP/HTTP when
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
+The API, the render worker and the agent sidecar export OpenTelemetry traces over
+OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
 cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is
 exported. `OTEL_TRACES_EXPORTER` may be unset or `otlp` (a comma list that includes
 `otlp` counts); `none` turns export off, and any other value (`console`, `zipkin`, …)
@@ -864,6 +884,12 @@ variables apply: `OTEL_RESOURCE_ATTRIBUTES` (add `deployment.environment`),
 database queries and Bambuddy calls from background loops; it keeps everything that
 starts at a request, a workflow or a named span), and `OTEL_SDK_DISABLED=true`, the kill switch for an SDK
 problem. Design: `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md`.
+
+The agent starts as `node --import ./dist/telemetry.js dist/main.js` (the image's
+`CMD` and `pnpm start`): the import registers the ESM loader hook and the SDK before
+the app loads. A chat turn is one trace; an approval ends the turn's spans when the
+call parks, and the decision is a trace of its own linked to it
+(`ai_approvals.traceparent`).
 
 **Browser spans** reach the collector through the backend: the page posts OTLP/JSON to
 `POST /telemetry/v1/traces` on ScadBuddy's own origin, and the relay

@@ -32,7 +32,7 @@ from scadbuddy.workflows.commands import (
 )
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
-PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6 = (uuid.uuid4().hex for _ in range(6))
+PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -125,6 +125,26 @@ def test_without_a_key_each_request_is_its_own_operation(
     assert counts.runs == 2
 
 
+def test_only_a_request_with_a_key_reads_the_record_first(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
+    match it; reading one would only spend the answer's deadline."""
+    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
+    real = type(store).find
+    reads: list[str] = []
+
+    async def find(self: Any, key: str) -> Any:
+        reads.append(key)
+        return await real(self, key)
+
+    monkeypatch.setattr(type(store), "find", find)
+    assert post(client, {"a": 1}).status_code == 200
+    assert reads == []
+    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
+    assert len(reads) == 1
+
+
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
     client: TestClient, pg_conninfo: str
 ) -> None:
@@ -175,8 +195,17 @@ def test_a_slow_done_command_answers_202_and_is_followed(
         assert time.monotonic() < resend_until, started.text
         started = post(client, {"delay": 20}, key=PRESS_4)
     assert started.status_code == 202, started.text
+    assert started.json()["repeated"] is False
     op = follow(client, started.json()["id"], timeout=60)
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
+    # Review #1063 r6 4: `repeated` belongs to a route's 202, never to the record.
+    assert "repeated" not in op
+
+
+def test_only_the_202_documents_repeated(app: FastAPI) -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    assert "repeated" not in schemas["Operation"]["properties"]
+    assert "repeated" in schemas["OperationAccepted"]["properties"]
 
 
 def test_get_operation_404s_an_unknown_id(client: TestClient) -> None:

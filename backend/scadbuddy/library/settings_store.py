@@ -25,9 +25,10 @@ statement on its own row, so neither can drop the other's change.
 from __future__ import annotations
 
 import logging
+import time
 import types
 from dataclasses import dataclass
-from typing import Any, Literal, Self, Union, get_args, get_origin
+from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -43,7 +44,13 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import NozzleChoice, RackAlgorithm, SlotChoice, Tier
+from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
+    NozzleChoice,
+    RackAlgorithm,
+    SlotChoice,
+    Tier,
+)
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
@@ -103,6 +110,14 @@ def _nullable(name: str) -> bool:
 #: switches or a level, which only a reset puts back.
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 
+
+#: How long a printer's rack-algorithm save may wait for a connection, and then how
+#: long its write may run (#1129). Together well under the print dialog's 25 s give-up
+#: (``rackAlgorithmSave`` in ``frontend/src/api/client.ts``): the dialog then sends its
+#: next choice, and a save it gave up on must not commit after that one. This bounds
+#: only the server's database work, not time a request spends before it reaches the
+#: store (a worker thread, a proxy); ordering saves explicitly is #1216.
+RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 
 #: The settings `StoreNotReadyError` is decided from.
 STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
@@ -224,8 +239,8 @@ class StoredSettings(BambuddyIds):
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
         if printer_id is None:
-            return "least_used"
-        return self.printer_rack_algorithms.get(str(printer_id), "least_used")
+            return DEFAULT_ALGORITHM
+        return self.printer_rack_algorithms.get(str(printer_id), DEFAULT_ALGORITHM)
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -441,14 +456,35 @@ class SettingsStore:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def snapshot(self) -> SettingsSnapshot:
+    def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
+        """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a
+        connection and every statement after it share one deadline. A pool wait that runs
+        out raises ``PoolTimeout``; a statement that does raises ``QueryCanceled``.
+
+        It bounds a read Postgres is slow to answer (a held lock, a slow plan), since
+        ``statement_timeout`` is enforced by the server. The bound starts at the first
+        ``set_config``, so the ``BEGIN`` and ``SET TRANSACTION`` before it are not bounded
+        by it. A connection that gets no reply
+        at all (a half-open socket) is not bounded here: that is #1226. It bounds this
+        read only: a pool-wide statement timeout would also cut short the saves'
+        deliberate lock waits and the migration."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection(timeout=timeout) as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            rows = conn.execute("SELECT name, value FROM settings").fetchall()
-            choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
-            beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
+
+            def read(query: LiteralString) -> list[DictRow]:
+                if deadline is not None:
+                    # statement_timeout bounds each statement on its own, so each one
+                    # gets what is left of the read's budget.
+                    left = max(1, int((deadline - time.monotonic()) * 1000))
+                    conn.execute("SELECT set_config('statement_timeout', %s, true)", [str(left)])
+                return conn.execute(query).fetchall()
+
+            rows = read("SELECT name, value FROM settings")
+            choices = read("SELECT model_id, choices FROM model_print_choices")
+            beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
         stored_rows = {row["name"]: row["value"] for row in rows}
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
@@ -488,8 +524,8 @@ class SettingsStore:
             stored=StoredSettings.model_validate(values), runtime=runtime, sources=sources
         )
 
-    def load(self) -> StoredSettings:
-        return self.snapshot().stored
+    def load(self, timeout: float | None = None) -> StoredSettings:
+        return self.snapshot(timeout).stored
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
@@ -551,17 +587,26 @@ class SettingsStore:
         ).fetchall()
         stored = {row["name"]: row["value"] for row in rows}
 
+        def deployment(name: str) -> Any:
+            # The environment's value, else the default. The inbox is not env-seeded,
+            # so the deployment's `Settings` has no such attribute (#1253).
+            if name in ENV_SEEDED:
+                return getattr(self.defaults, name)
+            return StoredSettings.model_fields[name].get_default(call_default_factory=True)
+
         def merged(name: str) -> Any:
             if name in changes:
                 return changes[name]
             if name in reset or name not in stored:
-                # The deployment's own value: the environment's, else the default.
-                return getattr(self.defaults, name)
+                return deployment(name)
+            if name not in ENV_SEEDED:
+                # Read as `snapshot` reads it: as stored, with no env check to pass.
+                return stored[name]
             try:
                 return check_value(name, stored[name])
             except ValueError:
                 # As `snapshot` reads it: a refused row follows the environment.
-                return getattr(self.defaults, name)
+                return deployment(name)
 
         backend = merged("store_backend") or "local"
         if backend == "bambuddy" and (
@@ -602,11 +647,23 @@ class SettingsStore:
 
     def set_printer_rack_algorithm(
         self, printer_id: int, algorithm: RackAlgorithm | None
-    ) -> StoredSettings:
-        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it."""
-        with self._pool.connection() as conn:
+    ) -> RackAlgorithm:
+        """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
+        Returns the printer's algorithm now.
+
+        Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
+        write, so it commits well inside the print dialog's give-up or not at all
+        (#1129). Nothing is read back afterwards: an unbounded read of every setting
+        could outlast the give-up on a save that has already landed."""
+        bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
+        with (
+            self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
+            conn.transaction(),
+        ):
+            conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
             _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
-        return self._written("printer_rack_algorithm")
+        emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
+        return algorithm or DEFAULT_ALGORITHM
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing

@@ -69,6 +69,35 @@ def frontend(tmp_path: Path) -> Path:
     return directory
 
 
+WRONG_METHODS = (
+    ("DELETE", "/api/v1/settings", "GET, PUT"),
+    ("OPTIONS", "/api/v1/models", "GET, POST"),
+    ("POST", "/healthz", "GET"),
+)
+
+
+def assert_allow_names_every_method(client: TestClient) -> None:
+    """#1318: RFC 9110 wants every method in Allow, not just the first route's."""
+    for method, path, allow in WRONG_METHODS:
+        response = client.request(method, path, headers={"Origin": "http://testserver"})
+        assert response.status_code == 405, path
+        assert response.headers["allow"] == allow, path
+        assert response.headers["content-type"] == "application/problem+json", path
+
+
+def test_a_405_allows_every_method_the_path_has(client: TestClient) -> None:
+    assert_allow_names_every_method(client)
+
+
+def test_a_405_allows_every_method_the_path_has_beside_the_spa(
+    frontend: Path, settings: Settings
+) -> None:
+    """With the bundle mounted at ``/`` the router never raises the 405 itself."""
+    settings = settings.model_copy(update={"frontend_dir": frontend})
+    with TestClient(create_app(settings)) as client:
+        assert_allow_names_every_method(client)
+
+
 def test_the_spa_is_served_with_a_fallback_for_client_routes(
     frontend: Path, settings: Settings
 ) -> None:
@@ -87,3 +116,31 @@ def test_the_spa_is_served_with_a_fallback_for_client_routes(
 def test_without_a_bundle_the_api_is_served_alone(client: TestClient) -> None:
     assert client.get("/").status_code == 404
     assert client.get("/api/v1/models").status_code == 200
+
+
+def test_an_unknown_api_path_is_a_problem_404_in_the_composed_app(
+    frontend: Path, settings: Settings
+) -> None:
+    """#365, through create_app's routers, middleware and instrumentation, not a bare mount."""
+    settings = settings.model_copy(update={"frontend_dir": frontend})
+    with TestClient(create_app(settings)) as client:
+        for method, path in (
+            ("GET", "/api/v1/jobs"),
+            ("GET", "/api/v1/healthz"),
+            ("POST", "/api/v1/nonsense"),
+        ):
+            response = client.request(method, path)
+            assert response.status_code == 404, path
+            assert response.headers["content-type"] == "application/problem+json", path
+            assert "did you mean" not in response.json().get("detail", ""), path
+
+        wrong = client.post("/api/v1/models/demo/schema")
+        assert wrong.status_code == 405
+        assert wrong.headers["allow"] == "GET"
+        assert wrong.headers["content-type"] == "application/problem+json"
+
+        slash = client.get("/api/v1/models/", follow_redirects=False)
+        assert slash.status_code == 404
+        assert slash.json()["detail"].endswith("did you mean /api/v1/models?")
+
+        assert client.get("/models/demo").text == INDEX

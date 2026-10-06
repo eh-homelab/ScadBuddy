@@ -132,6 +132,20 @@ RELEASE_UPDATE = "release"
 ReleaseReason = Literal["superseded", "cancelled"]
 #: `render_accept`'s refusal: `render_queue_max` jobs already wait.
 QUEUE_FULL = "QueueFull"
+#: `accepted`'s rejection by a run that is closing (its last claim released, or its
+#: render raised). Rejected, the Update is not in the run's history, so its id is free
+#: for the run that starts next (review #1066 (7) 1).
+CLOSING = "RenderClosing"
+#: `accepted`'s failure when the run's first step failed past its bounded retries (an
+#: error no retry fixes; an older build's row on the key is `LEGACY_PENDING`): the run
+#: completes with no row, and the route answers 500 `render-unstartable` (review #1066
+#: (10) 1).
+RENDER_UNSTARTABLE = "RenderUnstartable"
+#: `render_accept`'s failure while an older build's pending row holds the key and its
+#: workflow still runs: past the retries the run closes with no row, and `accepted`
+#: answers `closing`, so the request is still accepting and is sent again (review #1066
+#: (11) 2).
+LEGACY_PENDING = "LegacyPending"
 
 
 class RenderStart(BaseModel):
@@ -151,6 +165,9 @@ class RenderStart(BaseModel):
     #: The first caller's ``traceparent`` (#988), written on the row `render_accept`
     #: inserts: what a coalesced request links to.
     traceparent: str | None = None
+    #: The pending job of the slug this request replaces: its slot is not counted
+    #: against `max_pending`, so a supersede never needs a free one (review #1066 (9) 3).
+    supersedes: str | None = None
 
 
 class AcceptRender(BaseModel):
@@ -167,7 +184,9 @@ class RenderAnswer(BaseModel):
     coalesced: bool = False
     #: How many jobs wait, when the queue was full and nothing was started.
     queue_full: int | None = None
-    #: The execution's last claim was released: it is closing, and starts again.
+    #: The execution is closing, and starts again. Normally a rejection (`CLOSING`);
+    #: an answer only for an Update that waited for the run's first step while a
+    #: release sent by hand took its last claim.
     closing: bool = False
 
 

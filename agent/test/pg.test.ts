@@ -63,6 +63,30 @@ describe.skipIf(!TEST_DATABASE_URL)(
         }
       })
 
+      it('the NULL-safe done checks apply over a row the loose ones let through, clearing it', async () => {
+        const strict = '20261005T1800Z_attention_done_null_checks'
+        await migrate(db.sql, MIGRATIONS.filter((m) => m.id < strict))
+        const [session] = await db.sql<{ id: string }[]>`
+          INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+          VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1)
+          RETURNING id`
+        // A plain question (attention_reason NULL) carrying a summary and the unattended flag.
+        await db.sql`
+          INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions, tool, summary, unattended)
+          VALUES (gen_random_uuid(), ${session!.id}, gen_random_uuid(), 'toolu_q', '[]', 'AskUserQuestion', 'x', true)`
+        expect(await migrate(db.sql, MIGRATIONS.filter((m) => m.id <= strict))).toEqual([strict])
+        expect(await db.sql`SELECT summary, unattended FROM ai_questions`).toEqual([{ summary: null, unattended: false }])
+        expect(
+          await db.sql`
+            SELECT conname, convalidated FROM pg_constraint
+            WHERE conrelid = 'ai_questions'::regclass AND conname IN ('ai_questions_summary_check', 'ai_questions_unattended_check')
+            ORDER BY conname`,
+        ).toEqual([
+          { conname: 'ai_questions_summary_check', convalidated: true },
+          { conname: 'ai_questions_unattended_check', convalidated: true },
+        ])
+      })
+
       it('apply a later migration on top of an existing schema', async () => {
         await migrate(db.sql)
         const next = [...MIGRATIONS, { id: '29990101T0000Z_example', sql: 'CREATE TABLE ai_example (id int PRIMARY KEY)' }]

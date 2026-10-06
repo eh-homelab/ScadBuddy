@@ -53,6 +53,11 @@ EDGE=(
     "no-hole-small|name=\"Jo\";hole=false;text_size=8;outline=1"
     "big-ring|name=\"Sam\";hole_diameter=8;ring_wall=4;base_thickness=8;letter_height=5"
     "empty|name=\"\""
+    "two-words|name=\"Ann Lee\""
+    "wide-gap|name=\"Ann    Lee\""
+    "missing-glyph|name=\"Zoë 🦄 ß\""
+    "leading-gap|name=\"   Ann\""
+    "leading-missing-glyph|name=\"🦄 Zoë\""
 )
 : > "$OUT/edge.txt"
 for c in "${EDGE[@]}"; do
@@ -216,6 +221,38 @@ for line in open("%s/edge.txt" % OUT):
     check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
     want_top = base if empty else top
     check(abs(max(zs) - want_top) <= TOL, "top at z=%.1f (got %.3f)" % (want_top, max(zs)))
+    if empty:
+        # An empty name is the keyring tab alone, with no stray lump of base (#920).
+        tab = float(p.get("hole_diameter", 4)) + 2 * float(p.get("ring_wall", 1.6))
+        check(max(ys) - min(ys) <= tab + TOL,
+              "empty name is just the tab, %.1f mm tall (got %.3f)" % (tab, max(ys) - min(ys)))
+
+    # One piece (#920): a space or a glyph the font lacks must not leave part
+    # of the word on a base island that falls off the keyring. Union-find over
+    # the shared vertex indices of every triangle, both materials: the base
+    # inside a letter's counter touches only letter triangles, so the base
+    # material alone would count each counter as an island. This relies on the
+    # Manifold 3MF export writing one object whose materials share one vertex
+    # pool; an exporter that duplicated coincident vertices per part would make
+    # a one-piece model count as several.
+    parent = {}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for t in root.iter(NS + "triangle"):
+        a, b, c = (int(t.get(k)) for k in ("v1", "v2", "v3"))
+        for v in (a, b, c):
+            parent.setdefault(v, v)
+        for u, w in ((a, b), (b, c)):
+            ru, rw = find(u), find(w)
+            if ru != rw:
+                parent[ru] = rw
+    comps = len({find(v) for v in parent})
+    check(comps == 1, "prints as one connected piece (%d component(s))" % comps)
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
