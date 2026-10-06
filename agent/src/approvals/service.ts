@@ -730,7 +730,9 @@ export class ApprovalService {
             sessionId: settled.sessionId,
             id,
             approved: decision === 'approved',
+            decision,
             ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+            ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
           })
           const events = [scrubForLog(resolved, [])]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }

@@ -130,8 +130,9 @@ test.describe('assistant panel (#256)', () => {
     await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible()
     await panel.getByRole('button', { name: 'Stop', exact: true }).click()
 
-    // An interrupted approval resolves as not approved, with no decider.
-    await expect(card).toContainText('Denied.')
+    // An interrupted approval is cancelled, not denied: nobody decided it (#979).
+    await expect(card).toContainText('Cancelled: interrupted by You.')
+    await expect(card).not.toContainText('Denied')
     await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
     await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
@@ -199,5 +200,41 @@ test.describe('assistant panel (#256)', () => {
     await expect(touched.getByRole('group', { name: 'Presets' })).toContainText('preset-tall')
     await touched.getByRole('group', { name: 'Revisions' }).getByRole('link', { name: /3f9c2a1/ }).click()
     await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e$/)
+  })
+})
+
+test.describe('the assistant beside a dialog (#798)', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
+
+  test('stays visible and usable while the Print dialog is open', async ({ page }) => {
+    // Narrow enough that a dialog centred in the whole window would run under the panel.
+    await page.setViewportSize({ width: 1100, height: 800 })
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+
+    await expect(page.getByTestId('generate')).toBeEnabled()
+    await page.getByTestId('generate').click()
+    await expect(page.getByTestId('print')).toBeEnabled()
+    await page.getByTestId('print').click()
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    await expect(dialog).toBeVisible()
+
+    // Side by side, not on top of each other, and nothing covers the chat.
+    const dialogBox = await dialog.boundingBox()
+    const panelBox = await panel.boundingBox()
+    if (!dialogBox || !panelBox) throw new Error('not laid out')
+    expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
+    const composerBox = await composer.boundingBox()
+    if (!composerBox) throw new Error('composer not laid out')
+    const [x, y] = [composerBox.x + composerBox.width / 2, composerBox.y + composerBox.height / 2]
+    expect(await page.evaluate(`document.elementFromPoint(${x}, ${y})?.id`)).toBe('assistant-composer')
+
+    await composer.click()
+    await composer.fill('Which spool is the grey one?')
+    await expect(composer).toHaveValue('Which spool is the grey one?')
+    await expect(dialog).toBeVisible()
   })
 })

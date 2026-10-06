@@ -33,10 +33,11 @@ export type FeedItem =
        * (`POST /api/v1/ai/pending-input/{id}`, #815), back to `pending` if it was
        * refused; `closed` (with `reason`) when it was refused because the entry was
        * already resolved or expired, so no resolve frame need arrive for the card to
-       * end; `approved`/`denied` from `approval.resolved`, the server's confirmation,
-       * which also replaces `closed` when it does arrive.
+       * end; `approved`/`denied`/`expired`/`cancelled` (with `reason`) from
+       * `approval.resolved`, the server's confirmation, which also replaces `closed`
+       * when it does arrive. Nobody denied an expired or cancelled one (#979).
        */
-      state: 'pending' | 'sent' | 'approved' | 'denied' | 'closed'
+      state: 'pending' | 'sent' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'closed'
       by?: Owner
       reason?: string
     }
@@ -311,7 +312,12 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === event.id
-            ? { ...withoutReason(i), state: event.approved ? 'approved' : 'denied', by: event.by }
+            ? {
+                ...withoutReason(i),
+                state: event.decision ?? (event.approved ? 'approved' : 'denied'),
+                by: event.by,
+                ...(event.reason ? { reason: event.reason } : {}),
+              }
             : i,
         ),
       )

@@ -148,8 +148,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages the worker's activities run; `render_job` runs them in one
   process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
-  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
-  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
+  workflow's first (local) activity inserts the row, identical requests join it as
+  claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob

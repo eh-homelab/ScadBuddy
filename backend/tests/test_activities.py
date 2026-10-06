@@ -30,9 +30,16 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
+from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
+    Job,
+    JobResult,
+    PartInfo,
+    StepInfo,
+    render_key,
+)
 from scadbuddy.render.jobs import RAW_RENDER_NAME
-from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
@@ -59,9 +66,9 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
-from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import PgPool, write_openscad_3mf
 from tests.support.activities import REVISION, demo_paths, piece_request, worker_deps
+from tests.support.renders import render_to_end
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
 
@@ -415,8 +422,8 @@ def projecting(
 
 def _submitted(projection: JobProjection) -> Job:
     job = _job(width=1)
-    projection.submit(job, render_key("demo", {"width": 1}, None))
-    return job
+    key = render_key("demo", {"width": 1}, None)
+    return projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
 
 
 @pytest.mark.requires_postgres
@@ -446,7 +453,8 @@ async def test_project_running_records_the_queue_wait_once(
     acts = RenderActivities(replace(deps, metrics=metrics))
     job = _job(width=1)
     job.created_at = datetime.now(UTC) - timedelta(seconds=30)
-    projection.submit(job, render_key("demo", {"width": 1}, None))
+    key = render_key("demo", {"width": 1}, None)
+    projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
 
     await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
     # A second "running" (a retried activity) finds the row already started.
@@ -610,8 +618,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     paths = demo_paths(tmp_path)
     refs = BlobRefs(projection.pool)
     deps = worker_deps(tmp_path, paths, projection=projection, refs=refs)
-    job, again = (_job(width=1).model_copy(update={"model_version": REVISION}) for _ in "ab")
-    projection.submit(job, render_key("demo", {"width": 1}, REVISION))
+    request = _job(width=1).model_copy(update={"model_version": REVISION})
     key = piece_key("demo", REVISION, "model.scad", {"width": 1})
     raw = deps.blobs.dir_for(key) / RAW_RENDER_NAME
 
@@ -626,21 +633,10 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
         ):
             # A versioned worker takes new workflows only once its version is current.
             await _make_current(client)
-            await asyncio.wait_for(
-                client.execute_workflow(
-                    TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                ),
-                timeout=120,
-            )
+            job = await render_to_end(client, queue, request)
             rendered = raw.stat().st_mtime_ns
             # The same piece again, after the first one closed: answered from the blob.
-            projection.submit(again, render_key("demo", {"width": 1}, REVISION))
-            await asyncio.wait_for(
-                client.execute_workflow(
-                    TemplatePipeline.run, again, id=workflow_id_for(again.id), task_queue=queue
-                ),
-                timeout=120,
-            )
+            again = await render_to_end(client, queue, request)
 
     stored = projection.read(job.id)
     assert stored.state == "done", stored.error
@@ -678,14 +674,8 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
         ):
             await _make_current(client)
 
-            async def rendered(job: Job) -> Path:
-                projection.submit(job, render_key("demo", {"width": 1}, None))
-                await asyncio.wait_for(
-                    client.execute_workflow(
-                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                    ),
-                    timeout=120,
-                )
+            async def rendered(request: Job) -> Path:
+                job = await render_to_end(client, queue, request)
                 done = projection.read(job.id)
                 assert done.state == "done", done.error
                 assert done.result is not None

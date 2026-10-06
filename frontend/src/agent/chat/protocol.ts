@@ -258,7 +258,11 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     id: z.string().min(1),
     approved: z.boolean(),
+    /** How it ended (#979); absent from events logged before it existed, where `approved` says it. */
+    decision: z.enum(['approved', 'denied', 'expired', 'cancelled']).optional(),
     by: OwnerSchema.optional(),
+    /** Why an expired or cancelled one ended. */
+    reason: z.string().optional(),
   }),
   /**
    * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.

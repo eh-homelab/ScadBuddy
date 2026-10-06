@@ -36,14 +36,17 @@ vi.mock('../components/Preview', () => ({
     plate,
     leading,
     controls,
+    rejected,
   }: {
     job?: Job
     rendering: boolean
     plate?: Plate
     leading?: ReactNode
     controls?: ReactNode
+    rejected?: boolean
   }) => (
     <div data-testid="preview">
+      {rejected && <span data-testid="preview-rejected" />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -215,6 +218,53 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('says it cannot reach the render service, not that the queue is full', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'Temporal is unavailable',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent('ScadBuddy cannot reach its render service; retrying in 1 s')
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Unprocessable Content',
+              status: 422,
+              detail: "parameter 'size' expects a number, got \"big\"",
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    render()
+    expect(await screen.findByText(/expects a number/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The viewer is told, so it drops its "Change a parameter to render." placeholder.
+    expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
   })
 
   it('re-renders after a parameter change and updates the dimensions', async () => {
@@ -523,6 +573,34 @@ describe('CustomizePage', () => {
 
     const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
     expect(sent).toEqual([-12])
+  }, 20000)
+
+  it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    expect(size).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Text size must be between 6 and 28.')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    // Longer than the debounce: a render of 500 would have been asked for by now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(size)
+    await user.type(size, '20')
+    expect(screen.queryByText(/must be between/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent).not.toContain(500)
+    expect(sent.at(-1)).toBe(20)
   }, 20000)
 
   it('links to the versions panel', async () => {

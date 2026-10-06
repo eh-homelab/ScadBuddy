@@ -116,6 +116,35 @@ describe('PrintDetailPage (#311)', () => {
     expect(await screen.findByTestId('landed')).toHaveTextContent('versions:name-keychain')
   })
 
+  it('shows a library file print without a template, parameters or ScadBuddy files (#976)', async () => {
+    const base = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/90', () =>
+        HttpResponse.json({
+          ...base,
+          archive_id: 90,
+          output_id: null,
+          slug: null,
+          library_file_id: 89,
+          output_name: 'Bambu Spool Lock',
+          params_diff: null,
+          provenance: null,
+          files: base.files.filter((file) => file.kind === 'sliced' || file.kind === 'source'),
+          links: { ...base.links, customize_url: null },
+        }),
+      ),
+    )
+    render(90)
+    expect(await screen.findByRole('heading', { name: 'Bambu Spool Lock' })).toBeInTheDocument()
+    expect(screen.getByText('Bambuddy library file')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Provenance' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Customize from this' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'ScadBuddy render' })).not.toBeInTheDocument()
+    const files = await section('Files')
+    expect(within(files).getByText('Sliced file')).toBeInTheDocument()
+    expect(within(files).queryByText('Parameters')).not.toBeInTheDocument()
+  })
+
   it('links the template', async () => {
     const { user } = render(35)
     const provenance = await section('Provenance')
