@@ -10,12 +10,16 @@ import type { ChatTransport, ChatTransportFactory } from './transport'
 const YOU = { kind: 'browser', id: 'browser', label: 'You' } as const
 
 /**
- * A settled refusal (#815: 409 already resolved, 410 expired) ends the card with its
- * reason rather than leaving it at "Sending…" until a resolve frame that may not come.
+ * A settled refusal (#815: 404 stale, 409 no longer pending, 410 expired) ends the card
+ * with its reason rather than leaving it at "Sending…" until a resolve frame that may
+ * not come, or re-arming buttons that can only be refused again. A 409 carries the
+ * agent's own `reason` (answered, cancelled, timed out…); a card never guesses one (#1400).
  */
 function closed(err: RespondError): { closed?: string } {
   if (!err.settled) return {}
-  return { closed: err.status === 410 ? 'it expired before your response arrived' : 'it was already resolved elsewhere' }
+  if (err.status === 404) return { closed: 'the assistant no longer has it waiting' }
+  if (err.status === 410) return { closed: 'it expired before your response arrived' }
+  return { closed: err.reason ?? 'it is no longer waiting for a response' }
 }
 
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
@@ -48,6 +52,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   const startQueued = useRef(false)
   /** The transport has a connection open now (between onOpen and onClose). */
   const live = useRef(false)
+  /** Cards whose response is in flight, so a second click before the re-render cannot POST again (#1403). */
+  const responding = useRef(new Set<string>())
   useEffect(() => {
     latest.current = state
   }, [state])
@@ -121,27 +127,42 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [])
 
+  /** The card, if it is still pending and has no response in flight; claims it for one. */
+  const claim = useCallback((sessionId: string, kind: 'approval' | 'question', id: string) => {
+    const item = latest.current.sessions[sessionId]?.items.find((i) => i.kind === kind && i.id === id)
+    if ((item?.kind !== 'approval' && item?.kind !== 'question') || item.state !== 'pending') return undefined
+    if (responding.current.has(`${kind}:${id}`)) return undefined
+    responding.current.add(`${kind}:${id}`)
+    return item
+  }, [])
+  const release = (kind: 'approval' | 'question', id: string) => responding.current.delete(`${kind}:${id}`)
+
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
+    if (!claim(sessionId, 'approval', approvalId)) return
     // Shown as `sent` until the server's approval.resolved confirms it; a refused one
     // goes back to pending, buttons live, with the agent's reason (#815).
     dispatch({ type: 'decided', sessionId, approvalId })
-    respond(`approval:${approvalId}`, decisionBody(approve)).then(
-      (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
-      (err: RespondError) =>
-        dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, ...closed(err) }),
-    )
-  }, [])
+    respond(`approval:${approvalId}`, decisionBody(approve))
+      .then(
+        (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
+        (err: RespondError) =>
+          dispatch({ type: 'respond-failed', sessionId, id: approvalId, message: `Your decision was not taken: ${err.message}`, ...closed(err) }),
+      )
+      .finally(() => release('approval', approvalId))
+  }, [claim])
 
   const answer = useCallback((sessionId: string, questionId: string, answers: string[]) => {
-    const item = latest.current.sessions[sessionId]?.items.find((i) => i.kind === 'question' && i.id === questionId)
+    const item = claim(sessionId, 'question', questionId)
     if (item?.kind !== 'question') return
     dispatch({ type: 'answered', sessionId, questionId })
-    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined)).then(
-      (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
-      (err: RespondError) =>
-        dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, ...closed(err) }),
-    )
-  }, [])
+    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined))
+      .then(
+        (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
+        (err: RespondError) =>
+          dispatch({ type: 'respond-failed', sessionId, id: questionId, message: `Your answer was not taken: ${err.message}`, ...closed(err) }),
+      )
+      .finally(() => release('question', questionId))
+  }, [claim])
 
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */
   const control = useCallback((message: ClientMessage, queued: string) => {

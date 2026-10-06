@@ -178,10 +178,13 @@ export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
   readonly status: 400 | 403 | 404 | 409 | 410
-  constructor(code: ApprovalErrorCode, message: string) {
+  /** For a conflict, how the approval ended, as a clause ("it was already denied"). */
+  readonly reason: string | undefined
+  constructor(code: ApprovalErrorCode, message: string, reason?: string) {
     super(message)
     this.code = code
     this.status = STATUS_OF[code]
+    this.reason = reason
   }
 }
 
@@ -325,6 +328,15 @@ function record(row: Row): ApprovalRecord {
     traceparent: row.traceparent,
     decisionTraceparent: row.decision_traceparent,
   }
+}
+
+/** How an approval that can no longer be decided ended, as a clause, from its row's own reason (#1400). */
+function conflictReason(now: ApprovalRecord | undefined): string {
+  if (now?.decision === 'cancelled') return now.reason ?? 'it was cancelled'
+  if (now?.decision === 'approved' && now.revokedAt !== null) {
+    return `it was approved, then withdrawn${now.reason ? ` (${now.reason})` : ''}`
+  }
+  return `it was already ${now?.decision ?? 'decided'}`
 }
 
 /** JSON with object keys sorted at every depth, so equal inputs hash equally. */
@@ -834,7 +846,11 @@ export class ApprovalService {
         throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
       }
       if (now?.decision === 'expired') throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
-      throw new ApprovalError('conflict', `approval ${id} was already ${now?.decision ?? 'decided'}`)
+      throw new ApprovalError(
+        'conflict',
+        `approval ${id} was already ${now?.decision ?? 'decided'}`,
+        conflictReason(now),
+      )
     }
     // A parked turn (on any replica) picks the decision up itself. A turn
     // that is finishing as the decision lands looks parked here; it voids

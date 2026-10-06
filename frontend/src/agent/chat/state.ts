@@ -311,7 +311,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === event.id
-            ? { ...i, state: event.approved ? 'approved' : 'denied', by: event.by }
+            ? { ...withoutReason(i), state: event.approved ? 'approved' : 'denied', by: event.by }
             : i,
         ),
       )
@@ -333,9 +333,10 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         mapItems(s, (i) =>
           i.kind === 'question' && i.id === event.id
             ? event.answered
-              ? { ...i, state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
-              : {
-                  ...i,
+              ? { ...withoutReason(i), state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
+              : // A closed card's reason is not this one's (#1401).
+                {
+                  ...withoutReason(i),
                   state: 'cancelled',
                   ...(event.reason === undefined ? {} : { reason: event.reason }),
                   ...(event.reconnected ? { reconnected: true as const } : {}),
@@ -512,6 +513,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       )
     }
   }
+}
+
+/** The item without the reason its previous state gave; a new state brings its own. */
+function withoutReason<T extends { reason?: string }>(item: T): Omit<T, 'reason'> {
+  const { reason: _reason, ...rest } = item
+  return rest
 }
 
 /** A turn is live: running, or parked on a human (an approval, or a question, #940). */
