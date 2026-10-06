@@ -180,7 +180,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         const first = ask('toolu_1', spec())
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
         const other = ask('toolu_2', spec({ reason: 'blocked', timeoutS: 0.3 }))
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+        // Wait for toolu_2's row whatever its outcome: its 0.3 s timeout can expire before a poll
+        // for two pending rows sees it (#1472). Superseding happens in the insert's transaction,
+        // so once the row exists, toolu_1 still being open proves another reason did not replace it.
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE tool_use_id = 'toolu_2'`).length).toBe(1)
+        expect(await db.sql`SELECT outcome FROM ai_questions WHERE tool_use_id = 'toolu_1'`).toEqual([{ outcome: null }])
         const second = ask('toolu_3', spec({ timeoutS: 0.3 }))
         verdicts.push(await first, await other, await second)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
@@ -800,10 +804,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       (async function* () {
         await Promise.resolve()
         const own = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_own', signal: new AbortController().signal, attention: spec() })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 4_000 }).toBe(1)
         const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
         // No poll for both rows pending here: the test body waits for them and then resolves
-        // both, so a poll here could only lose that race and wait forever (#1472).
+        // both, so a poll here could lose that race and time out (#1472).
         results.push(...(await Promise.all([own, auto])))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
