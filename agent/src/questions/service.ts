@@ -715,14 +715,28 @@ export class QuestionService {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
       if (attention?.reason === 'done') return { answered: false, posted: true, message: 'posted' }
-      // A failed check (the hub, the database) must not leave the row with
-      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
-      await attention?.onParked?.().catch(() => undefined)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
       const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
-      const waited = await this.waitFor(id, signal, deadline)
+      // The check runs beside the wait, never before it: an answer, a reconnect
+      // (wake), the timer or the abort ends the wait however long the check
+      // takes, and a hung check (a pool or lock wait) cannot stall the call
+      // (#1352). A failed check leaves the wait going on for the hub or the
+      // timer to end. A settled check wakes the wait, which re-reads its row.
+      const parked = new AbortController()
+      if (attention?.onParked) {
+        attention.onParked(parked.signal).then(
+          () => this.wake(id),
+          () => this.wake(id),
+        )
+      }
+      let waited: Row | 'due' | undefined
+      try {
+        waited = await this.waitFor(id, signal, deadline)
+      } finally {
+        parked.abort()
+      }
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay

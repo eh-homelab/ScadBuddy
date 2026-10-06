@@ -161,6 +161,47 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
+  // #1352: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
+  it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3, onParked: hangs }) }), approvalPollMs: 20 })
+    const first = await timed.start(browser, { origin: 'chat', prompt: 'go' })
+    await first.turn!.done
+    expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
+
+    verdicts = []
+    const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }), approvalPollMs: 20 })
+    const second = await stopped.start(browser, { origin: 'chat', prompt: 'go' })
+    await pending(second.session.id)
+    expect(await stopped.interrupt(second.session.id, browser)).toBe(true)
+    await second.turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+  })
+
+  // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
+  it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const started = Date.now()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: raising({ spec: spec({ onParked: hangs }) }, { spec: spec({ onParked: hangs }) }),
+      approvalPollMs: 5_000,
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const first = await pending(session.id)
+    await m.questions.answer(browser, answer(session.id, first, ['Done']))
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`).length).toBe(1)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: true, answers: { [attentionCard(input()).question]: 'Done' } },
+      { answered: false, reconnected: true, message: expect.any(String) },
+    ])
+    // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
+    expect(Date.now() - started).toBeLessThan(5_000)
+  })
+
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
@@ -998,6 +1039,33 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(results).toEqual([{ back: true, why: 'reconnected' }])
   })
 
+  // #1352: a reconnect check that outlives its wait must not end the wait opened after it.
+  it("a reconnect check that returns after its wait ended does not end a later wait's request", async () => {
+    let late: (back: boolean) => void = () => undefined
+    const first = new AbortController()
+    const results: TabWait[] = []
+    const started: { m?: SessionManager; sessionId?: string } = {}
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (late = resolve)) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      first.abort()
+      results.push(await a)
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(0)
+      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      late(true)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`).toEqual([{ tool_use_id: 'toolu_b' }])
+      await expect.poll(() => started.m).toBeDefined()
+      await started.m!.questions.reconnected(started.sessionId!)
+      results.push(await b)
+    })
+    started.m = m
+    started.sessionId = session.id
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
+  })
+
   it('a session another principal owns gets no wait: its browser_* calls fail at once', async () => {
     let extrasSeen: unknown = 'unset'
     const m = manager({
@@ -1079,6 +1147,20 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       expect(later).toEqual(first)
       expect(asked).toBe(1)
     }
+  })
+
+  // #1345: a typed reply ends the turn's tab waits too, so a later call cannot ask again before the model acted on it.
+  it('after a typed reply, a later call that finds no tab fails at once and does not ask again', async () => {
+    let asked = 0
+    const wait = waitForTab((request) => {
+      asked += 1
+      return Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'use the other printer' } })
+    }, never, noop)
+    const first = await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })
+    const later = await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })
+    expect(first).toEqual({ back: false, message: expect.stringMatching(/^The user replied "use the other printer" instead/) })
+    expect(later).toEqual({ back: false, message: expect.stringMatching(/already replied "use the other printer".*not asked for again/) })
+    expect(asked).toBe(1)
   })
 
   it('a call that comes after every waiter withdrew opens a wait of its own, not the withdrawn one', async () => {
