@@ -285,6 +285,20 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(after.costUsd).toBeCloseTo(0.9, 9)
     })
 
+    it('counts only the fork’s own spend when a Stop still ends with a result', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      // The fork's turn is stopped; Claude Code still reports the $0.10 it spent (#1168).
+      next = { hang: true, resultOnAbortUsd: 0.1 }
+      const turn = await m.send(child.id, browser, 'go on')
+      await new Promise((r) => setTimeout(r, 50))
+      expect(await m.interrupt(child.id, browser)).toBe(true)
+      expect(await turn.done).toEqual({ kind: 'interrupted' })
+      expect(await m.get(child.id, browser)).toMatchObject({ ownCostUsd: 0.1 })
+      // $0.40 + $0.10: the parent's spend is not written into the fork's own.
+      expect((await m.get(parent, browser)).costUsd).toBeCloseTo(0.5, 9)
+    })
+
     it('shares it with a fork of a fork', async () => {
       const parent = await started()
       const child = await m.fork(parent, browser)

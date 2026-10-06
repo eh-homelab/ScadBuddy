@@ -1588,7 +1588,7 @@ export class SessionManager {
       // raced the stop. The turn reads interrupted either way (#1168); what it
       // spent before it stopped is still counted (see below).
       const total = result.total_cost_usd
-      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      costUsd = total >= session.ownCostUsd ? total : session.ownCostUsd + total
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
