@@ -103,9 +103,11 @@ export type QuestionVerdict =
   /** Keyed by question text; a multi-select answer is its labels joined by ", ". */
   | { answered: true; answers: Record<string, string> }
   /** Not answered; `message` is what the model reads as the tool's error. */
-  | { answered: false; message: string; timedOut?: false }
+  | { answered: false; message: string; timedOut?: false; reconnected?: false }
   /** #815: an attention request's `proceed` timer fired. Never an answer, and never an approval. */
   | { answered: false; timedOut: true; message: string }
+  /** #815 §2: a `tab_disconnected` request's session has a connected tab again (the system resolved it). */
+  | { answered: false; reconnected: true; message: string }
 
 /** Parks a question until it is answered or the turn ends; a rejection counts as unanswered. */
 export type QuestionGate = (request: QuestionRequest) => Promise<QuestionVerdict>
