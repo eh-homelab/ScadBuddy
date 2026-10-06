@@ -219,13 +219,30 @@ describe('speech to text', () => {
     installSpeech()
     const { user } = await openPanel()
     const mic = screen.getByRole('button', { name: 'Voice input' })
-    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1_000)
     await user.pointer({ keys: '[MouseLeft>]', target: mic })
     expect(mic).toHaveAttribute('aria-pressed', 'true')
     now.mockReturnValue(2_000)
     await user.pointer({ keys: '[/MouseLeft]', target: mic })
     expect(FakeRecognition.instances[0]!.stop).toHaveBeenCalledOnce()
     now.mockRestore()
+  })
+
+  it('measures the hold in elapsed time, not on a wall clock that steps (#1485)', async () => {
+    installSpeech()
+    const { user } = await openPanel()
+    const mic = screen.getByRole('button', { name: 'Voice input' })
+    const elapsed = vi.spyOn(performance, 'now').mockReturnValue(1_000)
+    const wall = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    await user.pointer({ keys: '[MouseLeft>]', target: mic })
+    // A quick click, during which the wall clock steps an hour on: still a toggle.
+    elapsed.mockReturnValue(1_100)
+    wall.mockReturnValue(3_601_000)
+    await user.pointer({ keys: '[/MouseLeft]', target: mic })
+    expect(FakeRecognition.instances[0]!.stop).not.toHaveBeenCalled()
+    expect(mic).toHaveAttribute('aria-pressed', 'true')
+    elapsed.mockRestore()
+    wall.mockRestore()
   })
 
   it('toggles from the keyboard', async () => {

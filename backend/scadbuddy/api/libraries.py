@@ -461,7 +461,7 @@ async def remove_library(
     # Alone: no pin can find this checkout and record it while it goes, and no
     # render can take a lease on it.
     async with checkouts.removing():
-        jobs = checkouts.leased(directory)
+        jobs = await asyncio.to_thread(checkouts.leased, directory)
         if jobs:
             raise ApiError(
                 status.HTTP_409_CONFLICT,

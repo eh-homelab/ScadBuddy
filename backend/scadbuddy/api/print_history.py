@@ -805,7 +805,9 @@ class PrintAgain(_Response):
     description=(
         "Adds the archive to Bambuddy's print queue (`POST /queue/` with `archive_id`; "
         "Bambuddy's own reprint route is gone), on the printer and plate it printed "
-        "on, with Bambuddy's default options. The key needs Read Status (the archive is "
+        "on, with the remembered print options (global, then the printer's, then the "
+        "model's, as a print run applies them; one copy, no project). The key needs Read "
+        "Status (the archive is "
         "read first) and Manage Queue. "
         "409 when Bambuddy no longer has the archive or no printer is known for it."
     ),

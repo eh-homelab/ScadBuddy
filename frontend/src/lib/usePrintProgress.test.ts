@@ -144,6 +144,15 @@ describe('usePrintProgress', () => {
       expect(read).toHaveBeenCalledTimes(2)
     })
 
+    it('keeps to the 30 s backstop when the wall clock steps (#1485)', async () => {
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
+      renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      vi.setSystemTime(Date.now() + 3_600_000)
+      await tick(4_000)
+      expect(read).toHaveBeenCalledTimes(1)
+    })
+
     it('polls every 2 s while the socket is unavailable', async () => {
       realtime.setStatus('unavailable')
       read.mockResolvedValue(fixtures.queuedSliceProgress)

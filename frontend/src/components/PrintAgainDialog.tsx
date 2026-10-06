@@ -95,7 +95,8 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
         <>
           <p className="text-[13px] text-ink">
             Queue <span className="font-medium">{print.output_name ?? print.slug ?? `print #${print.archive_id}`}</span> again on{' '}
-            <span className="font-medium">{printer}</span>, with Bambuddy&apos;s default print options.
+            <span className="font-medium">{printer}</span>, with the print options remembered for this
+            printer and model, as a print from the print dialog uses.
           </p>
           {error && (
             <p role="alert" className="mt-3 text-[13px] text-warn">
