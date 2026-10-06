@@ -687,13 +687,22 @@ async def prepare_run(
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
-    plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
+    laid_out = await source.plate_ids(client)
+    plate_ids = laid_out if request.all_plates else [request.plate_id]
     if not plate_ids:
         # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
         # to queue, and every route below reads the first plate's outcome. Read
         # from the local 3MF before anything touches Bambuddy.
         raise RunRefusalError(
             "This output's 3MF lays out no plates, so there is nothing to print.",
+        )
+    if laid_out and request.plate_id not in laid_out and not request.all_plates:
+        # Bambuddy does not check it either: the run would upload, then fail in the
+        # slicer with no reason given (#1320).
+        count = f"{len(laid_out)} plate{'s' if len(laid_out) != 1 else ''}"
+        raise RunRefusalError(
+            f"The 3MF has {count} ({', '.join(map(str, laid_out))}); "
+            f"there is no plate {request.plate_id}.",
         )
     printer_id = request.printer_id or settings.printer_id
     if printer_id is None:

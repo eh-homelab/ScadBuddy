@@ -115,4 +115,47 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
       .toEqual(['read'])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false })
   }, 60_000)
+
+  it('Stop while a question waits ends the turn there: no further model call, and the turn reads interrupted (#1168)', async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'Could you try answering again?' }
+        : {
+            toolUse: {
+              name: ASK_USER_QUESTION,
+              input: {
+                questions: [
+                  {
+                    question: QUESTION,
+                    header: 'Draft',
+                    multiSelect: true,
+                    options: [
+                      { label: 'Approve', description: 'File it as written' },
+                      { label: 'Cancel', description: 'Do not file it' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }
+    const m = await replica()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me something' })
+    const events = await m.attach(session.id, browser, { signal: stop.signal })
+    await collectUntil(events, (e) => e.event.type === 'question.asked')
+    const callsWhenAsked = fake.messageCalls().length
+
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(await turn!.done).toEqual({ kind: 'interrupted' })
+    // The model is not asked again: no reply to the abort, no spend.
+    expect(fake.messageCalls()).toHaveLength(callsWhenAsked)
+    const log = (await m.events.read(session.id, 0, 10_000)).map((e) => e.event)
+    await expectPanelAccepts(log)
+    expect(log.some((e) => e.type === 'assistant.text.done')).toBe(false)
+    expect(log).toContainEqual(expect.objectContaining({ type: 'question.resolved', answered: false, reason: 'interrupted by You' }))
+    expect(log.slice(-2)).toEqual([
+      { v: 1, type: 'error', sessionId: session.id, code: 'interrupted', message: 'the turn was interrupted' },
+      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
+    ])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turnActive: false })
+  }, 60_000)
 })

@@ -851,10 +851,12 @@ async def _render_plated(
     drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
     plates: int | None,
     solids: object | None = None,
+    render: object | None = None,
 ) -> tuple[JobResult, list[int]]:
     paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    render, asked = _plated_render(drawn, plates)
+    plated, asked = _plated_render(drawn, plates)
+    render = render or plated
     schema = _colour_schema(
         ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
     )
@@ -946,6 +948,30 @@ async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
 async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
     with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
         await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)
+
+
+async def test_a_plate_openscad_refuses_as_empty_fails_naming_it(paths: DataPaths) -> None:
+    """#1328: OpenSCAD will not export an empty plate at all; it logs "Current top
+    level object is empty." and exits 1 before there is a 3MF to split."""
+    render, _ = _plated_render({0: [TRAY, LID], 1: [TRAY]}, plates=2)
+
+    async def refuse_plate_two(*args: object, **kwargs: object) -> object:
+        if _plate_of(kwargs.get("extra_defines")) == 2:
+            raise OpenSCADError(
+                "openscad exited with 1",
+                ["ECHO: plates = 2", "Current top level object is empty."],
+                1,
+            )
+        return await render(*args, **kwargs)  # type: ignore[operator]
+
+    with pytest.raises(OpenSCADError) as raised:
+        await _render_plated(paths, {}, plates=2, render=refuse_plate_two)
+
+    message = str(raised.value)
+    assert message.startswith("plate 2 of 2 rendered no geometry")
+    assert "echo(plates = 2)" in message
+    assert raised.value.log_tail == ["ECHO: plates = 2", "Current top level object is empty."]
+    assert raised.value.returncode == 1
 
 
 # ── #424: the stages the render activities run, each from what is on disk ─────

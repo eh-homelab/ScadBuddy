@@ -189,8 +189,9 @@ const CARRY_ON = 'Carry on without the tab'
 
 export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
   let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
-  // Once the user said to carry on, or nobody came back in time, the rest of the
-  // turn does not ask again: each later call that finds no tab fails at once.
+  // Once the user said to carry on, typed a reply of their own, or nobody came
+  // back in time, the rest of the turn does not ask again: each later call that
+  // finds no tab fails at once. The latch lasts until the turn ends, never less.
   let gaveUp: string | undefined
   let started = 0
   return ({ tool, toolUseId, signal, isBack }) => {
@@ -198,9 +199,12 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
     if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
     if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
     if (!open && started >= TAB_WAITS_PER_TURN) {
+      // Neutral on purpose (#1393): the waits counted here may have ended any
+      // way (a reconnect to this replica or another, a withdrawn call), and this
+      // replica cannot tell which, so the message names no cause.
       gaveUp =
-        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is still not reachable from here (it may be ` +
-        'connected to another agent replica). Carry on without the tab for the rest of this turn.'
+        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now. Carry on without ` +
+        'the tab for the rest of this turn.'
       return Promise.resolve({ back: false, message: gaveUp })
     }
     if (!open) started += 1
@@ -225,7 +229,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
     })
   }
 
-  function start(tool: string, toolUseId: string | undefined, isBack: () => Promise<boolean>): NonNullable<typeof open> {
+  function start(tool: string, toolUseId: string | undefined, isBack: (signal: AbortSignal) => Promise<boolean>): NonNullable<typeof open> {
     const stop = new AbortController()
     const wait = (async (): Promise<TabWait> => {
       const parsed = parseAttention({
@@ -252,19 +256,29 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           ...spec,
           // The tab may have come back between the failed call and the row: the
           // hub saw nothing to resolve then, so look once now that there is one.
-          onParked: async () => {
-            if (await isBack()) await reconnected()
+          // A check that outlives the wait does nothing: reconnected() ends every
+          // open tab wait of the session, which by then may be a later one. The
+          // check gets the same signal, so one that hangs (#1352) is cancelled
+          // with the wait rather than held for the life of the process.
+          onParked: async (parked) => {
+            if ((await isBack(parked)) && !parked.aborted) await reconnected()
           },
         },
       })
       if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
       // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
       // other reply is the user's own words, which the model must read, so the
-      // call is not run and its error carries them.
+      // call is not run and its error carries them. It ends the turn's tab waits
+      // too, for the rest of the turn: the user is not asked twice in one turn,
+      // and a later call says so without telling the model to act on the reply
+      // again (the call that carried it already did).
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
         if (reply === IM_BACK) return { back: true, why: 'user_back' }
         if (reply !== CARRY_ON) {
+          gaveUp =
+            `The user already replied ${JSON.stringify(reply)} when asked for the tab this turn, so the tab is not ` +
+            'asked for again this turn and this call was not run. Carry on without the tab for the rest of this turn.'
           return { back: false, message: `The user replied ${JSON.stringify(reply)} instead; the call was not run. Act on their reply.` }
         }
         gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`
@@ -1520,8 +1534,9 @@ export class SessionManager {
     // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
     // is pending fails that call ("Tool permission request failed: AbortError:
     // Tool permission stream closed before response received"), and Claude
-    // Code may still reach the model and end with a `result` before it exits,
-    // so either outcome below can follow. The tool never runs.
+    // Code may still reach the model and end with a `result` before it exits;
+    // so the harness interrupts first (harness/run.ts stopFirst, #1168), which
+    // ends the turn with no model call. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
     // A question never outlives its turn (questions/service.ts), shutdown or not.
@@ -1533,7 +1548,19 @@ export class SessionManager {
     } else {
       await this.approvals.revokeUnused(id, 'the turn ended')
     }
-    if (result) {
+    if (result && stopped !== undefined) {
+      // Stopped, and Claude Code still reported a result: the interrupt's
+      // `error_during_execution` (harness/run.ts stopFirst), or a result that
+      // raced the stop. The turn reads interrupted either way (#1168); what it
+      // spent before it stopped is still counted (see below).
+      const total = result.total_cost_usd
+      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      turns = session.turns + result.num_turns
+      status = 'idle'
+      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      outcome = { kind: 'interrupted' }
+    } else if (result) {
       // `total_cost_usd` of a RESUMED query already includes the earlier
       // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
       // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The

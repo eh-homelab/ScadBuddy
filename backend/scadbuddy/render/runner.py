@@ -17,7 +17,8 @@ from typing import Any
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.tracing import span
-from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
+from scadbuddy.render.confinement import escaping_includes, sandboxed
+from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector, parse_diagnostics
 from scadbuddy.render.schema import (
     CustomizerSchema,
     Parameter,
@@ -173,6 +174,17 @@ def _require_in_range(parameter: Parameter, value: int | float) -> None:
         )
 
 
+def _require_max_length(parameter: Parameter, value: str) -> None:
+    """The customizer's ``// N`` on a string (#1330), in code points: what OpenSCAD's
+    ``len()`` and the customizer's counter count (#920)."""
+    limit = parameter.max_length
+    if limit is not None and len(value) > limit:
+        raise ParameterValueError(
+            parameter.name,
+            f"parameter {parameter.name!r} must be at most {limit} characters, got {len(value)}",
+        )
+
+
 def _require_option(parameter: Parameter, value: ParamValue) -> None:
     """One of the select's options, or a value the template retired (#432)."""
     allowed = [option.value for option in parameter.options]
@@ -229,6 +241,9 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
 
 
 def _format_checked(parameter: Parameter, value: ParamValue) -> str:
+    if isinstance(value, str) and "\x00" in value:
+        # Neither execve nor Postgres takes one (#965).
+        raise ValueError(f"parameter {parameter.name!r} contains a NUL byte")
     if parameter.type == "boolean":
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
@@ -248,6 +263,7 @@ def _format_checked(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
         _refuse_path_like(parameter, value)
+        _require_max_length(parameter, value)
         return quote_string(value)
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
@@ -323,9 +339,18 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
     # here the same way it would on a fresh install, instead of working by accident.
     if config.library_path:
         env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
+    # #994: a target outside the model and its libraries is refused before the run,
+    # and the run itself is confined to them; see render/confinement.py.
+    escaping = await asyncio.to_thread(escaping_includes, cwd, args[-1]) if args else []
+    if escaping:
+        log = [include.log_line() for include in escaping]
+        raise OpenSCADError(
+            "the model includes a file outside its directory and libraries",
+            log,
+            diagnostics=parse_diagnostics(log),
+        )
     process = await asyncio.create_subprocess_exec(
-        config.openscad,
-        *args,
+        *sandboxed(config.openscad, args, cwd=cwd, config=config, env=env),
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

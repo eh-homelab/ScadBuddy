@@ -63,8 +63,16 @@ multi-colour rules, connecting Bambuddy and each feature.
 ```bash
 docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
   -e SCADBUDDY_DATABASE_URL=postgresql://scadbuddy:secret@db:5432/scadbuddy \
+  -e SCADBUDDY_PUBLIC_URL=http://<host>:8080 \
   ghcr.io/eh-homelab/scadbuddy:main
 ```
+
+**Set `SCADBUDDY_PUBLIC_URL` to the URL you open the UI at** (#962). Writes from a
+browser are only accepted from that origin, one in `SCADBUDDY_ALLOWED_ORIGINS`, or
+loopback (see "Realtime" below). Left unset, with no allowed origins either, the
+backend accepts a write from the page's own origin (its `Host`) so the install can
+still be configured from Settings, but that leaves it open to DNS rebinding until a
+public URL is saved.
 
 **A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
 the backend refuses to start and says so. Settings and the render jobs live
@@ -186,7 +194,7 @@ on shutdown.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
-  replaced before it started is cancelled, and identical waiting requests share
+  replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
@@ -237,9 +245,21 @@ is not the public URL in `SCADBUDDY_ALLOWED_ORIGINS`
 (`https://scadbuddy.internal.example,https://scadbuddy.sso.example`); otherwise
 the pages on the other hostname show "Live updates unavailable" while the same
 pages on the public URL work, and the backend log says
-`refused a realtime socket from origin ...`. REST calls carry no `Origin`, so
-they are not affected; only the socket is. The agent reads the same variable
-for its own origin check (below).
+`refused a realtime socket from origin ...`.
+
+**Writes** (#962) use the same rule. A `POST`, `PUT`, `PATCH` or `DELETE` whose
+`Origin` is not one of those origins gets a `403` problem whose detail names
+`SCADBUDDY_PUBLIC_URL` and `SCADBUDDY_ALLOWED_ORIGINS`, before its body is read, and
+the backend logs `refused a POST /api/v1/... from origin ...`. This is what stops a
+page on another site from creating models, restoring revisions or printing through
+a LAN user's browser. So a hostname missing from the list cannot save, render or
+print, not just lose live updates. A request with no `Origin` (curl, scripts, the
+agent's server-side calls) is not a browser page and is not affected. While neither
+a public URL nor `SCADBUDDY_ALLOWED_ORIGINS` is configured, a write from the
+request's own origin (`Origin` equal to its scheme and `Host`) is also accepted, so a
+fresh install can be configured; that gives up DNS-rebinding protection until one
+of the two is set. The agent reads the same variable for its own origin check
+(below).
 
 ## Deploying
 
@@ -255,7 +275,10 @@ The backend needs its database (#401): the manifest must set
 becomes ready and its log names the missing variable. The settings live in that
 database, so the Bambuddy connection a deployment needs from the first start
 comes from `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY` (from a Secret)
-and `SCADBUDDY_PUBLIC_URL`.
+and `SCADBUDDY_PUBLIC_URL`. Every hostname the UI is served under must be the
+public URL or listed in `SCADBUDDY_ALLOWED_ORIGINS`: from any other, browser writes
+are refused with a `403` and a `refused a ... from origin ...` log line (#962), and
+live updates are unavailable.
 
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
@@ -401,7 +424,8 @@ timelapse pull, sidebar registration) run there as Temporal workflows. That work
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
   field, and while Temporal cannot be reached a changed value is refused with the
-  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save);
+  one Temporal refuses to describe (a denied permission) is a `temporal-refused` 500.
   A retry of an operation whose record was deleted while Temporal still holds its closed
   execution would answer 409 "may have been done" instead of its outcome. Raising the
   namespace's retention after the save is not re-checked.

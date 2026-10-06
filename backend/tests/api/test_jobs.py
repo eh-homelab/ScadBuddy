@@ -70,6 +70,27 @@ def test_a_parameter_of_the_wrong_type_is_rejected(client: TestClient, model: st
     assert "expects a number" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "body",
+    [{"params": {"label": "N\x00L"}}, {"inputs": {"params": {"label": "N\x00L"}}}],
+)
+def test_a_nul_in_a_text_parameter_is_rejected_by_name(
+    client: TestClient, model: str, body: dict[str, Any]
+) -> None:
+    """#965: Postgres cannot hold a NUL, so it was a 500 echoing the driver's error."""
+    response = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert response.status_code == 422, response.text
+    assert "'label' contains a NUL byte" in response.json()["detail"]
+
+
+def test_a_nul_in_the_template_ui_state_is_rejected(client: TestClient, model: str) -> None:
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"inputs": {"params": {}, "ui": {"a\x00": 1}}}
+    )
+    assert response.status_code == 422, response.text
+    assert "NUL byte" in response.json()["detail"]
+
+
 def test_a_text_parameter_holding_a_path_is_rejected(client: TestClient, model: str) -> None:
     """#281: a template may hand any string to import()/surface(), so a value that
     would reach outside the model's directory never reaches openscad."""

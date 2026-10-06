@@ -108,7 +108,7 @@ describe('GET /healthz', () => {
 
 describe('/api/v1/ai/credentials', () => {
   it('reads as unconfigured, and says whether saving is possible', async () => {
-    const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials')
+    const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       configured: false,
@@ -130,7 +130,7 @@ describe('/api/v1/ai/credentials', () => {
     expect(text).not.toContain(SECRET)
     expect(JSON.parse(text)).toMatchObject({ configured: true, kind: 'anthropic_api_key', last4: '7e1c', usable: true })
 
-    const read = await app.request('/api/v1/ai/credentials')
+    const read = await app.request('/api/v1/ai/credentials', { headers: UI })
     const readText = await read.text()
     expect(readText).not.toContain(SECRET)
     expect(readText).not.toContain('kekId')
@@ -202,7 +202,7 @@ describe('/api/v1/ai/credentials', () => {
 
   it('answers 503 with the reason when there is no database', async () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
-    const res = await app.request('/api/v1/ai/credentials')
+    const res = await app.request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({
       detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
@@ -344,7 +344,7 @@ describe('health and settings name the key problem, not the key file (finding 9)
     expect(missing.detail).toMatch(/some\/where.*ENOENT/)
     const app = createApp(deps({ kek: missing }))
     const healthText = JSON.stringify((await health(app)).body)
-    const getText = await (await app.request('/api/v1/ai/credentials')).text()
+    const getText = await (await app.request('/api/v1/ai/credentials', { headers: UI })).text()
     for (const text of [healthText, getText]) {
       expect(text).toContain('SCADBUDDY_SECRET_KEY_FILE cannot be read')
       expect(text).not.toContain('some/where')
@@ -361,7 +361,7 @@ describe('a credential in #354 format (finding 2, clean break)', () => {
     credentials.row!.envelope.secretSealed[0] = 0x01
     const app = createApp(deps({ credentials }))
     expect((await health(app)).body.ai).toBe('unavailable (stored credential is in an outdated format; save it again)')
-    expect(await (await app.request('/api/v1/ai/credentials')).json()).toMatchObject({ usable: false })
+    expect(await (await app.request('/api/v1/ai/credentials', { headers: UI })).json()).toMatchObject({ usable: false })
     const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ detail: expect.stringMatching(/older format.*save it again/) })

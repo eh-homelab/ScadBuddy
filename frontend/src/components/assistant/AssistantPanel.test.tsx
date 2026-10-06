@@ -215,6 +215,20 @@ describe('assistant panel', () => {
     window.localStorage.removeItem('scadbuddy.assistant.advanced')
   })
 
+  it('says on an empty chat what Advanced will show, so the switch visibly takes effect (#1488)', async () => {
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: 'New chat' }))
+    const note = /Advanced: tool arguments, sources and memory details will be shown/
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.getByText(note)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+  })
+
   it('holds the outward step until Approve, then sends the decision', async () => {
     const { user } = await openAndSend()
     const card = screen.getByRole('region', { name: 'Needs your approval' })
