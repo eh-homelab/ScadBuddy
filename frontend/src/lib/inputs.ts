@@ -40,6 +40,15 @@ export function joinInputs(params: ParamValues, extra: InputsExtra): JsonObject 
   return { ...extra, params }
 }
 
+/** Whether two JSON values are equal, whatever the order of their object keys. */
+export function sameJson(a: Json | undefined, b: Json | undefined): boolean {
+  if (a === b) return true
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((item, i) => sameJson(item, b[i]))
+  if (!isJsonObject(a) || !isJsonObject(b)) return false
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameJson(a[key], b[key]))
+}
+
 /** Keys a patch from a template's UI never writes: they would reach a prototype. */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 

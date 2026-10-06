@@ -39,8 +39,12 @@ export type PendingInputEntry = {
   created_at: string
   /** When its timer fires: an approval's expiry, an attention request's; null for a question, which has none. */
   expires_at: string | null
-  /** Set on an attention request (#815) only. */
-  attention?: { reason: string; on_timeout: string }
+  /**
+   * Set on an attention request (#815) only. A `done` summary has no timer
+   * (`on_timeout` null) and carries `summary`, ScadBuddy's record of what its
+   * turn touched; it stays listed until the user dismisses it.
+   */
+  attention?: { reason: string; on_timeout: string | null; summary?: string }
 }
 
 export type PendingInputRouteDeps = {
@@ -81,8 +85,14 @@ export async function pendingInput(sessions: SessionManager): Promise<PendingInp
       responders: ['browser' as const],
       created_at: q.createdAt,
       expires_at: q.expiresAt,
-      ...(q.kind === 'attention' && q.attentionReason && q.onTimeout
-        ? { attention: { reason: q.attentionReason, on_timeout: q.onTimeout } }
+      ...(q.kind === 'attention' && q.attentionReason
+        ? {
+            attention: {
+              reason: q.attentionReason,
+              on_timeout: q.onTimeout,
+              ...(q.summary === null ? {} : { summary: q.summary }),
+            },
+          }
         : {}),
     })),
   ]

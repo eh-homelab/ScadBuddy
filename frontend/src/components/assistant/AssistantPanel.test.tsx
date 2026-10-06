@@ -5,7 +5,7 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/pendingInput'
+import { setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -270,6 +270,29 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('shows a done summary beside the badge, not in the waiting count or the tab title (#815)', async () => {
+    setPendingAnswers(1, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you, 1 summary' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 1 waiting for you (1 question), 1 summary')
+    expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toHaveTextContent('1 waiting for you')
+    await waitFor(() => expect(document.title).toBe('(1) ScadBuddy'))
+  })
+
+  it('a done summary alone waits for nothing: no count, no title prefix, but still shown (#815)', async () => {
+    setPendingAnswers(0, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 summary' })
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+    expect(document.title).toBe('ScadBuddy')
   })
 
   it('shows the badge embedded in Bambuddy, but leaves the frame\'s unseen title alone (#815)', async () => {

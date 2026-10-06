@@ -22,6 +22,7 @@ from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
@@ -33,6 +34,12 @@ from scadbuddy.api.deps import (
     PrintLinksDep,
     SettingsStoreDep,
 )
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.params import schema_of
 from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
@@ -42,7 +49,6 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRun,
     PrinterMedia,
-    QueueItemCreate,
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.print_links import LinkedPrint
@@ -61,6 +67,8 @@ from scadbuddy.library.outputs import (
     download_filename,
 )
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -717,6 +725,7 @@ class PrintAgain(_Response):
     "/{archive_id}/reprint",
     response_model=PrintAgain,
     status_code=status.HTTP_201_CREATED,
+    responses=OPERATION_RESPONSES,
     summary="Print again: queue the archive on its printer",
     description=(
         "Adds the archive to Bambuddy's print queue (`POST /queue/` with `archive_id`; "
@@ -728,35 +737,21 @@ class PrintAgain(_Response):
 )
 async def reprint(
     archive_id: ArchiveIdPath,
+    response: Response,
     links: PrintLinksDep,
-    store: SettingsStoreDep,
-    cache: ArchiveCacheDep,
-) -> PrintAgain:
-    link = await _require_print(links, archive_id)
-    async with client_for(store.load()) as client:
-        archive = await cache.archive(client, archive_id)
-        if archive is None:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"archive {archive_id} was deleted in Bambuddy, so it cannot be printed again",
-            )
-        printer_id = archive.printer_id if archive.printer_id is not None else link.printer_id
-        if printer_id is None:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"no printer is known for archive {archive_id}; queue it from Bambuddy",
-            )
-        plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
-        item = await client.enqueue(
-            QueueItemCreate(archive_id=archive_id, printer_id=printer_id, plate_id=plate_id)
-        )
-        # The archive gains a run once the item prints; read it afresh then.
-        cache.forget(client, archive_id)
-        return PrintAgain(
-            queue_item_id=item.id,
-            printer_id=printer_id,
-            bambuddy_url=client.config.web_url(QUEUE_PAGE),
-        )
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> PrintAgain | JSONResponse:
+    await _require_print(links, archive_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["reprint"],
+        subject=f"archive:{archive_id}",
+        request={"archive_id": archive_id},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, PrintAgain)
 
 
 class TimelapsePull(BaseModel):
@@ -768,6 +763,7 @@ class TimelapsePull(BaseModel):
     "/{archive_id}/timelapse/pull",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    responses=OPERATION_RESPONSES,
     summary="Pull a timelapse off the printer onto the print",
     description=(
         "Downloads `filename` from the printer and attaches it to the archive as its "
@@ -782,18 +778,20 @@ class TimelapsePull(BaseModel):
 async def pull_timelapse(
     archive_id: ArchiveIdPath,
     body: TimelapsePull,
+    response: Response,
     links: PrintLinksDep,
-    store: SettingsStoreDep,
-    cache: ArchiveCacheDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
     await _require_print(links, archive_id)
-    async with client_for(store.load()) as client:
-        if await cache.archive(client, archive_id) is None:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"archive {archive_id} was deleted in Bambuddy, so no timelapse can be "
-                "attached to it",
-            )
-        await client.select_timelapse(archive_id, body.filename)
-        cache.forget(client, archive_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["timelapse_pull"],
+        subject=f"archive:{archive_id}",
+        request={"archive_id": archive_id, "filename": body.filename},
+        idempotency_key=idempotency_key,
+    )
+    if isinstance(result, OperationAccepted):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

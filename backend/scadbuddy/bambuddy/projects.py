@@ -283,3 +283,15 @@ async def attach_results(
     return AttachResult(
         project_id=project_id, queue_item_ids=list(queue_item_ids), archive_ids=archives
     )
+
+
+class ProjectAttach(BaseModel):
+    """Which of this output's queue entries to file under the project.
+
+    The ids come from the progress read (#89): a plate's queue item only exists once it
+    has sliced, so the caller learns them by polling.
+    """
+
+    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
+    project_id: int | None = None
+    queue_item_ids: list[int] = Field(default_factory=list)

@@ -64,6 +64,7 @@ STATE_ATTR = "scadbuddy"
 VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
+OPERATION_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 #: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
@@ -234,7 +235,7 @@ class _Immediate:
         emit(self.bus, event)
 
 
-def _transactional(events: EventBus) -> TransactionalEvents:
+def transactional_events(events: EventBus) -> TransactionalEvents:
     return events if isinstance(events, PgNotifyEventBus) else _Immediate(events)
 
 
@@ -389,7 +390,7 @@ def _build_core(settings: Settings) -> AppState:
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
         print_runs=PrintCommands(
-            store=PrintRunStore(pool, events=_transactional(events)),
+            store=PrintRunStore(pool, events=transactional_events(events)),
             client=temporal,
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,
@@ -604,6 +605,7 @@ SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
 RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
+OperationIdPath = Annotated[str, Path(pattern=OPERATION_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]
