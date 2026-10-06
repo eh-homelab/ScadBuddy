@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from scadbuddy.api.params import require_valid_preset_params
+from scadbuddy.render.runner import format_scad_value
 from scadbuddy.render.schema import (
     CustomizerSchema,
     build_schema,
@@ -336,3 +338,65 @@ def test_no_bundled_caption_talks_about_the_app(slug: str) -> None:
     in the image") reads as noise to the person choosing a typeface."""
     source = (MODELS / slug / "model.scad").read_text(encoding="utf-8")
     assert "the app fills this dropdown" not in source
+
+
+#: The battery crate's `cell = "AA"; // [AAA, AA, C, D, 9V, 18650, CR2032]` (#356):
+#: OpenSCAD's export types the bare 18650 as a number, the rest as text.
+MIXED_PARAM = {
+    "parameters": [
+        {
+            "name": "cell",
+            "type": "string",
+            "initial": "AA",
+            "options": [
+                {"name": "AAA", "value": "AAA"},
+                {"name": "AA", "value": "AA"},
+                {"name": "9V", "value": "9V"},
+                {"name": "18650", "value": 18650.0},
+                {"name": "Half", "value": 1.5},
+            ],
+        },
+    ]
+}
+MIXED_SOURCE = 'cell = "AA"; // [AAA, AA, 9V, 18650, 1.5:Half]\n// retired cell = 14500\n'
+
+
+def test_a_select_mixing_text_and_numbers_serves_every_option_as_text() -> None:
+    """#356: the template compares `cell` against strings, so a number option is
+    offered as the text OpenSCAD's comment wrote, never as `18650.0`."""
+    (cell,) = build_schema(MIXED_PARAM, MIXED_SOURCE).parameters
+    assert cell.type == "select"
+    assert [(o.name, o.value) for o in cell.options] == [
+        ("AAA", "AAA"),
+        ("AA", "AA"),
+        ("9V", "9V"),
+        ("18650", "18650"),
+        ("Half", "1.5"),
+    ]
+    assert cell.retired == ["14500"]
+
+
+def test_a_mixed_select_number_option_renders_and_saves_as_a_preset() -> None:
+    """#356: the text value round-trips through a render and a preset."""
+    schema = build_schema(MIXED_PARAM, MIXED_SOURCE)
+    (cell,) = schema.parameters
+    assert format_scad_value(cell, "18650") == '"18650"'
+    assert format_scad_value(cell, "AA") == '"AA"'
+    require_valid_preset_params(schema, {"cell": "18650"})
+    require_valid_preset_params(schema, {"cell": "14500"})
+
+
+def test_an_all_number_select_keeps_its_numbers() -> None:
+    raw = {
+        "parameters": [
+            {
+                "name": "grid",
+                "type": "number",
+                "initial": 2,
+                "options": [{"name": "1", "value": 1.0}, {"name": "2", "value": 2.0}],
+            }
+        ]
+    }
+    (grid,) = build_schema(raw, "grid = 2; // [1, 2]\n").parameters
+    assert [o.value for o in grid.options] == [1.0, 2.0]
+    assert format_scad_value(grid, 2) == "2.0"

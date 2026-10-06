@@ -24,7 +24,7 @@ test.describe('duplicating a template (#159)', () => {
 
     // The copy says where it came from, and the built-in is still read-only.
     // In-app, not `goto`: a reload starts the msw state over, and the copy with it.
-    await page.getByRole('link', { name: 'keychain-template-copy' }).click()
+    await page.getByRole('link', { name: 'Keychain Template copy', exact: true }).click()
     await expect(page).toHaveURL(/\/m\/keychain-template-copy$/)
     const from = page.getByTestId('duplicated-from')
     await expect(from).toContainText('Duplicated from builtin:keychain-template')

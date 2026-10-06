@@ -3,8 +3,9 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import type { BoundingBox, Job, Plate } from '../api/types'
+import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
+import { cameraFraming, framingSpan, sceneOffset, shouldRefit } from '../lib/previewFrame'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
@@ -88,6 +89,8 @@ interface Props {
    * if nothing were wrong.
    */
   rejected?: boolean
+  /** #937 — where OpenSCAD's warnings point the reader to fix them: the source editor. */
+  sourceLink?: ReactNode
 }
 
 export function Preview({
@@ -100,6 +103,7 @@ export function Preview({
   controls,
   covered,
   rejected = false,
+  sourceLink,
 }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
@@ -111,6 +115,7 @@ export function Preview({
         colors: string[]
         notes: string[]
         warnings: string[]
+        diagnostics: Diagnostic[]
         plates: number
       }
     | undefined
@@ -124,10 +129,19 @@ export function Preview({
         colors: job.colors ?? [],
         notes: job.notes ?? [],
         warnings: job.warnings ?? [],
+        // A trace only says where an error was called from; a render that finished
+        // has its warnings to show, which OpenSCAD logs and goes on past (#937).
+        diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: Math.max(job.plates?.length ?? 0, 1),
       })
     }
   }, [job])
+
+  // #364 — the GLB that has been drawn, or failed to load: until one of them is the
+  // shown one, the render is not on screen yet, so the spinner stays.
+  const [loadedUrl, setLoadedUrl] = useState<string>()
+  const [brokenUrl, setBrokenUrl] = useState<string>()
+  const loading = shown !== undefined && loadedUrl !== shown.url && brokenUrl !== shown.url
 
   const theme = useViewerTheme()
   const cancelled = job?.status === 'cancelled'
@@ -151,13 +165,18 @@ export function Preview({
         // The loader keeps a failed load cached, so any remount would only rethrow it:
         // drop it as soon as it fails, and the next load of that URL fetches again.
         onError={() => {
-          if (shown) useLoader.clear(GLTFLoader, shown.url)
+          if (!shown) return
+          useLoader.clear(GLTFLoader, shown.url)
+          setBrokenUrl(shown.url)
         }}
         fallback={(_, retry) => <PreviewFailed captureRef={captureRef} onRetry={retry} />}
       >
         <Canvas
           key={theme.bg}
           data-testid="preview-canvas"
+          // #364 — draw only when something changed (the controls, a new model), not
+          // every frame: an idle page otherwise keeps the GPU busy.
+          frameloop="demand"
           gl={{ preserveDrawingBuffer: true, antialias: true }}
           camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
           onCreated={({ gl, get }) => {
@@ -200,7 +219,9 @@ export function Preview({
 
           {shown && (
             <Suspense fallback={null}>
-              <Model url={shown.url} bbox={shown.bbox} />
+              {/* #364 — a failed render's outline would describe a model that is not
+                  what the parameters now give. */}
+              <Model url={shown.url} bbox={shown.bbox} outline={!failed} onLoaded={setLoadedUrl} />
             </Suspense>
           )}
 
@@ -227,10 +248,10 @@ export function Preview({
             {plate && <PlateBadge plate={plate} />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {rendering && (
+            {(rendering || loading) && (
               <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
                 <Spinner /> Rendering
-                {stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
+                {rendering && stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
               </span>
             )}
             {controls}
@@ -240,6 +261,9 @@ export function Preview({
         {!failed && (
           <div className="flex flex-col items-start gap-2">
             {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
+            {shown && shown.diagnostics.length > 0 && (
+              <OpenScadWarnings diagnostics={shown.diagnostics} sourceLink={sourceLink} />
+            )}
             {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
           </div>
@@ -250,6 +274,7 @@ export function Preview({
         <RenderError
           cancelled={cancelled}
           log={(job.log_tail ?? []).join('\n')}
+          error={job.error ?? undefined}
           warnings={job.warnings ?? []}
           covered={covered}
         />
@@ -350,6 +375,45 @@ export function RenderNotes({ notes }: { notes: string[] }) {
 }
 
 /**
+ * #937 — what OpenSCAD logged about a render that still finished: a warning means it
+ * dropped or guessed at something (a child of `cube()`, an undefined variable), so
+ * the preview may be missing part of the model.
+ */
+function OpenScadWarnings({
+  diagnostics,
+  sourceLink,
+}: {
+  diagnostics: Diagnostic[]
+  sourceLink?: ReactNode
+}) {
+  return (
+    <section
+      aria-label="OpenSCAD warnings"
+      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+    >
+      <h3 className="flex items-center gap-2 text-[10px] tracking-wide text-warn">
+        From OpenSCAD
+        {sourceLink && <span className="text-[11px] tracking-normal underline">{sourceLink}</span>}
+      </h3>
+      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-warn">
+        {diagnostics.map((diagnostic, index) => (
+          <li key={index} className="flex gap-2">
+            <span className="sb-num shrink-0 text-faint">
+              {diagnostic.line == null
+                ? ''
+                : diagnostic.file && diagnostic.file !== 'model.scad'
+                  ? `${diagnostic.file}:${diagnostic.line}`
+                  : `Line ${diagnostic.line}`}
+            </span>
+            <span>{diagnostic.message}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/**
  * #383 — ScadBuddy's own warnings about a render, say a file parameter's asset
  * OpenSCAD could not open. Warn-coloured and titled for ScadBuddy, so it reads as
  * distinct from what the template itself said (`RenderNotes`).
@@ -378,14 +442,19 @@ export function RenderWarnings({ warnings, inline = false }: { warnings: string[
 function RenderError({
   cancelled = false,
   log,
+  error,
   warnings,
   covered,
 }: {
   cancelled?: boolean
   log?: string
+  error?: string
   warnings: string[]
   covered?: string
 }) {
+  // No OpenSCAD log: the render failed in ScadBuddy's own stages (#952), so the
+  // job's error says what happened and OpenSCAD is not to blame.
+  const ownFailure = !cancelled && !log && !!error
   return (
     <div
       className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
@@ -394,14 +463,16 @@ function RenderError({
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         {cancelled
           ? 'This render was cancelled. A newer request replaced it before it finished — your parameters were not the problem.'
-          : 'OpenSCAD could not render these parameters.'}
+          : ownFailure
+            ? 'ScadBuddy could not finish this render.'
+            : 'OpenSCAD could not render these parameters.'}
       </p>
       {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre
         data-testid="render-log"
         className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted"
       >
-        {log ?? 'No log output was captured.'}
+        {(ownFailure ? error : log) || 'No log output was captured.'}
       </pre>
     </div>
   )
@@ -436,27 +507,28 @@ function BuildPlate({ theme, size }: { theme: ViewerTheme; size: [number, number
 }
 
 /**
- * Frames the model once, when its size is first known. After that the view is the
- * viewer's: orbiting is never yanked back by the next render.
+ * Frames the model when its size is first known, and again when a new render's size
+ * moves far from the one framed (#364: a preset can take a box from 80 to 258 mm).
+ * Otherwise the view is the viewer's: a small edit never yanks an orbit back.
  */
 function FitCamera({ bbox }: { bbox?: BoundingBox }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
-  const framed = useRef(false)
+  const invalidate = useThree((state) => state.invalidate)
+  const framedSpan = useRef<number | null>(null)
 
   useEffect(() => {
-    if (!bbox || framed.current || !controls) return
-    framed.current = true
+    if (!bbox || !controls || !shouldRefit(framedSpan.current, bbox.size)) return
+    framedSpan.current = framingSpan(bbox.size)
 
-    const [width, depth, height] = bbox.size
-    const span = Math.max(width, depth, height, 20)
-    const distance = span * 1.9 + 40
+    const { target, distance } = cameraFraming(bbox.size)
     const direction = new THREE.Vector3(0.78, 0.62, 0.86).normalize()
     camera.position.copy(direction.multiplyScalar(distance))
-    controls.target.set(0, height / 2, 0)
+    controls.target.set(...target)
     camera.lookAt(controls.target)
     controls.update()
-  }, [bbox, camera, controls])
+    invalidate?.()
+  }, [bbox, camera, controls, invalidate])
 
   return null
 }
@@ -468,10 +540,25 @@ function FitCamera({ bbox }: { bbox?: BoundingBox }) {
  * OpenSCAD's Z-up, which stood the model on its edge; the msw fixture happened to be
  * authored Z-up too, so every mocked test agreed with it.
  */
-function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
+function Model({
+  url,
+  bbox,
+  outline,
+  onLoaded,
+}: {
+  url: string
+  bbox?: BoundingBox
+  outline: boolean
+  onLoaded: (url: string) => void
+}) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   const group = useRef<THREE.Group>(null)
+  // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
+  // centred on the plate. Move the model there, as the slicer will.
+  const offset = useMemo(() => (bbox ? sceneOffset(bbox) : ([0, 0, 0] as const)), [bbox])
+
+  useEffect(() => onLoaded(url), [onLoaded, url])
 
   const edges = useMemo(() => {
     if (!bbox) return null
@@ -484,8 +571,10 @@ function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
 
   return (
     <group ref={group}>
-      <primitive object={scene} />
-      {edges && (
+      <group position={offset}>
+        <primitive object={scene} />
+      </group>
+      {edges && outline && (
         <lineSegments name={BBOX_OBJECT} position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
           <edgesGeometry args={[edges]} attach="geometry" />
           <lineBasicMaterial

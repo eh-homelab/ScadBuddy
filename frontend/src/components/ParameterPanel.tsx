@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
 import { diffFromDefaults, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
@@ -51,6 +51,32 @@ export function ParameterPanel({
   }
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
+  // #968 — the WAI-ARIA tabs pattern: the tablist is one Tab stop (the selected tab), and
+  // the arrow keys, Home and End move between tabs, selecting each as it is reached.
+  const ids = useId()
+  const tabId = (index: number) => `${ids}-tab-${index}`
+  const panelId = `${ids}-panel`
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const currentIndex = current ? tabs.indexOf(current) : -1
+  function onTabKey(event: KeyboardEvent) {
+    const last = tabs.length - 1
+    const next =
+      event.key === 'ArrowRight'
+        ? currentIndex === last ? 0 : currentIndex + 1
+        : event.key === 'ArrowLeft'
+          ? currentIndex <= 0 ? last : currentIndex - 1
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? last
+              : null
+    const group = next === null ? undefined : tabs[next]
+    if (next === null || !group) return
+    event.preventDefault()
+    setActive(group.name)
+    tabRefs.current[next]?.focus()
+  }
+
   const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
   const extruderOf = (name: string) => extruders.get(name)
 
@@ -72,17 +98,27 @@ export function ParameterPanel({
       {toolbar}
       <div
         role="tablist"
+        onKeyDown={onTabKey}
         aria-label="Parameter groups"
-        className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-line px-2 pt-2"
+        // #942 — wrapped onto rows, never scrolled: a template with many groups (Dollhouse
+        // Kit has 15) hid most of them past an edge with no scrollbar, fade or arrow.
+        className="flex shrink-0 flex-wrap gap-x-0.5 gap-y-1 border-b border-line px-2 pt-2"
       >
-        {tabs.map((group) => {
+        {tabs.map((group, index) => {
           const selected = group.name === current?.name
           return (
             <button
               key={group.name}
+              ref={(element) => {
+                tabRefs.current[index] = element
+              }}
+              id={tabId(index)}
               role="tab"
               type="button"
               aria-selected={selected}
+              // One panel, showing the selected group: every tab controls it.
+              aria-controls={panelId}
+              tabIndex={selected ? 0 : -1}
               onClick={() => setActive(group.name)}
               className={`-mb-px shrink-0 border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${
                 selected
@@ -119,7 +155,7 @@ export function ParameterPanel({
         )}
 
         {current && (
-          <ul role="tabpanel" aria-label={current.name} className="divide-y divide-line/60">
+          <ul id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)} className="divide-y divide-line/60">
             {current.params.map((param) => (
               <li key={param.name} data-param={param.name}>
                 <ParamWidget

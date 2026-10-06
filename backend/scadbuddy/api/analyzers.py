@@ -21,10 +21,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import psycopg
-from fastapi import APIRouter, Path, Query, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -53,12 +54,17 @@ from scadbuddy.analyzers.runner import (
 )
 from scadbuddy.api.deps import (
     CatalogueDep,
+    ConfigDep,
     EventsDep,
+    FetcherDep,
+    HistoryDep,
     OutputsDep,
+    PathsDep,
     SettingsStoreDep,
     UploadsDep,
 )
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.problems import ApiError
@@ -220,6 +226,36 @@ def _stored[T](call: Callable[[], T]) -> T:
         raise _unavailable(error) from None
 
 
+@dataclass(frozen=True)
+class ParamsCheck:
+    """Refuses a configuration's params the way the render route does (#995): a
+    configuration a render would 422 is not one the analyzers can judge, and judging it
+    anyway answers "Nothing to report" for input that is wrong."""
+
+    catalogue: CatalogueDep
+    paths: PathsDep
+    history: HistoryDep
+    config: ConfigDep
+    fetcher: FetcherDep
+
+    async def __call__(self, target: AnalysisTarget) -> None:
+        if target.slug is None or not target.params:
+            return
+        require_model_exists(self.catalogue, target.slug)
+        _, schema = await schema_of(
+            target.slug,
+            None,
+            paths=self.paths,
+            history=self.history,
+            config=self.config,
+            fetcher=self.fetcher,
+        )
+        require_valid_params(schema, target.params)
+
+
+ParamsCheckDep = Annotated[ParamsCheck, Depends()]
+
+
 def _subject(
     target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
 ) -> tuple[str, dict[str, ParamValue], OutputMeta | None]:
@@ -358,6 +394,7 @@ async def post_run(
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
     decisions: DecisionsDep,
+    check: ParamsCheckDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -374,6 +411,7 @@ async def post_run(
     With a database that cannot be reached, the analyzers still run;
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
+    await check(body.target)
     context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -398,10 +436,12 @@ async def post_preview(
     uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
+    check: ParamsCheckDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
+    await check(body.target)
     context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -428,6 +468,7 @@ async def post_apply(
     store: SettingsStoreDep,
     decisions: DecisionsDep,
     events: EventsDep,
+    check: ParamsCheckDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -436,12 +477,14 @@ async def post_apply(
     removable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for
     what a send that consumes it must do.
 
-    Refused, in this order: a scope this finding does not fall in (422); a fingerprint
+    Refused, in this order: a configuration's params a render would refuse (422,
+    naming them in ``parameters``); a scope this finding does not fall in (422); a fingerprint
     that differs from the one this apply computes, because the diff, the scope, the
     print or its base moved since the preview (409, ``analyzer-fix-stale``); a change
     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
+    await check(body.target)
     context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

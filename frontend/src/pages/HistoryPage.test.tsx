@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { bbox, outputs } from '../mocks/fixtures'
+import { bbox, keychainSchema, outputs } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
@@ -37,6 +37,18 @@ async function row(name: string): Promise<HTMLElement> {
 }
 
 describe('HistoryPage', () => {
+  it("names the model in the breadcrumb, not OpenSCAD's customizer title (#939)", async () => {
+    // OpenSCAD titles the schema after the .scad file it exported, so every model's
+    // reads "model"; the record's name is the one the reader knows it by.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () => HttpResponse.json({ ...keychainSchema, title: 'model' })),
+    )
+    render()
+    await screen.findByTestId('outputs')
+    expect(screen.getByRole('link', { name: 'Name Keychain' })).toHaveAttribute('href', '/m/name-keychain')
+    expect(screen.queryByRole('link', { name: 'model' })).not.toBeInTheDocument()
+  })
+
   it('lists every output newest first', async () => {
     render()
     const list = await screen.findByTestId('outputs')

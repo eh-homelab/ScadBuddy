@@ -24,6 +24,9 @@ export function HistoryPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
+  // #939 — the breadcrumb names the model by its record. The schema's `title` is the
+  // .scad file OpenSCAD exported, "model" for every model.
+  const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
   // on `print:<output id>`, which this list does not follow.
   const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
@@ -64,7 +67,7 @@ export function HistoryPage() {
           </Link>
           <span className="text-faint">/</span>
           <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
-            {schemaState.data?.title ?? slug}
+            {modelState.data?.name ?? slug}
           </Link>
           <span className="text-faint">/</span>
           <h1 className="text-[13px] font-medium">History</h1>
