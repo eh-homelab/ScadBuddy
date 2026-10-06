@@ -29,6 +29,8 @@ import {
   checkParamValue,
   defaultValues,
   diffFromDefaults,
+  outOfRange,
+  rangeProblem,
   sameValues,
   type ParamValues,
 } from '../lib/params'
@@ -260,6 +262,10 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // #921 — a number outside its declared range is flagged on its field; the render
+  // would only answer 422, so none is started and Generate waits until it is fixed.
+  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
   const {
@@ -269,15 +275,15 @@ export function CustomizePage() {
     busy: renderBusy,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled && seed ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
-  const upToDate = settled && settledFor === debounced && !rendering
+  const upToDate = settled && settledFor === debounced && !rendering && !invalid
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
   const output =
-    settled && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
@@ -716,7 +722,7 @@ export function CustomizePage() {
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
-          disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
+          disabled={uiGenerate.generating || rendering || !settled || Boolean(invalid) || job?.status !== 'done'}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -1069,6 +1075,12 @@ export function CustomizePage() {
               className="border-t border-line px-3 py-2 text-[12px] text-muted"
             >
               The render queue is full; this preview will be retried in {renderBusy} s.
+            </p>
+          )}
+          {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
+          {invalid && templateUi && (
+            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+              {invalid}
             </p>
           )}
           {renderError && (
