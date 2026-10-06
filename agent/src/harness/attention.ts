@@ -40,6 +40,14 @@ export const MESSAGE_MAX = 2_000
 
 /** The quick replies the card offers when the agent names none. */
 export const DEFAULT_REPLIES = ["I'm here", 'Carry on without me'] as const
+/** A tab wait's reply that means the tab is back (sessions/manager.ts waitForTab). */
+export const IM_BACK = "I'm back"
+/**
+ * Replies that say only "the tab is back": a reconnect that resolved the row first
+ * already did what they ask (questions/service.ts answer). Any other reply is words
+ * the model would never read, so it is not one of these.
+ */
+export const BACK_REPLIES: readonly string[] = [IM_BACK, DEFAULT_REPLIES[0]]
 
 /** What the card's header says for each reason. */
 const HEADERS: Record<AttentionReason, string> = {
@@ -86,6 +94,8 @@ export type AttentionSpec = {
   onTimeout: OnTimeout
   /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
   timeoutS: number
+  /** Called once the request is recorded and shown (questions/service.ts `gate`). */
+  onParked?: () => Promise<void>
 }
 
 /** The request's input, or why it is refused (and nothing parks). */
@@ -140,6 +150,10 @@ export function timedOutText(seconds: number): string {
   )
 }
 
+/** The result the model reads when the session's tab came back (#815 §2): not a reply, but the wait is over. */
+export const RECONNECTED_TEXT =
+  'reconnected: the ScadBuddy tab is connected again (the user has not replied). Retry the browser_* call that failed.'
+
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
@@ -167,7 +181,8 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
   try {
     const verdict = await gate({ tool, questions: [card], toolUseId, signal: context.data.signal, attention })
     if (verdict.answered) return text(answeredText(verdict.answers[card.question] ?? ''))
-    if (verdict.timedOut) return text(timedOutText(attention.timeoutS))
+    if ('timedOut' in verdict && verdict.timedOut) return text(timedOutText(attention.timeoutS))
+    if ('reconnected' in verdict && verdict.reconnected) return text(RECONNECTED_TEXT)
     return text(verdict.message, true)
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
@@ -178,9 +193,9 @@ export async function attentionHandler(gate: QuestionGate, tool: string, args: u
 /** The tool's description, as the model reads it. */
 export const ATTENTION_DESCRIPTION =
   'Get the user\'s attention and wait for their reply: shown in the ScadBuddy panel and counted on the Assistant ' +
-  'badge. Use it when you cannot go on without them (`blocked`, `tab_disconnected` after a browser_* call ' +
-  'found no tab, a `question` that has no fixed choices), or to tell them you are `done` with long work. ' +
+  'badge. Use it when you cannot go on without them (`blocked`, a `question` that has no fixed choices), or to ' +
+  'tell them you are `done` with long work. Do not use it after a browser_* call finds no tab: that call ' +
+  'already waits for the tab and asks the user itself, and its result says what they chose. ' +
   '`options` are up to four quick replies; the user may also type their own. After `timeout_s` (default 300) ' +
   '`on_timeout` decides: `proceed` (default) returns timed_out and you carry on with work that needs no ' +
-  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything. ' +
-  'One request per reason is open at a time: a new one replaces the last.'
+  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything.'

@@ -380,6 +380,35 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
 
+### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
+
+The API process also polls the `bambuddy` task queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`):
+print runs and every other Bambuddy write (send, project files, projects, reprint,
+timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
+**not** versioned: any replica polling the queue may take any task on it.
+
+- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
+  activities to that queue, and this release **must** roll out with `Recreate` (or the
+  old replicas scaled to 0 before the new ones start). The homelab deployment sets
+  `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
+  takes those tasks and fails them as unregistered. A workflow task is retried, so an
+  `Operation` there only stalls. An activity task's failure counts against its retry
+  policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
+  so one such task on an old replica records the operation `failed` as "may have been
+  done" although nothing reached Bambuddy, and a check whose three attempts all land
+  there is refused with a 500.
+- **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
+  must be at least the Temporal namespace's retention (`DescribeNamespace`'s
+  `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
+  field, and while Temporal cannot be reached a changed value is refused with the
+  `temporal-unavailable` 503 rather than saved unchecked (the other settings still save).
+  A retry of an operation whose record was deleted while Temporal still holds its closed
+  execution would answer 409 "may have been done" instead of its outcome. Raising the
+  namespace's retention after the save is not re-checked.
+- **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched`, so
+  a rolling update stays safe; a release that adds a workflow or activity type to the
+  queue says so here and needs the same `Recreate` rollout.
+
 ### Blob store and render workers (#426)
 
 Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
@@ -393,6 +422,10 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
+  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
+  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
+  trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
