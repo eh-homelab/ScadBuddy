@@ -420,6 +420,10 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   finish the renders pinned to their build. A pending row of the older API's that no
   workflow will run is failed, once it is 30 s old, by the next render of its key or
   the API's next pass over such rows.
+- **Upgrading from a release with the in-process print watcher** (before #1053): roll
+  it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
+  `print_watches` after the new one hands that log to `FollowPrint` at start, and
+  those prints would go unfollowed until someone opens their progress.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
 
@@ -428,16 +432,23 @@ print runs and every other Bambuddy write (send, project files, projects, reprin
 timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
 **not** versioned: any replica polling the queue may take any task on it.
 
-- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
-  activities to that queue, and this release **must** roll out with `Recreate` (or the
-  old replicas scaled to 0 before the new ones start). The homelab deployment sets
-  `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
+- **Upgrading to the release with #1053** adds two workflow types (`Operation`,
+  `FollowPrint`) and their activities to that queue, and a second queue beside it,
+  `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
+  `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
+  slot a print run or an operation needs. That worker has `FOLLOW_SLOTS` (200,
+  `bambuddy/follow.py`) slots per process: each print holds one while it moves (a
+  poke's old attempt holds its own for up to about 24 s more). Past them, new prints
+  wait on the queue unfollowed: watch `scadbuddy_print_follows_running`, and the
+  warning "every follow slot is taken". This release **must** roll out with `Recreate`
+  (or the old replicas scaled to 0 before the new ones start). The homelab deployment
+  sets `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
   takes those tasks and fails them as unregistered. A workflow task is retried, so an
-  `Operation` there only stalls. An activity task's failure counts against its retry
-  policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
-  so one such task on an old replica records the operation `failed` as "may have been
-  done" although nothing reached Bambuddy, and a check whose three attempts all land
-  there is refused with a 500.
+  `Operation` or `FollowPrint` there only stalls. An activity task's failure counts
+  against its retry policy: the effect of a reprint, a timelapse pull or a project write
+  runs at most once, so one such task on an old replica records the operation `failed`
+  as "may have been done" although nothing reached Bambuddy, and a check whose three
+  attempts all land there is refused with a 500.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the

@@ -37,6 +37,19 @@ class StubWorker:
         self.stopped.set()
 
 
+@pytest.fixture(autouse=True)
+def follows(monkeypatch: pytest.MonkeyPatch) -> list[StubWorker]:
+    """The follow worker beside each ``bambuddy`` one (review #1091 1), stubbed."""
+    built: list[StubWorker] = []
+
+    def build(*args: Any, **kwargs: Any) -> StubWorker:
+        built.append(StubWorker(False, asyncio.Event()))
+        return built[-1]
+
+    monkeypatch.setattr(main, "follow_worker", build)
+    return built
+
+
 async def test_a_failed_worker_is_logged_at_once_and_started_again(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -80,9 +93,11 @@ def _state() -> SimpleNamespace:
         catalogue=None,
         print_runs=SimpleNamespace(store=None),
         print_progress=None,
-        print_watcher=None,
+        print_follower=None,
+        metrics=SimpleNamespace(print_follows_running=None),
         print_links=None,
         components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else None),
+        projection=SimpleNamespace(pool=None),
     )
 
 
@@ -182,3 +197,70 @@ async def test_the_worker_task_ends_lost_operations_on_its_interval(
     stop.set()
     await asyncio.wait_for(task, 5)
     assert calls[:2] == ["operations", "operations"]
+
+
+async def test_a_failed_follow_worker_restarts_both_workers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 1: the follow queue is served beside the ``bambuddy`` one, and one
+    that dies is started again with the other, which is shut down, not abandoned."""
+    second = asyncio.Event()
+    prints: list[StubWorker] = []
+    follows: list[StubWorker] = []
+
+    def build_print(*args: Any, **kwargs: Any) -> StubWorker:
+        prints.append(StubWorker(False, asyncio.Event()))
+        return prints[-1]
+
+    def build_follow(*args: Any, **kwargs: Any) -> StubWorker:
+        follows.append(
+            StubWorker(False, second if follows else asyncio.Event(), fail_after=not follows)
+        )
+        return follows[-1]
+
+    monkeypatch.setattr(main, "bambuddy_worker", build_print)
+    monkeypatch.setattr(main, "follow_worker", build_follow)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
+    stop = asyncio.Event()
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+        await asyncio.wait_for(second.wait(), 5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert len(prints) == len(follows) == 2
+    assert prints[0].stopped.is_set()
+    assert "the print worker failed" in caplog.text
+
+
+async def test_the_old_watchers_handoff_does_not_hold_the_worker_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1091 4: each follow the boot handoff starts may wait out an RPC timeout on
+    a slow Temporal; the ``bambuddy`` queue is polled meanwhile, and a stop cancels a
+    handoff still pending rather than waiting for it."""
+    entered = asyncio.Event()
+    handing_off = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def pending(*args: Any) -> list[str]:
+        handing_off.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return []
+
+    monkeypatch.setattr(main, "resume_followed", pending)
+    monkeypatch.setattr(main, "bambuddy_worker", lambda *a, **k: StubWorker(False, entered))
+    monkeypatch.setattr(main, "reconcile_lost_runs", _no_lost_runs)
+    monkeypatch.setattr(main, "reconcile_lost_operations", _no_lost_runs)
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_print_worker(_state(), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(handing_off.wait(), 5)
+    await asyncio.wait_for(entered.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert cancelled.is_set()

@@ -1626,8 +1626,11 @@ describe('PrintPicker · Plates of a 3MF', () => {
   it("drops the previous output's plates while the next output's load", async () => {
     // Both outputs are ones the mock knows, so the second's choices read lands and the
     // dialog stays up: only the reset can take the first output's plates away.
-    const first = { ...(fixtures.outputs[0] as Output), library_files: [] }
-    const second = { ...(fixtures.outputs[1] as Output), library_files: [] }
+    const [firstFixture, secondFixture] = fixtures.outputs
+    expect(firstFixture, 'fixtures.outputs[0]').toBeDefined()
+    expect(secondFixture, 'fixtures.outputs[1]').toBeDefined()
+    const first = { ...(firstFixture as Output), library_files: [] }
+    const second = { ...(secondFixture as Output), library_files: [] }
     server.use(
       http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
         if (params.id === second.id) await delay('infinite')

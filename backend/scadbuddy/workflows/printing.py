@@ -31,13 +31,20 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    FailureError,
+    WorkflowAlreadyStartedError,
+    is_cancelled_exception,
+)
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
+    from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         PRINT_RUN_WORKFLOW,
@@ -144,6 +151,8 @@ PLATES_PATCH = "print-cancel-records-every-plate"
 #: and its execution completes. A history from before it cancels ``print_fail`` and ends
 #: the execution cancelled (``cancelled_during_fail_1061``).
 FAIL_PATCH = "print-cancel-waits-for-fail"
+#: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
+FOLLOW_PATCH = "follow-print"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -423,7 +432,42 @@ class PrintRunWorkflow:
                 retry_policy=RECORD_RETRY,
             )
         )
+        # Patched: a run started on a build without the follow replays without it
+        # (review #1061); `PrintRun` runs in the wild since #1061 merged.
+        if (
+            workflow.patched(FOLLOW_PATCH)
+            and input.source.kind == "output"
+            and input.source.output_id is not None
+        ):
+            await self._follow(input.source.output_id)
         return finished
+
+    async def _follow(self, output_id: str) -> None:
+        """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
+        this run, or a poke to the one already following the output (a child start has
+        no id-conflict policy). A poke that finds it closed in between starts it once more."""
+        for _ in range(2):
+            try:
+                await workflow.start_child_workflow(
+                    FOLLOW_WORKFLOW,
+                    output_id,
+                    id=follow_id(output_id),
+                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                    cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+                )
+                return
+            except WorkflowAlreadyStartedError:
+                pass
+            try:
+                await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
+                    POKE_SIGNAL
+                )
+                return
+            except FailureError:
+                continue
+        # Only a log, so no command: no `patched` (review #1091 3). The progress route
+        # starts the follow again once someone opens the output.
+        workflow.logger.warning("could not follow the print", extra={"output_id": output_id})
 
     def _upsert(
         self,

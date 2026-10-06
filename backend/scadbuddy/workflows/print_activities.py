@@ -46,7 +46,6 @@ from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
-from scadbuddy.bambuddy.watcher import PrintWatcher
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
@@ -86,7 +85,6 @@ class PrintDeps:
     catalogue: Catalogue
     store: PrintRunStore
     observer: ProgressObserver
-    watcher: PrintWatcher
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None
     #: Where a library file's queue items are recorded for the print history (#976).
@@ -342,10 +340,10 @@ class PrintActivities:
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An
             # output deleted while it printed has nothing left to follow.
+            # The workflow then starts its `FollowPrint` (#1053).
             try:
                 meta = require_output(self.d.outputs, spec.output_id)
                 self.d.observer.started(meta)
-                await self.d.watcher.started(meta.id)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         return run
