@@ -354,7 +354,7 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     library_file(89)
     run_routes()
     slice_routes()
-    queue_route(item_id=51)
+    queued_again = queue_route(item_id=51)
     response = run_library(
         client,
         89,
@@ -420,3 +420,9 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     # Once Bambuddy drops the queue item, the print stays listed.
     respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
     assert [item["archive_id"] for item in client.get("/api/v1/prints").json()["items"]] == [90]
+
+    # And it prints again, on the printer and plate it printed on.
+    reprint = client.post("/api/v1/prints/90/reprint")
+    assert reprint.status_code == 201, reprint.text
+    sent = json.loads(queued_again.calls.last.request.content)
+    assert sent["archive_id"] == 90 and sent["printer_id"] == 1
