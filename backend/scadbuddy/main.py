@@ -20,6 +20,7 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
@@ -351,13 +352,14 @@ async def _prepare_catalogue(state: AppState) -> None:
 
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
-    queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure leaves the projection to the
-    lifespan's guard, which closes everything a failed start opened, each once."""
+    queue left running, connect the in-process worker's client, prune, and start the
+    service (which settles the pending rows no workflow will run, then prunes). A
+    failure leaves the projection to the lifespan's guard, which closes everything a
+    failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
     await _prepare_catalogue(state)
-    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # What a pre-Temporal release was running, nothing
     # will finish (#546).
     failed = await asyncio.to_thread(projection.fail_legacy_running)
     if failed:
@@ -368,15 +370,6 @@ async def _start_render(state: AppState) -> None:
     if settings.temporal_worker_inprocess:
         # Eager: a worker cannot run on the API's lazy client (dev and tests).
         state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-    # Before the reconciler's first pass (`service.start`), which starts only rows
-    # that name a workflow: what a pre-Temporal release's queue left pending
-    # becomes this path's.
-    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-    if adopted:
-        logger.info(
-            "adopted the renders the legacy queue left pending",
-            extra={"count": len(adopted), "job_ids": adopted},
-        )
     await service.prune()
     await service.start()
 
@@ -454,6 +447,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         watcher=state.print_watcher,
         rack=state.components.get(RACK_USAGE),
+        links=state.print_links,
     )
     ops = state.components.get(OPERATIONS)
     activities = [
@@ -595,7 +589,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
-    # its reconciler), so it runs inside the `try` whose `finally` releases them: a
+    # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
     backfill: asyncio.Task[None] | None = None
@@ -730,6 +724,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
         ],
+    )
+    # A write from a page on another origin is refused before its body is read (#962).
+    app.add_middleware(
+        CrossSiteGate,
+        public_url=lambda: state.settings_store.load().public_url,
+        allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth

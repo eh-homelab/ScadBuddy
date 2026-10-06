@@ -16,7 +16,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockPlates } from '../mocks/handlers'
+import { setMockPlates, setMockRenderColors } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -36,14 +36,17 @@ vi.mock('../components/Preview', () => ({
     plate,
     leading,
     controls,
+    rejected,
   }: {
     job?: Job
     rendering: boolean
     plate?: Plate
     leading?: ReactNode
     controls?: ReactNode
+    rejected?: boolean
   }) => (
     <div data-testid="preview">
+      {rejected && <span data-testid="preview-rejected" />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -103,6 +106,23 @@ async function firstRender() {
 }
 
 describe('CustomizePage', () => {
+  it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
+    // The schema's title is the .scad file's name, "model" for every model.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...fixtures.keychainSchema, title: 'model' }),
+      ),
+      http.get('/api/v1/models/:slug', async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      }),
+    )
+    render()
+    const heading = await screen.findByRole('heading', { level: 1 })
+    expect(heading).not.toHaveTextContent(/^model$/)
+    expect(heading).toHaveTextContent('name-keychain')
+  })
+
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -154,10 +174,51 @@ describe('CustomizePage', () => {
     expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
   })
 
+  // #938 — the extruder a colour parameter gets is the render's, not its place among
+  // the colour parameters: a hard-coded colour can take extruder 1, and an unused
+  // parameter takes none.
+  it("labels each colour parameter with the render's extruder, or as not in the render", async () => {
+    setMockRenderColors('name-keychain', ['#3366FF', '#E8532F'])
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const field = (name: string) => screen.getByRole('textbox', { name: `${name} hex` }).closest('[data-param]')!
+    await waitFor(() => expect(field('Text')).toHaveTextContent('extruder 2'))
+    expect(field('Plate')).toHaveTextContent('not in this render')
+    expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
+  })
+
+  // #938 review — the previous render's colours cannot speak for a colour changed since:
+  // while its render is pending, the edited field must not claim it is not printed.
+  it('does not label a just-changed colour "not in this render" while it renders', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    await user.clear(hex)
+    await user.type(hex, '#00FF00')
+    expect(field).not.toHaveTextContent('not in this render')
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
   })
 
   it('says the queue is full and renders anyway once the delay passes', async () => {
@@ -185,6 +246,53 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('says it cannot reach the render service, not that the queue is full', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'Temporal is unavailable',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent('ScadBuddy cannot reach its render service; retrying in 1 s')
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Unprocessable Content',
+              status: 422,
+              detail: "parameter 'size' expects a number, got \"big\"",
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    render()
+    expect(await screen.findByText(/expects a number/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The viewer is told, so it drops its "Change a parameter to render." placeholder.
+    expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
   })
 
   it('re-renders after a parameter change and updates the dimensions', async () => {
@@ -474,6 +582,53 @@ describe('CustomizePage', () => {
       if (body.inputs.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
     }
     // Two debounced renders and a schema refetch do not fit the default budget.
+  }, 20000)
+
+  it('renders a retyped number once, never the empty field as 0 (#1323)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    await user.clear(padding)
+    // Longer than the debounce: an empty field that committed 0 would render it now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    await user.type(padding, '-12')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(before), { timeout: 4000 })
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
+    expect(sent).toEqual([-12])
+  }, 20000)
+
+  it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    expect(size).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Text size must be between 6 and 28.')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    // Longer than the debounce: a render of 500 would have been asked for by now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(size)
+    await user.type(size, '20')
+    expect(screen.queryByText(/must be between/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent).not.toContain(500)
+    expect(sent.at(-1)).toBe(20)
   }, 20000)
 
   it('links to the versions panel', async () => {

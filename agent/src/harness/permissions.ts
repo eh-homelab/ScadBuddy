@@ -118,6 +118,8 @@ export type ApprovalRequest = {
   input: Record<string, unknown>
   /** The tool_use block's id: the panel's `tool.call` id. */
   toolUseId: string
+  /** Set for a subagent's call, which the panel is never shown (sessions/sdkEvents.ts). */
+  agentId?: string
   tier: RiskTier
   /** Aborted when the SDK drops the request (the query stops). */
   signal: AbortSignal
@@ -164,7 +166,14 @@ export function makeCanUseTool(
     if (decision.decision === 'deny') return { behavior: 'deny', message: decision.reason }
     if (!gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
     try {
-      const verdict = await gate({ toolName, input, toolUseId: options.toolUseID, tier: decision.tier, signal: options.signal })
+      const verdict = await gate({
+        toolName,
+        input,
+        toolUseId: options.toolUseID,
+        ...(options.agentID !== undefined ? { agentId: options.agentID } : {}),
+        tier: decision.tier,
+        signal: options.signal,
+      })
       // The approved input, not a later copy: the approval binds to it.
       return verdict.approved
         ? { behavior: 'allow', updatedInput: verdict.input }

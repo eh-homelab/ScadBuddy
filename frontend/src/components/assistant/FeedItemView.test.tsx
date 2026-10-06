@@ -7,7 +7,8 @@ import { FeedItemView } from './FeedItemView'
 const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
-  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you, ...(state === 'closed' ? { reason: 'it expired' } : {}) }
+  const reason = state === 'closed' ? 'it expired' : state === 'cancelled' ? 'interrupted by You' : undefined
+  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, ...(state === 'expired' || state === 'cancelled' ? {} : { by: you }), ...(reason ? { reason } : {}) }
   return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
@@ -19,6 +20,9 @@ describe('the approval card', () => {
       ['approved', 'Approved by You.'],
       ['denied', 'Denied by You.'],
       ['closed', 'Your decision was not taken: it expired.'],
+      // Nobody denied these (#979).
+      ['expired', 'Expired: nobody decided in time, so it was not run.'],
+      ['cancelled', 'Cancelled: interrupted by You.'],
     ]
     for (const [state, text] of cases) {
       const { unmount } = card(state)

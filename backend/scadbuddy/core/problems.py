@@ -4,10 +4,13 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match, Mount
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
 
@@ -26,6 +29,22 @@ _TITLES = {
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
+
+
+class Problem(BaseModel):
+    """An RFC 9457 problem document, as every error response carries it. Its `type`
+    names the problem a client tells apart."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    title: str
+    status: int
+    detail: str
+    instance: str
+    #: On a command's ``temporal-unavailable`` or ``temporal-refused``: whether its start
+    #: may have reached Temporal, so the same request (never a new key) follows it.
+    may_have_started: bool | None = None
 
 
 class ApiError(Exception):
@@ -72,6 +91,29 @@ def problem_response(
     return JSONResponse(body, status_code=status, media_type=PROBLEM_MEDIA_TYPE, headers=headers)
 
 
+#: The methods a 405's ``Allow`` is drawn from.
+_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def _allowed_methods(request: Request) -> str | None:
+    """Every method some route on this path takes, for a 405's Allow (#1318).
+
+    The router fills Allow from the first route whose path matches, so ``GET /settings``
+    and ``PUT /settings``, being two routes, answer ``Allow: GET``. Each method is
+    probed instead: FastAPI keeps an included router as one opaque route that says
+    which methods match only when asked. A mount (the SPA's, at ``/``) matches every
+    method on every path, so it is not asked.
+    """
+    allowed = {
+        method
+        for method in _METHODS
+        for route in request.app.router.routes
+        if not isinstance(route, Mount)
+        and route.matches({**request.scope, "method": method})[0] is Match.FULL
+    }
+    return ", ".join(sorted(allowed)) or None
+
+
 def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_problem(request: Request, exc: ApiError) -> JSONResponse:
@@ -87,7 +129,10 @@ def install_problem_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        return problem_response(request, exc.status_code, str(exc.detail), headers=exc.headers)
+        headers = dict(exc.headers or {})
+        if exc.status_code == 405 and (allow := _allowed_methods(request)):
+            headers["Allow"] = allow
+        return problem_response(request, exc.status_code, str(exc.detail), headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -105,4 +150,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled error", extra={"path": request.url.path})
+        if isinstance(exc, psycopg.Error):
+            # The driver's text quotes the SQL and its bound values (#965).
+            return problem_response(request, 500, type(exc).__name__)
         return problem_response(request, 500, f"{type(exc).__name__}: {exc}")

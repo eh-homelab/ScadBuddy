@@ -85,8 +85,8 @@ def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
     started: list[asyncio.Task[None]] = []
 
     async def unreachable(*args: object, **kwargs: object) -> None:
-        assert service._reconciler is not None  # the service is fully up by now
-        started.append(service._reconciler)
+        assert service._pruner is not None  # the service is fully up by now
+        started.append(service._pruner)
         raise PoolTimeout("the database refused a second pool")
 
     monkeypatch.setattr(bus._pool, "open", unreachable)
@@ -95,7 +95,7 @@ def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
 
     assert started, "the render service had started before the bus failed"
     assert all(task.done() for task in started)
-    assert service._reconciler is None
+    assert service._pruner is None
     assert projection.pool.closed
     assert bus._pool.closed
     assert projection.pg_listener.backend_pid is None

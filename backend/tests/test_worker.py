@@ -40,7 +40,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
-from scadbuddy.render.job_models import Job, render_key
+from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
@@ -73,6 +73,7 @@ from tests.conftest import (
     PgPool,
     fake_3mf_openscad,
 )
+from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
 
@@ -151,13 +152,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
                         },
                     }
 
-                    projection.submit(job, render_key(model, params, revision))
-                    await asyncio.wait_for(
-                        client.execute_workflow(
-                            TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                        ),
-                        timeout=120,
-                    )
+                    job = await render_to_end(client, queue, job)
                     metrics = (await http.get("/metrics")).text
             finally:
                 stop.set()
@@ -393,8 +388,12 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     marked = threading.Event()
 
     class _Projection:
-        """Only what the pipeline's first activity needs: the `project` activity's
-        `mark_started`, which proves the worker polled and ran it."""
+        """Only what the pipeline's first activities need: `render_accept`'s insert,
+        then the `project` activity's `mark_started`, which proves the worker polled
+        and ran it."""
+
+        def accept(self, job: Job, key: str, **_: object) -> Job:
+            return job
 
         def mark_started(self, job_id: str) -> None:
             started.append(job_id)
@@ -428,13 +427,13 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
         worker = asyncio.create_task(run_inprocess_worker(settings, deps, client, stop))
         handle = await client.start_workflow(
             TemplatePipeline.run,
-            job,
+            start_of(job),
             id=workflow_id_for(job.id),
             task_queue=settings.temporal_task_queue_render,
         )
         try:
             assert await asyncio.wait_for(asyncio.to_thread(marked.wait, 60), 65)
-            assert started == [job.id]
+            assert len(started) == 1
             # The workflow is still running (its next activity cannot succeed on these
             # deps): the worker ends on `stop` all the same, without draining.
             stop.set()

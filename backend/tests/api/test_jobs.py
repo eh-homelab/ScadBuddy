@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -7,8 +9,14 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
+from temporalio.client import WorkflowUpdateFailedError
+from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
@@ -17,6 +25,13 @@ from scadbuddy.render.jobs import SnapshotPendingError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+)
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 
 
@@ -68,6 +83,27 @@ def test_a_parameter_of_the_wrong_type_is_rejected(client: TestClient, model: st
     response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": "wide"}})
     assert response.status_code == 422
     assert "expects a number" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"params": {"label": "N\x00L"}}, {"inputs": {"params": {"label": "N\x00L"}}}],
+)
+def test_a_nul_in_a_text_parameter_is_rejected_by_name(
+    client: TestClient, model: str, body: dict[str, Any]
+) -> None:
+    """#965: Postgres cannot hold a NUL, so it was a 500 echoing the driver's error."""
+    response = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert response.status_code == 422, response.text
+    assert "'label' contains a NUL byte" in response.json()["detail"]
+
+
+def test_a_nul_in_the_template_ui_state_is_rejected(client: TestClient, model: str) -> None:
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"inputs": {"params": {}, "ui": {"a\x00": 1}}}
+    )
+    assert response.status_code == 422, response.text
+    assert "NUL byte" in response.json()["detail"]
 
 
 def test_a_text_parameter_holding_a_path_is_rejected(client: TestClient, model: str) -> None:
@@ -129,11 +165,26 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
     second = client.post(
         f"/api/v1/models/{model}/render",
         json={"params": {"width": 12}, "supersedes": first.json()["job_id"]},
+        headers={"Idempotency-Key": "b" * 32},
     )
     assert second.status_code == 202
     # The first is cancelled unless its render finished first; the newer one renders.
     assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
     assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
+
+
+def test_a_supersede_without_an_idempotency_key_is_refused(client: TestClient, model: str) -> None:
+    """Without a key a re-send would release the job a second time, and with it another
+    claimant's: refused before anything starts (review #1066 2.1)."""
+    submit = mock.AsyncMock()
+    with mock.patch.object(RenderService, "submit", submit):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}, "supersedes": "0" * 32},
+        )
+    assert response.status_code == 422
+    assert "Idempotency-Key" in response.json()["detail"]
+    submit.assert_not_awaited()
 
 
 def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:
@@ -154,6 +205,130 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     body = response.json()
     assert body["retry_after"] == 7
     assert "queue is full" in body["detail"]
+
+
+def _unreachable() -> TemporalUnavailableError:
+    """What `start_command` raises when a lazy client's first connect fails."""
+    try:
+        raise TemporalUnavailableError("render-x") from RuntimeError("Failed client connect: x")
+    except TemporalUnavailableError as error:
+        return error
+
+
+@pytest.mark.parametrize(
+    ("error", "says", "may_have_started"),
+    [
+        # Only a failed connect wrote nothing (review #1066 (8) 2).
+        (_unreachable(), "Nothing was queued", False),
+        # The rest may follow a start Temporal persisted: the same request follows it,
+        # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
+        (TemporalUnavailableError("render-x"), "to follow it if it started", True),
+        (
+            RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""),
+            "to follow it if it started",
+            True,
+        ),
+        (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started", True),
+        (TemporalBusyError("render-x"), "to follow it if it started", True),
+    ],
+)
+def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
+    client: TestClient, model: str, error: Exception, says: str, may_have_started: bool
+) -> None:
+    down = mock.AsyncMock(side_effect=error)
+    with mock.patch.object(RenderService, "submit", down):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert says in response.json()["detail"]
+    assert response.json()["may_have_started"] is may_have_started
+    assert response.headers["retry-after"] == "5"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        RPCError("Namespace nope is not found.", RPCStatusCode.NOT_FOUND, b""),
+        RPCError("denied for nope", RPCStatusCode.PERMISSION_DENIED, b""),
+        RPCError("nope is invalid", RPCStatusCode.INVALID_ARGUMENT, b""),
+        # What `start_command` raises for a refusal since #1316 (review #1066 of c144c02).
+        TemporalRefusedError("render-nope"),
+    ],
+)
+def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
+    client: TestClient, model: str, refusal: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong namespace or a denied permission is configuration, never "cannot reach
+    Temporal, try again shortly"; Temporal's message stays in the log (review #1066 (8)
+    2)."""
+    refused = mock.AsyncMock(side_effect=refusal)
+    with mock.patch.object(RenderService, "submit", refused):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 500
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    assert "nope" not in response.json()["detail"]
+    assert "retry-after" not in response.headers
+    # The start may have been persisted before Temporal refused: the detail's "send the
+    # same request again" is what the clients do on `may_have_started` (review #1066
+    # (10) 3).
+    assert response.json()["may_have_started"] is True
+    assert "to follow it if it started" in response.json()["detail"]
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
+
+
+def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, model: str) -> None:
+    """An Update failure other than an execution that closed first (review #1066 3.1)."""
+    failed = mock.AsyncMock(
+        side_effect=WorkflowUpdateFailedError(ApplicationError("boom at /srv/internal"))
+    )
+    with mock.patch.object(RenderService, "submit", failed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    # The worker's failure text stays in the log (review #1066 5.1).
+    assert "/srv/internal" not in response.json()["detail"]
+    # The run answered: no job was made, and nothing tells a client to send it again.
+    assert response.json()["may_have_started"] is False
+    assert "again" not in response.json()["detail"]
+
+
+def test_a_render_still_being_accepted_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert response.headers["retry-after"] == "2"
+
+
+def test_a_render_passes_its_idempotency_key_as_the_request_id(
+    client: TestClient, model: str
+) -> None:
+    """Review #1066 2.1: a re-send keeps its key, so it is the same claim on the job."""
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "a" * 32},
+        )
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == "a" * 32
+
+
+def test_a_render_whose_execution_ended_before_it_answered_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    """Review #1061 1c: an execution that ended before its Update answered recorded
+    nothing; the same request starts it again, never a bare 500."""
+    closed = mock.AsyncMock(side_effect=CommandClosedError("render-x"))
+    with mock.patch.object(RenderService, "submit", closed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
 
 
 def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
@@ -239,11 +414,26 @@ def test_a_value_outside_the_customizer_is_rejected_by_name(
     assert response.headers["content-type"] == "application/problem+json"
 
 
+def _render_followed(client: TestClient, slug: str, body: dict[str, Any]) -> Response:
+    """POST a render as the browser and the agent do: with an `Idempotency-Key`, sent
+    again with it while the answer is `command-still-accepting` (a render whose first
+    activity outlives the submit's deadline, as on a loaded machine). Any other answer
+    is returned as it is."""
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    for _ in range(10):
+        response: Response = client.post(
+            f"/api/v1/models/{slug}/render", json=body, headers=headers
+        )
+        if response.status_code != 503 or response.json()["type"] != STILL_ACCEPTING_PROBLEM:
+            return response
+    return response
+
+
 def test_the_customizer_bounds_and_a_retired_option_are_accepted(
     client: TestClient, ranged: str
 ) -> None:
     for params in ({"width": 1}, {"width": 100}, {"shape": "square"}, {"shape": "circle"}):
-        response = client.post(f"/api/v1/models/{ranged}/render", json={"params": params})
+        response = _render_followed(client, ranged, {"params": params})
         assert response.status_code == 202, (params, response.text)
 
 
