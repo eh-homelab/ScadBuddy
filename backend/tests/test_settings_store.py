@@ -21,6 +21,7 @@ from psycopg_pool import PoolTimeout
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
@@ -56,6 +57,17 @@ def store(settings: Settings) -> Iterator[SettingsStore]:
         yield opened
     finally:
         opened.close()
+
+
+def test_every_pooled_connection_bounds_a_silent_peer(store: SettingsStore) -> None:
+    """#1226: ``statement_timeout`` is the server's, so it cannot catch a half-open
+    connection; the client's own TCP keepalive and user timeout must."""
+    with store.pool.connection() as first, store.pool.connection() as second:
+        params = [conn.info.get_parameters() for conn in (first, second)]
+    for got in params:
+        assert {name: got.get(name) for name in TCP_KEEPALIVE} == {
+            name: str(value) for name, value in TCP_KEEPALIVE.items()
+        }
 
 
 def _fresh_load(settings: Settings) -> StoredSettings:
