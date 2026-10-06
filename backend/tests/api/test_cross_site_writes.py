@@ -118,6 +118,61 @@ def test_an_allowed_origin_passes(app: FastAPI, public: TestClient) -> None:
     assert _paste(public, "Other", {"Origin": "https://scad.lan"}) == 403
 
 
-def test_without_a_public_url_only_loopback_passes(client: TestClient) -> None:
+def test_unconfigured_a_write_from_the_request_own_origin_passes(client: TestClient) -> None:
+    """No public URL and no allowed origins: the page's own origin may write, so a
+    fresh install can save the settings that configure it."""
     assert _paste(client, "Loop", {"Origin": "http://127.0.0.1:8080"}) == 201
-    assert _paste(client, "Far", {"Origin": "https://scad.example.com"}) == 403
+    assert _paste(client, "Own", {"Origin": "http://testserver"}) == 201
+
+
+@pytest.mark.parametrize(
+    "origin", ["https://evil.example", "https://testserver", "http://testserver:8080", "null"]
+)
+def test_unconfigured_a_foreign_origin_is_still_refused(client: TestClient, origin: str) -> None:
+    response = client.post(
+        "/api/v1/models",
+        content=SOURCE.encode(),
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Far", "Origin": origin},
+    )
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert "SCADBUDDY_PUBLIC_URL" in detail and "SCADBUDDY_ALLOWED_ORIGINS" in detail
+
+
+def test_configured_origin_equal_to_host_is_refused(app: FastAPI, client: TestClient) -> None:
+    """Once configured, a rebound name (the attacker's in both Origin and Host) is not
+    let through just because the two agree."""
+    rebound = {"Origin": "http://evil.example", "Host": "evil.example"}
+    assert _paste(client, "Before", rebound) == 201  # unconfigured: the stated trade-off
+    response = client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+    assert response.status_code == 200, response.text
+    assert _paste(client, "After", rebound) == 403
+
+    state = getattr(app.state, STATE_ATTR)
+    client.put("/api/v1/settings", json={"public_url": None})
+    state.settings = state.settings.model_copy(update={"allowed_origins": "https://scad.lan"})
+    assert _paste(client, "Allowed", rebound) == 403
+
+
+def test_quickstart_saves_settings_from_its_own_page(client: TestClient) -> None:
+    """The README quickstart: no env, the UI opened at http://<host>:8080."""
+    response = client.put(
+        "/api/v1/settings",
+        json={"public_url": "http://scad-box:8080"},
+        headers={"Origin": "http://scad-box:8080", "Host": "scad-box:8080"},
+    )
+    assert response.status_code == 200, response.text
+    # And now it is configured: that origin is the public URL's.
+    assert _paste(client, "Next", {"Origin": "http://scad-box:8080", "Host": "x"}) == 201
+
+
+def test_the_gate_covers_routes_outside_the_api(public: TestClient) -> None:
+    """The middleware wraps the whole app: the trace relay at the root is refused by
+    it (its own check would say "Origin not allowed")."""
+    response = public.post(
+        "/telemetry/v1/traces",
+        content=b"{}",
+        headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403, response.text
+    assert "SCADBUDDY_PUBLIC_URL" in response.json()["detail"]

@@ -9,6 +9,15 @@ sandboxed frame, a ``data:`` page) is not any of them. A request with no ``Origi
 not a browser page (curl, the agent's server-side calls) and passes, as it does on the
 socket. Safe methods are not checked: they change nothing, and a cross-site page cannot
 read their answers (the API sends no CORS headers).
+
+UNCONFIGURED. While neither a public URL (Settings, seeded by ``SCADBUDDY_PUBLIC_URL``)
+nor ``SCADBUDDY_ALLOWED_ORIGINS`` is set, a write is also accepted when its ``Origin``
+is the request's own origin (its scheme and ``Host``), so a fresh install opened at
+``http://<host>:8080`` can save the settings that configure it. That still refuses a
+page on another site, which is what #962 is about, but it gives up DNS-rebinding
+protection: a rebound name arrives with the attacker's name in both ``Origin`` and
+``Host``. Configuring either one turns this off, and then ``Origin == Host`` alone is
+refused, as on the realtime socket.
 """
 
 from __future__ import annotations
@@ -21,12 +30,28 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.api.realtime import origin_allowed
+from scadbuddy.api.realtime import _origin, origin_allowed
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
 logger = logging.getLogger(__name__)
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: How much of a refused ``Origin`` is logged: the header is the caller's to make huge.
+LOGGED_ORIGIN_CHARS = 200
+REFUSED = (
+    "writes must come from the ScadBuddy UI at its public URL; if this is the UI, set "
+    "SCADBUDDY_PUBLIC_URL to the URL it is opened at, or list this origin in "
+    "SCADBUDDY_ALLOWED_ORIGINS"
+)
+
+
+def _same_host(origin: str | None, scope: Scope, headers: Headers) -> bool:
+    """Whether ``origin`` is the request's own ``scheme://host[:port]``."""
+    host = headers.get("host")
+    if origin is None or not host:
+        return False
+    own = _origin(f"{scope['scheme']}://{host}")
+    return own is not None and _origin(origin) == own
 
 
 class CrossSiteGate:
@@ -46,27 +71,35 @@ class CrossSiteGate:
         if scope["type"] != "http" or scope["method"] in SAFE_METHODS:
             await self.app(scope, receive, send)
             return
-        origin = Headers(scope=scope).get("origin")
+        headers = Headers(scope=scope)
+        origin = headers.get("origin")
         allowed = self.allowed_origins()
         # The stored public URL is read only when the cheap answer is no.
-        if origin_allowed(origin, None, allowed) or origin_allowed(
-            origin, await asyncio.to_thread(self.public_url), allowed
+        if origin_allowed(origin, None, allowed):
+            await self.app(scope, receive, send)
+            return
+        public_url = await asyncio.to_thread(self.public_url)
+        unconfigured = not public_url and not allowed
+        if origin_allowed(origin, public_url, allowed) or (
+            unconfigured and _same_host(origin, scope, headers)
         ):
             await self.app(scope, receive, send)
             return
         logger.warning(
-            "refused a %s %s from origin %r: not the public URL's origin, not in "
-            "SCADBUDDY_ALLOWED_ORIGINS and not loopback",
+            "refused a %s %s from origin %r: not the public URL's origin (%r), not in "
+            "SCADBUDDY_ALLOWED_ORIGINS and not loopback; if this is the UI, set "
+            "SCADBUDDY_PUBLIC_URL or SCADBUDDY_ALLOWED_ORIGINS",
             scope["method"],
             scope["path"],
-            origin,
+            (origin or "")[:LOGGED_ORIGIN_CHARS],
+            public_url,
         )
         response = JSONResponse(
             {
                 "type": "about:blank",
                 "title": "Forbidden",
                 "status": 403,
-                "detail": "writes must come from the ScadBuddy UI at its public URL",
+                "detail": REFUSED,
                 "instance": scope["path"],
             },
             status_code=403,
