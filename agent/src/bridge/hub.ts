@@ -186,6 +186,12 @@ export class TabHub implements BrowserTabs {
   readonly #log: (message: string) => void
   #poll: NodeJS.Timeout | undefined
   #refreshing: Promise<void> | undefined
+  /**
+   * #815 §2: told each time a session gets a connected tab again: its tab
+   * reconnected, or the user opened it from another tab (`pairSession`). main.ts
+   * resolves the session's `tab_disconnected` attention requests with it.
+   */
+  onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined
 
   constructor(options: TabHubOptions = {}) {
     this.#pairings = options.pairings
@@ -213,6 +219,7 @@ export class TabHub implements BrowserTabs {
     const before = this.#tabs.get(tabId)
     this.#tabs.set(tabId, connection)
     if (before && before !== connection) before.replaced()
+    for (const [sessionId, paired] of this.#sessionTabs) if (paired === tabId) this.#sessionTabBack(sessionId)
     if (!this.#poll && this.#pairings) {
       this.#poll = setInterval(() => void this.refresh(), this.#pollMs)
       this.#poll.unref()
@@ -238,6 +245,13 @@ export class TabHub implements BrowserTabs {
       const oldest = this.#sessionTabs.keys().next().value as string
       this.#sessionTabs.delete(oldest)
     }
+    if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
+  }
+
+  #sessionTabBack(sessionId: string): void {
+    const listener = this.onSessionTab
+    if (!listener) return
+    void listener(sessionId).catch((err: unknown) => this.logError(err))
   }
 
   /** Whether `sessionId` has a tab that is connected here now. */
