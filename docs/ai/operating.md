@@ -170,6 +170,23 @@ subprocess never inherits the service's environment. `buildQueryOptions()` in
 `env` holding only `CLAUDE_CONFIG_DIR`, `HOME` and `PATH`. The pinned SDK's `sdk.d.ts`
 says `env` "REPLACES the subprocess environment entirely" (quoted in that file).
 
+Tracing (#988) is configured by the standard OpenTelemetry variables only, read by
+[`agent/src/telemetry/setup.ts`](../../agent/src/telemetry/setup.ts) when the process
+starts under `node --import ./dist/telemetry.js` (the image's `CMD`):
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the latter used
+verbatim, the former with `/v1/traces` appended; `OTEL_EXPORTER_OTLP_HEADERS` and
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` add collector headers; neither endpoint set, or
+`OTEL_TRACES_EXPORTER=none`: spans are created, so context propagates, and dropped;
+`OTEL_TRACES_EXPORTER` unset, empty or a list containing `otlp`, any case, exports as
+configured, and any other value, `console` say, is off with one warning naming it), `OTEL_SDK_DISABLED=true` (the kill switch: no spans at all),
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans) and
+`OTEL_RESOURCE_ATTRIBUTES`. `SCADBUDDY_VERSION` and `SCADBUDDY_REVISION` are stamped
+into the image by `build-image.yml` and become `service.version` and
+`scadbuddy.revision`. None of these reach the Claude Code subprocess, whose `env` is
+explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`,
+the headless browser and Anthropic never get one. Design:
+`docs/superpowers/specs/2026-10-01-distributed-tracing-design.md` §5.4.
+
 ## 3. The key-encryption key
 
 The Claude credential is stored with envelope encryption (spec §9; see
@@ -586,6 +603,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
   [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+  `traceparent` is the parked call's tool span and `decision_traceparent` the decision's
+  `agent.approval` span (#988); both are internal and never in an approval view.
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
   name, tier, `created_at`, `expires_at`, `revoked_at`, `last_used_at` and
   `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,

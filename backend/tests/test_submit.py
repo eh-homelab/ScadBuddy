@@ -15,16 +15,17 @@ from typing import Any
 
 import psycopg
 import pytest
-from google.protobuf.any_pb2 import Any as Any_
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
-from temporalio.api.common.v1 import GrpcStatus
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
+from temporalio.api.enums.v1 import IndexedValueType
+from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
+    WorkflowUpdateFailedError,
 )
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -50,6 +51,7 @@ from scadbuddy.render.projection import (
     CLOSED_ERROR,
     LEGACY_UNSTARTED_ERROR,
     JobProjection,
+    run_closed,
     workflow_id_for,
     workflow_id_for_key,
 )
@@ -59,18 +61,30 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.commands import CommandStillAcceptingError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+)
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
     RELEASE_UPDATE,
+    RENDER_UNSTARTABLE,
     AcceptRender,
     Projection,
     ReleaseAnswer,
     RenderAnswer,
 )
-from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
-from tests.support.renders import legacy_row
+from scadbuddy.workflows.pipelines import (
+    ACCEPT_RETRY,
+    KIND,
+    STATUS,
+    SUBJECT,
+    RenderPreview,
+    TemplatePipeline,
+)
+from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
 from tests.test_workflows import FakeActivities, _worker
 
@@ -111,6 +125,21 @@ class ProjectingActivities(FakeActivities):
 
 def _sample(metrics: Metrics, name: str) -> float:
     return metrics.registry.get_sample_value(name) or 0.0
+
+
+def _settle_failed(metrics: Metrics, settle_pass: str) -> float:
+    sample = "scadbuddy_render_settle_failed_total"
+    return metrics.registry.get_sample_value(sample, {"pass": settle_pass}) or 0.0
+
+
+def _settle_errors(metrics: Metrics, settle_pass: str) -> float:
+    sample = "scadbuddy_render_settle_errors_total"
+    return metrics.registry.get_sample_value(sample, {"pass": settle_pass}) or 0.0
+
+
+def _failed_jobs(metrics: Metrics) -> float:
+    sample = "scadbuddy_render_jobs_finished_total"
+    return metrics.registry.get_sample_value(sample, {"outcome": "failed"}) or 0.0
 
 
 def _w() -> int:
@@ -305,6 +334,123 @@ async def test_a_resent_supersede_releases_the_old_job_once(
     assert kept.state in ("pending", "running") and kept.claims == 1
 
 
+async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last release waits in the workflow for the cancelled job's projection. Held
+    there, the submit still answers with the new job inside its bound, below Envoy's 15 s
+    route timeout (review #1066 (8) 1). `rpc_timeout` bounds each poll, not the Update
+    (the SDK polls again), so a long one stands in for a server that keeps answering
+    polls with no outcome."""
+    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    monkeypatch.setattr(submit_module, "RELEASE_BOUND", 1.0, raising=False)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate, held = asyncio.Event(), asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=held)
+        async with _worker(client, queue, acts):
+            old = await service.submit(SLUG, {"width": _w()})
+            began = time.monotonic()
+            async with asyncio.timeout(30):
+                new = await service.submit(
+                    SLUG, {"width": _w()}, supersedes=old.id, request_id=uuid.uuid4().hex
+                )
+            took = time.monotonic() - began
+            held.set()
+            gate.set()
+            await _settled(projection, old.id)
+            await _settled(projection, new.id)
+        await service.aclose()
+
+    assert new.id != old.id
+    print("TOOK", took)
+    assert took < 5
+
+
+class _Described:
+    """A client whose `describe` finds the execution, or answers NOT_FOUND."""
+
+    def __init__(self, *, exists: bool) -> None:
+        self.exists = exists
+
+    def get_workflow_handle(self, *_: object, **__: object) -> _Described:
+        return self
+
+    async def describe(self, **__: object) -> None:
+        if not self.exists:
+            raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+
+@pytest.mark.parametrize(
+    ("exists", "raised", "counted"),
+    [
+        (True, CommandStillAcceptingError, "scadbuddy_render_accept_pending_total"),
+        (False, TemporalUnavailableError, "scadbuddy_render_store_errors_total"),
+    ],
+)
+async def test_a_submit_is_answered_within_one_bound(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    exists: bool,
+    raised: type[Exception],
+    counted: str,
+) -> None:
+    """One deadline covers every Temporal call a submit makes (review #1066 (8) 1).
+    Past it the request is still accepting when its execution exists, and Temporal
+    unavailable when it cannot say: a client that never connected queued nothing."""
+
+    async def hanging(*_: object, **__: Any) -> RenderAnswer:
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+    monkeypatch.setattr(submit_module, "start_command", hanging)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 0.5)
+    service = make_service(_Described(exists=exists), f"t-{uuid.uuid4().hex[:8]}")
+    async with asyncio.timeout(30):
+        with pytest.raises(raised):
+            await service.submit(SLUG, {"width": _w()})
+    await service.aclose()
+
+    assert (
+        service.metrics.registry.get_sample_value(
+            counted, {"operation": "start_workflow"} if not exists else None
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("code", [RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.CANCELLED])
+@pytest.mark.parametrize(
+    ("exists", "raised"),
+    [(True, CommandStillAcceptingError), (False, TemporalUnavailableError)],
+)
+async def test_a_start_that_grpc_ended_is_answered_as_a_late_one(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    code: RPCStatusCode,
+    exists: bool,
+    raised: type[Exception],
+) -> None:
+    """gRPC ending the call says nothing of the start, which may have reached Temporal:
+    still accepting when the execution exists, never "nothing was done" (review #1066
+    (8) 2)."""
+
+    async def ended(*_: object, **__: Any) -> RenderAnswer:
+        raise RPCError("ended", code, b"")
+
+    monkeypatch.setattr(submit_module, "start_command", ended)
+    service = make_service(_Described(exists=exists), "unused")
+    with pytest.raises(raised) as error:
+        await service.submit(SLUG, {"width": _w()})
+    await service.aclose()
+
+    assert isinstance(error.value.__cause__, RPCError)
+
+
 async def test_superseding_the_same_render_answers_it_without_a_claim(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
@@ -343,6 +489,43 @@ async def test_superseding_a_finished_job_still_submits(
     assert (await asyncio.to_thread(projection.read, first.id)).state == "done"
 
 
+class _BrokenAccept(ProjectingActivities):
+    """`render_accept` fails every attempt, as a SQL error the code does not expect."""
+
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        self.accepts += 1
+        raise RuntimeError("relation render_jobs has no column x")
+
+
+async def test_an_accept_that_keeps_failing_is_answered_unstartable_within_the_deadline(
+    make_service: ServiceFactory, deps: WorkerDeps
+) -> None:
+    """The first step's retries are bounded: past them the run completes and its
+    Update answers the refusal, so the request gets an answer rather than looping on
+    `command-still-accepting` with no row (review #1066 (10) 1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = _BrokenAccept(deps)
+        params: dict[str, ParamValue] = {"width": _w()}
+        async with _worker(client, queue, acts):
+            began = time.monotonic()
+            with pytest.raises(WorkflowUpdateFailedError) as refused:
+                await service.submit(SLUG, params)
+            took = time.monotonic() - began
+            handle = client.get_workflow_handle(workflow_id_for_key(render_key(SLUG, params, None)))
+            await asyncio.wait_for(handle.result(), timeout=30)
+            described = await handle.describe()
+        await service.aclose()
+
+    assert took < submit_module.SUBMIT_DEADLINE
+    assert described.status == WorkflowExecutionStatus.COMPLETED
+    cause = refused.value.cause
+    assert isinstance(cause, ApplicationError) and cause.type == RENDER_UNSTARTABLE
+    assert acts.accepts == ACCEPT_RETRY.maximum_attempts
+
+
 async def test_a_refused_submit_supersedes_nothing(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
@@ -353,6 +536,8 @@ async def test_a_refused_submit_supersedes_nothing(
         acts = ProjectingActivities(deps, hold_running=hold)
         async with _worker(client, queue, acts):
             first = await service.submit(SLUG, {"width": _w()})
+            # Another job waits, so the queue is full without the one superseded.
+            _legacy(projection)
             with pytest.raises(QueueFullError) as refused:
                 await service.submit(SLUG, {"width": _w()}, supersedes=first.id)
             waiting = await asyncio.to_thread(projection.read, first.id)
@@ -365,25 +550,85 @@ async def test_a_refused_submit_supersedes_nothing(
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 1
 
 
-async def test_a_submit_after_the_last_release_waits_for_close_and_starts_again(
-    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
-    job = Job(id=uuid.uuid4().hex, slug=SLUG, created_at=now())
-    answers = [RenderAnswer(closing=True), RenderAnswer(job=job)]
-    calls: list[str] = []
-
-    async def answering(*_: object, **kwargs: Any) -> RenderAnswer:
-        calls.append(str(kwargs["id"]))
-        return answers.pop(0)
-
-    monkeypatch.setattr(submit_module, "start_command", answering)
+    """With the queue full of the caller's own stale preview, the request replacing it
+    is accepted, and that preview is superseded (review #1066 (9) 3)."""
     async with temporal_client() as client:
-        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
-        submitted = await service.submit(SLUG, {"width": _w()})
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue, config=replace(deps.config, render_queue_max=1))
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
+        async with _worker(client, queue, acts, max_concurrent_activities=1):
+            # A running job holds the worker's one activity slot, so the next one's
+            # `running` write waits for it, and that job stays pending.
+            busy = await service.submit(SLUG, {"width": _w()})
+            await _until(acts, "render_main")
+            first = await service.submit(SLUG, {"width": _w()})
+            second = await service.submit(SLUG, {"width": _w()}, supersedes=first.id)
+            dropped = await _settled(projection, first.id)
+            gate.set()
+            done = await _settled(projection, second.id)
+            await _settled(projection, busy.id)
         await service.aclose()
 
-    assert submitted.id == job.id
-    assert len(calls) == 2 and calls[0] == calls[1]
+    assert (dropped.state, dropped.error) == ("cancelled", SUPERSEDED_ERROR)
+    assert done.state == "done", done.error
+    assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 0
+
+
+async def test_a_request_answered_closing_and_resent_after_the_close_gets_a_fresh_job(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slider dragged from A to B and back: A's request reaches A's run while B's
+    supersede is releasing it, and is answered still-accepting. Sent again with its key
+    once the run has closed, it starts a fresh render of A, rather than being answered
+    from the closed run (review #1066 (7) 1)."""
+    monkeypatch.setattr(submit_module, "CLOSING_WAIT", 0.5)
+    a = {"width": _w()}
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate, projecting = asyncio.Event(), asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=projecting)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, a, request_id=uuid.uuid4().hex)
+            await _until(acts, "render_main")
+            superseding = asyncio.create_task(
+                service.submit(
+                    SLUG, {"width": _w()}, supersedes=first.id, request_id=uuid.uuid4().hex
+                )
+            )
+            # The release waits for the cancelled job to project (held here).
+            async with asyncio.timeout(30):
+                while not [
+                    p for p in acts.projections if p.state == "cancelled" and p.job_id == first.id
+                ]:
+                    await asyncio.sleep(0.01)
+            request = uuid.uuid4().hex
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, a, request_id=request)
+            projecting.set()
+            second = await asyncio.wait_for(superseding, timeout=30)
+            assert first.workflow_id is not None
+            await asyncio.wait_for(
+                client.get_workflow_handle(
+                    first.workflow_id, run_id=first.workflow_run_id
+                ).result(),
+                timeout=30,
+            )
+            again = await service.submit(SLUG, a, request_id=request)
+            gate.set()
+            await _settled(projection, again.id)
+            await _settled(projection, second.id)
+        await service.aclose()
+
+    assert again.id != first.id and again.workflow_run_id != first.workflow_run_id
+    assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
 
 
 async def test_an_update_aborted_by_a_closing_execution_starts_again(
@@ -799,6 +1044,18 @@ async def test_a_legacy_cancel_of_a_workflow_that_never_started_is_not_an_error(
     )
 
 
+async def _register_search_attributes(client: Client) -> None:
+    """§4.2's keywords, as the cluster's operator registers them."""
+    request = AddSearchAttributesRequest(
+        namespace=client.namespace,
+        search_attributes={
+            key.name: IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD for key in (KIND, SUBJECT, STATUS)
+        },
+    )
+    with suppress(RPCError):  # registered already, on a shared server
+        await client.operator_service.add_search_attributes(request)
+
+
 class _HeldDone(ProjectingActivities):
     """The `done` projection waits for ``release`` once it has written the row."""
 
@@ -819,8 +1076,9 @@ async def test_a_release_after_the_render_finished_cancels_nothing(
     """The last release reaching a job whose `done` is written (in flight, or already
     back) cancels nothing and says so (review #1066 2.3)."""
     async with temporal_client() as client:
+        await _register_search_attributes(client)
         queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
+        service = make_service(client, queue, search_attributes=True)
         held = asyncio.Event()
         async with _worker(client, queue, _HeldDone(deps, release=held)):
             job = await service.submit(SLUG, {"width": _w()})
@@ -834,10 +1092,13 @@ async def test_a_release_after_the_render_finished_cancels_nothing(
             held.set()
             answer = await asyncio.wait_for(last, timeout=30)
             await asyncio.wait_for(handle.result(), timeout=30)
+            described = await handle.describe()
         await service.aclose()
 
     assert done.state == "done"
     assert answer.cancelled is None
+    # Visibility says what the row says (review #1066 (9) 2).
+    assert described.typed_search_attributes.get(STATUS) == "settled"
     assert (await asyncio.to_thread(projection.read, job.id)).state == "done"
 
 
@@ -877,6 +1138,32 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
     assert (dropped.state, dropped.error) == ("cancelled", SUPERSEDED_ERROR)
 
 
+async def test_a_request_resent_after_its_render_closed_is_answered_with_its_job(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """The key is the `accepted` Update's id. Sent again once ``render-<key>`` has
+    closed, update-with-start answers it with the closed run's outcome rather than a
+    new run: the same job, not a second one (review #1066 (6) 2)."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            request = uuid.uuid4().hex
+            first = await service.submit(SLUG, {"width": width}, request_id=request)
+            await _settled(projection, first.id)
+            assert first.workflow_id is not None
+            await asyncio.wait_for(
+                client.get_workflow_handle(first.workflow_id).result(), timeout=30
+            )
+            again = await service.submit(SLUG, {"width": width}, request_id=request)
+        await service.aclose()
+
+    assert (again.id, again.workflow_run_id) == (first.id, first.workflow_run_id)
+    assert acts.accepts == 1
+
+
 class _SlowAccept(ProjectingActivities):
     """`render_accept` waits for ``accepting``: an Update that outlives its deadline."""
 
@@ -899,19 +1186,46 @@ def _aged(projection: JobProjection, *job_ids: str) -> None:
         )
 
 
+@pytest.mark.parametrize(("fail_main", "state"), [(False, "done"), (True, "failed")])
+async def test_an_older_builds_start_renders_its_row_on_this_worker(
+    deps: WorkerDeps, projection: JobProjection, fail_main: bool, state: str
+) -> None:
+    """During a rolling deploy an older API inserts its row and starts `render-<job id>`
+    with the `Job` itself: this build's worker decodes it (`RenderStart | Job`), settles
+    the row and completes the run (review #1066 (9) 1)."""
+    job = _legacy(projection)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with _worker(client, queue, ProjectingActivities(deps, fail_main=fail_main)):
+            handle = await client.start_workflow(
+                "TemplatePipeline",
+                job.model_dump(mode="json"),
+                id=workflow_id_for(job.id),
+                task_queue=queue,
+            )
+            await asyncio.wait_for(handle.result(), timeout=60)
+            described = await handle.describe()
+
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == state, stored.error
+    assert described.status == WorkflowExecutionStatus.COMPLETED
+
+
 async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
     make_service: ServiceFactory, projection: JobProjection
 ) -> None:
     """Past `LEGACY_GRACE`, a row naming no workflow, or one Temporal does not have
     running, is orphaned. A younger row may be between the older API's insert and its
-    start (review #1066 1.2), and a running one is that build's."""
+    start (review #1066 1.2), and a running one is that build's. A row that build moved
+    to running and whose workflow then closed is failed too (review #1066 (5) 2.1)."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        orphan, draining, ancient, fresh = (_legacy(projection) for _ in range(4))
+        orphan, draining, ancient, fresh, stalled = (_legacy(projection) for _ in range(5))
         with psycopg.connect(projection.conninfo) as conn:
             conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (ancient.id,))
-        _aged(projection, orphan.id, draining.id, ancient.id)
+            conn.execute("UPDATE render_jobs SET state = 'running' WHERE id = %s", (stalled.id,))
+        _aged(projection, orphan.id, draining.id, ancient.id, stalled.id)
         # The old build's execution of `draining`: no worker here, so it stays running.
         await client.start_workflow(
             "TemplatePipeline", id=workflow_id_for(draining.id), task_queue=queue
@@ -922,10 +1236,15 @@ async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
             await client.get_workflow_handle(workflow_id_for(draining.id)).terminate()
         await service.aclose()
 
-    assert sorted(failed) == sorted([orphan.id, ancient.id])
+    assert sorted(failed) == sorted([orphan.id, ancient.id, stalled.id])
+    # Counted, so an operator can alert on it (review #1066 (9) 5).
+    assert _settle_failed(service.metrics, "legacy") == 3
+    assert _failed_jobs(service.metrics) == 3
     for job_id in (orphan.id, ancient.id):
         stored = await asyncio.to_thread(projection.read, job_id)
         assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    stored = await asyncio.to_thread(projection.read, stalled.id)
+    assert (stored.state, stored.error) == ("failed", CLOSED_ERROR)
     for job_id in (draining.id, fresh.id):
         assert (await asyncio.to_thread(projection.read, job_id)).state == "pending"
 
@@ -982,6 +1301,11 @@ async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_clos
         async with _worker(client, queue, acts):
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, params)
+            # The 1 s deadline can lapse before a loaded worker runs the first
+            # `render_accept`; wait for that attempt rather than racing it.
+            async with asyncio.timeout(60):
+                while acts.accepts < 1:
+                    await asyncio.sleep(0.1)
             waiting = await asyncio.to_thread(projection.read, old.id)
             tries = acts.accepts
             await legacy.terminate()
@@ -1021,6 +1345,8 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
                 await client.get_workflow_handle(
                     job.workflow_id, run_id=job.workflow_run_id
                 ).terminate()
+                # Past the grace a run's listing in Visibility may trail its start by.
+                _aged(projection, job.id)
                 closed = await _settled(projection, job.id, timeout=10)
                 orphan = await _settled(projection, late.id, timeout=10)
                 held.set()
@@ -1030,6 +1356,56 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
     assert running.state == "pending"
     assert (closed.state, closed.error) == ("failed", CLOSED_ERROR)
     assert (orphan.state, orphan.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+
+
+async def test_a_settle_pass_asks_only_about_rows_whose_run_is_not_open(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One Visibility listing of the open runs, then a describe only for a row whose run
+    it does not list: an open run's row costs no call of its own (review #1066 (9) 4)."""
+    described: list[str] = []
+
+    async def spy(client: Client, job: Job, **kwargs: Any) -> bool:
+        described.append(job.id)
+        return await run_closed(client, job, **kwargs)
+
+    monkeypatch.setattr(submit_module, "run_closed", spy)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        held = asyncio.Event()
+        async with _worker(client, queue, ProjectingActivities(deps, hold_running=held)):
+            job = await service.submit(SLUG, {"width": _w()})
+            _aged(projection, job.id)
+            assert job.workflow_id is not None
+            handle = client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
+            # Until Visibility lists the run: it may trail the start.
+            async with asyncio.timeout(30):
+                while not [
+                    execution
+                    async for execution in client.list_workflows(
+                        f"WorkflowId = '{job.workflow_id}' AND ExecutionStatus = 'Running'"
+                    )
+                ]:
+                    await asyncio.sleep(0.1)
+            open_pass = await service.settle_closed()
+            asked = list(described)
+            await handle.terminate()
+            async with asyncio.timeout(30):
+                while not await service.settle_closed():
+                    await asyncio.sleep(0.1)
+            held.set()
+        await service.aclose()
+
+    assert open_pass == [] and asked == []
+    assert described[-1] == job.id
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert (stored.state, stored.error) == ("failed", CLOSED_ERROR)
+    assert _settle_failed(service.metrics, "closed") == 1
+    assert _failed_jobs(service.metrics) == 1
 
 
 class _SlowFirstClaim(ProjectingActivities):
@@ -1100,17 +1476,6 @@ async def test_a_release_while_an_input_problems_failure_waits_to_be_written_can
     assert answer.cancelled is not None and answer.cancelled.id == job.id
 
 
-def _namespace_not_found() -> RPCError:
-    status = GrpcStatus(
-        code=RPCStatusCode.NOT_FOUND,
-        message="Namespace nope is not found.",
-        details=[
-            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
-        ],
-    )
-    return RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())
-
-
 async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
     make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1120,7 +1485,7 @@ async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
 
     async def refusing(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        raise _namespace_not_found()
+        raise namespace_not_found()
 
     monkeypatch.setattr(submit_module, "start_command", refusing)
     async with temporal_client() as client:
@@ -1130,6 +1495,37 @@ async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
         await service.aclose()
 
     assert len(calls) == 1
+
+
+class _Refusing:
+    """A client whose every Update and cancel raises ``error``."""
+
+    def __init__(self, error: RPCError) -> None:
+        self.error = error
+
+    def get_workflow_handle(self, *_: object, **__: object) -> _Refusing:
+        return self
+
+    async def execute_update(self, *_: object, **__: object) -> None:
+        raise self.error
+
+
+async def test_a_release_to_a_missing_namespace_is_not_taken_for_a_closed_run(
+    make_service: ServiceFactory,
+) -> None:
+    """Its NOT_FOUND is configuration: the release fails (a warning in the supersede),
+    never "closed, nothing to release" (review #1066 (7) 2)."""
+    service = make_service(_Refusing(namespace_not_found()), "unused")
+    job = Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        created_at=now(),
+        workflow_id="render-x",
+        workflow_run_id="run-1",
+    )
+    with pytest.raises(TemporalUnavailableError):
+        await service._release(job, None)
+    await service.aclose()
 
 
 # ── inputs Temporal can never take (final review I2) ────────────────────────────
@@ -1293,3 +1689,104 @@ async def test_with_no_valid_span_rows_carry_no_traceparent(
     assert submit_span.parent is None
     assert stored is not None
     assert stored.split("-")[1] == f"{submit_span.context.trace_id:032x}"
+
+
+def _unsettled_and_stale(projection: JobProjection) -> None:
+    """An aged row of a ``render-<render_key>`` run and an aged legacy row: each pass
+    asks Temporal about one."""
+    unsettled, stale = _legacy(projection), _legacy(projection)
+    with psycopg.connect(projection.conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_run_id = %s WHERE id = %s",
+            (uuid.uuid4().hex, unsettled.id),
+        )
+    _aged(projection, unsettled.id, stale.id)
+
+
+async def test_start_does_not_wait_for_the_settle_pass_while_temporal_is_unreachable(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """The lazy client's first connect retries for minutes: the boot pass runs in the
+    background, so the lifespan finishes at once (review #1066 1.1, 6.1)."""
+    # Here, not at the top: the workflow sandbox re-imports this module.
+    from scadbuddy.workflows.client import connect_lazily
+
+    _unsettled_and_stale(projection)
+    service = make_service(connect_lazily("127.0.0.1:1", "default"), "unused")
+    began = time.monotonic()
+    try:
+        async with asyncio.timeout(10):
+            await service.start()
+    finally:
+        await service.aclose()
+    assert time.monotonic() - began < 10
+
+
+async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """Each describe is bounded, and the pass stops at the first that Temporal does not
+    answer: the rows wait for the next pass (review #1066 1.1)."""
+    from scadbuddy.workflows.client import connect_lazily
+
+    _unsettled_and_stale(projection)
+    service = make_service(connect_lazily("127.0.0.1:1", "default"), "unused")
+    began = time.monotonic()
+    async with asyncio.timeout(60):
+        await service.settle()
+    assert time.monotonic() - began < 30
+    assert all(job.state == "pending" for job in await asyncio.to_thread(projection.list_jobs))
+    for settle_pass in ("closed", "legacy"):
+        assert _settle_errors(service.metrics, settle_pass) == 1
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        TemporalUnavailableError("render-x"),
+        RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""),
+    ],
+)
+async def test_a_render_start_that_fails_counts_as_a_start_workflow_error(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, refusal: Exception
+) -> None:
+    """Every refused start is counted, not only logged (review #1066 4.1)."""
+
+    async def refusing(*_: object, **__: Any) -> RenderAnswer:
+        raise refusal
+
+    monkeypatch.setattr(submit_module, "start_command", refusing)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(type(refusal)):
+            await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    errors = service.metrics.registry.get_sample_value(
+        "scadbuddy_render_store_errors_total", {"operation": "start_workflow"}
+    )
+    assert errors == 1
+
+
+@pytest.mark.parametrize(
+    "pending", [CommandStillAcceptingError("render-x"), CommandClosedError("render-x")]
+)
+async def test_a_start_still_accepting_counts_as_pending_not_as_an_error(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, pending: Exception
+) -> None:
+    """The client sends the same request again: nothing failed, so the start_workflow
+    errors stay an alert on Temporal itself (review #1066 (5) 3.1)."""
+
+    async def accepting(*_: object, **__: Any) -> RenderAnswer:
+        raise pending
+
+    monkeypatch.setattr(submit_module, "start_command", accepting)
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(type(pending)):
+            await service.submit(SLUG, {"width": _w()})
+        await service.aclose()
+
+    sample = service.metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_store_errors_total", {"operation": "start_workflow"}) == 0
+    assert sample("scadbuddy_render_accept_pending_total") == 1

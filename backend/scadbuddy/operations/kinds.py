@@ -28,6 +28,11 @@ class OperationKind:
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     run_attempts: int = 1
 
+    def __post_init__(self) -> None:
+        # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
+        if self.run_attempts < 1:
+            raise ValueError(f"{self.name!r}: run_attempts must be at least 1")
+
 
 #: Set by the check activity; true while its check waits on Bambuddy, and left true when
 #: that wait is cut short, so a check out of time blames the right service.

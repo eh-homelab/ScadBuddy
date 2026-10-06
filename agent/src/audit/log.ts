@@ -317,12 +317,13 @@ export class AuditLog implements AuditRepo {
     if (filter.before) add((n) => `id < $${n}::bigint`, filter.before)
     const limit = Math.min(Math.max(filter.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
     params.push(limit + 1)
+    // ORDER BY names ai_audit.id: a bare `id` is the text output column, which sorts "99" above "1000" (#893).
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT id::text AS id, at, kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id, approved_by_kind,
               approved_by_id, approved_by_label, outcome, detail, started_at, finished_at, duration_ms
        FROM ai_audit ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY id DESC LIMIT $${params.length}`,
+       ORDER BY ai_audit.id DESC LIMIT $${params.length}`,
       params,
     )
     const page = rows.slice(0, limit).map(view)

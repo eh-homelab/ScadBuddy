@@ -34,6 +34,23 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 /** Long-running tools report here; a no-op when the caller sent no progress token. */
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
+/** How a browser_* call's wait for its tab ended (ToolServices `waitForTab`). */
+export type TabWait =
+  /** `why`: the hub saw the session's tab again, or the user said they are back (the tab may still not be here). */
+  | { back: true; why: 'reconnected' | 'user_back' }
+  | { back: false; message: string }
+/**
+ * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
+ * `isBack`: whether the call's tab is connected now, checked once the wait is
+ * recorded, so a tab that came back in between is not waited for.
+ */
+export type WaitForTab = (request: {
+  tool: string
+  toolUseId: string | undefined
+  signal: AbortSignal
+  isBack: () => Promise<boolean>
+}) => Promise<TabWait>
+
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
@@ -47,14 +64,8 @@ export type ToolServices = {
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
   renderWaitMs: number
-  /**
-   * How long a command follows an operation's 202 (tools/command.ts, review #1063), as the
-   * browser's `printRunPoll.operationFollowMs` does. It must exceed the longest run,
-   * `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend `workflows/operation.py`) with
-   * 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s, `main.py`) for the reconciler
-   * to end a lost one: 1203 s.
-   */
-  operationFollowMs: number
+  /** How long a command follows a 202 (tools/command.ts); `COMMAND_FOLLOW_MS` when unset. */
+  commandFollowMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
@@ -65,6 +76,12 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
+  /**
+   * #815 §2: parks a browser_* call that found no tab until the session's tab is
+   * back, the user replies, or the wait times out. Only a turn of a session the
+   * browser user owns has one (sessions/manager.ts); without it the call fails at once.
+   */
+  waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
 }
@@ -73,6 +90,8 @@ export type ToolContext = ToolServices & {
   principal: Principal
   /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
   session?: string | undefined
+  /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */
+  toolUseId?: string | undefined
   progress: Progress
   signal: AbortSignal
   /** The projection's own tools by name, so `confirm_action` can run the approved one. */
