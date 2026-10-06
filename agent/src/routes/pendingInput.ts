@@ -161,8 +161,9 @@ export class RespondError extends Error {
 }
 
 /** How a question that is no longer pending ended, as a clause. */
-function endedReason(entry: { outcome: 'answered' | 'cancelled' | 'timed_out' | null; reason: string | null }): string {
+function endedReason(entry: { outcome: 'answered' | 'cancelled' | 'timed_out' | 'reconnected' | null; reason: string | null }): string {
   if (entry.outcome === 'answered') return 'it was already answered'
+  if (entry.outcome === 'reconnected') return entry.reason ?? 'the ScadBuddy tab is connected again'
   return entry.reason ?? (entry.outcome === 'timed_out' ? 'nobody replied in time' : 'it was cancelled')
 }
 
