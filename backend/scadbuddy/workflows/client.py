@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from datetime import timedelta
+from typing import Any
 
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
     DescribeWorkerDeploymentRequest,
     SetWorkerDeploymentCurrentVersionRequest,
 )
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import VersioningBehavior
 from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
+from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.printing import PrintRunWorkflow
+from scadbuddy.workflows.problems import OPERATION_LOST
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -81,6 +89,36 @@ def render_worker(
     )
 
 
+def bambuddy_worker(
+    client: Client,
+    task_queue: str,
+    activities: Sequence[Callable[..., Any]],
+    *,
+    graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+) -> Worker:
+    """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun`` and
+    ``Operation``. Unversioned: a change to either that alters its commands is made with
+    ``workflow.patched``, so a run started on the old code finishes on the new.
+    ``tests/test_print_replay.py`` replays committed ``PrintRun`` histories to hold that;
+    a new activity name also needs ``patched``, or an old replica takes its task and
+    fails it as unregistered.
+
+    A new workflow type, or activity names no ``patched`` can guard, cannot be rolled:
+    the release that adds them needs a ``Recreate`` rollout (or the old replicas scaled
+    to 0 first). #1053 is one: it adds ``Operation`` and its ``op_*`` and
+    ``op.<kind>.*`` activities (README, "Bambuddy writes on the ``bambuddy`` queue").
+    Rolled anyway, an unregistered workflow task only stalls, but an activity's failure
+    counts against its retry policy: an effect that runs once is recorded ``failed``
+    ("may have been done") without reaching Bambuddy, and a check can answer 500."""
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[PrintRunWorkflow, OperationWorkflow],
+        activities=activities,
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
+    )
+
+
 async def make_current(client: Client, *, namespace: str, build_id: str) -> None:
     """Make `build_id` the deployment's current version: a versioned worker takes new
     workflows only once its version is current."""
@@ -127,6 +165,7 @@ async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
 __all__ = [
     "DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
+    "bambuddy_worker",
     "connect",
     "drained",
     "is_current",
@@ -134,3 +173,55 @@ __all__ = [
     "pydantic_data_converter",
     "render_worker",
 ]
+
+
+#: A run younger than this is left alone: its execution may not have been described yet.
+LOST_RUN_GRACE = timedelta(minutes=1)
+
+
+async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool:
+    """Whether that run (or, with no run id, the workflow's latest) is running."""
+    try:
+        described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe()
+    except RPCError as error:
+        if error.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return described.status == WorkflowExecutionStatus.RUNNING
+
+
+async def reconcile_lost_runs(
+    client: Client, store: PrintRunStore, *, older_than: timedelta = LOST_RUN_GRACE
+) -> int:
+    """End each ``running`` print run whose execution has closed or is gone (review
+    #1061): terminated in the Temporal UI, it never runs ``print_fail``. One still
+    running is left to end its row itself, and so is one whose workflow still runs
+    under a later run id: a reset continues the same row there. Returns how many it
+    ended."""
+    ended = 0
+    for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
+        if await _running(client, workflow_id, workflow_run_id) or await _running(
+            client, workflow_id, None
+        ):
+            continue
+        if (await store.fail_lost(run_id)).status == "failed":
+            ended += 1
+    return ended
+
+
+async def reconcile_lost_operations(
+    client: Client, store: OperationStore, *, older_than: timedelta = LOST_RUN_GRACE
+) -> int:
+    """End each ``running`` operation whose execution has closed or is gone (review
+    #1063 1): terminated after ``op_insert``, or past a timeout, it never runs
+    ``op_finish``. The same rule as :func:`reconcile_lost_runs`. Returns how many it
+    ended."""
+    ended = 0
+    for op_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
+        if await _running(client, workflow_id, workflow_run_id) or await _running(
+            client, workflow_id, None
+        ):
+            continue
+        if (await store.finish(op_id, error=OPERATION_LOST)).status == "failed":
+            ended += 1
+    return ended

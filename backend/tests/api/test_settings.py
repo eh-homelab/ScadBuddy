@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import psycopg
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from google.protobuf.duration_pb2 import Duration
 from psycopg.types.json import Jsonb
+from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.workflows.client import connect, connect_lazily
 from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
@@ -24,6 +34,8 @@ DEFAULTS: dict[str, object] = {
     "printer_id": None,
     "default_plate": None,
     "display_unit": "mm",
+    "print_run_retention_seconds": None,
+    "operation_retention_seconds": None,
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
     "temporal_ui_url": None,
@@ -152,6 +164,88 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
     assert (
         client.put("/api/v1/settings", json={"display_unit": None}).json()["display_unit"] == "mm"
     )
+
+
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
+def test_a_retention_is_stored_and_a_clear_keeps_every_row(
+    client: TestClient, settings: Settings, field: str
+) -> None:
+    """#1052/#1053, spec 2026-10-01 §4.2, §5.4: empty keeps every row; a number prunes
+    older ones."""
+    saved = client.put("/api/v1/settings", json={field: 604800})
+    assert saved.json()[field] == 604800
+    assert read_stored(settings.database_url)[field] == 604800
+    cleared = client.put("/api/v1/settings", json={field: None})
+    assert cleared.json()[field] is None
+
+
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
+@pytest.mark.parametrize("value", [0, -1, 86, 86399])
+def test_a_retention_under_a_day_is_refused(client: TestClient, field: str, value: int) -> None:
+    """Review #1061 2a: under the repeat window, a pruned row turns a retry of a print
+    that succeeded into a second print."""
+    response = client.put("/api/v1/settings", json={field: value})
+    assert response.status_code == 422
+
+
+@pytest.fixture
+def three_day_namespace(app: FastAPI, temporal_address: str) -> Iterator[None]:
+    """The operations client on a namespace that keeps a closed execution 3 days."""
+    namespace = f"retention-{uuid.uuid4().hex[:12]}"
+
+    async def register() -> None:
+        temporal = await connect(temporal_address, "default")
+        await temporal.workflow_service.register_namespace(
+            RegisterNamespaceRequest(
+                namespace=namespace,
+                workflow_execution_retention_period=Duration(seconds=3 * 86400),
+            )
+        )
+
+    asyncio.run(register())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily(temporal_address, namespace))
+    )
+    yield
+    state.components.override(OPERATIONS, ops)
+
+
+@pytest.mark.usefixtures("three_day_namespace")
+def test_an_operation_retention_below_temporals_is_refused_beside_the_field(
+    client: TestClient, settings: Settings
+) -> None:
+    """Review #1063 r6 2: a record pruned before Temporal forgets the execution turns a
+    keyed retry of a recorded outcome into "may have been done"."""
+    refused = client.put("/api/v1/settings", json={"operation_retention_seconds": 2 * 86400})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "operation_retention_seconds"]
+    assert "3 days" in refused.json()["errors"][0]["msg"]
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    saved = client.put("/api/v1/settings", json={"operation_retention_seconds": 3 * 86400})
+    assert saved.status_code == 200, saved.text
+
+
+def test_an_operation_retention_is_refused_while_temporal_cannot_say(
+    client: TestClient, app: FastAPI, settings: Settings
+) -> None:
+    """Unchecked, it could be below Temporal's: refused, as a command is, until it answers."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
+    try:
+        response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+        # A field that does not depend on Temporal still saves.
+        other = client.put("/api/v1/settings", json={"printer_id": 3})
+    finally:
+        state.components.override(OPERATIONS, ops)
+    assert response.status_code == 503
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    assert other.status_code == 200
 
 
 def test_an_unknown_display_unit_is_refused(client: TestClient) -> None:

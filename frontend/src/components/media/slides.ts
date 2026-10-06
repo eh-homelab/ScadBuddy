@@ -11,6 +11,8 @@ export type Slide = {
   kind: 'image' | 'video'
   src: string
   poster?: string
+  /** A small copy of the image or poster, for a strip of thumbnails (#624). */
+  thumbnail?: string
   alt: string
   caption?: string
   /** The file's MIME type: a video's `<source type>` needs it. */
@@ -31,6 +33,7 @@ export function toSlides(slug: string, media: MediaView[]): Slide[] {
       kind: item.kind,
       src: api.mediaUrl(slug, item),
       poster: api.mediaPosterUrl(slug, item),
+      thumbnail: api.mediaThumbnailUrl(slug, item),
       alt: caption ?? `${kind} ${index + 1} of ${shown.length}`,
       caption,
       contentType: item.content_type,

@@ -231,10 +231,11 @@ export class PgEventListener implements EventSource {
     }
     let rows: Row[]
     try {
+      // ORDER BY names events.seq: a bare `seq` is the text output column, which sorts "9" above "10" (#893).
       rows = await this.#sql<Row[]>`
         SELECT seq::text AS seq, event_id, payload, logged_at, now() AS read_at FROM events
         WHERE seq > ${from.toString()}::bigint
-        ORDER BY seq DESC LIMIT ${this.#replayLimit + 1}`
+        ORDER BY events.seq DESC LIMIT ${this.#replayLimit + 1}`
     } catch (err) {
       this.#adopt(undefined)
       this.#resync(`the event log could not be read (${(err as Error).message})`)

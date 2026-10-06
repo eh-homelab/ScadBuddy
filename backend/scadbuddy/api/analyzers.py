@@ -59,12 +59,11 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.schema import ParamValue

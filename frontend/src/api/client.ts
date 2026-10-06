@@ -58,6 +58,8 @@ import type {
   PrintProgress,
   PrintCheck,
   PrintRun,
+  Operation,
+  OperationAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -90,7 +92,13 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
-import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
+import type {
+  AiConnectionTest,
+  AiCredentialCreate,
+  AiCredentialEntry,
+  AiCredentialList,
+  AiCredentialSave,
+} from './aiCredential'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -136,6 +144,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).body
+}
+
+/** `request`, keeping the status: a 202 from an operation's route is not its body. */
+async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -151,9 +164,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await readProblem(response))
   }
   if (response.status === 204) {
-    return undefined as T
+    return { status: 204, body: undefined as T }
   }
-  return (await response.json()) as T
+  return { status: response.status, body: (await response.json()) as T }
 }
 
 /**
@@ -179,6 +192,12 @@ export const UNANSWERED = 'urn:scadbuddy:unanswered'
 export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
+/**
+ * The `type` of the problem `command()` writes when it stops following an operation
+ * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
+ * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
+ */
+export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
 /**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
@@ -292,6 +311,8 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  // Its run may be checking still, and will print once it is accepted (#1052).
+  if (error.problem.type === STILL_ACCEPTING) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -313,17 +334,38 @@ function bambuddyUnanswered(problem: Problem): boolean {
 const seg = encodeURIComponent
 
 /**
- * How often `runPrint` reads a running print run (#470), and how many times it tries a
- * request no ScadBuddy answer described again before giving up; tests shorten it.
+ * How often `runPrint` reads a running print run (#470), how many times it tries a
+ * request no ScadBuddy answer described again before giving up, and how long it keeps
+ * sending one the server is still accepting (#1052: past the accept's own worst case,
+ * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+/**
+ * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
+ * execution is gone within minutes; this is the backstop, past any run's own length.
+ * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
+ * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
+ * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent does not follow
+ * that long: it follows for `COMMAND_FOLLOW_MS` (the backend's answer deadline plus a
+ * margin, agent/src/tools/command.ts), then hands back the running operation for
+ * `get_operation`.
+ */
+export const printRunPoll = {
+  intervalMs: 1000,
+  reattempts: 3,
+  acceptingMs: 240_000,
+  followMs: 3_600_000,
+  operationFollowMs: 1_260_000,
+}
 
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
- * later one back (#1086 review). Aborting only stops the browser waiting: the server has
- * no shorter bound on this write, so a save given up on can still commit after the next
- * one and leave the printer on the earlier choice (tracked in #1129).
+ * later one back (#1086 review). Aborting only stops the browser waiting, so the server
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): once
+ * a save reaches the store it commits or fails inside that bound. Time before it reaches
+ * the store is not bounded, so a save held up there can still land after the next one;
+ * ordering saves explicitly is #1216.
  */
 export const rackAlgorithmSave = { timeoutMs: 25_000 }
 
@@ -337,16 +379,18 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
+export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ * Or ScadBuddy answered that the same request is still being accepted.
  */
 function unanswered(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    caught.problem.type === UNANSWERED &&
-    [0, 502, 503, 504, 524].includes(caught.status)
-  )
+  if (!(caught instanceof ApiError)) return false
+  if (caught.problem.type === STILL_ACCEPTING) return true
+  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
@@ -374,14 +418,61 @@ async function reattach<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
-  for (let tries = 0; ; tries++) {
+  const began = Date.now()
+  for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
-      await wait(printRunPoll.intervalMs, signal)
+      if (signal?.aborted || !unanswered(caught)) throw caught
+      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+        throw caught
+      }
+      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
     }
   }
+}
+
+/**
+ * A Bambuddy write as an operation (#1053, spec 2026-10-01 §4.2): one `Idempotency-Key`
+ * per call, which a re-send after an answer that never arrived keeps, so the server
+ * answers it with the first outcome and does nothing twice. The route answers its own
+ * body, or 202 with an operation still running, followed here through
+ * `GET /operations/{id}` to that body, or to the problem the route would have answered.
+ */
+async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const signal = init.signal ?? undefined
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
+  if (first.status !== 202) return first.body as T
+  let op: Operation = first.body as OperationAccepted
+  const began = Date.now()
+  while (op.status === 'running') {
+    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+      throw new ApiError({
+        type: OPERATION_UNFINISHED,
+        title: 'Still running',
+        status: 504,
+        detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
+      })
+    }
+    await wait(printRunPoll.intervalMs, signal)
+    const id = op.id
+    op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
+  }
+  if (op.status === 'failed') {
+    const error = op.error
+    throw new ApiError({
+      ...error?.extensions,
+      type: error?.type,
+      title: error?.title ?? 'Failed',
+      status: error?.status ?? 500,
+      detail: error?.detail ?? 'The operation ended without a result.',
+    })
+  }
+  return (op.result ?? undefined) as T
 }
 
 /**
@@ -404,7 +495,18 @@ async function followPrintRun(
     signal,
     within,
   )
+  const began = Date.now()
   while (run.status === 'running') {
+    if (Date.now() - began >= printRunPoll.followMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:print-run-unfinished',
+        title: 'Still preparing',
+        status: 504,
+        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        // It may be queued by now: the dialog says to check before printing again.
+        may_have_queued: true,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = run.id
     run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
@@ -611,6 +713,15 @@ export const api = {
     item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
 
   /**
+   * #624 — a small copy of an image or of a video's poster, for a strip of
+   * thumbnails; undefined for a video with no poster, which has none.
+   */
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+    item.kind === 'video' && !item.poster
+      ? undefined
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+
+  /**
    * #274 — adds an image or video as the template's last item. XHR rather than
    * `fetch`, which reports no upload progress; a video runs to a gigabyte.
    * `onProgress` gets the fraction sent, 0 to 1.
@@ -800,11 +911,11 @@ export const api = {
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
-  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+  reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
   /** #311 — attaches a timelapse still on the printer to the print. */
   pullTimelapse: (archiveId: number, filename: string) =>
-    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+    command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
     }),
@@ -818,7 +929,7 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   sendOutput: (id: string, body: SendRequest) =>
-    request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
+    command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
   /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
   putThumbnail: (outputId: string, png: Blob) => {
@@ -944,7 +1055,7 @@ export const api = {
    * row — that makes Bambuddy's project page list the files.
    */
   createProject: (body: ProjectRequest) =>
-    request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+    command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #317 — the project both pickers open on; `null` is "No project". */
   rememberProject: (projectId: number | null) =>
@@ -958,7 +1069,7 @@ export const api = {
    * Idempotent: the same project again answers with the file already there.
    */
   fileIntoProject: (outputId: string, projectId: number) =>
-    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+    command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId }),
     }),
@@ -967,7 +1078,7 @@ export const api = {
    * sliced, and an archive only once a print has finished, so the ids come from the
    * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
-    request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
+    command<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1164,7 +1275,7 @@ export const api = {
     request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
 
   registerSidebar: () =>
-    request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+    command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
    * The AI agent's headless browser (#349), served by the agent service under
@@ -1237,14 +1348,14 @@ export const api = {
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
   /**
-   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
-   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
-   * parse is a real failure and rejects as it would anywhere.
+   * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
+   * four and status only. A non-JSON answer is the backend's SPA fallback (nothing routes
+   * `/api/v1/ai/*` to the agent), and rejects with a problem of type `AI_NOT_ROUTED`; a
+   * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
-  getAiCredential: async (): Promise<AiCredentialView> => {
-    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+  listAiCredentials: async (): Promise<AiCredentialList> => {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
       throw new ApiError({
@@ -1254,14 +1365,28 @@ export const api = {
         detail: 'The agent service did not answer at /api/v1/ai.',
       })
     }
-    return (await response.json()) as AiCredentialView
+    return (await response.json()) as AiCredentialList
   },
 
-  putAiCredential: (body: AiCredentialUpdate) =>
-    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+  /** Added last, so it is tried after every existing one. */
+  createAiCredential: (body: AiCredentialCreate) =>
+    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+  /** Every id exactly once, first tried first; a stale list answers 409. */
+  reorderAiCredentials: (ids: string[]) =>
+    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+
+  saveAiCredential: (id: string, body: AiCredentialSave) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: (id: string) =>
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+
+  /** Back to `active`, for one disabled or cooling down. */
+  resetAiCredential: (id: string) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
-  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
+  testAiCredential: (id: string) =>
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
 }

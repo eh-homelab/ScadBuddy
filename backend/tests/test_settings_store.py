@@ -10,16 +10,19 @@ one key inside the row's upsert.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg_pool import PoolTimeout
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
     STORE_READINESS_LOCK,
     ModelPrintChoices,
@@ -470,11 +473,157 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
         "least_used",
     )
 
-    store.set_printer_rack_algorithm(2, None)
+    assert store.set_printer_rack_algorithm(2, None) == "least_used"
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
     store.forget_remembered()
     assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_a_bounded_settings_read_gives_up_on_a_held_table(settings: Settings) -> None:
+    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
+    the bound is this read's own, so the next read on the same connection is not
+    bounded by it."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    try:
+        before = _connection_and_bound(store)
+        with psycopg.connect(settings.database_url) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=0.2)
+        after = _connection_and_bound(store)
+    finally:
+        store.close()
+    assert after == before
+
+
+def _connection_and_bound(store: SettingsStore) -> tuple[int, str]:
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT pg_backend_pid() AS pid, current_setting('statement_timeout') AS bound"
+        ).fetchone()
+    assert row is not None
+    return row["pid"], row["bound"]
+
+
+def test_a_settings_read_timeout_bounds_the_whole_read(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1111: the timeout is the read's whole budget, not each statement's: a read that
+    waits most of it on one table gets only the rest for the next."""
+    budget = 2.0
+    settings_holder = psycopg.connect(settings.database_url)
+    release = threading.Timer(0.6 * budget, settings_holder.commit)
+    try:
+        settings_holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+        with psycopg.connect(settings.database_url) as beds, beds.transaction():
+            beds.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+            release.start()
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=budget)
+            elapsed = time.monotonic() - started
+    finally:
+        release.cancel()
+        release.join()
+        settings_holder.close()
+    # The read waits 0.6 budgets on one table and the rest on the other: about one
+    # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
+    # unit would give up at once.
+    assert 0.9 * budget < elapsed < 1.45 * budget
+
+
+def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
+    store: SettingsStore,
+) -> None:
+    """#1111: the bound leaves an ordinary read alone."""
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
+    assert store.load(timeout=5) == store.load()
+
+
+def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the print dialog gives up on a save after 25 s and sends the next choice.
+    A save that is still waiting in Postgres must give up first, or it could commit
+    after the one that replaced it and leave the printer on the older choice."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
+        took = _timed_in_thread(save)
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+    assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+
+def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the pool wait is bounded too, not only the write."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store._pool.connection():
+            took = _timed_in_thread(save)
+    finally:
+        store.close()
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+    assert [type(exc) for exc in failed] == [PoolTimeout]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+
+def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129 review: a save that committed must not then stall on an unbounded read of
+    every setting, or the dialog gives up on a value that is stored."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    answered: list[str] = []
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+        took = _timed_in_thread(
+            lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
+        )
+    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+    assert answered == ["bambuddy"]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+
+#: The rack tests patch the bound to 0.2 s. A save that gave up in under half the
+#: real 5 s bound gave up on the patched one; one that ran past it is the regression
+#: this tells apart (a dropped ``SET LOCAL`` or pool timeout), with over ten times the
+#: patched bound to spare for a loaded runner.
+GAVE_UP_ON_THE_PATCHED_BOUND = settings_store.RACK_ALGORITHM_WRITE_TIMEOUT / 2
+
+
+def _timed_in_thread(call: Callable[[], object]) -> float:
+    """Run ``call`` in a thread, give it 5 s, and return how long it took."""
+    started = time.monotonic()
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    return time.monotonic() - started
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:

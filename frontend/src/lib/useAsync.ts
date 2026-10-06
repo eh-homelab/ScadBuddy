@@ -10,10 +10,15 @@ export interface AsyncState<T> {
    * Fetch again in the background: the current data stays until the answer lands.
    * With `accept`, the answer (if still the newest) is applied only when `accept`
    * returns true as it lands: a page holding unsaved edits decides there, and does
-   * whatever else it must (a "changed elsewhere" banner) instead.
+   * whatever else it must (a "changed elsewhere" banner) instead. `failed` is called
+   * when the read (if still the newest) fails; every caller merged into that read is.
    */
-  refresh: (accept?: (data: T) => boolean) => void
-  setData: (next: T) => void
+  refresh: (accept?: (data: T) => boolean, failed?: () => void) => void
+  /**
+   * Shows `next` in place of the data. With `supersede`, a background read already in flight
+   * for the same deps no longer replaces it (an action's own answer is newer than that read).
+   */
+  setData: (next: T, options?: { supersede?: boolean }) => void
 }
 
 interface Snapshot<T> {
@@ -71,15 +76,20 @@ export function useAsync<T>(
 
   const queued = useRef(false)
   const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
-  const refresh = useCallback((accept?: (data: T) => boolean) => {
-    // Signals that arrive together are read once, deciding by the latest `accept`.
+  const failing = useRef<(() => void)[]>([])
+  const refresh = useCallback((accept?: (data: T) => boolean, failed?: () => void) => {
+    // Signals that arrive together are read once, deciding by the latest `accept`; each
+    // caller's `failed` is kept, so none misses the failure of the read it was merged into.
     accepting.current = accept
+    if (failed) failing.current.push(failed)
     if (queued.current) return
     queued.current = true
     queueMicrotask(() => {
       queued.current = false
       const { load: current, key: at } = latest.current
       const decide = accepting.current
+      const fail = failing.current
+      failing.current = []
       const mine = ++sequence.current
       current().then(
         (data) => {
@@ -93,6 +103,7 @@ export function useAsync<T>(
           // A failed background read keeps what is on screen: the next change reads
           // again. Only a key with nothing to show yet shows the error.
           setSnapshot((s) => (s.key === at && s.data !== undefined ? s : { key: at, error }))
+          for (const f of fail) f()
         },
       )
     })
@@ -109,7 +120,15 @@ export function useAsync<T>(
   }, [topicList, refresh])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
-  const setData = useCallback((data: T) => setSnapshot((s) => ({ ...s, data, error: undefined })), [])
+  // The key the snapshot holds, so `supersede` never cancels another key's first load.
+  const held = useRef(snapshot.key)
+  useEffect(() => {
+    held.current = snapshot.key
+  })
+  const setData = useCallback((data: T, options?: { supersede?: boolean }) => {
+    if (options?.supersede && held.current === latest.current.key) ++sequence.current
+    setSnapshot((s) => ({ ...s, data, error: undefined }))
+  }, [])
 
   const settled = snapshot.key === key
   return {

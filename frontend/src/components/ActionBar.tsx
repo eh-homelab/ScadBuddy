@@ -17,7 +17,7 @@ import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
-import type { InputsExtra } from '../lib/inputs'
+import { sameJson, type InputsExtra } from '../lib/inputs'
 import { saveOutput } from '../lib/saveOutput'
 import { traceAction } from '../lib/traceAction'
 import { useDisplayUnit } from '../lib/units'
@@ -72,7 +72,8 @@ interface Props {
   fitProblems?: string[]
   /** #81 — the model of the printer the print picker has in view. */
   onPrinterModel: (model: string | null) => void
-  onGenerated: (output: Output) => void
+  /** With the UI state (`extra`) the output was saved with. */
+  onGenerated: (output: Output, extra: InputsExtra) => void
   onSent: (result: SendResult) => void
   /** A print sliced and queued from the print dialog (spec 2026-09-27). */
   onRan: (result: PrintRunResult) => void
@@ -133,16 +134,19 @@ export function ActionBar({
   }
 
   /** Best effort: the output is saved whether or not Bambuddy takes the file. */
-  async function fileIntoProject(created: Output) {
-    if (projectId === null) return
+  /** Files a new output in the remembered project; the file, or null when none was filed. */
+  async function fileIntoProject(created: Output): Promise<ProjectFile | null> {
+    if (projectId === null) return null
     const name = project?.name ?? `project ${projectId}`
     try {
       const file = await api.fileIntoProject(created.id, projectId)
       setFiled({ outputId: created.id, name, file })
+      return file
     } catch (cause) {
       setFileError(
         `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
       )
+      return null
     }
   }
 
@@ -163,7 +167,8 @@ export function ActionBar({
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
 
-  async function generate(): Promise<Output | null> {
+  /** The saved output, and the project file Generate filed it as (#931: the agent records both). */
+  async function generate(): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
     setGenerating(true)
     setError(null)
@@ -176,10 +181,10 @@ export function ActionBar({
         async (within, span) => {
           const created = await saveOutput({ slug, job, extra, capture, within })
           span.setAttribute('scadbuddy.output_id', created.id)
-          onGenerated(created)
+          onGenerated(created, extra)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
-          await within(() => fileIntoProject(created))
-          return created
+          const filed = await within(() => fileIntoProject(created))
+          return { output: created, filed, extra }
         },
       )
     } catch (cause) {
@@ -196,6 +201,7 @@ export function ActionBar({
     generating,
     creatingProject,
     output,
+    extra,
     sendOpen,
     printOpen,
   })
@@ -212,10 +218,18 @@ export function ActionBar({
         throw new AgentToolError('invalid_args', 'A project is still being created; wait for it first.')
       }
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
-      const created = await generate()
-      if (!created) return null
-      await committed(() => live.current.output?.id === created.id, 'the saved output')
-      return { output: { id: created.id, name: created.name ?? null } }
+      const generated = await generate()
+      if (!generated) return null
+      const { output: created, filed, extra: savedExtra } = generated
+      // Shown, or already left behind by a UI-state change made while it saved (#848).
+      await committed(
+        () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
+        'the saved output',
+      )
+      return {
+        output: { id: created.id, name: created.name ?? null, slug: created.slug },
+        filed: filed && { project_id: filed.project_id, library_file_id: filed.library_file_id, created: filed.created },
+      }
     },
     open_print_dialog: async ({ kind }) => {
       if (!live.current.output) {
