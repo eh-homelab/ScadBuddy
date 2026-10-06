@@ -124,9 +124,10 @@ describe('LibraryPage', () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-7001')
     const caption = card.querySelector(`p[title="${filename}"]`)
-    const [head, tail] = Array.from(caption?.querySelectorAll('span') ?? [])
-    expect(head.textContent + tail.textContent).toBe(filename)
-    expect(tail.textContent).toBe('ong_tail.3mf')
+    const parts = Array.from(caption?.querySelectorAll('span') ?? [], (span) => span.textContent)
+    expect(parts.join('')).toBe(filename)
+    expect(parts).toHaveLength(2)
+    expect(parts[1]).toBe('ong_tail.3mf')
   })
 
   it('says when the library cannot be read', async () => {
