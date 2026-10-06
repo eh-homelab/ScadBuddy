@@ -37,9 +37,11 @@ describe('answerBody', () => {
 })
 
 describe('RespondError.settled', () => {
-  it('is true only for an entry already resolved (409) or expired (410)', () => {
+  it('is true only for an entry stale (404), no longer pending (409) or expired (410)', () => {
     expect(new RespondError('x', 409).settled).toBe(true)
     expect(new RespondError('x', 410).settled).toBe(true)
+    expect(new RespondError('x', 404, undefined, true).settled).toBe(true)
+    // A 404 the agent did not mark stale (a proxy, an older replica) leaves the card answerable.
     expect(new RespondError('x', 404).settled).toBe(false)
     expect(new RespondError('x', 400).settled).toBe(false)
     expect(new RespondError('x').settled).toBe(false)
@@ -57,7 +59,15 @@ describe('respond', () => {
     server.use(http.post(route, () => HttpResponse.json({ detail: 'no longer waiting' }, { status: 409 })))
     const err = await respond(id, { kind: 'answer', text: 'hi' }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(RespondError)
-    expect(err).toMatchObject({ message: 'no longer waiting', status: 409, settled: true })
+    expect(err).toMatchObject({ message: 'no longer waiting', status: 409, settled: true, reason: undefined })
+
+    server.use(http.post(route, () => HttpResponse.json({ detail: 'no longer waiting', reason: 'the turn ended' }, { status: 409 })))
+    expect(await respond(id, { kind: 'answer', text: 'hi' }).catch((e: unknown) => e)).toMatchObject({ status: 409, reason: 'the turn ended' })
+
+    server.use(http.post(route, () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })))
+    expect(await respond(id, { kind: 'answer', text: 'hi' }).catch((e: unknown) => e)).toMatchObject({ status: 404, settled: false })
+    server.use(http.post(route, () => HttpResponse.json({ detail: 'no pending input', stale: true }, { status: 404 })))
+    expect(await respond(id, { kind: 'answer', text: 'hi' }).catch((e: unknown) => e)).toMatchObject({ status: 404, settled: true })
   })
 
   it('is not settled when the agent cannot be reached', async () => {

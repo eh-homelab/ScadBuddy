@@ -75,8 +75,18 @@ export type PendingInputRouteDeps = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
-export async function pendingInput(sessions: SessionManager): Promise<PendingInputEntry[]> {
-  const [approvals, answers] = await Promise.all([sessions.approvals.list(BROWSER_USER, { pending: true }), sessions.questions.listPending()])
+/**
+ * The response body. `summaries_truncated`: more undismissed `done` summaries
+ * are pending than are listed (questions/service.ts PENDING_CAP), so a count
+ * of them is a lower bound.
+ */
+export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncated: boolean }
+
+export async function pendingInput(sessions: SessionManager): Promise<PendingInputPage> {
+  const [approvals, { questions: answers, summariesTruncated }] = await Promise.all([
+    sessions.approvals.list(BROWSER_USER, { pending: true }),
+    sessions.questions.listPending(),
+  ])
   const entries: PendingInputEntry[] = [
     ...approvals.map((a) => ({
       id: `approval:${a.id}`,
@@ -114,7 +124,7 @@ export async function pendingInput(sessions: SessionManager): Promise<PendingInp
         : {}),
     })),
   ]
-  return entries.sort((a, b) => a.created_at.localeCompare(b.created_at))
+  return { entries: entries.sort((a, b) => a.created_at.localeCompare(b.created_at)), summaries_truncated: summariesTruncated }
 }
 
 /**
@@ -154,14 +164,27 @@ export type RespondBody = z.infer<typeof RespondBody>
 
 export type RespondResult = { id: string; kind: PendingInputEntry['kind']; outcome: 'approved' | 'denied' | 'answered' }
 
-/** A refused respond, with the HTTP status the route answers. */
+/**
+ * A refused respond, with the HTTP status the route answers. A 409's `reason` says
+ * how the entry ended, as a clause the panel shows ("it was already answered"), so it
+ * never has to guess one (#1400).
+ */
 export class RespondError extends Error {
   override name = 'RespondError'
   readonly status: 400 | 403 | 404 | 409 | 410
-  constructor(status: 400 | 403 | 404 | 409 | 410, message: string) {
+  readonly reason: string | undefined
+  constructor(status: 400 | 403 | 404 | 409 | 410, message: string, reason?: string) {
     super(message)
     this.status = status
+    this.reason = reason
   }
+}
+
+/** How a question that is no longer pending ended, as a clause. */
+function endedReason(entry: { outcome: 'answered' | 'cancelled' | 'timed_out' | 'reconnected' | null; reason: string | null }): string {
+  if (entry.outcome === 'answered') return 'it was already answered'
+  if (entry.outcome === 'reconnected') return entry.reason ?? 'the ScadBuddy tab is connected again'
+  return entry.reason ?? (entry.outcome === 'timed_out' ? 'nobody replied in time' : 'it was cancelled')
 }
 
 const QUESTION_STATUS = { not_found: 404, forbidden: 403, conflict: 409, invalid: 400 } as const
@@ -197,7 +220,7 @@ export async function respond(
       })
       return { id: requestId, kind: 'approval', outcome: decided.decision === 'approved' ? 'approved' : 'denied' }
     } catch (err) {
-      if (err instanceof ApprovalError) throw new RespondError(err.status, err.message)
+      if (err instanceof ApprovalError) throw new RespondError(err.status, err.message, err.reason)
       throw err
     }
   }
@@ -207,7 +230,8 @@ export async function respond(
   if (body.kind !== 'answer') {
     throw new RespondError(400, `${requestId} asks for an answer: respond with {"kind": "answer", …}`)
   }
-  if (!entry.pending) throw new RespondError(409, `${requestId} is no longer waiting for an answer`)
+  const ended = (now: NonNullable<typeof entry>) => new RespondError(409, `${requestId} is no longer waiting for an answer`, endedReason(now))
+  if (!entry.pending) throw ended(entry)
   let answers: string[]
   if (entry.kind === 'attention') {
     if (body.answers !== undefined || (body.choice === undefined) === (body.text === undefined)) {
@@ -245,6 +269,12 @@ export async function respond(
       { clientIp: where.clientIp },
     )
   } catch (err) {
+    if (err instanceof QuestionError && err.code === 'conflict') {
+      // It ended between the read above and the answer: say how.
+      // A failed re-read must not turn the 409 into a 500: fall through without a reason.
+      const now = await sessions.questions.entry(rowId).catch(() => undefined)
+      if (now && !now.pending) throw ended(now)
+    }
     if (err instanceof QuestionError) throw new RespondError(QUESTION_STATUS[err.code], err.message)
     throw err
   }
@@ -257,7 +287,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
-    return c.json({ entries: await pendingInput(deps.sessions) })
+    return c.json(await pendingInput(deps.sessions))
   })
 
   // Anything over the cap is 413 unread.
@@ -281,7 +311,14 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     try {
       return c.json(await respond(deps.sessions, BROWSER_USER, c.req.param('id'), body, { clientIp: deps.remoteAddress(c) }))
     } catch (err) {
-      if (err instanceof RespondError) return c.json({ detail: err.message }, err.status)
+      if (err instanceof RespondError) {
+        // `stale` marks the agent's own 404, so the panel can tell it from one a proxy or
+        // an older replica without this route answers: only this one closes the card.
+        return c.json(
+          { detail: err.message, ...(err.reason === undefined ? {} : { reason: err.reason }), ...(err.status === 404 ? { stale: true } : {}) },
+          err.status,
+        )
+      }
       throw err
     }
   })

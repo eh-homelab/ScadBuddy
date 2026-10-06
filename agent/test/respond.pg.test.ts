@@ -104,7 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
 
   async function ids_(m: SessionManager) {
     const [approval] = await m.approvals.list(browser, { pending: true })
-    const questions = await m.questions.listPending()
+    const { questions } = await m.questions.listPending()
     return {
       approval: `approval:${approval!.id}`,
       inputHash: approval!.inputHash,
@@ -136,10 +136,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     ])
     expect(approved).toEqual([true])
 
-    // Nothing is pending any more: a second response to each is refused.
-    expect((await post(ids.attention, { kind: 'answer', text: 'again' })).status).toBe(409)
+    // Nothing is pending any more: a second response to each is refused, saying how it ended (#1400).
+    const again = await post(ids.attention, { kind: 'answer', text: 'again' })
+    expect(again.status).toBe(409)
+    expect(await again.json()).toMatchObject({ reason: 'it was already answered' })
     expect((await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': 'Lid' } })).status).toBe(409)
-    expect((await post(ids.approval, { kind: 'approval', decision: 'deny' })).status).toBe(409)
+    const decided = await post(ids.approval, { kind: 'approval', decision: 'deny' })
+    expect(decided.status).toBe(409)
+    expect(await decided.json()).toMatchObject({ reason: 'it was already approved' })
+    // Approved, then withdrawn unused: it no longer stands, so it must not read "already approved".
+    await db.sql`UPDATE ai_approvals SET consumed_at = NULL, revoked_at = now(), reason = 'the turn ended' WHERE id = ${ids.approval.slice('approval:'.length)}`
+    const revoked = await post(ids.approval, { kind: 'approval', decision: 'deny' })
+    expect(await revoked.json()).toMatchObject({ reason: 'it was approved, then withdrawn (the turn ended)' })
+  })
+
+  it("says a cancelled or timed-out entry's own reason in its 409, not that it was answered (#1400)", async () => {
+    const { m, ids, post, session, turn } = await setUp()
+    await m.interrupt(session.id, browser)
+    await turn.done
+    const [row] = await db.sql<{ reason: string }[]>`SELECT reason FROM ai_questions WHERE id = ${ids.question.slice('question:'.length)}`
+    const cancelled = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': 'Lid' } })
+    expect(cancelled.status).toBe(409)
+    expect(await cancelled.json()).toMatchObject({ reason: row!.reason })
+    expect(row!.reason).not.toMatch(/answered/)
+    // An approval cancelled with the turn says the row's reason too, not a generic one.
+    const [approvalRow] = await db.sql<{ decision: string; reason: string | null }[]>`
+      SELECT decision, reason FROM ai_approvals WHERE id = ${ids.approval.slice('approval:'.length)}`
+    expect(approvalRow).toMatchObject({ decision: 'cancelled', reason: expect.any(String) })
+    const cancelledApproval = await post(ids.approval, { kind: 'approval', decision: 'approve' })
+    expect(cancelledApproval.status).toBe(409)
+    expect(await cancelledApproval.json()).toMatchObject({ reason: approvalRow!.reason })
+
+    // A timed-out one says so (the row is rewritten once nothing is parked on it).
+    await db.sql`UPDATE ai_questions SET outcome = 'timed_out', reason = 'nobody replied in time (on_timeout: proceed)'
+                 WHERE id = ${ids.attention.slice('question:'.length)}`
+    const timedOut = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
+    expect(timedOut.status).toBe(409)
+    expect(await timedOut.json()).toMatchObject({ reason: 'nobody replied in time (on_timeout: proceed)' })
   })
 
   it("refuses a response that is not the entry's kind, or does not fit it, and leaves the entry pending", async () => {
@@ -174,7 +207,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.approval, 'not json')).status).toBe(400)
     expect((await post(ids.approval, { kind: 'approval', decision: 'approve', input_hash: '0'.repeat(64) })).status).toBe(409)
 
-    expect((await m.questions.listPending()).length).toBe(2)
+    expect((await m.questions.listPending()).questions.length).toBe(2)
     expect((await m.approvals.list(browser, { pending: true })).length).toBe(1)
     await m.interrupt(session.id, browser)
     await turn.done
@@ -183,7 +216,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
   it('refuses a stale or unknown id, a request not from the UI, a non-JSON body and an oversized one', async () => {
     const { m, ids, post, session, turn } = await setUp()
 
-    expect((await post('question:00000000-0000-4000-8000-000000000000', { kind: 'answer', text: 'hi' })).status).toBe(404)
+    const unknown = await post('question:00000000-0000-4000-8000-000000000000', { kind: 'answer', text: 'hi' })
+    expect(unknown.status).toBe(404)
+    // Marked as the agent's own, so the panel closes the card on it and on nothing else.
+    expect(await unknown.json()).toMatchObject({ stale: true })
     expect((await post('approval:00000000-0000-4000-8000-000000000000', { kind: 'approval', decision: 'deny' })).status).toBe(404)
     expect((await post('question:not-a-uuid', { kind: 'answer', text: 'hi' })).status).toBe(404)
     expect((await post(`durable:${session.id}:run:toolu_a`, { kind: 'answer', text: 'hi' })).status).toBe(404)
@@ -197,7 +233,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const padded = (n: number) => `{"kind":"answer","text":"hi"}`.padEnd(n, ' ')
     expect((await post(ids.attention, padded(RESPONSE_MAX + 1))).status).toBe(413)
 
-    expect((await m.questions.listPending()).length).toBe(2)
+    expect((await m.questions.listPending()).questions.length).toBe(2)
     expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
     await turn.done
@@ -234,7 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const dismissed = await post(id, { kind: 'answer', choice: 'Dismiss' })
     expect(dismissed.status).toBe(200)
     expect(await dismissed.json()).toEqual({ id, kind: 'answer', outcome: 'answered' })
-    expect(await m.questions.listPending()).toEqual([])
+    expect((await m.questions.listPending()).questions).toEqual([])
     expect((await post(id, { kind: 'answer', choice: 'Dismiss' })).status).toBe(409)
   })
 

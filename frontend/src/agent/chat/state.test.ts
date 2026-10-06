@@ -105,6 +105,7 @@ describe('chatReducer', () => {
     // A resolve frame that does arrive still says how it really ended.
     const late = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: you })], closed)
     expect(late.sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
     // The route's own 2xx resolves the card without the socket.
     expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
     // A failure that lands after the server resolved it changes nothing on the card.
@@ -212,6 +213,22 @@ describe('chatReducer', () => {
       waiting,
     )
     expect(back.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reconnected: true })
+
+    // A closed card's reason is not a later resolve frame's: one without a reason
+    // must not read "No reply: <the refusal's reason>" (#1401).
+    const closed = run(
+      [
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'x', closed: 'it is no longer waiting for a response' },
+      ],
+      waiting,
+    )
+    expect(closed.sessions.s1?.items[0]).toMatchObject({ state: 'closed', reason: 'it is no longer waiting for a response' })
+    const reasonless = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false })], closed)
+    expect(reasonless.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled' })
+    expect(reasonless.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    const late = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ["I'm here"] })], closed)
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {
