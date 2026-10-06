@@ -233,6 +233,22 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((results.at(-1) as { costUsd: number }).costUsd).toBeCloseTo(0.4 + CUT, 10)
     })
 
+    it('counts each of two stops in a row once, whatever the float rounding of the totals', async () => {
+      // claude-opus-5, 40k input at $5/MTok: exactly $0.20. Stored as 0.1 +
+      // 0.2 = 0.30000000000000004, from which 0.2 does not take back 0.1.
+      const cut = { stall: { model: 'claude-opus-5', usage: { input_tokens: 40_000 } }, resultCostUsd: 0.1 }
+      next = { reply: 'done', costUsd: 0.1 }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = cut
+      await stopMidReply(session.id, 'write a long essay')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.3, 10)
+      // The second stop's result restores the same $0.10 the transcript holds.
+      next = cut
+      await stopMidReply(session.id, 'and another')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.5, 10)
+    })
+
     it('counts a first turn stopped before anything else was spent', async () => {
       const { session } = await m.start(browser, { origin: 'chat' })
       next = { stall, resultCostUsd: 0 }

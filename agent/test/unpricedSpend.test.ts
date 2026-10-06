@@ -19,6 +19,7 @@ describe('priceOf', () => {
     ['claude-opus-5-5', 4, 20],
     ['claude-opus-5', 5, 25],
     ['claude-opus-4-1', 15, 75],
+    ['claude-3-opus-latest', 15, 75],
     ['claude-opus-4-6[1m]', 5, 25],
     ['anthropic.claude-haiku-4-5', 1, 5],
     ['claude-fable-5-1', 10, 50],

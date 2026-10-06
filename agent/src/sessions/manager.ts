@@ -399,6 +399,9 @@ export type SessionRecord = {
  */
 type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
 
+/** USD: how far below `cost_usd - unpriced_cost_usd` a resumed total may read and still be the restored one (#991). */
+const RESTORED_EPSILON = 1e-9
+
 const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
@@ -1565,8 +1568,12 @@ export class SessionManager {
     // only what Claude Code priced: not the session's unpriced spend (#991),
     // which is added back. If the restore ever fails the total comes back
     // smaller than what it should have carried, and it is added instead.
+    // `priced` is taken back out of a float sum, so it can come out an ulp or
+    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1); a
+    // failed restore is short by a whole turn's spend, far more than RESTORED_EPSILON.
     const priced = session.costUsd - session.unpricedCostUsd
-    const spent = (total: number) => (total >= priced ? total + session.unpricedCostUsd : session.costUsd + total)
+    const spent = (total: number) =>
+      total >= priced - RESTORED_EPSILON ? total + session.unpricedCostUsd : session.costUsd + total
     let costUsd = session.costUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when

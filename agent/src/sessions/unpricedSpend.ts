@@ -14,7 +14,8 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 // Input and cache tokens are exact (message_start reports them). Output is
 // exact only when a message_delta carried it; otherwise it is estimated from
 // the text streamed so far at 4 characters a token. Thinking whose text is not
-// shown is not counted, so the estimate errs low, never high.
+// shown (omitted or redacted), signatures and citations are not counted, so
+// the estimate errs low.
 
 /** USD per million tokens. A cache write costs 1.25× input (5-minute TTL) or 2× (1-hour). */
 type Price = { input: number; output: number; cacheRead: number }
@@ -35,6 +36,7 @@ const PRICES: readonly (readonly [string, Price])[] = [
   ['claude-opus-4-6', { input: 5, output: 25, cacheRead: 0.5 }],
   ['claude-opus-4-5', { input: 5, output: 25, cacheRead: 0.5 }],
   ['claude-opus-4', { input: 15, output: 75, cacheRead: 1.5 }],
+  ['claude-3-opus', { input: 15, output: 75, cacheRead: 1.5 }],
   ['claude-sonnet-5', { input: 2, output: 10, cacheRead: 0.2 }],
   ['claude-sonnet-4', { input: 3, output: 15, cacheRead: 0.3 }],
   ['claude-3-7-sonnet', { input: 3, output: 15, cacheRead: 0.3 }],
