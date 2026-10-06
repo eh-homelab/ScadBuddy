@@ -606,6 +606,71 @@ describe('PresetPicker', () => {
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
   })
 
+  it('Reset to defaults clears the selected preset, so Update cannot empty it (#350)', async () => {
+    const patches: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH') patches.push(request.url)
+    })
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Mum')
+    const reset = screen.getByRole('button', { name: 'Reset to defaults' })
+    await waitFor(() => expect(reset).toBeEnabled())
+    await user.click(reset)
+
+    expect(select).toHaveValue('')
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Delete preset/ })).not.toBeInTheDocument()
+    // Nor does Save as offer the values as a variant of the preset they no longer are.
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    expect(within(dialog).getByRole('textbox', { name: 'Preset name' })).toHaveValue('')
+    expect(patches).toEqual([])
+  })
+
+  it('prefills a variant\'s name within the limit, selected, and drops a stale error (#350)', async () => {
+    const long = 'A'.repeat(78)
+    const preset = {
+      id: 'e'.repeat(32),
+      name: long,
+      origin: 'mine',
+      params: { name: 'Kai' },
+      description: '',
+      tags: [],
+    }
+    server.use(
+      http.get('/api/v1/models/:slug/presets', () => HttpResponse.json([preset])),
+      http.post('/api/v1/models/:slug/presets', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'Name taken' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render()
+    const select = await screen.findByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(select).getByRole('option', { name: long })).toBeInTheDocument())
+    await user.selectOptions(select, long)
+    await user.clear(screen.getByRole('textbox', { name: 'Name on the tag' }))
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'Bo')
+
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    const input = within(dialog).getByRole<HTMLInputElement>('textbox', { name: 'Preset name' })
+    expect([...input.value].length).toBeLessThanOrEqual(80)
+    expect(input.value).toMatch(/ \(variant\)$/)
+    // Selected, so typing replaces the prefill rather than appending to it.
+    await waitFor(() => expect(input).toHaveFocus())
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length])
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Name taken')
+    // At the limit already, so the edit is a deletion.
+    await user.type(input, '{Backspace}')
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('Reset to defaults clears the UI state a preset brought', async () => {
     const lid = {
       id: 'f'.repeat(32),
