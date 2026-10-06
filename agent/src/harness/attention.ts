@@ -110,8 +110,12 @@ export type AttentionSpec =
       onTimeout: OnTimeout
       /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
       timeoutS: number
-      /** Called once the request is recorded and shown (questions/service.ts `gate`). */
-      onParked?: () => Promise<void>
+      /**
+       * Called once the request is recorded and shown (questions/service.ts `gate`).
+       * `signal` aborts once the wait stops waiting for it (its timer, an abort): a
+       * check still running then must not act, or it could end a later wait's request.
+       */
+      onParked?: (signal: AbortSignal) => Promise<void>
     }
   /** A done summary: posted, never waited on (see above). */
   | { reason: 'done' }
@@ -190,7 +194,9 @@ export const POSTED_TEXT =
 
 /** The result the model reads when the session's tab came back (#815 §2): not a reply, but the wait is over. */
 export const RECONNECTED_TEXT =
-  'reconnected: the ScadBuddy tab is connected again (the user has not replied). Retry the browser_* call that failed.'
+  'reconnected: the ScadBuddy tab is connected again (the user has not replied). A browser_* call that failed was ' +
+  'not run since, and the page may have reloaded or changed while the tab was away: re-check it (browser_status, ' +
+  'then browser_snapshot) before calling a browser_* tool that changes it again.'
 
 /** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
