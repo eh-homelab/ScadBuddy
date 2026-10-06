@@ -465,10 +465,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
-- `claude-review` is a merge gate: the review runs after CI, then a classifier passes
-  only when every finding in the review for *this* commit is fixed or tracked in an
-  open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
-  to the PR files those `pr-feedback` issues automatically.
+- `claude-review` is a merge gate: the review runs after CI and sorts its findings into
+  `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
+  finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
+  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
+  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
+  `pr-feedback` issues automatically.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed
