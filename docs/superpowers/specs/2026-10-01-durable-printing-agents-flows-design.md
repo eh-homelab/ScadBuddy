@@ -1543,6 +1543,19 @@ Each phase is its own implementation plan and ships alone.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.
+   - As built so far (3a, #1054, plan `2026-10-03-durable-phase-3a-housekeeping-schedule.md`):
+     the Schedule `scadbuddy-housekeeping-<queue>` (overlap `SKIP`, every
+     `asset_sweep_interval`; `0` deletes it) starts `Housekeeping` on the `library` queue.
+     It runs four activities in order, each tried once and best effort: prune settled
+     render jobs, sweep unused uploads, sweep unreferenced blobs, sweep old duplicate
+     staging. A second Schedule, `scadbuddy-prune-<queue>`, runs only the prune every
+     300 s (the old loop's cadence) and stays when the interval is `0`. Setup is retried
+     until Temporal takes it. Its worker runs in the API process, which holds the data volume, until the
+     `scadbuddy-library` container. The API's sweep loop and `RenderService`'s prune
+     loop are gone. The boot passes stay in the boot, since they must finish before the
+     first request; the boot then triggers the Schedule once. That run is the start's only
+     sweep of the uploads (review #1095 1). While an operator keeps the Schedule paused,
+     the start backfills the uploads to the store itself (review #1095 2).
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4, §6.6): `agent-durable/`, the plugin pin,

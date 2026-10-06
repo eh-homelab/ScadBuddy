@@ -196,6 +196,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs run (#1052, spec
     # 2026-10-01 §4.3). The API serves it itself in this phase (#1060).
     temporal_task_queue_bambuddy: str = "bambuddy"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY: where the housekeeping Schedule's sweeps
+    # run (#1054, spec 2026-10-01 §4.3, §4.4); this process serves it.
+    temporal_task_queue_library: str = "library"
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -229,6 +232,7 @@ class Settings(BaseSettings):
         "temporal_namespace",
         "temporal_task_queue_render",
         "temporal_task_queue_bambuddy",
+        "temporal_task_queue_library",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -399,6 +403,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_bambuddy": (
             "Paired with the Temporal address: the API starts print runs on it, and the"
             " worker that serves it must name the same queue."
+        ),
+        "temporal_task_queue_library": (
+            "Paired with the Temporal address: the housekeeping Schedule starts its sweeps on"
+            " it, and this process serves it."
         ),
         "temporal_search_attributes": (
             "Whether the namespace has ScadBuddy's Search Attributes registered, which the"

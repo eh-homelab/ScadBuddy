@@ -267,8 +267,10 @@ class RenderPiece:
 
     async def _tell_waiting(self, outcome: PieceOutcome) -> None:
         while self._waiting:
-            job = workflow.get_external_workflow_handle_for(
-                TemplatePipeline.run, self._waiting.pop(0)
+            job: workflow.ExternalWorkflowHandle[TemplatePipeline] = (
+                workflow.get_external_workflow_handle_for(
+                    TemplatePipeline.run, self._waiting.pop(0)
+                )
             )
             try:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
@@ -646,7 +648,9 @@ class TemplatePipeline:
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 )
             except WorkflowAlreadyStartedError:
-                piece = workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
+                    workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                )
                 try:
                     await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                 except FailureError as error:
