@@ -229,10 +229,10 @@ export class ChatConnection {
    * past `drainStallMs` (which closes the connection).
    */
   private async drained(signal: AbortSignal): Promise<boolean> {
-    const since = Date.now()
+    const since = performance.now()
     while (this.buffered() > this.limits.highWater) {
       if (this.closed || signal.aborted) return false
-      if (Date.now() - since > this.limits.drainStallMs) {
+      if (performance.now() - since > this.limits.drainStallMs) {
         this.giveUp(`nothing drained for ${this.limits.drainStallMs} ms`)
         return false
       }

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -217,6 +217,84 @@ describe('render_model', () => {
     expect(posts).toBe(1)
   })
 
+  it('re-sends a render the backend is still accepting, with the same key (#1053)', async () => {
+    let posts = 0
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        posts += 1
+        keys.push(request.headers.get('Idempotency-Key'))
+        return posts === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ status: 'done' })
+    expect(posts).toBe(2)
+    // One request to the backend, so one claim on the job (review #1066 2.1).
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it.each([
+    [503, 'https://scadbuddy.dev/problems/temporal-unavailable'],
+    [500, 'https://scadbuddy.dev/problems/render-unstartable'],
+  ])('re-sends a %i that may have started, with the same key (review #1066 (10) 3)', async (status, type) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(
+              { type, title: 'Unavailable', status, detail: 'Send the same request again.', may_have_started: true },
+              { status },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not re-send a problem that started nothing (review #1066 (10) 3)', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'Nothing was queued; try again shortly.',
+            may_have_started: false,
+          },
+          { status: 503 },
+        )
+      }),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
@@ -256,6 +334,28 @@ describe('render_model', () => {
     const done = await runTool(tool('render_model'), { slug: 'box', save_output: true, output_name: 'v1' }, ctx())
     expect(firstText(done)).toMatchObject({ status: 'done', output: { id: '0123456789abcdef0123456789abcdef' } })
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
+  })
+
+  it('waits out renderWaitMs in elapsed time, whatever the wall clock does (#1485)', async () => {
+    let polls = 0
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now')
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => {
+        polls += 1
+        // The clock steps an hour on during the first poll.
+        if (polls === 1) stepped.mockImplementation(() => now.call(Date) + 3_600_000)
+        return HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: polls < 3 ? 'running' : 'done' })
+      }),
+    )
+    try {
+      const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 60_000 }))
+      expect(firstText(result)).toMatchObject({ status: 'done' })
+    } finally {
+      stepped.mockRestore()
+    }
   })
 
   it('reports a cancelled render as a tool error with its log, settling immediately rather than waiting out renderWaitMs', async () => {

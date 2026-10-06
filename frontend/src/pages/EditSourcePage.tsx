@@ -124,7 +124,7 @@ export function EditSourcePage() {
       breadcrumb={
         <>
           <Link to={modelPath(slug)} className="shrink-0 text-[12px] text-muted hover:text-ink">
-            {slug}
+            {model.data?.name ?? slug}
           </Link>
           <span className="text-faint">/</span>
           <h1 className="truncate text-[13px] font-medium">

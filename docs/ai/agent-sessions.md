@@ -24,7 +24,7 @@ so the dot is an underscore.
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
-| `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does |
+| `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does. The fork has no budget of its own: it spends from the parent's, which the parent and all its forks (and forks of those) share, so a turn in any of them uses it up for all, and a raise on any of them raises it. Forking a lineage that has spent its budget is refused with `budget_exhausted` (409). Only the user's "Continue in a new chat" in the panel gives a fork a budget of its own (#823) |
 | `sessions_interrupt` | `write` | Stops the running turn on whichever replica runs it |
 | `sessions_handoff` | `write` | Gives a session the caller owns to `"browser"` (the user in the UI) at once, or **offers** it to `"token:<id>"` or `"oidc:<issuer>#<sub>"` (§2.1); with `to` the caller's own id, accepts an offer made to it |
 | `sessions_accept_handoff` | `write` | Accepts a session offered to the caller: it becomes the owner |
