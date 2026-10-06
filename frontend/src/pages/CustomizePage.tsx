@@ -205,6 +205,8 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /** #350 — counts resets to the defaults, which leave no preset selected. */
+  const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
   // The inputs as of the last write, ahead of the render that shows it: two writes in one
   // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
@@ -305,6 +307,7 @@ export function CustomizePage() {
     if (schema) {
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+      setResets((n) => n + 1)
     }
   }, [schema])
 
@@ -772,6 +775,7 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      resetKey={resets}
     />
   )
   const templateUi = customUi && (
@@ -1026,6 +1030,7 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    resetKey={resets}
                   />
                 </>
               }
