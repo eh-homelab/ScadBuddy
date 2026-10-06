@@ -86,6 +86,19 @@ const loopCalls = (fake: FakeAnthropic) => fake.messageCalls().filter((r) => r.b
 /** Whether the conversation holds a tool result yet (Claude Code adds a system message after it). */
 const answered = (r: RecordedRequest) => JSON.stringify(r.body?.messages ?? []).includes('"tool_result"')
 
+type ToolResultBlock = { type: 'tool_result'; tool_use_id: string; content: unknown; is_error?: boolean }
+
+/** The `tool_result` block a request carries for one tool call, if any. */
+function toolResult(r: RecordedRequest, toolUseId: string): ToolResultBlock | undefined {
+  for (const message of r.body?.messages ?? []) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content as ToolResultBlock[]) {
+      if (block?.type === 'tool_result' && block.tool_use_id === toolUseId) return block
+    }
+  }
+  return undefined
+}
+
 describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let env: TestWorkflowEnvironment
   let kekDir: string
@@ -112,6 +125,8 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
   let settingsHung: Promise<void>
   let markHung: () => void
   const releases: (() => void)[] = []
+  /** This test's sessions, whose workflows afterEach terminates (visibility lags). */
+  const started: string[] = []
 
   beforeAll(async () => {
     if (!existsSync(MANIFEST) || !existsSync(PROMPT)) throw new Error(`run \`pnpm build\` first: ${MANIFEST} and ${PROMPT}`)
@@ -187,11 +202,9 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
 
   afterEach(async () => {
     for (const release of releases.splice(0)) release()
-    // Every session workflow this test left open (an abandoned one would keep its activities).
-    for await (const wf of durableClient.workflow.list({ query: 'ExecutionStatus = "Running"' })) {
-      if (wf.workflowId.startsWith('session-')) {
-        await durableClient.workflow.getHandle(wf.workflowId).terminate('test over').catch(() => undefined)
-      }
+    // Every session workflow this test started (an abandoned one would keep its activities).
+    for (const id of started.splice(0)) {
+      await durableClient.workflow.getHandle(durableWorkflowId(id)).terminate('test over').catch(() => undefined)
     }
     if (child && child.exitCode === null) {
       child.kill('SIGTERM')
@@ -261,9 +274,11 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     const from = panel.frames.length
     panel.send({ v: 1, type: 'user.message', mode: 'durable', text, context: { route: '/' } })
     const frames = await until(panel, is('user.turn'), from)
-    const started = frames.find(is('session.started'))
-    expect(started).toMatchObject({ mode: 'durable' })
-    return { sessionId: started!.sessionId as string, next: from + frames.length }
+    const first = frames.find(is('session.started'))
+    expect(first).toMatchObject({ mode: 'durable' })
+    const sessionId = first!.sessionId as string
+    started.push(sessionId)
+    return { sessionId, next: from + frames.length }
   }
 
   it('runs a turn from the socket: the worker starts after the message, and the reply still arrives', async () => {
@@ -326,6 +341,10 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     const result = rest.findIndex(is('tool.result'))
     expect(rest[resolved]).toMatchObject({ id: required.id, approved: false, by: browser })
     expect(rest[result]).toMatchObject({ ok: false })
+    // The model was told it was denied.
+    const denied = toolResult(loopCalls(fake).at(-1)!, String(required.tool))
+    expect(denied?.is_error).toBe(true)
+    expect(JSON.stringify(denied?.content)).toContain('A human reviewer rejected this action')
     expect(resolved).toBeLessThan(result)
     expect(rest.filter(is('assistant.text.delta')).map((f) => f.delta).join('')).toBe('Not deleted.')
     await expectPanelAccepts(panel.frames)
@@ -340,7 +359,7 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     await startDurableWorker()
     const panel = await openPanelSocket(agent)
     const { sessionId } = await newDurableSession(panel, 'First question')
-    await until(panel, is('tool.call'))
+    const hung = String((await until(panel, is('tool.call'))).at(-1)!.id)
     await settingsHung
 
     const mark = panel.frames.length
@@ -358,7 +377,9 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     const seen = JSON.stringify(asked[0]!.body?.messages)
     expect(seen).toContain('First question')
     expect(seen).toContain('Second question')
-    expect(seen).toMatch(/"tool_result".*interrupted/i)
+    const owed = toolResult(asked[0]!, hung)
+    expect(owed?.is_error).toBe(true)
+    expect(JSON.stringify(owed?.content)).toMatch(/interrupted/i)
     panel.close()
   }, 240_000)
 
@@ -370,7 +391,7 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     await startDurableWorker()
     const panel = await openPanelSocket(agent)
     const { sessionId } = await newDurableSession(panel, 'First question')
-    await until(panel, is('tool.call'))
+    const hung = String((await until(panel, is('tool.call'))).at(-1)!.id)
     await settingsHung
     // The snapshot that holds the started call is saved before the call is scheduled.
     const mark = panel.frames.length
@@ -389,7 +410,9 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
     expect(asked.length).toBeGreaterThan(0)
     const seen = JSON.stringify(asked[0]!.body?.messages)
     expect(seen).toContain('First question')
-    expect(seen).toMatch(/"tool_result".*interrupted/i)
+    const owed = toolResult(asked[0]!, hung)
+    expect(owed?.is_error).toBe(true)
+    expect(JSON.stringify(owed?.content)).toMatch(/interrupted/i)
     const errors = await db.sql<{ event: string }[]>`
       SELECT event FROM ai_session_events WHERE session_id = ${sessionId} AND event LIKE '%resumed_fresh%'`
     expect(errors).toEqual([])
