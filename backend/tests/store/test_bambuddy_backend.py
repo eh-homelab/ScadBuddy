@@ -25,6 +25,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.store.bambuddy import (
     BambuddyContentBackend,
     BambuddyTarget,
+    LegacyFoldersUnsettledError,
     RefusedDeleteError,
     RenderSettingsSource,
     _Inbox,
@@ -358,7 +359,7 @@ async def test_a_failed_folder_listing_leaves_pre_instance_rows_for_the_next_cal
     )
     _file_in(42)
     delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
-    backend = BambuddyContentBackend(target(), pool)
+    backend = BambuddyContentBackend(target(), pool, settle_backoff=0)
     with pytest.raises(ApiError) as failed:
         await backend.remove("78")
     assert not isinstance(failed.value, RefusedDeleteError)
@@ -385,7 +386,7 @@ async def test_a_delete_during_a_failed_listing_keeps_the_blob_tracked(pool: Poo
     )
     _file_in(42)
     delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
-    backend = BambuddyContentBackend(target(), pool)
+    backend = BambuddyContentBackend(target(), pool, settle_backoff=0)
     store = ContentStore(backend, BlobIndex(pool))
     ref = BlobRef(sha256="a" * 64, kind="piece", backend="bambuddy", backend_id="78", size=1)
     store.index.put("piece-a", ref, slug="old", meta={})
@@ -396,6 +397,68 @@ async def test_a_delete_during_a_failed_listing_keeps_the_blob_tracked(pool: Poo
     assert delete.call_count == 1
     assert store.index.get("piece-a") is None
     await store.aclose()
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_failed_settle_is_retried_only_after_the_backoff(pool: Pool) -> None:
+    """#1428: while the listing keeps failing, calls do not each pay a listing. A delete
+    that needs the rows meanwhile fails retryably, never with a refusal."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    listing = respx.get(f"{API}/library/folders").mock(
+        side_effect=[httpx.Response(503, json={"detail": "down"}), _placed_tree()]
+    )
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    now = [100.0]
+    backend = BambuddyContentBackend(target(), pool, settle_backoff=30, clock=lambda: now[0])
+    for _ in range(2):
+        with pytest.raises(LegacyFoldersUnsettledError):
+            await backend.remove("78")
+    assert listing.call_count == 1
+    now[0] += 30
+    await backend.remove("78")
+    assert delete.called and listing.call_count == 2
+    await backend.aclose()
+
+
+@respx.mock
+async def test_concurrent_first_calls_settle_once(pool: Pool) -> None:
+    """#1428: one listing for the settle, however many calls arrive together."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    listing = respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    _file_in(42)
+    respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    await asyncio.gather(*(backend.remove("78") for _ in range(4)))
+    assert listing.call_count == 1
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_malformed_folder_listing_breaks_neither_download_nor_exists(pool: Pool) -> None:
+    """#1432: a download or an exists uses no folder records, so a settle that would
+    fail (here on a payload that does not validate) is not attempted there; a delete
+    that needs it fails retryably."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    listing = respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(200, json=[{"unexpected": True}])
+    )
+    respx.get(f"{API}/library/files/9/download").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+    respx.get(f"{API}/library/files/5").mock(
+        return_value=httpx.Response(200, json=shaped("FileResponse", id=5, filename="a.zip"))
+    )
+    _file_in(42)
+    backend = BambuddyContentBackend(target(), pool)
+    assert b"".join([chunk async for chunk in backend.download("9")]) == b"ok"
+    assert await backend.exists("5")
+    assert not listing.called
+    with pytest.raises(Exception) as failed:
+        await backend.remove("78")
+    assert not isinstance(failed.value, RefusedDeleteError)
+    assert _instances(pool) == {40: "", 42: ""}
     await backend.aclose()
 
 

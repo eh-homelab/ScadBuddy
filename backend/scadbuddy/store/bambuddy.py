@@ -199,6 +199,15 @@ def _lock_key(parts: tuple[object, ...]) -> int:
     return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
 
 
+#: How long after a failed settle of pre-#683 rows the next one is tried (#1428).
+SETTLE_BACKOFF = 30.0
+
+
+class LegacyFoldersUnsettledError(RuntimeError):
+    """A delete needs the pre-#683 rows settled and the last try failed within
+    `SETTLE_BACKOFF`. Retryable, unlike `RefusedDeleteError` (#1437)."""
+
+
 class BambuddyContentBackend:
     backend = "bambuddy"
 
@@ -208,6 +217,8 @@ class BambuddyContentBackend:
         pool: Pool,
         *,
         http: httpx.AsyncClient | None = None,
+        settle_backoff: float = SETTLE_BACKOFF,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._target = target
         self._pool = pool
@@ -219,23 +230,57 @@ class BambuddyContentBackend:
         self._finding: dict[tuple[str, int, str, str], asyncio.Lock] = {}
         #: The instances whose pre-#683 rows this process has settled (`_claim_legacy`).
         self._claimed: set[str] = set()
+        #: One per instance, so concurrent first calls settle once (#1428).
+        self._settling: dict[str, asyncio.Lock] = {}
+        #: When each instance's last settle failed, for the backoff.
+        self._settle_failed: dict[str, float] = {}
+        self._settle_backoff = settle_backoff
+        self._clock = clock
 
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[tuple[BambuddyClient, _Inbox]]:
+    async def _client(
+        self, *, settle: bool = False
+    ) -> AsyncIterator[tuple[BambuddyClient, _Inbox]]:
+        """A client on the configured Bambuddy. With ``settle`` (the paths that use
+        folder records: upload, remove), the pre-#683 rows are settled first, best
+        effort: any failure is logged and leaves them for a later call. A download or
+        an exists never touches them, so nothing there can fail it (#1432)."""
         target = await self._target()
         inbox = _Inbox(target.instance, target.inbox_id)
         async with BambuddyClient(target.config, http=self._http) as client:
-            if inbox.instance not in self._claimed:
+            if settle and inbox.instance not in self._claimed:
                 try:
-                    await self._claim_legacy(client, inbox.instance)
-                except (ApiError, httpx.HTTPError):
-                    # Left for the next call; a delete that needs them retries (`remove`).
-                    logger.warning("could not list folders to settle pre-instance folder records")
+                    await self._settle(client, inbox.instance)
+                except LegacyFoldersUnsettledError:
+                    pass  # backing off; a delete that needs them retries (`remove`)
+                except Exception:
+                    logger.exception("could not settle pre-instance folder records")
             yield client, inbox
+
+    async def _settle(self, client: BambuddyClient, instance: str, *, again: bool = False) -> None:
+        """`_claim_legacy` once per instance at a time (#1428), not before
+        ``settle_backoff`` has passed since one failed: then it raises
+        `LegacyFoldersUnsettledError` without a request. ``again`` re-reads an instance
+        already settled (an older release may have recorded a row since). A failure
+        raises."""
+        async with self._settling.setdefault(instance, asyncio.Lock()):
+            if instance in self._claimed and not again:
+                return
+            failed = self._settle_failed.get(instance)
+            if failed is not None and self._clock() - failed < self._settle_backoff:
+                raise LegacyFoldersUnsettledError(
+                    "the pre-instance folder records could not be settled; retry later"
+                )
+            try:
+                await self._claim_legacy(client, instance)
+            except Exception:
+                self._settle_failed[instance] = self._clock()
+                raise
+            self._settle_failed.pop(instance, None)
 
     async def _claim_legacy(self, client: BambuddyClient, instance: str) -> None:
         """Settle the rows recorded before folders were per instance (``''``), before
@@ -343,7 +388,7 @@ class BambuddyContentBackend:
 
     async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
-        async with self._client() as (client, inbox):
+        async with self._client(settle=True) as (client, inbox):
             for attempt in (1, 2):
                 folder_id = await self._folder_for(client, inbox, scope)
                 try:
@@ -381,7 +426,7 @@ class BambuddyContentBackend:
         return True
 
     async def remove(self, backend_id: str) -> None:
-        async with self._client() as (client, inbox):
+        async with self._client(settle=True) as (client, inbox):
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
@@ -393,10 +438,10 @@ class BambuddyContentBackend:
                 self._legacy_work_folder, inbox, file.folder_id
             ):
                 # A pre-#683 row names the folder and is not settled yet (a listing
-                # failed, or an older release recorded it since). Settle now: a listing
-                # that fails again raises, which the caller retries, where a refusal
-                # would untrack the file for good (#1437).
-                await self._claim_legacy(client, inbox.instance)
+                # failed, or an older release recorded it since). Settle now: a failure
+                # (or the backoff after one) raises, which the caller retries, where a
+                # refusal would untrack the file for good (#1437).
+                await self._settle(client, inbox.instance, again=True)
                 work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
