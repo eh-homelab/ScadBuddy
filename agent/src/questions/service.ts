@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
-import type { AttentionReason, OnTimeout } from '../harness/attention.js'
-import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import { type AttentionReason, BACK_REPLIES, type OnTimeout } from '../harness/attention.js'
+import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
 import { redact } from '../secrets.js'
@@ -114,7 +114,7 @@ export type QuestionGateContext = {
 type Row = {
   id: string
   session_id: string
-  outcome: 'answered' | 'cancelled' | 'timed_out' | null
+  outcome: 'answered' | 'cancelled' | 'timed_out' | 'reconnected' | null
   answers: string[] | null
   reason: string | null
 }
@@ -284,6 +284,10 @@ export class QuestionService {
     const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Row['outcome'] }[]>`
       SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
     if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
+    // #815 §2: the tab came back first, so "I'm back" already happened; not an error to the user who clicked it.
+    // Any other reply (typed words, "Carry on") is a conflict: it would be dropped unread.
+    const saysBack = answers.length === 1 && BACK_REPLIES.includes(answers[0]!)
+    if (asked.outcome === 'reconnected' && saysBack) return
     if (asked.outcome !== null) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     if (answers.length !== asked.questions.length || answers.some((a) => !a.trim())) {
       throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
@@ -299,7 +303,12 @@ export class QuestionService {
         ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
         : { value: undefined, events: [] }
     })
-    if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
+    if (!answered) {
+      // Lost the race to reconnected() between the check above and the update: the same no-op.
+      const [now] = await this.deps.sql<{ outcome: Row['outcome'] }[]>`SELECT outcome FROM ai_questions WHERE id = ${id}`
+      if (now?.outcome === 'reconnected' && saysBack) return
+      throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
+    }
     this.wake(id)
     try {
       await this.refreshStatus(sessionId)
@@ -376,6 +385,53 @@ export class QuestionService {
           tier: 'read',
           outcome: 'refused',
           detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+    }
+    return rows.length
+  }
+
+  /**
+   * #815 §2: the session has a connected ScadBuddy tab again (bridge/hub.ts), so
+   * its open `tab_disconnected` attention requests are over: resolved as
+   * `reconnected` by the system, never as an answer. Returns how many. Called on
+   * whichever replica saw the tab; a turn parked on another replica sees the row
+   * on its next poll.
+   */
+  async reconnected(sessionId: string): Promise<number> {
+    const reason = 'the ScadBuddy tab is connected again'
+    const rows = await this.atomically(sessionId, async (tx) => {
+      const resolved = await tx<Resolved[]>`
+        UPDATE ai_questions SET outcome = 'reconnected', reason = ${reason}, resolved_at = now()
+        WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'tab_disconnected'
+          AND outcome IS NULL
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
+      return {
+        value: resolved,
+        events: resolved.map((r) =>
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
+        ),
+      }
+    })
+    if (rows.length === 0) return 0
+    for (const r of rows) this.wake(r.id)
+    try {
+      await this.refreshStatus(sessionId)
+    } finally {
+      await this.audited(
+        rows.map((r) => ({
+          kind: 'question',
+          action: 'reconnected',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'ok',
+          detail: safeDetail(`${r.tool} attention request ${r.id}: ${reason}`),
           startedAt: r.created_at,
           finishedAt: new Date(),
         })),
@@ -513,12 +569,17 @@ export class QuestionService {
           // The limit spans sessions and replicas, so its count and insert hold one
           // lock that does too (to commit), or two turns could each read 9 and insert.
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
-          const [recent] = await tx<{ n: number }[]>`
-            SELECT count(*)::int AS n FROM ai_questions
-            WHERE kind = 'attention' AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
-              AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
-          if (attention.reason !== 'done' && (recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
-            return { value: { ...none, limited: true }, events: [] }
+          // Only the model's own requests count, and only they are limited: a
+          // browser_* call's wait for its tab (sessions/manager.ts waitForTab) is
+          // ScadBuddy's, at most TAB_WAITS_PER_TURN per turn, and must not use up the model's.
+          // A done summary is outside the limit too, and a posted one (no timer) does not count.
+          if (request.tool === ATTENTION_TOOL && attention.reason !== 'done') {
+            const [recent] = await tx<{ n: number }[]>`
+              SELECT count(*)::int AS n FROM ai_questions
+              WHERE kind = 'attention' AND tool = ${ATTENTION_TOOL}
+                AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
+                AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
+            if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
           }
           // A done summary that recorded unattended actions (`unattended`) is not replaced by a later
           // turn's: that record is the user's check on what ran while nobody answered,
@@ -531,6 +592,9 @@ export class QuestionService {
             UPDATE ai_questions SET outcome = 'cancelled', reason = ${why}, resolved_at = now()
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
               AND outcome IS NULL AND (NOT unattended OR turn_id = ${turnId})
+              -- The model's own request and a browser_* call's wait for its tab
+              -- never replace each other: both end when the tab is back.
+              AND (tool = ${ATTENTION_TOOL}) = (${request.tool} = ${ATTENTION_TOOL})
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
@@ -612,6 +676,9 @@ export class QuestionService {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
       if (attention?.reason === 'done') return { answered: false, posted: true, message: 'posted' }
+      // A failed check (the hub, the database) must not leave the row with
+      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
+      await attention?.onParked?.().catch(() => undefined)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
@@ -624,6 +691,9 @@ export class QuestionService {
         // (A turn that stopped cancels its questions as it finishes.)
         if (!context.signal.aborted) await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
         return { answered: false, message: 'The user did not answer: the turn stopped first.' }
+      }
+      if (resolved.outcome === 'reconnected') {
+        return { answered: false, reconnected: true, message: resolved.reason ?? 'the ScadBuddy tab is connected again' }
       }
       if (resolved.outcome === 'timed_out' && attention) {
         if (attention.onTimeout === 'proceed') return { answered: false, timedOut: true, message: resolved.reason ?? 'timed out' }

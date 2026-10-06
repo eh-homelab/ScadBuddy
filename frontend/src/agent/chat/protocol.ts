@@ -292,6 +292,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string()).optional(),
     by: OwnerSchema.optional(),
     reason: z.string().optional(),
+    /** #815 — an attention request for a disconnected tab ended because the tab is back. */
+    reconnected: z.literal(true).optional(),
   }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
   z.object({

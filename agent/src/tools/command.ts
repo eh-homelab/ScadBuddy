@@ -1,0 +1,157 @@
+import { randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
+import type { components } from '../api/schema.js'
+import { ok } from './call.js'
+import { type ToolContext, ToolError } from './registry.js'
+
+// A ScadBuddy command from a tool (#1052, #1053, spec 2026-10-01 §4.2), as the browser
+// client's `command()` does it: one key per call, kept by every re-send, so a re-send
+// after an answer that never arrived is answered with the first outcome and nothing is
+// done twice. A route answers its own body, or 202 with an operation still running,
+// followed here through `GET /api/v1/operations/{id}`.
+
+export type FetchResult<T> = { data?: T; error?: unknown; response: Response }
+
+/** How many more times a request no ScadBuddy answer described is sent (#470). */
+export const RUN_REATTEMPTS = 3
+
+/** The backend's 503 while Temporal has not yet answered a command's start (#1052). */
+const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+
+/**
+ * How long a command is sent again while the backend says it is still accepting it:
+ * the browser's `printRunPoll.acceptingMs` (frontend/src/api/client.ts), past a print's
+ * accept worst case of three 60 s checks. Counting it against `RUN_REATTEMPTS` gave up
+ * within a minute, and a second print_output would be a second print (review #1061).
+ */
+export const ACCEPTING_MS = 240_000
+
+function stillAccepting(result: FetchResult<unknown>): boolean {
+  const { error, response } = result
+  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown }) : {}
+  return response.status === 503 && problem.type === STILL_ACCEPTING
+}
+
+/**
+ * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
+ * from something in between, whose body is not one of the backend's problems (they
+ * always carry a `detail`). Or the backend answered that it is still accepting the same
+ * request. The same rule as the browser client's `unanswered`.
+ */
+function unanswered(result: FetchResult<unknown>): boolean {
+  const { error, response } = result
+  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
+  if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
+  return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
+}
+
+/**
+ * `send`'s result, sent again while it goes unanswered (a dropped connection, fetch's
+ * `TypeError`, or a proxy's own 502/503/504/524). Safe only for a request keyed to its
+ * effect, or one that only reads. A problem the backend wrote is never re-sent.
+ */
+export async function answered<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<FetchResult<T>> {
+  const began = Date.now()
+  // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
+  for (let misses = 0; ; ) {
+    let result: FetchResult<T>
+    try {
+      result = await send()
+    } catch (caught) {
+      if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
+      if (misses++ >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      continue
+    }
+    if (unanswered(result)) {
+      const accepting = stillAccepting(result)
+      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+        throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
+      }
+      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
+      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
+      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
+      continue
+    }
+    return result
+  }
+}
+
+/** `answered`, then its body or the backend's problem as a ToolError. */
+export async function reattach<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<T> {
+  return ok(answered(ctx, send, what, gaveUp), what)
+}
+
+type Operation = components['schemas']['Operation']
+
+/**
+ * How long a command follows a 202 before handing back the running operation: the
+ * backend's own answer deadline (`COMMAND_ANSWER_DEADLINE`, 10 s, backend
+ * `workflows/commands.py`) plus a margin. Following longer held the session in one
+ * tool call for up to the browser's 21 minutes (review #1063 r6 3).
+ */
+export const COMMAND_FOLLOW_MS = 10_000 + 5_000
+
+/** A command still running when the follow window ended: the model follows it. */
+export type OperationRunning = { status: 'running'; operation_id: string; next: string }
+
+export function isRunning(result: unknown): result is OperationRunning {
+  return (result as OperationRunning | undefined)?.status === 'running' && typeof (result as OperationRunning).operation_id === 'string'
+}
+
+/** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
+export type CommandHeaders = { 'Idempotency-Key': string }
+
+/**
+ * Run a command route: `send` with this call's key, re-sent with the same key while it
+ * goes unanswered, and a 202 followed to the operation's result for `COMMAND_FOLLOW_MS`;
+ * past it, the running operation, for the model to follow with get_operation. A failed
+ * operation is a ToolError in the backend's own words, as the route's answer would have been.
+ */
+export async function command<T>(
+  ctx: ToolContext,
+  what: string,
+  send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
+): Promise<T | OperationRunning> {
+  const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+  const gaveUp = ' It may have been done anyway: check before trying again.'
+  const first = await answered(ctx, () => send(headers), what, gaveUp)
+  if (first.response.status !== 202) return ok(Promise.resolve(first), what)
+  let op = first.data as unknown as Operation
+  const deadline = Date.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
+  for (let step = 1; op.status === 'running'; step++) {
+    if (Date.now() >= deadline) {
+      return {
+        status: 'running',
+        operation_id: op.id,
+        next: `${what} is still running. Follow it with get_operation until it is no longer running; do not send it again.`,
+      }
+    }
+    await ctx.progress(step, undefined, `${what}: running`)
+    await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    const id = op.id
+    op = (await reattach(
+      ctx,
+      () => ctx.backend.GET('/api/v1/operations/{operation_id}', { params: { path: { operation_id: id } }, signal: ctx.signal }),
+      `get operation ${id}`,
+    )) as Operation
+  }
+  if (op.status === 'failed') {
+    // The problem the route would have answered, type and extensions included, through
+    // the same `ok` as a direct answer (review #1063 4).
+    const error = op.error
+    const problem = error ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail } : undefined
+    return ok<T>(Promise.resolve({ error: problem, response: new Response(null, { status: error?.status ?? 500 }) }), what)
+  }
+  return op.result as T
+}
