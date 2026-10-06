@@ -1792,6 +1792,24 @@ export const handlers = [
     })
   }),
 
+  // #624 — the strip's small copy: the image, or a video's poster (404 with none).
+  http.get(`${base}/models/:slug/media/:id/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item || item.missing) return noMediaItem(slug, id)
+    const file = item.kind === 'video' ? item.poster : item.file
+    if (!file) return noMediaItem(slug, id)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, file, 'image'), {
+      headers: {
+        'Content-Type': 'image/webp',
+        'Cache-Control': item.id === 'thumbnail' ? 'no-cache' : IMMUTABLE_CACHE_CONTROL,
+      },
+    })
+  }),
+
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const model = mediaTarget(slug)
