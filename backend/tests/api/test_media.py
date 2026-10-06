@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytest
 from fastapi import FastAPI
@@ -17,7 +21,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.types import Message
 
+from scadbuddy.api import media as media_api
 from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
+from scadbuddy.api.media import MAX_CONCURRENT_THUMBNAILS, THUMBNAIL_VERSION
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import GIT, git_env
@@ -187,6 +193,10 @@ def test_an_image_has_no_poster(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}/media/{image['id']}/poster").status_code == 404
 
 
+def _thumbnail_url(slug: str, item_id: str) -> str:
+    return f"/api/v1/models/{slug}/media/{item_id}/thumbnail?v={THUMBNAIL_VERSION}"
+
+
 def _real_image(size: tuple[int, int], fmt: str) -> bytes:
     out = io.BytesIO()
     Image.new("RGB", size, (200, 40, 40)).save(out, fmt)
@@ -197,7 +207,7 @@ def test_a_thumbnail_is_a_small_copy_of_the_image(client: TestClient, model: str
     original = _real_image((2000, 1500), "PNG")
     item = _upload(client, model, original).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "image/webp"
@@ -210,7 +220,7 @@ def test_a_thumbnail_is_a_small_copy_of_the_image(client: TestClient, model: str
 def test_a_videos_thumbnail_is_its_poster_shrunk(client: TestClient, model: str) -> None:
     item = _upload(client, model, WEBM, poster=_real_image((800, 600), "JPEG")).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200, response.text
     with Image.open(io.BytesIO(response.content)) as small:
@@ -226,7 +236,7 @@ def test_a_thumbnail_is_turned_upright_by_its_exif_orientation(
     Image.new("RGB", (400, 200), (200, 40, 40)).save(out, "JPEG", exif=exif.tobytes())
     item = _upload(client, model, out.getvalue()).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200, response.text
     with Image.open(io.BytesIO(response.content)) as small:
@@ -236,16 +246,51 @@ def test_a_thumbnail_is_turned_upright_by_its_exif_orientation(
 def test_a_video_with_no_poster_has_no_thumbnail(client: TestClient, model: str) -> None:
     item = _upload(client, model, WEBM).json()["media"][0]
 
-    assert client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail").status_code == 404
+    response = client.get(_thumbnail_url(model, item["id"]))
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"{model!r} has no poster for {item['id']!r}"
+
+
+def test_a_video_whose_poster_file_is_gone_has_no_thumbnail(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    item = _upload(client, model, WEBM, poster=JPEG).json()["media"][0]
+    (paths.model_dir(model) / "media" / item["poster"]).unlink()
+
+    response = client.get(_thumbnail_url(model, item["id"]))
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == f"{model!r} has no poster for {item['id']!r}"
+
+
+@pytest.mark.parametrize("error", [ValueError, SyntaxError])
+def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    def malformed(*_: object, **__: object) -> None:
+        raise error("malformed EXIF")
+
+    monkeypatch.setattr("scadbuddy.api.media.ImageOps.exif_transpose", malformed)
+    original = _real_image((400, 300), "JPEG")
+    item = _upload(client, model, original).json()["media"][0]
+
+    response = client.get(_thumbnail_url(model, item["id"]))
+
+    assert response.status_code == 200, response.text
+    assert response.content == original
+    assert response.headers["content-type"] == "image/jpeg"
 
 
 def test_an_undecodable_image_is_its_own_thumbnail(client: TestClient, model: str) -> None:
     item = _upload(client, model, PNG).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200
     assert response.content == PNG
+    assert response.headers["content-type"] == "image/png"
+    assert "immutable" in response.headers["cache-control"]
 
 
 def test_an_image_too_large_to_decode_cheaply_is_its_own_thumbnail(
@@ -255,10 +300,12 @@ def test_an_image_too_large_to_decode_cheaply_is_its_own_thumbnail(
     original = _real_image((101, 100), "PNG")
     item = _upload(client, model, original).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200
     assert response.content == original
+    assert response.headers["content-type"] == "image/png"
+    assert "immutable" in response.headers["cache-control"]
 
 
 def test_a_large_jpeg_that_draft_makes_cheap_is_still_shrunk(
@@ -268,7 +315,7 @@ def test_a_large_jpeg_that_draft_makes_cheap_is_still_shrunk(
     monkeypatch.setattr("scadbuddy.api.media.MAX_THUMBNAIL_SOURCE_PIXELS", 250 * 250)
     item = _upload(client, model, _real_image((1600, 1600), "JPEG")).json()["media"][0]
 
-    response = client.get(f"/api/v1/models/{model}/media/{item['id']}/thumbnail")
+    response = client.get(_thumbnail_url(model, item["id"]))
 
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "image/webp"
@@ -284,10 +331,142 @@ def test_a_legacy_file_in_another_format_is_not_decoded(
     gif = _real_image((400, 300), "GIF")
     (paths.model_dir(model) / "thumbnail.png").write_bytes(gif)
 
-    response = client.get(f"/api/v1/models/{model}/media/thumbnail/thumbnail")
+    response = client.get(_thumbnail_url(model, "thumbnail"))
 
     assert response.status_code == 200, response.text
     assert response.content == gif
+
+
+def test_a_thumbnail_is_cached_as_immutable_only_at_the_current_version(
+    client: TestClient, model: str
+) -> None:
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    unversioned = f"/api/v1/models/{model}/media/{item['id']}/thumbnail"
+
+    current = client.get(_thumbnail_url(model, item["id"]))
+    stale = client.get(f"{unversioned}?v={THUMBNAIL_VERSION - 1}")
+    bare = client.get(unversioned)
+
+    assert "immutable" in current.headers["cache-control"]
+    assert stale.headers["cache-control"] == "no-cache"
+    assert bare.headers["cache-control"] == "no-cache"
+    assert current.content == stale.content == bare.content
+
+
+def test_the_legacy_items_thumbnail_answers_304_to_its_etag(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+
+    first = client.get(_thumbnail_url(model, "thumbnail"))
+    etag = first.headers["etag"]
+    again = client.get(_thumbnail_url(model, "thumbnail"), headers={"If-None-Match": etag})
+
+    assert first.status_code == 200, first.text
+    assert first.headers["cache-control"] == "no-cache"
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["etag"] == etag
+
+    legacy.write_bytes(_real_image((300, 400), "PNG"))
+    replaced = client.get(_thumbnail_url(model, "thumbnail"), headers={"If-None-Match": etag})
+
+    assert replaced.status_code == 200
+    assert replaced.headers["etag"] != etag
+    with Image.open(io.BytesIO(replaced.content)) as small:
+        assert small.size == (144, 192)
+
+
+def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: a thumbnail PUT landing between the 304 check and the decode."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    old = client.get(_thumbnail_url(model, "thumbnail")).headers["etag"]
+    real = media_api._thumbnail_of
+
+    def replaced_first(path: Path, content_type: str) -> Any:
+        # As a thumbnail PUT does: a new file renamed over the old one.
+        staged = legacy.with_name("thumbnail.png.tmp")
+        staged.write_bytes(_real_image((300, 400), "PNG"))
+        os.replace(staged, legacy)
+        return real(path, content_type)
+
+    monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", replaced_first)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 200, response.text
+    assert response.headers["etag"] == media_api._legacy_etag(legacy.stat()) != old
+    with Image.open(io.BytesIO(response.content)) as small:
+        assert small.size == (144, 192)
+
+
+def test_a_legacy_file_deleted_mid_request_is_a_404(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: deleted between the 304 check and the decode."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    real = media_api._thumbnail_of
+
+    def deleted_first(path: Path, content_type: str) -> Any:
+        legacy.unlink()
+        return real(path, content_type)
+
+    monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", deleted_first)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 404, response.text
+
+
+def test_a_file_deleted_after_it_is_opened_is_still_served_whole(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1689: the fallback reads the handle the decode had open, not the path."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    original = _real_image((400, 300), "PNG")
+    legacy.write_bytes(original)
+
+    def deleted_undecoded(file: IO[bytes]) -> bytes | None:
+        legacy.unlink()
+        return None
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", deleted_undecoded)
+    response = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert response.status_code == 200, response.text
+    assert response.content == original
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_thumbnails_are_decoded_a_few_at_a_time(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    lock = threading.Lock()
+    running = 0
+    most = 0
+
+    def slow(file: IO[bytes]) -> bytes | None:
+        nonlocal running, most
+        with lock:
+            running += 1
+            most = max(most, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return None
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(
+            pool.map(lambda _: client.get(_thumbnail_url(model, item["id"])).status_code, range(8))
+        )
+
+    assert codes == [200] * 8
+    assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
 
 
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:

@@ -120,6 +120,12 @@ export type MigrateOptions = {
   lockTimeoutMs?: number
   /** Postgres `statement_timeout` for each statement of the migration. */
   statementTimeoutMs?: number
+  /**
+   * The advisory lock's key; MIGRATION_LOCK unless given. Only a test that holds
+   * the lock itself passes its own, so suites migrating in parallel cannot hold
+   * it too (#1249).
+   */
+  lockKey?: bigint
 }
 
 export const DEFAULT_LOCK_TIMEOUT_MS = 10_000
@@ -151,7 +157,7 @@ export async function migrate(
     // without them. Values are integers built here, not input.
     await tx.unsafe(`SET LOCAL lock_timeout = ${lockTimeout}`)
     await tx.unsafe(`SET LOCAL statement_timeout = ${statementTimeout}`)
-    await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+    await tx`SELECT pg_advisory_xact_lock(${(options.lockKey ?? MIGRATION_LOCK).toString()}::bigint)`
     await ensureLedger(tx)
     const rows = await tx<{ id: string; checksum: string | null }[]>`SELECT id, checksum FROM ai_migrations`
     const recorded = new Map(rows.map((row) => [row.id, row.checksum]))

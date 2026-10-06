@@ -134,6 +134,7 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  renderColors: {} as Record<string, string[]>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
   /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
@@ -207,7 +208,7 @@ function runJob(jobId: string): void {
       }
       job.status = 'done'
       job.bbox_mm = bboxOf(job.params ?? {})
-      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.colors = state.renderColors[job.slug] ?? colorsOf(job.slug, job.params ?? {})
       job.plates = state.plates[job.slug] ?? []
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
@@ -256,6 +257,7 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.renderColors = {}
   state.mediaFiles.clear()
   state.pulledTimelapses.clear()
   state.reprints = []
@@ -314,6 +316,15 @@ export function setMockMergeFiles(slug: string, files: MergeFiles): void {
  */
 export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
   state.plates[slug] = plates
+}
+
+/**
+ * #938 — the colours every finished render of `slug` reports, in extruder order, as a
+ * template whose geometry leaves a colour parameter unused (or hard-codes one) would.
+ * Unset, a render uses every colour parameter, in order.
+ */
+export function setMockRenderColors(slug: string, colors: string[]): void {
+  state.renderColors[slug] = colors
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
