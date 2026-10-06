@@ -806,6 +806,50 @@ async def test_a_render_that_drew_nothing_says_which_file_it_could_not_open(
     assert error.warnings[0] == MISSING_FILE_FAILED_WARNING.format(name="pic.svg")
 
 
+def _plate_two(fails: bool) -> object:
+    """A two-plate render whose plate 2 could not open pic.svg: OpenSCAD fails on it
+    (``fails``), or it renders and draws nothing (#451)."""
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        plate = _plate_of(kwargs.get("extra_defines"))
+        missing = ("pic.svg",) if plate == 2 else ()
+        if plate == 2 and fails:
+            raise OpenSCADError("openscad exited with 1", ["boom"], 1, missing_files=missing)
+        write_openscad_3mf(out, [] if plate == 2 else [TRAY])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=missing,
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=2,
+        )
+
+    return render
+
+
+@pytest.mark.parametrize("fails", [True, False], ids=["openscad-failed", "no-geometry"])
+async def test_a_failed_plate_keeps_its_warnings_and_missing_files(
+    paths: DataPaths, fails: bool
+) -> None:
+    async def no_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    error = await _failed_render(paths, _plate_two(fails), render_solids=no_solids)
+
+    assert str(error).startswith("plate 2 of 2")
+    assert error.missing_files == ("pic.svg",)
+    assert error.warnings == [
+        MISSING_FILE_FAILED_WARNING.format(name="pic.svg"),
+        *unreadable_colour_warnings(
+            _colour_schema(("base_color", "#0047BB"), ("text_color", "#0047BB")),
+            {"text_color": "not-a-colour"},
+        ),
+    ]
+
+
 # ── #289: a template that asks for more than one plate ────────────────────────
 
 TRAY = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))

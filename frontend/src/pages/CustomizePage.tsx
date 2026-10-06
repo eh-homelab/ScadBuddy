@@ -205,6 +205,8 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /** #350 — counts resets to the defaults, which leave no preset selected. */
+  const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
   // The inputs as of the last write, ahead of the render that shows it: two writes in one
   // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
@@ -258,6 +260,8 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // Nothing to render until there is a seed; once there is, an empty one is a model
+  // with no parameters, whose defaults still render (#941).
   const {
     job,
     rendering,
@@ -265,7 +269,7 @@ export function CustomizePage() {
     busy: renderBusy,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering
@@ -303,6 +307,7 @@ export function CustomizePage() {
     if (schema) {
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+      setResets((n) => n + 1)
     }
   }, [schema])
 
@@ -646,9 +651,9 @@ export function CustomizePage() {
   }
 
   // The model's own name (#179): what Edit details renames, and what the page
-  // shows once its record is in. `schema.title` is OpenSCAD's customizer title,
-  // which no metadata edit changes, so it only stands in until then.
-  const displayName = modelState.data?.name ?? schema.title ?? slug
+  // shows once its record is in. Not `schema.title`: that is the .scad file OpenSCAD
+  // exported, "model" for every model (#939), so the slug stands in until then.
+  const displayName = modelState.data?.name ?? slug
 
   const originLabel =
     record?.origin === 'builtin'
@@ -673,6 +678,11 @@ export function CustomizePage() {
         stage={renderStage}
         plate={plate}
         captureRef={captureRef}
+        sourceLink={
+          origin && (
+            <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+          )
+        }
         leading={
           // The page slot has no parameters flyout: the template's own page is the panel.
           full && customUi?.slot !== 'page' && (
@@ -765,6 +775,7 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      resetKey={resets}
     />
   )
   const templateUi = customUi && (
@@ -1027,6 +1038,7 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    resetKey={resets}
                   />
                 </>
               }
