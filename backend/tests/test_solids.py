@@ -128,6 +128,10 @@ class FakeRenders:
         self.peak = 0
         self.started: list[str] = []
         self.cancelled: list[str] = []
+        #: When set, each render waits here instead of sleeping, until this many have
+        #: started; the last to start wakes them all in one go.
+        self.together = 0
+        self._all_started = asyncio.Event()
 
     async def render_3mf(
         self,
@@ -148,7 +152,12 @@ class FakeRenders:
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:
-            await asyncio.sleep(self.delays.get(colour, self.delay))
+            if self.together:
+                if len(self.started) == self.together:
+                    self._all_started.set()
+                await self._all_started.wait()
+            else:
+                await asyncio.sleep(self.delays.get(colour, self.delay))
             if colour in self.fail:
                 raise self.fail[colour]
         except asyncio.CancelledError:
@@ -244,6 +253,10 @@ async def test_a_second_colour_failing_at_once_is_logged_not_lost(
     model, work = _model(tmp_path)
     colours = MANY_COLOURS[:2]
     fake.fail = {colours[0]: RuntimeError("first broke"), colours[1]: RuntimeError("second broke")}
+    # Both raise in the same turn of the event loop, before the TaskGroup can cancel
+    # either. Two equal sleeps did that only while their timers fired together; under
+    # load the first failure cancelled the second before it raised (#1617).
+    fake.together = len(colours)
 
     with pytest.raises(RuntimeError, match="broke") as raised:
         await render_solids(
