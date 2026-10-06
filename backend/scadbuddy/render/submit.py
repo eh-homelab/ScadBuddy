@@ -310,7 +310,7 @@ class RenderService:
         once and started again; still closing, the request is still accepting, and the
         client sends it again with the same key."""
         workflow_id = workflow_id_for_key(start.render_key)
-        for attempt in range(2):
+        for _ in range(2):
             try:
                 answer = await start_command(
                     self.client,
@@ -329,9 +329,10 @@ class RenderService:
                     # The start may have reached Temporal: still accepting if the
                     # execution exists (review #1066 (8) 2).
                     raise await late_answer(self.client, workflow_id) from error
-                # An Update that reached the execution as it completed is aborted. A
-                # missing namespace is NOT_FOUND too: configuration, raised at once.
-                if not execution_gone(error) or attempt:
+                # An Update that reached the execution as it completed is aborted, the
+                # same race as a `CLOSING` rejection (review #1066 (11) 1). A missing
+                # namespace is NOT_FOUND too: configuration, raised at once.
+                if not execution_gone(error):
                     raise
                 answer = RenderAnswer(closing=True)
             except WorkflowUpdateFailedError as error:
