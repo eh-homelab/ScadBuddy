@@ -70,9 +70,12 @@ class AlreadyClosedError(Exception):
 DESCRIBE_SECONDS = 2.0
 
 
-async def _late(client: Client, id: str) -> Exception:
-    """What a call that outlived its bound means: the execution exists, so it is still
-    accepting (a slow Update, a busy loop); or Temporal cannot say, so it is down."""
+async def late_answer(client: Client, id: str) -> Exception:
+    """What a command call that outlived its bound means, for the caller to raise.
+    Describes ``id`` within `DESCRIBE_SECONDS`: returns `CommandStillAcceptingError`
+    when the execution exists (a slow Update, a busy loop: the same request follows
+    it), and `TemporalUnavailableError` when the describe fails for any reason (no
+    such execution, or Temporal does not answer). Never raises."""
     try:
         async with asyncio.timeout(DESCRIBE_SECONDS):
             await client.get_workflow_handle(id).describe(
@@ -145,7 +148,7 @@ async def start_command[T](
                 rpc_timeout=deadline,
             )
     except TimeoutError as error:
-        raise await _late(client, id) from error
+        raise await late_answer(client, id) from error
     except RPCError as error:
         # The frontend refused the connection outright.
         if error.status == RPCStatusCode.UNAVAILABLE:
@@ -159,7 +162,7 @@ async def start_command[T](
     except WorkflowUpdateRPCTimeoutOrCancelledError as error:
         # The SDK reports the outer bound's cancellation as this error too.
         if bound.expired():
-            raise await _late(client, id) from error
+            raise await late_answer(client, id) from error
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             # A caller's cancel (its own deadline): never swallowed, or its

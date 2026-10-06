@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         CLOSING,
         QUEUE_FULL,
         RELEASE_UPDATE,
+        RENDER_UNSTARTABLE,
         AcceptRender,
         Failure,
         PieceOutcome,
@@ -57,6 +58,15 @@ PROJECT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 SHORT = timedelta(seconds=60)
+#: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
+#: retry fixes (an unexpected SQL error, an older build's row on the key that outlives
+#: them) answers the request rather than holding its render key with no row (review
+#: #1066 (10) 1). A failing attempt is answered within the route's 10 s deadline; a slow
+#: one is not cut short (each has `SHORT`), so a loaded database delays a render, as
+#: `command-still-accepting`, rather than refusing it.
+ACCEPT_RETRY = RetryPolicy(
+    maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+)
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
@@ -266,6 +276,8 @@ class TemplatePipeline:
         self._outcome: PieceOutcome | None = None
         self._job: Job | None = None
         self._queue_full: int | None = None
+        #: Why the first step failed past its retries: the run completes with no row.
+        self._unstartable: str | None = None
         self._answered = False
         self._claims = 0
         #: The `accepted` Update ids answered: a request sent again keeps its one claim.
@@ -285,10 +297,12 @@ class TemplatePipeline:
         self._outcome = outcome
 
     def _started(self) -> bool:
-        return self._work is not None or self._queue_full is not None
+        return (
+            self._work is not None or self._queue_full is not None or self._unstartable is not None
+        )
 
     def _closing(self) -> bool:
-        return self._released is not None or self._raised()
+        return self._released is not None or self._raised() or self._unstartable is not None
 
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> RenderAnswer:
@@ -299,6 +313,8 @@ class TemplatePipeline:
             await workflow.wait_condition(self._started)
         if self._queue_full is not None:
             return RenderAnswer(queue_full=self._queue_full)
+        if self._unstartable is not None:
+            raise ApplicationError(self._unstartable, type=RENDER_UNSTARTABLE, non_retryable=True)
         if self._closing():
             # Only after the wait above: a release sent by hand took the last claim.
             return RenderAnswer(closing=True)
@@ -418,14 +434,22 @@ class TemplatePipeline:
                 AcceptRender(start=start, workflow_id=info.workflow_id, run_id=info.run_id),
                 result_type=Job,
                 start_to_close_timeout=SHORT,
-                retry_policy=PROJECT_RETRY,
+                retry_policy=ACCEPT_RETRY,
             )
-        except (ActivityError, ApplicationError) as error:
+        except FailureError as error:
+            if is_cancelled_exception(error):
+                raise  # the run cancelled by hand: not the step's failure
             # A local activity's failure arrives as its ApplicationError itself
             # (temporalio 1.33), a regular one's as the ActivityError's cause.
             cause = error.cause if isinstance(error, ActivityError) else error
             if not (isinstance(cause, ApplicationError) and cause.type == QUEUE_FULL):
-                raise
+                # Its retries spent: nothing was written, and the Update answers the
+                # failure (500 `render-unstartable`); the run completes, so the next
+                # request starts a fresh one.
+                self._unstartable = f"the render could not be accepted: {cause or error}"
+                self._upsert(STATUS.value_set("refused"))
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                return
             # Nothing was written: the refusal answers the Update, and the run completes.
             # Back-pressure, so never a failed workflow (review #1066 3.1).
             self._queue_full = int(cause.details[0]) if cause.details else 0

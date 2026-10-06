@@ -23,7 +23,9 @@ from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
+    WorkflowUpdateFailedError,
 )
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -68,12 +70,20 @@ from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
     RELEASE_UPDATE,
+    RENDER_UNSTARTABLE,
     AcceptRender,
     Projection,
     ReleaseAnswer,
     RenderAnswer,
 )
-from scadbuddy.workflows.pipelines import KIND, STATUS, SUBJECT, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipelines import (
+    ACCEPT_RETRY,
+    KIND,
+    STATUS,
+    SUBJECT,
+    RenderPreview,
+    TemplatePipeline,
+)
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
 from tests.test_workflows import FakeActivities, _worker
@@ -477,6 +487,43 @@ async def test_superseding_a_finished_job_still_submits(
 
     assert done.state == "done", done.error
     assert (await asyncio.to_thread(projection.read, first.id)).state == "done"
+
+
+class _BrokenAccept(ProjectingActivities):
+    """`render_accept` fails every attempt, as a SQL error the code does not expect."""
+
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        self.accepts += 1
+        raise RuntimeError("relation render_jobs has no column x")
+
+
+async def test_an_accept_that_keeps_failing_is_answered_unstartable_within_the_deadline(
+    make_service: ServiceFactory, deps: WorkerDeps
+) -> None:
+    """The first step's retries are bounded: past them the run completes and its
+    Update answers the refusal, so the request gets an answer rather than looping on
+    `command-still-accepting` with no row (review #1066 (10) 1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = _BrokenAccept(deps)
+        params: dict[str, ParamValue] = {"width": _w()}
+        async with _worker(client, queue, acts):
+            began = time.monotonic()
+            with pytest.raises(WorkflowUpdateFailedError) as refused:
+                await service.submit(SLUG, params)
+            took = time.monotonic() - began
+            handle = client.get_workflow_handle(workflow_id_for_key(render_key(SLUG, params, None)))
+            await asyncio.wait_for(handle.result(), timeout=30)
+            described = await handle.describe()
+        await service.aclose()
+
+    assert took < submit_module.SUBMIT_DEADLINE
+    assert described.status == WorkflowExecutionStatus.COMPLETED
+    cause = refused.value.cause
+    assert isinstance(cause, ApplicationError) and cause.type == RENDER_UNSTARTABLE
+    assert acts.accepts == ACCEPT_RETRY.maximum_attempts
 
 
 async def test_a_refused_submit_supersedes_nothing(

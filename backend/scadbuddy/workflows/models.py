@@ -136,6 +136,11 @@ QUEUE_FULL = "QueueFull"
 #: render raised). Rejected, the Update is not in the run's history, so its id is free
 #: for the run that starts next (review #1066 (7) 1).
 CLOSING = "RenderClosing"
+#: `accepted`'s failure when the run's first step failed past its bounded retries (an
+#: error no retry fixes, or an older build's row on the key that outlived them): the run
+#: completes with no row, and the route answers 500 `render-unstartable` (review #1066
+#: (10) 1).
+RENDER_UNSTARTABLE = "RenderUnstartable"
 
 
 class RenderStart(BaseModel):

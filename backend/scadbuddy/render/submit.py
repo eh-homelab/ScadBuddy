@@ -74,7 +74,7 @@ from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
-    _late,
+    late_answer,
     start_command,
 )
 from scadbuddy.workflows.models import (
@@ -301,7 +301,7 @@ class RenderService:
         except TimeoutError as error:
             if not bound.expired():
                 raise
-            raise await _late(self.client, workflow_id_for_key(start.render_key)) from error
+            raise await late_answer(self.client, workflow_id_for_key(start.render_key)) from error
         return answer
 
     async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:
@@ -328,7 +328,7 @@ class RenderService:
                 if error.status in ENDED_RPC:
                     # The start may have reached Temporal: still accepting if the
                     # execution exists (review #1066 (8) 2).
-                    raise await _late(self.client, workflow_id) from error
+                    raise await late_answer(self.client, workflow_id) from error
                 # An Update that reached the execution as it completed is aborted. A
                 # missing namespace is NOT_FOUND too: configuration, raised at once.
                 if not execution_gone(error) or attempt:
