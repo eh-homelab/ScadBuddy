@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from psycopg import Connection
 from psycopg.errors import DeadlockDetected
 
 from scadbuddy.store.content import (
@@ -399,32 +400,16 @@ async def test_a_lost_reuse_at_the_cap_is_still_stored(
 
 
 def _parked_hold(monkeypatch: pytest.MonkeyPatch, after: Callable[[], None]) -> None:
-    """Run ``after`` in `_hold_shared`, once the hold is taken."""
-    hold = BlobIndex._hold_shared
+    """Run ``after`` once a put holds its key's row and, reusing, the object's
+    (`BlobIndex._locked`)."""
+    locked = BlobIndex._locked
 
-    def parked(*args: Any, **kwargs: Any) -> None:
-        hold(*args, **kwargs)
+    def parked(*args: Any, **kwargs: Any) -> Any:
+        own = locked(*args, **kwargs)
         after()
+        return own
 
-    monkeypatch.setattr(BlobIndex, "_hold_shared", staticmethod(parked))
-
-
-def _both(*calls: Callable[[], object]) -> list[str]:
-    results: list[str] = []
-
-    def run(call: Callable[[], object]) -> None:
-        try:
-            call()
-            results.append("ok")
-        except Exception as error:
-            results.append(type(error).__name__)
-
-    threads = [threading.Thread(target=run, args=(call,)) for call in calls]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(60)
-    return results
+    monkeypatch.setattr(BlobIndex, "_locked", staticmethod(parked))
 
 
 def _ref(backend_id: str, sha: str) -> BlobRef:
@@ -433,23 +418,45 @@ def _ref(backend_id: str, sha: str) -> BlobRef:
     )
 
 
-def _met_before_hold(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run `_hold_shared` only once both puts have reached it, each holding its own
-    key's row lock: the one ordering that deadlocks. Met any later, one put could take
-    its FOR SHARE before the other locked its key, and that other then just waits on
-    the first's commit (no deadlock, so no retry to assert). Only the first call of
-    each put meets; the loser's retry after the deadlock goes straight on."""
-    hold = BlobIndex._hold_shared
-    barrier = threading.Barrier(2)
-    met = threading.Event()
+def _parked_after_first_key_lock(
+    monkeypatch: pytest.MonkeyPatch, thread: Callable[[], threading.Thread | None]
+) -> tuple[threading.Event, threading.Event]:
+    """Park ``thread()``'s first ``FOR UPDATE`` once it has returned, i.e. while that
+    put holds its key's row lock and nothing else yet. Patched on the connection, not
+    on `BlobIndex`, so it holds whatever order the index takes its locks in. Returns
+    (parked, go)."""
+    execute = Connection.execute
+    parked, go = threading.Event(), threading.Event()
 
-    def meeting(*args: Any, **kwargs: Any) -> None:
-        if not met.is_set():
-            barrier.wait(timeout=30)
-            met.set()
-        hold(*args, **kwargs)
+    def parking(self: Connection[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
+        cursor = execute(self, query, *args, **kwargs)
+        if (
+            threading.current_thread() is thread()
+            and not parked.is_set()
+            and "FOR UPDATE" in str(query)
+        ):
+            parked.set()
+            assert go.wait(30)
+        return cursor
 
-    monkeypatch.setattr(BlobIndex, "_hold_shared", staticmethod(meeting))
+    monkeypatch.setattr(Connection, "execute", parking)
+    return parked, go
+
+
+def _wait_for_a_lock_wait(pool: Pool) -> None:
+    """Until a backend on this database waits on a heavyweight lock: a row lock held
+    by another transaction is waited on as that transaction's id."""
+    deadline = time.monotonic() + 30
+    with pool.connection() as conn:
+        while time.monotonic() < deadline:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+            if row is not None and row["n"] > 0:
+                return
+            time.sleep(0.01)
+    raise AssertionError("no backend ever waited on a lock")
 
 
 async def test_concurrent_re_puts_of_one_key_reusing_other_objects_hold_each(
@@ -526,28 +533,49 @@ async def test_concurrent_re_puts_of_one_key_reusing_other_objects_hold_each(
 def test_puts_swapping_objects_between_two_keys_do_not_deadlock(
     pool: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Each reuses the object the other key names. Locking key-then-object leaves this
-    one deadlock (locking in key text order would avoid it too; retrying is simpler),
-    so the deadlock Postgres breaks is retried, and logged. The first to commit frees
-    the other's object, so the retry finds it gone (`ContentStore` then uploads its own
-    copy); neither is a deadlock."""
+    """Each reuses the object the other key names. The first holds its key's row
+    while the second goes as far as it can; whatever it locks, it must not wait for
+    the first while the first waits for it (#1605). Locking key-then-object let each
+    hold its own key and wait for the other's row: a deadlock Postgres broke, retried,
+    and could deadlock again, since the victim's retry could re-take its key before the
+    winner took it. The first then commits; the second finds its object freed
+    (`ContentStore` uploads its own copy)."""
     index = BlobIndex(pool)
     p, o = _ref("21", "b"), _ref("22", "c")
     index.put("k1", p, slug="demo", meta={})
     index.put("k2", o, slug="demo", meta={})
-    _met_before_hold(monkeypatch)
+    results: dict[str, str] = {}
+
+    def run(name: str, call: Callable[[], object]) -> threading.Thread:
+        def target() -> None:
+            try:
+                call()
+                results[name] = "ok"
+            except Exception as error:
+                results[name] = type(error).__name__
+
+        return threading.Thread(target=target)
+
+    first = run("first", lambda: index.put("k1", o, slug="demo", meta={}, reuse=True))
+    second = run("second", lambda: index.put("k2", p, slug="demo", meta={}, reuse=True))
+    parked, go = _parked_after_first_key_lock(monkeypatch, lambda: first)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.store.index"):
-        results = _both(
-            lambda: index.put("k1", o, slug="demo", meta={}, reuse=True),
-            lambda: index.put("k2", p, slug="demo", meta={}, reuse=True),
-        )
-    assert sorted(results) == ["ReuseLostError", "ok"]
-    [retried] = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert retried.__dict__["key"] in ("k1", "k2")
-    assert retried.__dict__["attempt"] == 1
+        try:
+            first.start()
+            assert parked.wait(30)
+            second.start()
+            _wait_for_a_lock_wait(pool)
+            go.set()
+        finally:
+            go.set()
+            first.join(60)
+            second.join(60)
+    assert not first.is_alive() and not second.is_alive()
+    assert results == {"first": "ok", "second": "ReuseLostError"}
+    assert [r for r in caplog.records if r.name == "scadbuddy.store.index"] == []
     k1, k2 = index.get("k1"), index.get("k2")
     assert k1 is not None and k2 is not None
-    assert (k1.ref, k2.ref) in [(o, o), (p, p)]  # one moved; the other kept its object
+    assert (k1.ref, k2.ref) == (o, o)
 
 
 async def test_a_release_waits_for_a_reuse_that_holds_the_object(

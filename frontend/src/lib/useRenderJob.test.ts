@@ -130,6 +130,23 @@ describe('useRenderJob', () => {
     expect(result.current.error).toBeUndefined()
   })
 
+  it('waits out a refusal in elapsed time, not on a wall clock that steps (#1485)', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'full', retry_after: 3 }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    vi.setSystemTime(Date.now() + 3_600_000)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    expect(submit).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+    expect(submit).toHaveBeenCalledTimes(2)
+  })
+
   it('treats any other refusal as an error, not a wait', async () => {
     submit.mockRejectedValueOnce(
       new ApiError({ title: 'Service Unavailable', status: 503, detail: 'openscad is not available' }),
