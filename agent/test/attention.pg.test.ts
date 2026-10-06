@@ -202,6 +202,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(Date.now() - started).toBeLessThan(5_000)
   })
 
+  // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit
+  // sends must not be lost while that read is in flight, or the wait sleeps a whole poll (here an hour).
+  it('a wake that lands while the wait reads its row ends the wait at once, not after a poll', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 3_600_000 })
+    const service = m.questions as unknown as { row(id: string): Promise<unknown> }
+    const real = service.row.bind(service)
+    let reading!: () => void
+    const inRead = new Promise<void>((resolve) => (reading = resolve))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let first = true
+    vi.spyOn(service, 'row').mockImplementation(async (id) => {
+      const row = await real(id)
+      if (first) {
+        // The row as read before the answer commits: still pending.
+        first = false
+        reading()
+        await held
+      }
+      return row
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await inRead
+    await m.questions.answer(browser, answer(session.id, await pending(session.id), ['Done']))
+    release()
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: true, answers: { [attentionCard(input()).question]: 'Done' } }])
+  })
+
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
