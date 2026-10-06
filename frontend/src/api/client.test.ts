@@ -6,6 +6,7 @@ import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
   OPERATION_UNFINISHED,
+  TEMPORAL_UNAVAILABLE,
   UNANSWERED,
   api,
   mayHaveRun,
@@ -969,6 +970,206 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     )
     await call()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+describe('render (#1053)', () => {
+  const defaults = { ...printRunPoll }
+  afterEach(() => {
+    Object.assign(printRunPoll, defaults)
+  })
+
+  it('sends a render again while the server is still accepting it', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return posts === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(posts).toBe(2)
+  })
+
+  const unavailable = (mayHaveStarted: boolean, retryAfter = '5') =>
+    HttpResponse.json(
+      {
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy cannot reach Temporal, where renders run.',
+        may_have_started: mayHaveStarted,
+      },
+      { status: 503, headers: { 'Retry-After': retryAfter } },
+    )
+
+  it("answers temporal-unavailable that started nothing once, with its Retry-After as retry_after for the caller's re-send", async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return unavailable(false)
+      }),
+    )
+
+    // `useRenderJob` waits that long and sends it again with the same key (review #1066 (8) 3).
+    await expect(api.render('box', { params: {} })).rejects.toMatchObject({
+      status: 503,
+      problem: { type: TEMPORAL_UNAVAILABLE, retry_after: 5 },
+    })
+    expect(posts).toBe(1)
+  })
+
+  it('sends temporal-unavailable that may have started again with the same key (review #1066 (10) 4)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? unavailable(true, '0')
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('after temporal-unavailable that may have started and an abort, still sends once more (review #1066 (10) 4)', async () => {
+    printRunPoll.intervalMs = 50
+    const keys: (string | null)[] = []
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length > 1) return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+        setTimeout(() => controller.abort(), 10)
+        return unavailable(true, '0')
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not send a render-unstartable that started nothing again (review #1066 (10) 3)', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/render-unstartable',
+            title: 'Internal Server Error',
+            status: 500,
+            detail: 'the render could not be started',
+            may_have_started: false,
+          },
+          { status: 500 },
+        )
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).rejects.toMatchObject({ status: 500 })
+    expect(posts).toBe(1)
+  })
+
+  const accepting = () =>
+    HttpResponse.json(
+      {
+        type: 'https://scadbuddy.dev/problems/command-still-accepting',
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy is still checking this request.',
+      },
+      { status: 503, headers: { 'Retry-After': '2' } },
+    )
+
+  it('re-sends with the same Idempotency-Key, so the server counts one request', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? accepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await api.render('box', { params: {} })
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it("sends the caller's key when it passes one (review #1066 (7) 3)", async () => {
+    let key: string | null = null
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await api.render('box', { params: {} }, undefined, undefined, undefined, 'k'.repeat(32))
+    expect(key).toBe('k'.repeat(32))
+  })
+
+  it('after an abort between re-sends, sends once more to learn the job it claimed (review #1066 1.1)', async () => {
+    printRunPoll.intervalMs = 50
+    const keys: (string | null)[] = []
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length > 1) return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+        setTimeout(() => controller.abort(), 10)
+        return accepting()
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('gives up after that one last send when it is still being accepted', async () => {
+    printRunPoll.intervalMs = 20
+    let posts = 0
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        controller.abort()
+        return accepting()
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).rejects.toBeDefined()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(posts).toBe(2)
   })
 })
 

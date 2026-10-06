@@ -352,13 +352,14 @@ async def _prepare_catalogue(state: AppState) -> None:
 
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
-    queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure leaves the projection to the
-    lifespan's guard, which closes everything a failed start opened, each once."""
+    queue left running, connect the in-process worker's client, prune, and start the
+    service (which settles the pending rows no workflow will run, then prunes). A
+    failure leaves the projection to the lifespan's guard, which closes everything a
+    failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
     await _prepare_catalogue(state)
-    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # What a pre-Temporal release was running, nothing
     # will finish (#546).
     failed = await asyncio.to_thread(projection.fail_legacy_running)
     if failed:
@@ -369,15 +370,6 @@ async def _start_render(state: AppState) -> None:
     if settings.temporal_worker_inprocess:
         # Eager: a worker cannot run on the API's lazy client (dev and tests).
         state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-    # Before the reconciler's first pass (`service.start`), which starts only rows
-    # that name a workflow: what a pre-Temporal release's queue left pending
-    # becomes this path's.
-    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-    if adopted:
-        logger.info(
-            "adopted the renders the legacy queue left pending",
-            extra={"count": len(adopted), "job_ids": adopted},
-        )
     await service.prune()
     await service.start()
 
@@ -597,7 +589,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
-    # its reconciler), so it runs inside the `try` whose `finally` releases them: a
+    # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
     backfill: asyncio.Task[None] | None = None

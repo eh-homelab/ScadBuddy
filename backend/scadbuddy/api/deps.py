@@ -332,8 +332,8 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
-    # Lazy, so the API boots while Temporal is down: its renders wait, and the
-    # reconciler starts them once it is back.
+    # Lazy, so the API boots while Temporal is down: a render is then refused with
+    # `temporal-unavailable` (#1053) until it is back.
     temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
     render = RenderService(
         projection=projection,
@@ -342,6 +342,7 @@ def _build_core(settings: Settings) -> AppState:
         config=config,
         paths=paths,
         metrics=metrics,
+        search_attributes=settings.temporal_search_attributes,
     )
     previews = (
         build_previews(catalogue, outputs, render, config) if settings.preview_renders else None

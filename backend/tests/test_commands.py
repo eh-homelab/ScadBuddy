@@ -192,6 +192,36 @@ async def test_an_unreachable_temporal_is_unavailable_within_the_deadline(queue:
     assert time.monotonic() - began < 10
 
 
+async def test_a_callers_deadline_is_its_own_timeout_not_still_accepting(queue: str) -> None:
+    """A caller that bounds the call more tightly than ``deadline`` (a route's own
+    budget) gets its cancel back: turned into still-accepting, its `asyncio.timeout`
+    could not tell that it expired (review #1066 (9), the render route's 503)."""
+    from scadbuddy.workflows.client import connect_lazily
+
+    # A frontend that accepts and never answers: a refused port fails the connect at
+    # once, before the caller's bound, and tested nothing.
+    held: list[asyncio.StreamWriter] = []
+
+    async def silent(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(1):
+                await echo(
+                    connect_lazily(f"127.0.0.1:{port}", "default"),
+                    queue,
+                    "echo-caller-bound",
+                    deadline=timedelta(seconds=5),
+                )
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+
+
 class Proxy:
     """A TCP proxy to Temporal that can be cut, as a frontend going down would be."""
 
@@ -253,6 +283,24 @@ async def test_an_update_slower_than_the_default_deadline_is_still_accepting(
         with pytest.raises(CommandStillAcceptingError):
             await echo(client, queue, workflow_id, EchoInput(delay_s=20))
         await client.get_workflow_handle(workflow_id).terminate()
+
+
+async def test_the_memo_reaches_the_execution(client: Client, queue: str) -> None:
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        await start_command(
+            client,
+            "EchoCommand",
+            EchoInput(finish_at_once=True),
+            id=workflow_id,
+            task_queue=queue,
+            update="accepted",
+            result_type=EchoAnswer,
+            reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            memo={"activity_timeout": 42.0},
+        )
+        described = await client.get_workflow_handle(workflow_id).describe()
+    assert await described.memo_value("activity_timeout") == 42.0
 
 
 async def test_an_execution_ended_before_its_update_answered_is_a_closed_command(
