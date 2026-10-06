@@ -9,8 +9,9 @@ deleted. No dot-named folders: Bambuddy shows them.
 
 Every folder ScadBuddy makes or adopts is recorded in `store_folders`, under the
 Bambuddy instance (its base URL) and inbox it was found on, and a delete is refused
-unless the file sits in one recorded as `work` there (#683). What each file is lives in
-`store_blobs`, so a fetch is by file id, never a folder scan.
+unless the file sits in one recorded as `work` (or `retired`, #1437) there (#683).
+What each file is lives in `store_blobs`, so a fetch is by file id, never a folder
+scan.
 
 Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
 titles clean to the same name share one folder pair, and a template titled "Shared"
@@ -183,7 +184,18 @@ FOLDER_LOCK_TIMEOUT = "30s"
 
 def folder_lock_key(instance: str, inbox: int, slug: str, role: str) -> int:
     """The advisory-lock key for finding one folder, the same in every process."""
-    parts = ("store-folder", instance, inbox, slug, role)
+    return _lock_key(("store-folder", instance, inbox, slug, role))
+
+
+def legacy_folder_lock_key(inbox: int, slug: str, role: str) -> int:
+    """The key a release from before #683 locks the same find on. A find takes it as
+    well as `folder_lock_key` while such a worker may still be draining (#1437), so the
+    two never both create the folder; it goes with `store_folders.instance`'s DEFAULT
+    (#1429)."""
+    return _lock_key(("store-folder", inbox, slug, role))
+
+
+def _lock_key(parts: tuple[object, ...]) -> int:
     return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
 
 
@@ -218,7 +230,11 @@ class BambuddyContentBackend:
         inbox = _Inbox(target.instance, target.inbox_id)
         async with BambuddyClient(target.config, http=self._http) as client:
             if inbox.instance not in self._claimed:
-                await self._claim_legacy(client, inbox.instance)
+                try:
+                    await self._claim_legacy(client, inbox.instance)
+                except (ApiError, httpx.HTTPError):
+                    # Left for the next call; a delete that needs them retries (`remove`).
+                    logger.warning("could not list folders to settle pre-instance folder records")
             yield client, inbox
 
     async def _claim_legacy(self, client: BambuddyClient, instance: str) -> None:
@@ -230,17 +246,13 @@ class BambuddyContentBackend:
         into a folder the user made). Anything
         else (ids from an instance the URL was repointed away from, #683; a folder moved
         or deleted since) is dropped, never trusted, so the next find adopts or makes the
-        folder again. Best effort: a folder listing that fails leaves the rows for the
+        folder again. A folder listing that fails raises and leaves the rows for the
         next call."""
         legacy = await asyncio.to_thread(self._legacy_rows)
         if not legacy:
             self._claimed.add(instance)
             return
-        try:
-            folders = {f.id: f for root in await client.folders() for f in root.walk()}
-        except (ApiError, httpx.HTTPError):
-            logger.warning("could not list folders to settle pre-instance folder records")
-            return
+        folders = {f.id: f for root in await client.folders() for f in root.walk()}
         templates = {
             (row.inbox_id, row.slug): row.folder_id
             for row in legacy
@@ -280,18 +292,23 @@ class BambuddyContentBackend:
         self, instance: str, claimed: list[_LegacyFolder], seen: list[_LegacyFolder]
     ) -> None:
         """Claim ``claimed`` for ``instance`` (unless it already records that folder or
-        that slot), then drop whatever of ``seen`` is still unclaimed. A row an older
-        release inserts after ``seen`` was read is left for the next process."""
+        that slot), then drop whatever of ``seen`` is still unclaimed. A Work folder
+        whose slot the instance already records with another folder is kept as
+        `retired` (#1437): it is ScadBuddy's and may hold files, so it stays deletable
+        though nothing uploads into it. A row an older release inserts after ``seen``
+        was read is left for the next process."""
         with self._pool.connection() as conn, conn.transaction():
             for row in claimed:
                 try:
                     # A savepoint each: a find in another process may record the same
                     # slot meanwhile (its row is not visible to NOT EXISTS until it
-                    # commits). Then this row is simply not claimed, and goes below.
+                    # commits). Then this row is not claimed.
                     with conn.transaction():
-                        self._claim_row(conn, instance, row)
+                        won = self._claim_row(conn, instance, row)
                 except UniqueViolation:
-                    continue
+                    won = False
+                if not won and row.role == "work":
+                    self._retire_row(conn, instance, row)
             for row in seen:
                 conn.execute(
                     "DELETE FROM store_folders WHERE instance = '' AND inbox_id = %s"
@@ -300,14 +317,26 @@ class BambuddyContentBackend:
                 )
 
     @staticmethod
-    def _claim_row(conn: Connection[DictRow], instance: str, row: _LegacyFolder) -> None:
-        conn.execute(
+    def _claim_row(conn: Connection[DictRow], instance: str, row: _LegacyFolder) -> bool:
+        """Whether the row is now ``instance``'s."""
+        cursor = conn.execute(
             "UPDATE store_folders AS legacy SET instance = %s WHERE legacy.instance = ''"
             " AND inbox_id = %s AND slug = %s AND role = %s AND folder_id = %s"
             " AND NOT EXISTS (SELECT 1 FROM store_folders AS own WHERE own.instance = %s"
             " AND (own.folder_id = legacy.folder_id OR (own.inbox_id, own.slug, own.role)"
             " = (legacy.inbox_id, legacy.slug, legacy.role)))",
             (instance, row.inbox_id, row.slug, row.role, row.folder_id, instance),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _retire_row(conn: Connection[DictRow], instance: str, row: _LegacyFolder) -> None:
+        """Record ``row``'s Work folder as `retired` for ``instance``: nothing if the
+        instance already records that folder (it is deletable already)."""
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, %s, 'retired', %s) ON CONFLICT DO NOTHING",
+            (instance, row.inbox_id, row.slug, row.folder_id),
         )
 
     # --- ContentBackend ------------------------------------------------------
@@ -360,6 +389,15 @@ class BambuddyContentBackend:
                     return
                 raise
             work = await asyncio.to_thread(self._work_folders, inbox)
+            if file.folder_id not in work and await asyncio.to_thread(
+                self._legacy_work_folder, inbox, file.folder_id
+            ):
+                # A pre-#683 row names the folder and is not settled yet (a listing
+                # failed, or an older release recorded it since). Settle now: a listing
+                # that fails again raises, which the caller retries, where a refusal
+                # would untrack the file for good (#1437).
+                await self._claim_legacy(client, inbox.instance)
+                work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
                     f"library file {backend_id} is in folder {file.folder_id}, not a ScadBuddy"
@@ -406,8 +444,13 @@ class BambuddyContentBackend:
             if found is not None:
                 return found
             # Across processes: the lock's own connection, used for the lookup and the
-            # record too, so a find takes no pooled connection and no thread.
-            async with self._locked(folder_lock_key(inbox.instance, inbox.id, slug, role)) as conn:
+            # record too, so a find takes no pooled connection and no thread. The legacy
+            # key first, always, so two finds never take the pair in opposite orders.
+            keys = (
+                legacy_folder_lock_key(inbox.id, slug, role),
+                folder_lock_key(inbox.instance, inbox.id, slug, role),
+            )
+            async with self._locked(*keys) as conn:
                 found = await self._recorded(conn, inbox, slug, role)
                 if found is None:
                     found = await self._adopt_or_create(client, name, parent_id)
@@ -423,8 +466,8 @@ class BambuddyContentBackend:
         return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
 
     @asynccontextmanager
-    async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:
-        """A transaction-scoped advisory lock, so two workers never both create a folder,
+    async def _locked(self, *keys: int) -> AsyncIterator[AsyncConnection[DictRow]]:
+        """Transaction-scoped advisory locks, so two workers never both create a folder,
         on a connection of its own: the wait is in the event loop, not a thread, and a
         find never holds a pooled connection. A path that leaves without the COMMIT
         (a cancellation) closes the connection, and the rollback releases the lock.
@@ -436,7 +479,8 @@ class BambuddyContentBackend:
         try:
             await conn.execute("BEGIN")
             await conn.execute(f"SET LOCAL lock_timeout = '{FOLDER_LOCK_TIMEOUT}'")
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+            for key in keys:
+                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
             yield conn
             await conn.execute("COMMIT")
         finally:
@@ -468,7 +512,8 @@ class BambuddyContentBackend:
     def _forget(self, inbox: _Inbox, slug: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "DELETE FROM store_folders WHERE instance = %s AND inbox_id = %s AND slug = %s",
+                "DELETE FROM store_folders WHERE instance = %s AND inbox_id = %s AND slug = %s"
+                " AND role IN ('template', 'work')",
                 (inbox.instance, inbox.id, slug),
             )
         for role in ("template", "work"):
@@ -476,13 +521,26 @@ class BambuddyContentBackend:
 
     def _work_folders(self, inbox: _Inbox) -> set[int]:
         """The `Work/` folders recorded under the configured inbox on the configured
-        Bambuddy. One recorded under an inbox Settings no longer names, or on another
-        instance (whose ids mean other folders here, #683), is not ScadBuddy's to
-        delete from."""
+        Bambuddy, retired ones included (#1437). One recorded under an inbox Settings no
+        longer names, or on another instance (whose ids mean other folders here, #683),
+        is not ScadBuddy's to delete from."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT folder_id FROM store_folders"
-                " WHERE role = 'work' AND instance = %s AND inbox_id = %s",
+                " WHERE role IN ('work', 'retired') AND instance = %s AND inbox_id = %s",
                 (inbox.instance, inbox.id),
             ).fetchall()
         return {int(row["folder_id"]) for row in rows}
+
+    def _legacy_work_folder(self, inbox: _Inbox, folder_id: int | None) -> bool:
+        """Whether a pre-#683 row still records ``folder_id`` as a Work folder of the
+        configured inbox."""
+        if folder_id is None:
+            return False
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM store_folders WHERE instance = '' AND role = 'work'"
+                " AND inbox_id = %s AND folder_id = %s",
+                (inbox.id, folder_id),
+            ).fetchone()
+        return row is not None

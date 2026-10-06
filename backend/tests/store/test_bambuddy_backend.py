@@ -27,12 +27,14 @@ from scadbuddy.store.bambuddy import (
     BambuddyTarget,
     RefusedDeleteError,
     RenderSettingsSource,
+    _Inbox,
     folder_lock_key,
     folder_name,
     instance_key,
+    legacy_folder_lock_key,
 )
-from scadbuddy.store.content import BlobMissingError, BlobScope
-from scadbuddy.store.index import Pool
+from scadbuddy.store.content import BlobMissingError, BlobRef, BlobScope, ContentStore
+from scadbuddy.store.index import BlobIndex, Pool
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
@@ -165,7 +167,7 @@ async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool)
         conn.execute(
             "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
             " VALUES (%s, %s, 'old', 'work', 42)",
-            (BASE_URL, INBOX + 1),
+            (HERE, INBOX + 1),
         )
     respx.get(f"{API}/library/files/78").mock(
         return_value=httpx.Response(
@@ -181,6 +183,8 @@ async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool)
 
 
 OTHER = "https://other-bambuddy.test"
+#: This instance as `store_folders` keys it (#1437 Low 5: never the raw URL).
+HERE = instance_key(BASE_URL)
 
 
 def _record_folders(pool: Pool, instance: str, *rows: tuple[str, str, int]) -> None:
@@ -274,7 +278,7 @@ async def test_pre_instance_folders_placed_on_this_bambuddy_are_claimed(pool: Po
     backend = BambuddyContentBackend(target(), pool)
     await backend.remove("78")
     assert delete.called
-    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    assert _instances(pool) == {40: HERE, 42: HERE}
     await backend.aclose()
 
 
@@ -302,7 +306,7 @@ async def test_pre_instance_folders_not_on_this_bambuddy_are_dropped_not_claimed
 async def test_a_pre_instance_row_this_bambuddy_already_records_is_dropped(pool: Pool) -> None:
     """A legacy row for a folder or a slot the instance already has (another process
     claimed or made it first) is not claimed twice and raises no unique violation."""
-    _record_folders(pool, BASE_URL, ("old", "template", 40), ("old", "work", 42))
+    _record_folders(pool, HERE, ("old", "template", 40), ("old", "work", 42))
     with pool.connection() as conn:
         conn.execute(
             "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
@@ -314,7 +318,7 @@ async def test_a_pre_instance_row_this_bambuddy_already_records_is_dropped(pool:
     respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
     backend = BambuddyContentBackend(target(), pool)
     await backend.remove("78")
-    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    assert _instances(pool) == {40: HERE, 42: HERE}
     await backend.aclose()
 
 
@@ -340,32 +344,104 @@ async def test_a_pre_instance_template_folder_without_its_work_folder_is_dropped
 async def test_a_failed_folder_listing_leaves_pre_instance_rows_for_the_next_call(
     pool: Pool,
 ) -> None:
-    """While the listing fails nothing is claimed (a delete in a legacy Work folder is
-    refused); the next call that can list settles them, and later calls list no more."""
+    """#1437: while the listing fails nothing is claimed, and a delete in a legacy Work
+    folder fails with the listing's error, which a caller retries, not with a refusal,
+    which it treats as final. The next call that can list settles the rows, and later
+    calls list no more."""
     _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
     listing = respx.get(f"{API}/library/folders").mock(
-        side_effect=[httpx.Response(503, json={"detail": "down"}), _placed_tree()]
+        side_effect=[
+            httpx.Response(503, json={"detail": "down"}),
+            httpx.Response(503, json={"detail": "down"}),
+            _placed_tree(),
+        ]
     )
     _file_in(42)
     delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
     backend = BambuddyContentBackend(target(), pool)
-    with pytest.raises(RefusedDeleteError):
+    with pytest.raises(ApiError) as failed:
         await backend.remove("78")
+    assert not isinstance(failed.value, RefusedDeleteError)
     assert _instances(pool) == {40: "", 42: ""}
     await backend.remove("78")
     assert delete.call_count == 1
-    assert _instances(pool) == {40: BASE_URL, 42: BASE_URL}
+    assert _instances(pool) == {40: HERE, 42: HERE}
     await backend.remove("78")
-    assert listing.call_count == 2
+    assert listing.call_count == 3
     await backend.aclose()
+
+
+@respx.mock
+async def test_a_delete_during_a_failed_listing_keeps_the_blob_tracked(pool: Pool) -> None:
+    """#1437 High 1, end to end: the delete's index row goes back while the listing
+    fails, so the next pass removes the file instead of leaving it untracked."""
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    respx.get(f"{API}/library/folders").mock(
+        side_effect=[
+            httpx.Response(503, json={"detail": "down"}),
+            httpx.Response(503, json={"detail": "down"}),
+            _placed_tree(),
+        ]
+    )
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    store = ContentStore(backend, BlobIndex(pool))
+    ref = BlobRef(sha256="a" * 64, kind="piece", backend="bambuddy", backend_id="78", size=1)
+    store.index.put("piece-a", ref, slug="old", meta={})
+    with pytest.raises(ApiError):
+        await store.delete("piece-a")
+    assert store.index.get("piece-a") is not None
+    await store.delete("piece-a")
+    assert delete.call_count == 1
+    assert store.index.get("piece-a") is None
+    await store.aclose()
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_placed_work_folder_whose_slot_is_taken_stays_deletable(pool: Pool) -> None:
+    """#1437 High 2: the instance already records another Work folder (99) for the
+    slot, made by a find that did not adopt the legacy one. The legacy folder (42) is
+    verified ScadBuddy's and holds files: losing the slot must not orphan them."""
+    _record_folders(pool, HERE, ("old", "template", 40), ("old", "work", 99))
+    _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
+    respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    await backend.remove("78")
+    assert delete.called
+    assert "" not in _instances(pool).values()
+    await backend.aclose()
+
+
+def _claims_waiting(conninfo: str) -> int:
+    """Legacy claims (`_claim_row`) of this database waiting on a lock right now."""
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+            " AND wait_event_type = 'Lock' AND query LIKE 'UPDATE store_folders AS legacy%%'"
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _poll(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.01)
 
 
 def test_a_slot_recorded_by_another_process_mid_settle_is_not_a_unique_violation(
     pool: Pool, pg_conninfo: str
 ) -> None:
     """#1418 review: a find in another process records the slot after this settle read
-    its legacy rows, and commits only once the claim is waiting on it. The claim then
-    yields to it rather than failing the call with a unique violation."""
+    its legacy rows, and commits only once the claim is waiting on it (polled in
+    `pg_stat_activity`, #1437, so the test always reaches the unique check). The claim
+    then yields to it rather than failing the call with a unique violation, and the
+    legacy Work folder stays deletable."""
     _record_folders(pool, "", ("old", "template", 40), ("old", "work", 42))
     backend = BambuddyContentBackend(target(), pool)
     legacy = backend._legacy_rows()
@@ -373,14 +449,16 @@ def test_a_slot_recorded_by_another_process_mid_settle_is_not_a_unique_violation
         other.execute(
             "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
             " VALUES (%s, %s, 'old', 'work', 99)",
-            (BASE_URL, INBOX),
+            (HERE, INBOX),
         )
         with ThreadPoolExecutor(1) as pool_thread:
-            settling = pool_thread.submit(backend._settle_legacy, BASE_URL, legacy, legacy)
-            time.sleep(0.5)  # the claim of ('old', 'work') waits on the uncommitted row
+            settling = pool_thread.submit(backend._settle_legacy, HERE, legacy, legacy)
+            _poll(lambda: settling.done() or _claims_waiting(pg_conninfo) > 0)
+            assert not settling.done()
             other.commit()
             settling.result(10)
-    assert _instances(pool) == {40: BASE_URL, 99: BASE_URL}
+    assert _instances(pool) == {40: HERE, 42: HERE, 99: HERE}
+    assert backend._work_folders(_Inbox(HERE, INBOX)) == {42, 99}
 
 
 @pytest.mark.parametrize(
@@ -414,7 +492,7 @@ def test_another_scheme_port_path_or_host_is_another_instance(a: str, b: str) ->
 async def test_a_respelled_url_keeps_its_work_folders_deletable(pool: Pool) -> None:
     """#1431: folders recorded under `https://bambuddy.test` stay ScadBuddy's when
     Settings names the same Bambuddy as `HTTPS://Bambuddy.TEST:443`."""
-    _record_folders(pool, instance_key(BASE_URL), ("old", "work", 42))
+    _record_folders(pool, HERE, ("old", "work", 42))
 
     async def respelled() -> BambuddyTarget:
         return BambuddyTarget(
@@ -459,7 +537,7 @@ async def test_a_live_switch_to_another_bambuddy_does_not_reuse_cached_folders(
     assert upload_there.called
     with pool.connection() as conn:
         rows = conn.execute("SELECT DISTINCT instance FROM store_folders").fetchall()
-    assert {row["instance"] for row in rows} == {BASE_URL, OTHER}
+    assert {row["instance"] for row in rows} == {HERE, instance_key(OTHER)}
     await backend.aclose()
 
 
@@ -622,7 +700,7 @@ async def test_a_find_cancelled_while_waiting_for_the_lock_leaves_none_held(
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     respx.post(f"{API}/library/files").mock(return_value=uploaded())
-    key = folder_lock_key(BASE_URL, INBOX, SCOPE.slug or "", "template")
+    key = folder_lock_key(HERE, INBOX, SCOPE.slug or "", "template")
     with psycopg.connect(pg_conninfo, autocommit=True) as holder:
         holder.execute("SELECT pg_advisory_lock(%s)", (key,))
         assert _advisory_locks(pg_conninfo, key) == 1  # the key maps onto pg_locks as assumed
@@ -639,6 +717,60 @@ async def test_a_find_cancelled_while_waiting_for_the_lock_leaves_none_held(
     assert _advisory_locks(pg_conninfo, key) == 0
     for backend in (first, second):
         await backend.aclose()
+
+
+def _lock_waiters(conninfo: str, key: int) -> int:
+    """Backends waiting for (not holding) advisory lock `key`."""
+    unsigned = key & 0xFFFFFFFFFFFFFFFF
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            " AND classid = %s AND objid = %s AND objsubid = 1",
+            (unsigned >> 32, unsigned & 0xFFFFFFFF),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@respx.mock
+async def test_a_find_waits_for_a_previous_release_finding_the_same_folder(
+    pool: Pool, pg_conninfo: str
+) -> None:
+    """#1437 Medium 3: a worker from before #683, still draining in a rollout, locks a
+    find on the key without the instance. A find here takes that key too, so the two
+    never both create the folder."""
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    key = legacy_folder_lock_key(INBOX, SCOPE.slug or "", "template")
+    backend = BambuddyContentBackend(target(), pool)
+    with psycopg.connect(pg_conninfo, autocommit=True) as previous_release:
+        previous_release.execute("SELECT pg_advisory_lock(%s)", (key,))
+        waiting = asyncio.create_task(backend.upload("piece", b"a", name="a.zip", scope=SCOPE))
+        deadline = time.monotonic() + 10
+        while not waiting.done() and await asyncio.to_thread(_lock_waiters, pg_conninfo, key) == 0:
+            assert time.monotonic() < deadline, "the find never waited for the legacy key"
+            await asyncio.sleep(0.01)
+        assert not waiting.done()
+        previous_release.execute("SELECT pg_advisory_unlock(%s)", (key,))
+    assert await asyncio.wait_for(waiting, 5) == "500"
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_vanished_work_folder_forgets_its_slot_but_keeps_retired_folders(
+    pool: Pool,
+) -> None:
+    """#1437: making a template's folders again (`_forget`) drops the slot's rows, not
+    a retired Work folder, whose files stay deletable."""
+    _record_folders(
+        pool, HERE, ("old", "template", 40), ("old", "work", 99), ("old", "retired", 42)
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    backend._forget(_Inbox(HERE, INBOX), "old")
+    assert _instances(pool) == {42: HERE}
+    assert backend._work_folders(_Inbox(HERE, INBOX)) == {42}
+    await backend.aclose()
 
 
 @respx.mock
