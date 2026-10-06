@@ -16,6 +16,7 @@ import {
 } from '../../lib/printsQuery'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
+import { usePrintProgress } from '../../lib/usePrintProgress'
 import { MediaLightbox } from '../media/MediaLightbox'
 import type { Slide } from '../media/slides'
 import { Button } from '../ui/Button'
@@ -358,11 +359,12 @@ const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
 /**
  * #898 — a row asks the progress read whether anything is still coming. Bambuddy expires
  * slice jobs and drops queue items, and once the read has settled no print will be linked
- * to this output, so a spinner there would wait forever.
+ * to this output, so a spinner there would wait forever. #954 — it follows the print
+ * live, as the progress panel does, so the row changes without a reload.
  */
 function WaitingRow({ output }: { output: Output }) {
-  const progress = useAsync(() => api.getPrintProgress(output.id), [output.id])
-  const settled = progress.data?.settled ? progress.data : null
+  const { progress } = usePrintProgress(output.id, true)
+  const settled = progress?.settled ? progress : null
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
       <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>
