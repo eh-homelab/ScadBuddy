@@ -218,7 +218,8 @@ TRAY_H = RINGS ? ring_count(tray_height) * ring_height : tray_height;
 function piece_h(kind) = kind == "cup" ? CUP_H : TRAY_H;
 
 TD = min(text_depth, wall - BEHIND_TEXT);
-if (TD < text_depth && name_on != "none" && name != "")
+// wall - BEHIND_TEXT is inexact (1.2 - 0.8 < 0.4), so allow for rounding.
+if (TD < text_depth - 1e-6 && name_on != "none" && name != "")
     echo(str("NOTE: text_depth reduced from ", text_depth, " to ", TD, " mm to leave ", BEHIND_TEXT, " mm of wall behind the name"));
 
 HAS_NAME = len(name) > 0 && name != " ";
