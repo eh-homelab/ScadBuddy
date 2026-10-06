@@ -103,7 +103,7 @@ name_color = "#6A1B9A"; // color
 // Name inlaid flush into the board below the rows (leave empty for none)
 name = "MIA"; // 12
 
-// Typeface for the name (the app fills this dropdown from the fonts installed in the image)
+// Typeface for the name
 font = "DejaVu Sans:style=Bold"; // font
 
 // Largest letter height in mm (smaller if the name is long for the board)
