@@ -348,6 +348,22 @@ describe('PresetPicker', () => {
     })
   })
 
+  it('puts "Changed from" on its own line, truncated, as a status (#352)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+
+    const note = screen.getByTestId('preset-modified')
+    // Not squeezed into the buttons' row, where it wrapped word by word.
+    const update = screen.getByRole('button', { name: /^Update preset / })
+    expect(note.parentElement).not.toBe(update.parentElement)
+    // Above them, one line, the whole name kept for the eye that hovers.
+    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(note).toHaveClass('truncate')
+    expect(note).toHaveAttribute('title', 'Changed from Mum')
+    expect(screen.getByRole('status', { name: 'Changed from Mum' })).toBe(note)
+  })
+
   it('offers neither Update nor Delete on a preset the template ships', async () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Tiny')

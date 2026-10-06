@@ -50,6 +50,36 @@ test.describe('template presets', () => {
   })
 })
 
+test.describe('the "Changed from" note (#352)', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  for (const width of [1440, 1024, 390]) {
+    test(`stays one line inside the picker at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/m/name-keychain')
+      await page.getByLabel('Preset').selectOption({ label: 'Old engraving' })
+      await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
+
+      const note = page.getByTestId('preset-modified')
+      await expect(note).toHaveText('Changed from Old engraving')
+      const box = await note.boundingBox()
+      const picker = await page.getByTestId('preset-picker').boundingBox()
+      const update = await page.getByRole('button', { name: 'Update' }).boundingBox()
+      if (!box || !picker || !update) throw new Error('not laid out')
+      // One line, not a word per line beside the buttons.
+      expect(box.height).toBeLessThan(24)
+      // Inside the panel: a long name pushed its first letters off the left edge.
+      expect(box.x).toBeGreaterThanOrEqual(picker.x)
+      expect(box.x + box.width).toBeLessThanOrEqual(picker.x + picker.width)
+      // Above the buttons, on its own line.
+      expect(box.y + box.height).toBeLessThanOrEqual(update.y)
+    })
+  }
+})
+
 test.describe('duplicating a preset', () => {
   test.skip(
     !!process.env.E2E_BASE_URL,
