@@ -288,13 +288,13 @@ describe('EditSourcePage, unsaved edits (#997)', () => {
     const { user } = renderEdit()
     const editor = await edit(user)
 
-    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
     const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.queryByRole('heading', { name: 'Customizer' })).toBeNull()
     expect(editor).toHaveValue('sphere(2);\n')
 
-    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
     await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
   })
@@ -303,7 +303,7 @@ describe('EditSourcePage, unsaved edits (#997)', () => {
     const { user } = renderEdit()
     await screen.findByLabelText('OpenSCAD source')
 
-    await user.click(screen.getByRole('link', { name: 'name-keychain' }))
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).toBeNull()
   })
