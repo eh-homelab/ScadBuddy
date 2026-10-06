@@ -135,11 +135,18 @@ NC = pattern == "solid" ? 1 : pattern_colors;
 
 RINGS = shape == "stacked_rings";
 RR = ring_height / 2;                 // ring profile radius
+TROUGH = 0.66 * RR;                   // deepest inset between two rings (0.65 r exactly; polygons sag a bit)
+TOP_RIM = 0.4;                        // flat on top of the top ring, at least
 // Profile of one ring, as (inset from the outline, height above the ring's
 // centre): a circle from 90 degrees down to -45, then a 45-degree slope to a
 // point below the centre, so the underside never overhangs more than 45.
-RING_PROFILE = concat([for (a = [90 : -15 : -45]) [RR - RR * cos(a), RR * sin(a)]], [[RR, -RR * sqrt(2)]]);
-TROUGH = 0.66 * RR;                   // deepest inset between two rings (0.65 r exactly; polygons sag a bit)
+// Above the centre the inset stops TOP_RIM short of the cavity (TROUGH +
+// wall in): a tall ring's crest curves in by up to RR, and past the cavity
+// the top ring would be cut and the piece come out short (#1616). Only the
+// top ring shows it; the others' upper halves are inside the ring above.
+RING_PROFILE = concat([for (a = [90 : -15 : -45])
+                          [a > 0 ? min(RR - RR * cos(a), TROUGH + wall - TOP_RIM) : RR - RR * cos(a), RR * sin(a)]],
+                      [[RR, -RR * sqrt(2)]]);
 FOOT_INSET = RINGS ? 0.586 * RR : 0;  // inset of the outline at z = 0
 // Height of the boundary between ring i-1 and ring i (at the trough).
 function ring_boundary(i) = i * ring_height - 0.0636 * RR;
@@ -226,7 +233,8 @@ if (RINGS && TRAY_H != tray_height && pieces != "cup")
 function piece_h(kind) = kind == "cup" ? CUP_H : TRAY_H;
 
 TD = min(text_depth, wall - BEHIND_TEXT);
-if (TD < text_depth && name_on != "none" && name != "")
+// wall - BEHIND_TEXT is inexact (1.2 - 0.8 < 0.4), so allow for rounding.
+if (TD < text_depth - 1e-6 && name_on != "none" && name != "")
     echo(str("NOTE: text_depth reduced from ", text_depth, " to ", TD, " mm to leave ", BEHIND_TEXT, " mm of wall behind the name"));
 
 HAS_NAME = len(name) > 0 && name != " ";

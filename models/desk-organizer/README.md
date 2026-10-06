@@ -49,7 +49,7 @@ MakerWorld and in ScadBuddy.
 | `pattern` | `stripes` | `solid` (`color_1` only), `stripes` (horizontal bands from the bed up, the same on both pieces), or `blocks` (vertical panels: sectors of the cup, the first centred on the front; equal slices along the tray). |
 | `pattern_colors` | `3` | How many of `color_1`–`color_6` the pattern cycles through. |
 | `stripe_height` | `12` | Band height in mm. With `stacked_rings`, stripes follow the rings and change colour in the groove between two rings. |
-| `ring_height` | `10` | Height of one ring (`stacked_rings`). Piece heights snap to whole rings, at least two, with a `NOTE:` whenever that changes the height asked for (a 10 mm tray on 12 mm rings is 24 mm tall). |
+| `ring_height` | `10` | Height of one ring (`stacked_rings`). Piece heights snap to whole rings, at least two, with a `NOTE:` whenever that changes the height asked for (a 10 mm tray on 12 mm rings is 24 mm tall). The top ring keeps a flat rim at least 0.4 mm wide, however tall the ring. |
 
 ### Name
 
@@ -97,6 +97,8 @@ Renders 29 cases:
   wall with a 2 mm inlay, and a tray wider than it is long
 - rings heights that snap: a 10 mm tray on 12 mm rings (24 mm, the two-ring
   minimum) and a 95 mm cup on 10 mm rings (100 mm)
+- 20 mm rings at the default wall and 12 mm rings on a 1.2 mm wall, whose
+  crests would otherwise curve in past the cavity and shave the top ring
 - a long name, and no name
 
 Each 3MF is checked for:

@@ -88,8 +88,22 @@ describe('checkParamValue (#254)', () => {
   it('holds numbers to their type and limits', () => {
     expect(checkParamValue(param({ type: 'integer', min: 1, max: 4 }), 2.5).ok).toBe(false)
     expect(checkParamValue(param({ type: 'slider', min: 1, max: 4 }), 0).ok).toBe(false)
-    expect(checkParamValue(param({ type: 'number' }), '3').ok).toBe(false)
     expect(checkParamValue(param({ type: 'slider', min: 1, max: 4 }), 2.5)).toEqual({ ok: true, value: 2.5 })
+  })
+
+  it('reads a numeric string as the number a model meant (#948)', () => {
+    // A top-level `value` in set_param can reach the tab as "30" where the same value
+    // nested in set_params arrives as 30: one write must not need a retry.
+    expect(checkParamValue(param({ type: 'slider', min: 5, max: 60 }), '30')).toEqual({ ok: true, value: 30 })
+    expect(checkParamValue(param({ type: 'number' }), ' -2.5 ')).toEqual({ ok: true, value: -2.5 })
+    expect(checkParamValue(param({ type: 'integer' }), '1e2')).toEqual({ ok: true, value: 100 })
+    // Still held to the type and limits once read.
+    expect(checkParamValue(param({ type: 'integer' }), '2.5').ok).toBe(false)
+    expect(checkParamValue(param({ type: 'slider', min: 5, max: 60 }), '99').ok).toBe(false)
+    // Anything that is not a plain decimal number is still refused.
+    for (const text of ['', ' ', 'big', '3mm', '0x10', 'Infinity', 'NaN', '1,5']) {
+      expect(checkParamValue(param({ type: 'number' }), text)).toEqual({ ok: false, message: '"p" takes a number.' })
+    }
   })
 
   it('lets a file parameter take a sample or an uploaded asset, never a path', () => {
