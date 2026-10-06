@@ -875,7 +875,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const id = await pending(session.id)
     const [row] = await db.sql`SELECT kind, attention_reason, tool, tool_use_id FROM ai_questions WHERE id = ${id}`
     expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', tool: 'mcp__scadbuddy__browser_snapshot', tool_use_id: 'toolu_s' })
-    expect(await m.questions.listPending()).toHaveLength(1)
+    expect((await m.questions.listPending()).questions).toHaveLength(1)
     await m.questions.reconnected(session.id)
     await turn!.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }, { back: true, why: 'reconnected' }])
@@ -981,7 +981,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     await turn.done
     expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }])
-    expect(await m.questions.listPending()).toEqual([])
+    expect((await m.questions.listPending()).questions).toEqual([])
     const [row] = await db.sql`SELECT reason FROM ai_questions WHERE session_id = ${session.id}`
     expect(row).toEqual({ reason: 'the call was withdrawn' })
   })
