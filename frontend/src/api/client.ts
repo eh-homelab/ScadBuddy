@@ -108,7 +108,9 @@ export const API_BASE = '/api/v1'
 
 /**
  * #1424 — the backend's `THUMBNAIL_VERSION` (`api/media.py`): a media thumbnail is
- * cached as `immutable` only when asked for at this version. Bump the two together.
+ * cached as `immutable` only when asked for at this version. Bump the two together;
+ * the backend's `test_the_thumbnail_version_is_the_frontends` fails when they differ
+ * (#1691).
  */
 export const MEDIA_THUMBNAIL_VERSION = 1
 
