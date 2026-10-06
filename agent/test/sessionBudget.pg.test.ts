@@ -170,27 +170,27 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
   })
 
+  // claude-sonnet-4-5 at $3 / $15 / $0.30 cache read per MTok: 100k input +
+  // 200k cache read + 1000 output (4000 streamed characters) = $0.375.
+  const stall = {
+    model: 'claude-sonnet-4-5',
+    usage: { input_tokens: 100_000, cache_read_input_tokens: 200_000, output_tokens: 1 },
+    text: 'x'.repeat(4000),
+  }
+  const CUT = 0.375
+
+  /** Sends `text`, waits until the reply has started streaming, and stops it. */
+  async function stopMidReply(id: string, text: string) {
+    const turn = await m.send(id, browser, text)
+    for (let i = 0; i < 200; i++) {
+      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > 4)) break
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    expect(await m.interrupt(id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+  }
+
   describe('a turn stopped mid-reply (#991)', () => {
-    // claude-sonnet-4-5 at $3 / $15 / $0.30 cache read per MTok: 100k input +
-    // 200k cache read + 1000 output (4000 streamed characters) = $0.375.
-    const stall = {
-      model: 'claude-sonnet-4-5',
-      usage: { input_tokens: 100_000, cache_read_input_tokens: 200_000, output_tokens: 1 },
-      text: 'x'.repeat(4000),
-    }
-    const CUT = 0.375
-
-    /** Sends `text`, waits until the reply has started streaming, and stops it. */
-    async function stopMidReply(id: string, text: string) {
-      const turn = await m.send(id, browser, text)
-      for (let i = 0; i < 200; i++) {
-        if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > 4)) break
-        await new Promise((r) => setTimeout(r, 10))
-      }
-      expect(await m.interrupt(id, browser)).toBe(true)
-      expect(await turn.done).toEqual({ kind: 'interrupted' })
-    }
-
     it('charges what the cut-off request used, shows it on the meter, and does not count it again on the next turn', async () => {
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
       await turn!.done
@@ -364,6 +364,19 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       const after = await m.get(child.id, browser)
       expect(after).toMatchObject({ budgetUsd: 1, ownCostUsd: 0.3 })
       expect(after.costUsd).toBeCloseTo(0.9, 9)
+    })
+
+    it('charges a fork’s stopped turn to the shared budget (#991)', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      next = { stall }
+      await stopMidReply(child.id, 'write a long essay')
+      const after = await m.get(child.id, browser)
+      expect(after.ownCostUsd).toBeCloseTo(CUT, 10)
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT, 10)
+      expect((await m.get(parent, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      // The parent's next turn is given what the lineage has left after it.
+      expect(await spend(parent, browser, 0.45)).toBeCloseTo(1 - 0.4 - CUT, 9)
     })
 
     it('shares it with a fork of a fork', async () => {
