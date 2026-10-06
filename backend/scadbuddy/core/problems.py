@@ -4,6 +4,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -105,4 +106,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled error", extra={"path": request.url.path})
+        if isinstance(exc, psycopg.Error):
+            # The driver's text quotes the SQL and its bound values (#965).
+            return problem_response(request, 500, type(exc).__name__)
         return problem_response(request, 500, f"{type(exc).__name__}: {exc}")
