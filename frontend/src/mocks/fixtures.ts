@@ -1082,8 +1082,10 @@ export const filamentOptions: FilamentOptions = {
   slots: [
     // A sliced plate, so the grams are real. `PrintPicker.test.tsx` overrides these to
     // null for the unsliced case, which is what an unmodified upload actually answers.
-    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8 },
-    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9 },
+    // `colour_matches`: the spools whose colour still fits the slot, so a remembered
+    // choice of one is kept (#933). Hot Pink (22) is too far from #FF1493 to be.
+    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [21, 26] },
+    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9, colour_matches: [27] },
   ],
   spools: [
     {
