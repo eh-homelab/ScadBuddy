@@ -1168,7 +1168,9 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     const seen: AbortSignal[] = []
     const gate: QuestionGate = async (request) => {
       const parked = new AbortController()
-      void request.attention!.onParked!(parked.signal)
+      const attention = request.attention!
+      if (attention.reason === 'done') throw new Error('a tab wait is never a done summary')
+      void attention.onParked!(parked.signal)
       parked.abort()
       return { answered: false, timedOut: true, message: 'x' }
     }
