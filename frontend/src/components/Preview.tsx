@@ -82,6 +82,12 @@ interface Props {
    * move, so the camera's view stays as it was.
    */
   covered?: string
+  /**
+   * #367 — the server refused the render request (a 422), and the page says why. The
+   * scene then has nothing to show, but "Change a parameter to render." would read as
+   * if nothing were wrong.
+   */
+  rejected?: boolean
 }
 
 export function Preview({
@@ -93,6 +99,7 @@ export function Preview({
   leading,
   controls,
   covered,
+  rejected = false,
 }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
@@ -248,7 +255,7 @@ export function Preview({
         />
       )}
 
-      {!shown && !failed && !rendering && (
+      {!shown && !failed && !rendering && !rejected && (
         <p
           className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
           style={clear}

@@ -36,14 +36,17 @@ vi.mock('../components/Preview', () => ({
     plate,
     leading,
     controls,
+    rejected,
   }: {
     job?: Job
     rendering: boolean
     plate?: Plate
     leading?: ReactNode
     controls?: ReactNode
+    rejected?: boolean
   }) => (
     <div data-testid="preview">
+      {rejected && <span data-testid="preview-rejected" />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -185,6 +188,28 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Unprocessable Content',
+              status: 422,
+              detail: "parameter 'size' expects a number, got \"big\"",
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    render()
+    expect(await screen.findByText(/expects a number/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The viewer is told, so it drops its "Change a parameter to render." placeholder.
+    expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
   })
 
   it('re-renders after a parameter change and updates the dimensions', async () => {
