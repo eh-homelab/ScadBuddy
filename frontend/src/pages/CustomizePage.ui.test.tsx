@@ -226,6 +226,35 @@ describe('CustomizePage with a template UI', () => {
     expect(screen.getByTestId('generate')).toBeEnabled()
   }, 20_000)
 
+  it('host.generate() still resolves when a UI-state write lands while the output saves (#848)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let posted = false
+    server.use(
+      http.post('/api/v1/models/:slug/outputs', async () => {
+        posted = true
+        await held
+        return undefined // on to the default handler
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const run = host!.generate()
+    await waitFor(() => expect(posted).toBe(true), { timeout: 5000 })
+    host!.inputs.set({ ...host!.inputs.get(), demo: { generating: true } })
+    release()
+    await expect(run).resolves.toMatchObject({ outputId: expect.any(String) })
+    expect(screen.queryByText(/^Saved /)).toBeNull()
+  }, 20_000)
+
   it('a colour bound outside params starts no render and leaves the extruder numbers to params', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

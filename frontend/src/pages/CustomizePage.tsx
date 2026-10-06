@@ -385,7 +385,11 @@ export function CustomizePage() {
           const created = await saveOutput({ slug, job: done, extra: savedExtra, capture })
           setSaved({ jobId: done.id, extra: savedExtra, output: created })
           live.current.reloadOutputs()
-          await committed(() => live.current.output?.id === created.id, 'the saved output')
+          // Shown, or already left behind by a UI-state change made while it saved (#848).
+          await committed(
+            () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
+            'the saved output',
+          )
           return { jobId: done.id, outputId: created.id }
         })()
         generating.current = { key, run }
