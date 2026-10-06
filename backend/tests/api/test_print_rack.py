@@ -343,17 +343,49 @@ def test_a_manual_pick_that_does_not_fit_is_refused_before_anything_is_sliced(
 
 
 @respx.mock
-def test_a_high_flow_choice_is_judged_as_the_standard_slice_it_becomes(
+def test_a_high_flow_choice_on_the_rack_side_is_judged_as_high_flow(
     client: TestClient, model: str
 ) -> None:
-    """Review Focus 2 (#484): an HH position is neither offered nor accepted."""
+    """#484: the slice carries the flow chosen for the right, the side the rack swaps
+    onto, so with High Flow chosen there an HH position is offered and accepted, and an
+    HS one is not."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
     high_flow = {"nozzles": [{"size": "0.4", "flow": "high_flow"}], "tier": "standard"}
 
-    response = client.post(
+    accepted = client.post(
         f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 3}
+    )
+    refused = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 2}
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["errors"] == []
+    assert accepted.json()["rack"]["position"] == 3
+    assert [o["position"] for o in accepted.json()["rack"]["options"]] == [3, 5]
+    assert refused.json()["errors"] == [
+        "Rack position 2 holds a 0.4 mm Standard nozzle, and this prints with a 0.4 mm "
+        "High Flow nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_high_flow_choice_on_the_left_only_leaves_the_rack_side_standard(
+    client: TestClient, model: str
+) -> None:
+    """The dialog lists the left first: High Flow there says nothing of the rack side."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    left_only = {
+        "nozzles": [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
+        "tier": "standard",
+    }
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**left_only), "rack_position": 3}
     )
 
     assert response.status_code == 200, response.text

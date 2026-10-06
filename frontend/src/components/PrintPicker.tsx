@@ -70,12 +70,10 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  */
 
 /**
- * The notes about the nozzle step, shown in Advanced mode only (#772): the High Flow
- * choice's `hf-unsupported` and the rack's `not-installed`. A mounted High Flow nozzle
- * of the chosen size (`hf-mounted`, #797), whatever flow is chosen, is not one of them,
- * so Simple shows it.
+ * The notes about the nozzle step, shown in Advanced mode only (#772): the rack's
+ * `not-installed`. High Flow is sliced as High Flow since #484, so it has no note.
  */
-const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['hf-unsupported', 'not-installed'])
+const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
 
 interface Props {
   open: boolean

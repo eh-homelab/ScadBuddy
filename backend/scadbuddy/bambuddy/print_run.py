@@ -20,7 +20,12 @@ from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
-from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
+from scadbuddy.bambuddy.extruders import (
+    rack_volume_type,
+    slicer_nozzle_stats,
+    slicer_volume_types,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -63,7 +68,6 @@ from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import (
-    SLICED_VOLUME_TYPE,
     RackCandidate,
     RackGroup,
     Usage,
@@ -473,11 +477,9 @@ async def check_print(
     makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
     the catalogue refuses — in the run's own words. It no longer refuses by the mounted
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
-    slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
-    the size, whatever flow is chosen, since the slice is always Standard flow (#723,
-    #797, #484). It never carries the resolver's own ``hf-unsupported`` note for a
-    chosen High Flow nozzle (#862): that one is left to the run and the nozzle step.
-    What needs the uploaded file is still found by the run. Only the run's own refusals
+    slice through the one 0.2 mm nozzle, and since the slice states the flow chosen
+    (#484) it no longer warns of a mounted High Flow nozzle (#723, #797). What needs
+    the uploaded file is still found by the run. Only the run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
     check, as it would fail the run. With no printer chosen or configured there is
     nothing to judge, and the run says why."""
@@ -506,15 +508,7 @@ async def check_print(
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
-    # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
-    return PrintCheck(
-        errors=errors,
-        warnings=[
-            *high_flow_warnings(prepared.printer_status, request.choices.nozzles),
-            *rack_notes,
-        ],
-        rack=rack_view,
-    )
+    return PrintCheck(errors=errors, warnings=rack_notes, rack=rack_view)
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
@@ -544,8 +538,8 @@ async def rack_preview(
     rack: RackUsage | None,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
-    the preview ``/check`` shows. Judged on the flow the slice will carry (Standard until
-    #484). Every chosen spool counts toward the material test, since the slice may put any
+    the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
+    (#484). Every chosen spool counts toward the material test, since the slice may put any
     of them on the rack side. Advisory: a failure previews nothing."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
@@ -557,7 +551,7 @@ async def rack_preview(
         group = RackGroup(
             group_id=0,
             nozzle_diameter=request.choices.nozzles[0].size,
-            volume_type=SLICED_VOLUME_TYPE,
+            volume_type=rack_volume_type(request.choices.nozzles),
             # Zero alpha (a Clear spool's 00000000) is no color, never black.
             color=rack_color(first) if first else None,
             materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
@@ -609,17 +603,18 @@ def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -
             "nozzle rack. Choose Automatic."
         )
     size = request.choices.nozzles[0].size
+    flow = rack_volume_type(request.choices.nozzles)
     held = positions.get(request.rack_position)
-    if held is not None and eligible(held, size, SLICED_VOLUME_TYPE):
+    if held is not None and eligible(held, size, flow):
         return
     if held is None:
         holds = "holds no hotend"
     else:
-        flow = "High Flow" if held.high_flow else "Standard"
-        holds = f"holds a {held.nozzle_diameter} mm {flow} nozzle"
+        kind = "High Flow" if held.high_flow else "Standard"
+        holds = f"holds a {held.nozzle_diameter} mm {kind} nozzle"
     raise RunRefusalError(
         f"Rack position {request.rack_position} {holds}, and this prints with a {size} mm "
-        f"{SLICED_VOLUME_TYPE} nozzle. Choose another position, or Automatic."
+        f"{flow} nozzle. Choose another position, or Automatic."
     )
 
 
@@ -868,8 +863,10 @@ async def plan_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
-        # Only the side with the nozzle is offered to the slicer (#834).
-        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles[0].size),
+        # Only the side with the nozzle is offered to the slicer (#834), and each side
+        # states the flow chosen for it (#484).
+        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles),
+        nozzle_volume_type=slicer_volume_types(choices.nozzles),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -935,7 +932,6 @@ async def plan_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
-    hardware += high_flow_warnings(printer_status, choices.nozzles)
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:

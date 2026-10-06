@@ -15,11 +15,11 @@ was measured not to follow on 2026-09-28 (#745). What the slicer does follow is 
 extruders have the nozzle, and the run now states that (:func:`slicer_nozzle_stats`,
 #834).
 
-One advisory stays, by the owner's ruling on #723 (queue item 149 paused on it) and #797:
-a mounted High Flow nozzle of the chosen size is warned about (:func:`high_flow_warnings`),
-whatever flow is chosen, since the slice is always Standard flow until Bambuddy supports
-High Flow presets (#484), never refused, since a print may be set up before its nozzle is
-fitted.
+The slice also states the flow chosen for each side (#484), as Bambu Studio does:
+``nozzle_volume_type`` (:func:`slicer_volume_types`), and each side's nozzles named by
+that flow in ``extruder_nozzle_stats``. So the advisory #723 and #797 kept for a mounted
+High Flow nozzle (queue item 149 paused on one sliced as Standard) is gone with the
+mismatch it warned of.
 
 What is left besides is a label: the side each loaded spool feeds, so the picker can show it as
 the printer and Bambuddy do. With the Filament Track Switch (``fila_switch.installed``)
@@ -43,8 +43,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentWarning
-from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.models import FlowType, NozzleChoice, PrinterStatus
 
 RIGHT = 0
 LEFT = 1
@@ -99,10 +99,6 @@ def two_nozzles(status: PrinterStatus | None) -> bool:
     return LEFT in status.ams_extruder_map.values() or track_switch(status)
 
 
-def _side_word(extruder: int) -> str:
-    return "left" if extruder == LEFT else "right"
-
-
 def fitted_size(status: PrinterStatus | None, extruder: int) -> str | None:
     """The nozzle size mounted on ``extruder``, when the printer reports one."""
     if status is None or extruder >= len(status.nozzles):
@@ -118,37 +114,6 @@ def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
     return status.nozzles[extruder].high_flow
 
 
-def high_flow_warnings(
-    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
-) -> list[FilamentWarning]:
-    """A warning for each mounted High Flow nozzle of the chosen size, whatever flow is
-    chosen (#723, #797), never a refusal. Only ``nozzles[0].size`` is read here: the
-    slice is always Standard flow (#484), so it pauses on a mounted High Flow nozzle
-    regardless of the flow the choices ask for.
-
-    The printer paused a print at the first layer on a side whose nozzle type the slice
-    didn't match (queue item 149). A print may be set up before its nozzle is fitted, so
-    the owner chose a warning, and the dialog shows it in Simple and Advanced mode alike.
-    An unreadable status knows no nozzle, so it warns nothing."""
-    if not nozzles:
-        return []
-    size = nozzles[0].size
-    return [
-        FilamentWarning(
-            kind="hf-mounted",
-            message=(
-                f"The {_side_word(extruder)} nozzle is High Flow and this print is sliced "
-                "for Standard flow (High Flow slicing isn't supported yet, #484), so if it "
-                f"prints on the {_side_word(extruder)}, the printer pauses at the first "
-                f'layer ("the {_side_word(extruder)} nozzle is not matched with slicing '
-                'file"). Fit a standard nozzle there before it starts.'
-            ),
-        )
-        for extruder in (RIGHT, LEFT)
-        if fitted_size(status, extruder) == size and fitted_high_flow(status, extruder)
-    ]
-
-
 #: The side the H2C's nozzle rack swaps hotends onto: physical extruder 0, the right.
 #: Upstream Bambuddy measured it from Bambu Studio's own dispatch (``bambu_mqtt.py``,
 #: 2026-08-14), and the H2C preset agrees: ``extruder_max_nozzle_count`` ["1", "6"] names
@@ -159,6 +124,34 @@ RACK_SIDE = RIGHT
 #: The printer's sides in the slicer's extruder order: the H2C preset's
 #: ``physical_extruder_map`` is ["1", "0"], so the slicer's extruder 1 is the left.
 SLICER_ORDER = (LEFT, RIGHT)
+#: Each flow as Bambu Studio 02.08.02.61 spells it in ``nozzle_volume_type`` and
+#: ``extruder_nozzle_stats`` (#484).
+VOLUME_TYPE: dict[FlowType, str] = {"standard": "Standard", "high_flow": "High Flow"}
+
+
+def _flows(nozzles: Sequence[NozzleChoice]) -> dict[int, FlowType]:
+    """The flow chosen for each physical side. The dialog lists the left side first and
+    the right second; a single choice is both sides'."""
+    return {LEFT: nozzles[0].flow, RIGHT: nozzles[-1].flow}
+
+
+def slicer_volume_types(nozzles: Sequence[NozzleChoice]) -> list[str]:
+    """``nozzle_volume_type`` for the 3MF: the flow chosen for each extruder, in the
+    slicer's order (#484).
+
+    The one key Bambu Studio 02.08.02.61 changes per extruder when a project is High
+    Flow (``default_nozzle_volume_type`` stays Standard). The CLI keeps the 3MF's value
+    because the stock H2C printer preset has none (``BambuStudio.cpp``, around lines
+    3420-3430), and with it written the slice's printer and process come out "Direct
+    Drive High Flow" (measured on live Bambuddy, 2026-10-06)."""
+    flows = _flows(nozzles)
+    return [VOLUME_TYPE[flows[extruder]] for extruder in SLICER_ORDER]
+
+
+def rack_volume_type(nozzles: Sequence[NozzleChoice]) -> str:
+    """The flow the rack side is sliced for, which Bambuddy re-checks a rack pick
+    against at dispatch: the right's, the side the rack swaps onto."""
+    return VOLUME_TYPE[_flows(nozzles)[RACK_SIDE]]
 
 
 def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
@@ -180,8 +173,11 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
     return found
 
 
-def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | None:
-    """``extruder_nozzle_stats`` naming only the side that has a ``size`` nozzle (#834).
+def slicer_nozzle_stats(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> list[str] | None:
+    """``extruder_nozzle_stats`` naming only the side that has a nozzle of the chosen
+    size (#834), each side by the flow chosen for it (#484).
 
     Bambu's H2C presets state one size on both extruders, and the slicer's "Auto For
     Flush" grouping spreads the filaments over every extruder its nozzle stats offer —
@@ -192,17 +188,13 @@ def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | 
     "Standard#1"] and every filament on the right. Measured against the deployed slicer
     (2026-09-30), this key in the 3MF steers its grouping the same way.
 
-    A standard nozzle of the size is preferred, since ScadBuddy slices standard flow
-    (#484); a High Flow one of the size still beats a side without the size, and #723
-    warns of it. That side is still stated as ``Standard#1``, never ``High Flow#1``:
-    the file is sliced with a Standard process, and the deployed slicer
-    (bambu-studio-api bambuddy-1.2.5.6, 2026-09-30) treats the label as a count only.
-    ["Standard#0", "High Flow#1"], Studio's ["Standard#0|High Flow#0",
-    "Standard#0|High Flow#1"] and ["Standard#0", "Standard#1"] all slice, all put every
-    filament in one group on the right with ``volume_type="Standard"``, and all come
-    back rewritten to ["Standard#0", "Standard#1"]; the G-code differs only in its time
-    estimates. The mirrored left case is the same. The flow mismatch is left to the
-    ``hf-mounted`` warning from ``high_flow_warnings`` (#723, #797).
+    A nozzle of the flow chosen for its side is preferred: queue item 149 paused on a
+    High Flow left sliced as Standard. One of the other flow still beats a side without
+    the size, since nothing is refused on the mounted nozzles (#768). Each side is named
+    by the flow chosen for it (``High Flow#1``, as Bambu Studio writes it), the same
+    flow :func:`slicer_volume_types` states; without ``nozzle_volume_type`` the deployed
+    slicer (bambu-studio-api bambuddy-1.2.5.6, 2026-09-30) read the label as a count
+    only and sliced Standard.
 
     When both sides or neither side has the size, or the status cannot be read, this
     is ``None`` and the file is left as it was: the slicer keeps its own choice, and
@@ -211,13 +203,18 @@ def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | 
     """
     if status is None or not two_nozzles(status):
         return None
+    size = nozzles[0].size
+    chosen = _flows(nozzles)
     found = {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
     for has in (
-        {extruder for extruder, flows in found.items() if False in flows},
-        {extruder for extruder, flows in found.items() if flows},
+        {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows},
+        {e for e, flows in found.items() if flows},
     ):
         if len(has) == 1:
-            return [f"Standard#{int(extruder in has)}" for extruder in SLICER_ORDER]
+            return [
+                f"{VOLUME_TYPE[chosen[extruder]]}#{int(extruder in has)}"
+                for extruder in SLICER_ORDER
+            ]
         if has:
             return None
     return None

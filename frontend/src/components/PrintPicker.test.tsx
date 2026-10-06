@@ -280,9 +280,8 @@ describe('PrintPicker', () => {
       ...queuedResult,
       warnings: [
         {
-          kind: 'hf-unsupported',
-          message:
-            "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
+          kind: 'not-installed',
+          message: 'No 0.6 mm nozzle is installed. Install one before this prints.',
         },
         {
           kind: 'plate-differs',
@@ -297,7 +296,7 @@ describe('PrintPicker', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     const warnings = await screen.findByTestId('run-warnings')
-    expect(warnings).toHaveTextContent('High Flow presets')
+    expect(warnings).toHaveTextContent('No 0.6 mm nozzle is installed')
     expect(warnings).toHaveTextContent('Swap to Textured PEI Plate')
     expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and queued for 3DP-31B-598')
     expect(onRan).toHaveBeenCalledTimes(1)
@@ -399,16 +398,14 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('shows the mounted High Flow warning in Simple and Advanced, and never holds Print on it (#797)', async () => {
-    const highFlow =
-      'The left nozzle is High Flow and this print is sliced for Standard flow, so if it ' +
-      'prints on the left, the printer pauses at the first layer.'
+  it('shows the nozzle step’s note in Advanced only, and never holds Print on it', async () => {
+    const plate = "The 3DP-31B-598's last print used Engineering Plate. Swap to Textured PEI Plate."
     server.use(
       http.post('/api/v1/print/outputs/:id/check', () =>
         HttpResponse.json({
           errors: [],
           warnings: [
-            { kind: 'hf-mounted', message: highFlow },
+            { kind: 'plate-differs', message: plate },
             { kind: 'not-installed', message: 'No 0.6 mm nozzle is installed. Install one before this prints.' },
           ],
         }),
@@ -416,16 +413,16 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     renderPicker()
     await loaded()
-    // Simple mode: the mounted High Flow warning, and no nozzle-step note.
+    // Simple mode: the plate warning, and no nozzle-step note.
     const simple = await screen.findAllByTestId('print-verdict-warning')
     expect(simple).toHaveLength(1)
-    expect(simple[0]).toHaveTextContent('The left nozzle is High Flow')
+    expect(simple[0]).toHaveTextContent('Swap to Textured PEI Plate')
     expect(screen.queryByText(/No 0.6 mm nozzle is installed/)).toBeNull()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await showAdvanced()
     const advanced = await screen.findAllByTestId('print-verdict-warning')
-    expect(advanced[0]).toHaveTextContent('The left nozzle is High Flow')
+    expect(advanced[0]).toHaveTextContent('Swap to Textured PEI Plate')
     expect(advanced).toHaveLength(2)
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })

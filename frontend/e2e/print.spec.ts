@@ -104,12 +104,12 @@ test.describe('print dialog', () => {
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await dialog.getByLabel('Process').selectOption('0.24mm Standard @BBL H2C')
     await dialog.getByLabel('Preset for slot 1').selectOption({ label: 'Bambu ABS @BBL H2C' })
-    // High Flow is offered per side, and says it slices as Standard.
+    // High Flow is offered per side, and sliced as High Flow (#484): nothing says otherwise.
     await dialog.getByRole('radio', { name: 'Left High Flow' }).check()
-    await expect(dialog.getByText(/High Flow presets aren't supported/)).toBeVisible()
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toBeVisible()
-    await expect(dialog.getByTestId('run-warnings')).toContainText('slices this as Standard flow')
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
   })
 })

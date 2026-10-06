@@ -11,9 +11,10 @@ The spec's original plan of a ScadBuddy-authored printer preset was dropped (spe
 2026-09-27 §4.1, after §5's live tests): Bambuddy rejects every ``source: "local"``
 printer preset with 400 "The selected printer is not compatible with the process
 preset in the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
-nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size``, adds a
-``hf-unsupported`` warning when High Flow was asked for, and refuses mixed sizes
-outright rather than offering an override.
+nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size`` and refuses
+mixed sizes outright rather than offering an override. High Flow needs no preset: the
+print run states each side's flow in the 3MF, as Bambu Studio does (#484,
+:func:`scadbuddy.bambuddy.extruders.slicer_volume_types`).
 """
 
 from __future__ import annotations
@@ -109,8 +110,8 @@ def printer_preset_name(nozzles: list[NozzleChoice]) -> str:
 
     Spec §4.1: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
     no ScadBuddy-authored name for High Flow or mixed sizes — every flow combination
-    resolves to the same Bambu preset name, and ``resolve`` is what adds the
-    ``hf-unsupported`` warning or the ``mixed-sizes`` error instead.
+    resolves to the same Bambu preset name (the flow goes in the 3MF, #484), and
+    ``resolve`` is what adds the ``mixed-sizes`` error.
     """
     return _bambu_printer(nozzles[0].size)
 
@@ -190,15 +191,6 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
             FilamentWarning(
                 kind="no-preset",
                 message=f"Bambuddy has no printer preset {name!r}.",
-            )
-        )
-
-    if any(nozzle.flow == "high_flow" for nozzle in choices.nozzles):
-        warnings.append(
-            FilamentWarning(
-                kind="hf-unsupported",
-                message="Bambuddy slices this as Standard flow; High Flow presets "
-                "aren't supported by Bambuddy yet.",
             )
         )
 

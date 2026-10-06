@@ -140,10 +140,10 @@ print again until they have, since another print would be a second one.
   (spool-first spec §4.5). A slot error needs the uploaded file, so it arrives
   as the run's `failed` `error` with that 422, not as the POST's answer.
 - **Warnings** come back in the result and never block: spool not loaded, nozzle
-  not installed, High Flow slicing as Standard, a mounted High Flow nozzle of
-  the chosen size whatever flow is chosen (`hf-mounted`, #797), a Generic
-  filament preset fallback, or a plate that differs from the last print
-  (spool-first spec §4.3, §4.5).
+  not installed, a Generic filament preset fallback, or a plate that differs
+  from the last print (spool-first spec §4.3, §4.5). Each side's flow
+  (Standard or High Flow) is sliced as chosen (#484), so there is no flow
+  warning to predict.
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,

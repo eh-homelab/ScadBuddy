@@ -72,6 +72,8 @@ WarningKind = Literal[
     "no-process",
     "not-installed",
     "plate-differs",
+    # No longer given since the slice states its flow (#484), but kept so a run recorded
+    # with one still reads back.
     "hf-unsupported",
     "hf-mounted",
     "rack-unsafe-material",

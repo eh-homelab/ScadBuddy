@@ -18,9 +18,10 @@ from scadbuddy.bambuddy.extruders import (
     LEFT,
     RIGHT,
     extruder_of,
-    high_flow_warnings,
+    rack_volume_type,
     side_of,
     slicer_nozzle_stats,
+    slicer_volume_types,
     with_sides,
 )
 from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
@@ -152,36 +153,48 @@ def _nozzles(*types: tuple[str, str]) -> PrinterStatus:
 STANDARD_04 = [NozzleChoice(size="0.4")]
 
 
-def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about() -> None:
-    """#723, #797: queue item 149's printer, a standard right and a High Flow left, both
-    0.4, and a print chosen for Standard flow."""
-    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), STANDARD_04)
-    assert warning.kind == "hf-mounted"
-    assert warning.message.startswith("The left nozzle is High Flow")
+def _choose(size: str, left: str = "standard", right: str | None = None) -> list[NozzleChoice]:
+    """The dialog's nozzles: the left side first, then the right."""
+    return [
+        NozzleChoice.model_validate({"size": size, "flow": left}),
+        NozzleChoice.model_validate({"size": size, "flow": right or left}),
+    ]
 
 
-def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_when_high_flow_is_chosen() -> None:
-    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
-    of a mounted High Flow nozzle of the chosen size."""
-    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
-    [warning] = high_flow_warnings(status, [NozzleChoice(size="0.4", flow="high_flow")])
-    assert warning.kind == "hf-mounted"
-    assert warning.message.startswith("The left nozzle is High Flow")
+# --- #484: the flow the slice is for, as Bambu Studio writes it -----------------------------
 
 
-def test_index_0_is_the_right_nozzle() -> None:
-    """``PrinterStatus.nozzles[0]`` is the right (main) extruder."""
-    [warning] = high_flow_warnings(_nozzles(("HH01", "0.4"), ("HS01", "0.4")), STANDARD_04)
-    assert warning.message.startswith("The right nozzle is High Flow")
+@pytest.mark.parametrize(
+    ("nozzles", "expected"),
+    [
+        (STANDARD_04, ["Standard", "Standard"]),
+        ([NozzleChoice(size="0.4", flow="high_flow")], ["High Flow", "High Flow"]),
+        (_choose("0.4", "high_flow", "standard"), ["High Flow", "Standard"]),
+        (_choose("0.4", "standard", "high_flow"), ["Standard", "High Flow"]),
+    ],
+)
+def test_the_flow_is_stated_per_extruder_in_the_slicers_order(
+    nozzles: list[NozzleChoice], expected: list[str]
+) -> None:
+    """``nozzle_volume_type`` in Bambu Studio's spelling, the slicer's first extruder (the
+    left) first, as the dialog lists them; one choice is both sides'."""
+    assert slicer_volume_types(nozzles) == expected
 
 
-def test_no_high_flow_warning_for_standard_nozzles_another_size_or_no_status() -> None:
-    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), STANDARD_04) == []
-    assert (
-        high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), [NozzleChoice(size="0.2")])
-        == []
-    )
-    assert high_flow_warnings(None, STANDARD_04) == []
+@pytest.mark.parametrize(
+    ("nozzles", "expected"),
+    [
+        (STANDARD_04, "Standard"),
+        ([NozzleChoice(size="0.4", flow="high_flow")], "High Flow"),
+        (_choose("0.4", "high_flow", "standard"), "Standard"),
+        (_choose("0.4", "standard", "high_flow"), "High Flow"),
+    ],
+)
+def test_the_rack_side_is_sliced_for_the_rights_flow(
+    nozzles: list[NozzleChoice], expected: str
+) -> None:
+    """The rack swaps onto the right (physical 0), the dialog's second side."""
+    assert rack_volume_type(nozzles) == expected
 
 
 # --- #834: which extruders the slicer may put filament on ---------------------------------
@@ -196,14 +209,18 @@ ONLY_RIGHT = ["Standard#0", "Standard#1"]
 ONLY_LEFT = ["Standard#1", "Standard#0"]
 
 
+def _size(size: str) -> list[NozzleChoice]:
+    return [NozzleChoice.model_validate({"size": size})]
+
+
 def test_only_the_side_with_the_size_is_offered_to_the_slicer() -> None:
     """Queue item 159's printer: the right 0.2 HS00, the left 0.4 HH01."""
-    assert slicer_nozzle_stats(fts_status(), "0.2") == ONLY_RIGHT
+    assert slicer_nozzle_stats(fts_status(), _size("0.2")) == ONLY_RIGHT
 
 
 def test_a_size_only_the_left_has_puts_everything_on_the_left() -> None:
     status = _nozzles(("HS01", "0.4"), ("HS00", "0.2"))
-    assert slicer_nozzle_stats(status, "0.2") == ONLY_LEFT
+    assert slicer_nozzle_stats(status, _size("0.2")) == ONLY_LEFT
 
 
 def test_the_rack_counts_for_the_right_side() -> None:
@@ -212,19 +229,28 @@ def test_the_rack_counts_for_the_right_side() -> None:
     status = _nozzles(("HS01", "0.4"), ("HS00", "0.2"))
     # Every recorded spare is a 0.4, so the right has a standard 0.4 and the left does
     # not: the left's 0.2 is not the size.
-    assert slicer_nozzle_stats(status, "0.4") == ONLY_RIGHT
+    assert slicer_nozzle_stats(status, _size("0.4")) == ONLY_RIGHT
 
 
-def test_a_standard_nozzle_is_preferred_to_a_high_flow_one_of_the_size() -> None:
-    """ScadBuddy slices standard flow, and queue item 149 paused on a High Flow left."""
+def test_a_nozzle_of_the_chosen_flow_is_preferred() -> None:
+    """Queue item 149 paused on a High Flow left sliced as Standard: with Standard chosen
+    the standard side is offered, with High Flow chosen the High Flow side, so named."""
     status = _nozzles(("HH01", "0.2"), ("HS00", "0.2"))
-    assert slicer_nozzle_stats(status, "0.2") == ONLY_LEFT
+    assert slicer_nozzle_stats(status, _size("0.2")) == ONLY_LEFT
+    assert slicer_nozzle_stats(status, _choose("0.2", "high_flow")) == [
+        "High Flow#0",
+        "High Flow#1",
+    ]
 
 
-def test_a_high_flow_nozzle_of_the_size_still_beats_another_size() -> None:
-    """Nothing is refused on the mounted nozzles (#768), and #723 warns of the flow."""
+def test_each_side_is_named_for_its_own_chosen_flow() -> None:
+    """Bambu Studio names each extruder's nozzles by flow (``High Flow#1``); a side is
+    named for the flow chosen for it, whether or not it is the one offered."""
     status = _nozzles(("HH01", "0.2"), ("HS01", "0.6"))
-    assert slicer_nozzle_stats(status, "0.2") == ONLY_RIGHT
+    assert slicer_nozzle_stats(status, _choose("0.2", "standard", "high_flow")) == [
+        "Standard#0",
+        "High Flow#1",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -234,17 +260,12 @@ def test_a_high_flow_nozzle_of_the_size_still_beats_another_size() -> None:
         (_nozzles(("HS01", "0.6"), ("HH01", "0.2")), ONLY_LEFT),
     ],
 )
-def test_a_high_flow_only_side_is_stated_as_standard(
+def test_a_nozzle_of_the_other_flow_still_beats_another_size(
     status: PrinterStatus, expected: list[str]
 ) -> None:
-    """ScadBuddy slices a Standard process, and the deployed slicer (bambu-studio-api
-    bambuddy-1.2.5.6, 2026-09-30) groups ["Standard#0", "High Flow#1"] and Studio's
-    ["Standard#0|High Flow#0", "Standard#0|High Flow#1"] exactly as ["Standard#0",
-    "Standard#1"], rewriting both to it. So the side is stated as Standard, never as
-    High Flow: the label would change nothing but the cache key."""
-    stats = slicer_nozzle_stats(status, "0.2")
-    assert stats == expected
-    assert not any("High Flow" in entry for entry in stats)
+    """Nothing is refused on the mounted nozzles (#768): the one side with the size is
+    offered, named for the flow chosen, here Standard."""
+    assert slicer_nozzle_stats(status, _size("0.2")) == expected
 
 
 @pytest.mark.parametrize(
@@ -268,4 +289,4 @@ def test_a_high_flow_only_side_is_stated_as_standard(
     ],
 )
 def test_otherwise_the_slicer_is_left_to_choose(status: PrinterStatus | None, size: str) -> None:
-    assert slicer_nozzle_stats(status, size) is None
+    assert slicer_nozzle_stats(status, _size(size)) is None

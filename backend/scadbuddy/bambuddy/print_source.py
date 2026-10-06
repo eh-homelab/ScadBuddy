@@ -77,6 +77,7 @@ class PrintSource(Protocol):
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile: ...
 
     async def record(
@@ -144,6 +145,7 @@ class OutputSource:
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile:
         # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
         target = await target_for(
@@ -153,6 +155,7 @@ class OutputSource:
             nozzle_diameter=nozzle_size,
             colours=await _spool_colours(client, self.meta, plan),
             nozzle_stats=nozzle_stats,
+            nozzle_volume_type=nozzle_volume_type,
         )
         # A project's folder replaces the one from Settings for this send, which is what
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
@@ -289,6 +292,7 @@ class LibrarySource:
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile:
         return PrintFile(self.file_id)
 
