@@ -231,8 +231,8 @@ def test_import_retry_after_counts_down_from_the_oldest_held_fetch() -> None:
         assert permits.full()
         assert permits.retry_after() == url_import.IMPORT_TIMEOUT
         second = list(permits._taken)[1]
-        permits._taken[second] -= 20
-        assert permits.retry_after() == url_import.IMPORT_TIMEOUT - 20
+        permits._taken[second] -= 4
+        assert permits.retry_after() == url_import.IMPORT_TIMEOUT - 4
         # A fetch past its deadline is about to give its permit back.
         permits._taken[second] -= 60
         assert permits.retry_after() == 1
