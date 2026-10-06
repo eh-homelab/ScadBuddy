@@ -7,8 +7,10 @@ import type { SourceCheck } from '../api/types'
 import type { DefinitionFile } from '../lib/lsp'
 import { refusedCheck } from '../lib/problems'
 import { useDebounced } from '../lib/useDebounced'
+import { useLeaveGuard } from '../lib/useLeaveGuard'
 import { SourceEditor, type SourceEditHandle } from './SourceEditor'
 import { Button } from './ui/Button'
+import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
 
 /** Long enough that a burst of typing is one check, short enough to feel live. */
@@ -30,7 +32,10 @@ interface Props {
   readOnly?: boolean
   /** #159 — what a read-only source offers in place of Save ("Duplicate to edit"). */
   readOnlyActions?: ReactNode
-  onSave: (force: boolean) => Promise<void>
+  /** #997 — unsaved edits: leaving the page asks first. */
+  dirty: boolean
+  /** Saves, and answers where to go now that it has. */
+  onSave: (force: boolean) => Promise<string>
 }
 
 /** A verdict is only ever shown for the exact text it was computed from. */
@@ -56,8 +61,10 @@ export function SourceWorkbench({
   canSave,
   readOnly = false,
   readOnlyActions,
+  dirty,
   onSave,
 }: Props) {
+  const guard = useLeaveGuard(dirty)
   const [verdict, setVerdict] = useState<Verdict | undefined>(undefined)
   const [checking, setChecking] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -96,6 +103,7 @@ export function SourceWorkbench({
   const check = verdict?.source === source ? verdict.result : undefined
   const refused = check !== undefined && !check.ok
   const busy = checking || saving
+  const saveDisabled = readOnly || busy || !canSave || !source.trim()
 
   // #185 — a saved model's sibling files and pinned libraries, for go-to-definition.
   // Memoized: a new function would start a new language server session.
@@ -180,7 +188,8 @@ export function SourceWorkbench({
     setSaving(true)
     setError(null)
     try {
-      await onSave(force)
+      // Saved, so not leaving anything behind: `dirty` has not caught up yet.
+      guard.leaveTo(await onSave(force))
     } catch (cause) {
       if (cause instanceof ApiError) {
         const fromServer = refusedCheck(cause.problem)
@@ -215,7 +224,7 @@ export function SourceWorkbench({
                 size="sm"
                 variant="primary"
                 onClick={() => void save(false)}
-                disabled={busy || !canSave || !source.trim()}
+                disabled={saveDisabled}
               >
                 {saving && <Spinner />}
                 {saveLabel}
@@ -242,6 +251,10 @@ export function SourceWorkbench({
           readFile={readFile}
           label="OpenSCAD source"
           readOnly={readOnly}
+          // #997 — Ctrl/Cmd+S is the Save button, and does nothing when it would not.
+          onSave={() => {
+            if (!saveDisabled) void save(false)
+          }}
         />
       </div>
 
@@ -253,6 +266,25 @@ export function SourceWorkbench({
         )}
         <CheckReport check={check} checking={checking} />
       </div>
+
+      <Dialog
+        open={guard.pending !== null}
+        title="Leave without saving?"
+        description="Your edits to this source have not been saved, and will be lost."
+        onClose={guard.stay}
+        footer={
+          <>
+            <Button variant="ghost" onClick={guard.stay}>
+              Stay
+            </Button>
+            <Button variant="danger" onClick={guard.leave}>
+              Leave without saving
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-muted">Save first to keep them.</p>
+      </Dialog>
     </div>
   )
 }
