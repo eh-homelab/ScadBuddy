@@ -110,43 +110,41 @@ function summarise(content: unknown): string {
 }
 
 /**
- * Which of a turn's tool calls its event log shows yet (#881). The turn logs
- * the SDK's stream one append at a time, while the SDK asks canUseTool as soon
- * as Claude Code does, so a call can reach the approval gate while its
- * `tool.call` still waits behind the turn's earlier appends. The gate waits on
- * `until` before it logs `approval.required`, so the panel never sees an
- * approval for a call it has not been shown.
+ * Where each of a turn's `tool.call` events is in being logged (#881). The turn
+ * logs the SDK's stream one append at a time, while the SDK asks canUseTool as
+ * soon as Claude Code does, so a call can reach the approval gate while its
+ * `tool.call` still waits behind the turn's earlier appends, or before the turn
+ * has read it at all. The gate calls `ensure` before it logs `approval.required`:
+ * it waits for the turn's own append of the call, or logs the call itself when
+ * the turn has not reached it, so the panel never sees an approval for a call it
+ * has not been shown. Neither waits on anything that may never come.
  */
 export class ShownCalls {
-  private readonly shown = new Set<string>()
-  private readonly waiting = new Map<string, (() => void)[]>()
-  private closed = false
+  private readonly logged = new Map<string, Promise<void>>()
 
-  /** The call's `tool.call` is in the log. */
-  mark(id: string): void {
-    this.shown.add(id)
-    for (const wake of this.waiting.get(id) ?? []) wake()
-    this.waiting.delete(id)
+  /** The calls among `events` are being logged by `append`. */
+  logging(events: readonly ServerEvent[], append: Promise<unknown>): void {
+    const done = append.then(
+      () => undefined,
+      () => undefined,
+    )
+    for (const e of events) if (e.type === 'tool.call') this.logged.set(e.id, done)
   }
 
-  /** The turn's stream has ended: nothing more will be shown, so no one waits. */
-  close(): void {
-    this.closed = true
-    for (const wakes of this.waiting.values()) for (const wake of wakes) wake()
-    this.waiting.clear()
-  }
-
-  /** Resolves once the call is shown, the stream has ended, or `signal` aborts. */
-  until(id: string, signal: AbortSignal): Promise<void> {
-    if (this.closed || this.shown.has(id) || signal.aborted) return Promise.resolve()
-    return new Promise((resolve) => {
-      const wake = () => {
-        signal.removeEventListener('abort', wake)
-        resolve()
-      }
-      signal.addEventListener('abort', wake, { once: true })
-      this.waiting.set(id, [...(this.waiting.get(id) ?? []), wake])
-    })
+  /**
+   * Resolves once the call's `tool.call` has been logged (or its append failed):
+   * the turn's own append when it has one, else `log`'s.
+   */
+  ensure(id: string, log: () => Promise<unknown>): Promise<void> {
+    let done = this.logged.get(id)
+    if (done === undefined) {
+      done = log().then(
+        () => undefined,
+        () => undefined,
+      )
+      this.logged.set(id, done)
+    }
+    return done
   }
 }
 
@@ -163,6 +161,17 @@ export class SdkEventMapper {
   constructor(sessionId: string, tierOf: TierResolver) {
     this.sessionId = sessionId
     this.tierOf = tierOf
+  }
+
+  /**
+   * The `tool.call` for a call this mapper has not produced yet, claimed so that it
+   * is produced once: by the stream's `tool_use`, or by the approval gate when the
+   * gate gets there first (ShownCalls). Undefined when it was produced already.
+   */
+  call(id: string, name: string, input: Record<string, unknown>): ServerEvent | undefined {
+    if (this.calls.has(id)) return undefined
+    this.calls.add(id)
+    return event({ type: 'tool.call', sessionId: this.sessionId, id, name, input, risk: this.tierOf(name, input) ?? 'outward' })
   }
 
   map(message: SDKMessage): ServerEvent[] {
@@ -207,16 +216,14 @@ export class SdkEventMapper {
             const messageId = `${apiId}:${index}`
             out.push(event({ type: 'assistant.text.delta', sessionId, messageId, delta: block.text }))
             out.push(event({ type: 'assistant.text.done', sessionId, messageId }))
-          } else if (block.type === 'tool_use' && typeof block.id === 'string' && !this.calls.has(block.id)) {
-            this.calls.add(block.id)
+          } else if (block.type === 'tool_use' && typeof block.id === 'string') {
             const name = typeof block.name === 'string' ? block.name : 'unknown'
             const input =
               typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
                 ? (block.input as Record<string, unknown>)
                 : {}
-            out.push(
-              event({ type: 'tool.call', sessionId, id: block.id, name, input, risk: this.tierOf(name, input) ?? 'outward' }),
-            )
+            const call = this.call(block.id, name, input)
+            if (call) out.push(call)
           }
         })
         return out

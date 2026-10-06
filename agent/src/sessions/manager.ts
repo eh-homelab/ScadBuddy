@@ -1136,13 +1136,17 @@ export class SessionManager {
        * says it, and they are dropped; otherwise they are shown as they came.
        */
       const heldErrors: SDKMessage[] = []
+      const log = async (events: ServerEvent[]) => {
+        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        for (const e of events) traced.observe(e)
+        if (auditor) for (const e of events) await auditor.observe(e)
+      }
       const show = async (message: SDKMessage) => {
         await pluginCheck?.(message)
         const events = mapper.map(message)
-        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
-        for (const e of events) if (e.type === 'tool.call') shownCalls.mark(e.id)
-        for (const e of events) traced.observe(e)
-        if (auditor) for (const e of events) await auditor.observe(e)
+        const logged = log(events)
+        shownCalls.logging(events, logged)
+        await logged
       }
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
@@ -1239,7 +1243,11 @@ export class SessionManager {
           secrets: () => secrets,
           signal: controller.signal,
           trace: traced,
-          shown: (toolUseId, signal) => shownCalls.until(toolUseId, signal),
+          shown: (toolUseId, toolName, input) =>
+            shownCalls.ensure(toolUseId, () => {
+              const call = mapper.call(toolUseId, toolName, input)
+              return call ? log([call]) : Promise.resolve()
+            }),
         })
         const sandbox =
           this.deps.headlessBrowser?.sandbox && browserSetting === true
@@ -1376,7 +1384,6 @@ export class SessionManager {
           traced.fail(err)
         }
       } finally {
-        shownCalls.close()
         forwarded?.release()
         packages?.release()
         local.settling = true
