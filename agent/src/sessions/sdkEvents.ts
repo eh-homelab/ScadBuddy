@@ -8,7 +8,7 @@ import { event, type ServerEvent } from './protocol.js'
 // table in frontend/src/agent/chat/protocol.ts (#340). The query runs with
 // `includePartialMessages: true`, so for each API response the SDK yields
 // `stream_event` messages wrapping the raw streaming events AND the complete
-// `assistant` message. Order measured against the pinned SDK (0.3.283) with
+// `assistant` message. Order measured against the SDK (0.3.283 and 0.3.287) with
 // test/support/fakeAnthropic.ts, one text reply:
 //
 //   system/init, system/status, stream_event/message_start,

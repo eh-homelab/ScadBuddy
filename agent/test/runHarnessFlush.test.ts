@@ -2,7 +2,7 @@ import type * as Sdk from '@anthropic-ai/claude-agent-sdk'
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// The SDK's Query (0.3.283) delegates next/return/throw to an inner stream
+// The SDK's Query (0.3.287) delegates next/return/throw to an inner stream
 // and returns that inner stream from [Symbol.asyncIterator](), so a for-await
 // loop over the Query never calls the Query's own methods (#1009). This fake
 // has the same shape, and writes a stderr line with no trailing newline.

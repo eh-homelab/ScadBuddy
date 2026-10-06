@@ -1582,7 +1582,7 @@ export class SessionManager {
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
     // `total_cost_usd` of a RESUMED query already includes the earlier
-    // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
+    // turns: measured on SDK 0.3.283 and 0.3.287 (0.000105 after turn 1, 0.00021 after
     // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
     // SDK restores it from the transcript's `cost-state` entry, which holds
     // only what Claude Code priced: not the session's unpriced spend (#991),
@@ -1601,7 +1601,7 @@ export class SessionManager {
     // the turn was aborted: only an abort ends a wait (approvals/service.ts).
     // A shutdown keeps it, and the session waiting on it, for after the
     // restart; anything else (an interrupt) cancels it. Measured on SDK
-    // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
+    // 0.3.283 and 0.3.287 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
     // is pending fails that call ("Tool permission request failed: AbortError:
     // Tool permission stream closed before response received"), and Claude
     // Code may still reach the model and end with a `result` before it exits;

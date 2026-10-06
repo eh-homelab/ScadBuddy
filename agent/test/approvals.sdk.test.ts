@@ -12,7 +12,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 
 // #258, spec §3.2 → §3.1: can `canUseTool` park an outward call on an
 // asynchronous human decision, with no deadline of the SDK's own? Measured
-// here against the real SDK (0.3.283) and its bundled Claude Code binary,
+// here against the real SDK (0.3.287) and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
 // test/run.test.ts does). Nothing reaches Anthropic.
 //

@@ -25,7 +25,7 @@ import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 // #815: request_user_attention, an `answer`-kind entry at the question gate.
-// Its input rules and handler here, then the real SDK (0.3.283) and its
+// Its input rules and handler here, then the real SDK (0.3.287) and its
 // bundled binary against the local fake Anthropic endpoint. Nothing reaches
 // Anthropic. The Postgres side is test/attention.pg.test.ts.
 

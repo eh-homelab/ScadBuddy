@@ -49,7 +49,7 @@ describe('SdkEventMapper', () => {
   })
 
   it('maps streamed text to deltas and done, in the order the SDK yields it', () => {
-    // The order measured on SDK 0.3.283: the complete assistant message comes
+    // The order measured on SDK 0.3.283 and 0.3.287: the complete assistant message comes
     // before its content_block_stop.
     const events = mapAll([
       { type: 'system', subtype: 'init', session_id: S } as unknown as SDKMessage,

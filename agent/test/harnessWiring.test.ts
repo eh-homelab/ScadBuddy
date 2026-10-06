@@ -156,7 +156,8 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(result.subtype).toBe('success')
     expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
     expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
-    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283).
+    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283;
+    // `cc-plugin-agents-md@builtin` and `cc-plugin-plugin-authoring@builtin` on 2.1.287).
     expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([])
     expect(init.skills.filter((s) => s.startsWith('scadbuddy:'))).toEqual([])
     expect(init.mcp_servers.map((s) => [s.name, s.status])).toEqual([['scadbuddy', 'connected']])
@@ -214,7 +215,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
       )
       expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
-      // `Agent` is listed by its older name (measured on Claude Code 2.1.283).
+      // `Agent` is listed by its older name (measured on Claude Code 2.1.283 and 2.1.287).
       expect([...init.tools].sort()).toEqual(['Skill', 'Task', ...registry].sort())
       // No server of its own: its tools are the in-process `scadbuddy` server.
       expect(init.mcp_servers.map((s) => s.name)).toEqual(['scadbuddy'])
@@ -246,12 +247,14 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     }, 60_000)
 
     // #946: a subagent asked to run in the background runs inside the turn.
-    // Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
-    // input at a string prompt's first result, and from then on Claude Code
-    // refused every permission request itself ("The user doesn't want to take
-    // this action right now"), asking neither canUseTool nor the user. That hit
-    // the subagent's own calls and those of the turn Claude Code starts when it
-    // reports back, read tools included (measured on Claude Code 2.1.283).
+    // Backgrounded, it outlived its parent's turn: SDK 0.3.283 closed Claude
+    // Code's input at a string prompt's first result, and from then on Claude
+    // Code refused every permission request itself ("The user doesn't want to
+    // take this action right now"), asking neither canUseTool nor the user.
+    // That hit the subagent's own calls and those of the turn Claude Code
+    // starts when it reports back, read tools included (measured on 2.1.283).
+    // 0.3.287 keeps the input open until the session is idle: those calls
+    // reach canUseTool, but after the turn's result (run.ts).
     describe('a subagent asked to run in the background (#946)', () => {
       /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
       function backgroundScript(tool: string, input: Record<string, unknown>) {
@@ -307,7 +310,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
 
     // #940: a subagent asks the user too. Claude Code refuses AskUserQuestion
     // inside a subagent ("AskUserQuestion is not available inside subagents",
-    // measured on Claude Code 2.1.283) and never hands the call to canUseTool,
+    // measured on Claude Code 2.1.283 and 2.1.287) and never hands the call to canUseTool,
     // so a session with a question gate also gets ASK_USER_TOOL, an in-process
     // MCP tool that parks on the same gate; a subagent's MCP calls reach the
     // host like any other.

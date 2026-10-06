@@ -7,7 +7,7 @@ import type { Sql } from 'postgres'
 // (db/migrations/20260928T0107Z_sessions.sql).
 //
 // The interface, as declared in the pinned SDK
-// (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, 0.3.283,
+// (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, 0.3.287,
 // `export declare type SessionStore`, marked @alpha):
 //
 //   append(key, entries): Promise<void>   required

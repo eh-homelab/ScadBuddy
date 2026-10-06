@@ -14,7 +14,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
 // binary against the fake endpoint is test/fallback.e2e.test.ts). The
-// messages are shaped as Claude Code 2.1.283 sends them.
+// messages are shaped as Claude Code 2.1.283 and 2.1.287 send them.
 
 const SESSION = '00000000-0000-4000-8000-0000000000aa'
 
