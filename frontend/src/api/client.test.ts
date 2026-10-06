@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
@@ -5,6 +6,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  MEDIA_THUMBNAIL_VERSION,
   OPERATION_UNFINISHED,
   TEMPORAL_UNAVAILABLE,
   UNANSWERED,
@@ -1499,5 +1501,13 @@ describe('Retry-After on problems (#1000)', () => {
     await expect(api.testAiCredential('default')).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
     const other = await api.listAiCredentials().catch((cause: unknown) => cause)
     expect((other as ApiError).problem).not.toHaveProperty('retry_after')
+  })
+})
+
+describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
+  it("is the backend's THUMBNAIL_VERSION, or no thumbnail is ever cached as immutable", () => {
+    const media = readFileSync(`${import.meta.dirname}/../../../backend/scadbuddy/api/media.py`, 'utf8')
+    const found = [...media.matchAll(/^THUMBNAIL_VERSION = (\d+)$/gm)].map((match) => Number(match[1]))
+    expect(found).toEqual([MEDIA_THUMBNAIL_VERSION])
   })
 })

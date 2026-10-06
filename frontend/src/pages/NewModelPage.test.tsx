@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -38,6 +38,7 @@ function renderNew() {
       <Routes>
         <Route path="/new" element={<NewModelPage />} />
         <Route path="/m/:slug" element={<h1>Customizer</h1>} />
+        <Route path="/" element={<h1>Catalogue</h1>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -48,6 +49,28 @@ async function paste(user: ReturnType<typeof userEvent.setup>, text: string) {
   await user.click(screen.getByLabelText('OpenSCAD source'))
   await user.paste(text)
 }
+
+describe('NewModelPage, unsaved source (#997)', () => {
+  it('asks before leaving a pasted source behind', async () => {
+    const { user } = renderNew()
+    await paste(user, 'cube(1);\n')
+
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('cube(1);\n')
+
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByRole('heading', { name: 'Catalogue' })).toBeInTheDocument()
+  })
+
+  it('leaves an empty page without asking', async () => {
+    const { user } = renderNew()
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    expect(await screen.findByRole('heading', { name: 'Catalogue' })).toBeInTheDocument()
+  })
+})
 
 describe('NewModelPage', () => {
   it('abandons a superseded check on the wire, not just on arrival', async () => {

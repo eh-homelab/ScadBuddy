@@ -40,7 +40,12 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    LibraryStore,
+)
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
@@ -308,7 +313,8 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     uploads = BambuddyUploadStore(pool)
-    checkouts = CheckoutGate()
+    # Render leases in Postgres, so a removal here sees the render worker's (#872).
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(

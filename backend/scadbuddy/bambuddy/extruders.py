@@ -118,8 +118,25 @@ def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
     return status.nozzles[extruder].high_flow
 
 
+def high_flow_warning(extruder: int) -> FilamentWarning:
+    """The ``hf-mounted`` warning for ``extruder``'s mounted High Flow nozzle."""
+    side = _side_word(extruder)
+    return FilamentWarning(
+        kind="hf-mounted",
+        message=(
+            f"The {side} nozzle is High Flow and this print is sliced for Standard flow "
+            "(High Flow slicing isn't supported yet, #484), so if it prints on the "
+            f'{side}, the printer pauses at the first layer ("the {side} nozzle is not '
+            'matched with slicing file"). Fit a standard nozzle there before it starts.'
+        ),
+    )
+
+
 def high_flow_warnings(
-    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+    status: PrinterStatus | None,
+    nozzles: Sequence[NozzleChoice],
+    *,
+    rack_picked: bool = False,
 ) -> list[FilamentWarning]:
     """A warning for each mounted High Flow nozzle of the chosen size, whatever flow is
     chosen (#723, #797), never a refusal. Only ``nozzles[0].size`` is read here: the
@@ -129,23 +146,20 @@ def high_flow_warnings(
     The printer paused a print at the first layer on a side whose nozzle type the slice
     didn't match (queue item 149). A print may be set up before its nozzle is fitted, so
     the owner chose a warning, and the dialog shows it in Simple and Advanced mode alike.
-    An unreadable status knows no nozzle, so it warns nothing."""
+    An unreadable status knows no nozzle, so it warns nothing.
+
+    ``rack_picked``: a rack position is picked for the rack side, which only ever picks
+    a Standard hotend of the size (``rack.rank.eligible``), so the hotend mounted there
+    now is swapped out and is not warned about (#1238)."""
     if not nozzles:
         return []
     size = nozzles[0].size
     return [
-        FilamentWarning(
-            kind="hf-mounted",
-            message=(
-                f"The {_side_word(extruder)} nozzle is High Flow and this print is sliced "
-                "for Standard flow (High Flow slicing isn't supported yet, #484), so if it "
-                f"prints on the {_side_word(extruder)}, the printer pauses at the first "
-                f'layer ("the {_side_word(extruder)} nozzle is not matched with slicing '
-                'file"). Fit a standard nozzle there before it starts.'
-            ),
-        )
+        high_flow_warning(extruder)
         for extruder in (RIGHT, LEFT)
-        if fitted_size(status, extruder) == size and fitted_high_flow(status, extruder)
+        if fitted_size(status, extruder) == size
+        and fitted_high_flow(status, extruder)
+        and not (rack_picked and extruder == RACK_SIDE)
     ]
 
 

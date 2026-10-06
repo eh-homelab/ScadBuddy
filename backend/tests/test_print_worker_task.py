@@ -97,6 +97,7 @@ def _state() -> SimpleNamespace:
         print_progress=None,
         print_follower=None,
         metrics=SimpleNamespace(print_follows_running=None),
+        print_links=None,
         components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else None),
         projection=SimpleNamespace(pool=None),
     )

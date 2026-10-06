@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from scadbuddy.api.deps import (
     AppState,
     CatalogueDep,
+    EventsDep,
     PresetsDep,
     SlugPath,
 )
@@ -24,6 +25,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, PresetsChanged, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
@@ -42,6 +44,7 @@ from scadbuddy.library.presets import (
     ParamPresetUpdate,
     PresetExistsError,
     PresetNotFoundError,
+    PresetStore,
     TooManyPresetsError,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
@@ -82,22 +85,47 @@ async def _require_valid(
     )
 
 
-def _taken(slug: str, name: str) -> ApiError:
+# #357: problems are shown as they are, so they are written for people: no template
+# or preset ids, and no Python quoting. The ids stay in the problem's own fields.
+
+
+def _taken(error: PresetExistsError) -> ApiError:
+    """Names the preset that has the name, as it is spelled, not the spelling asked for."""
+    (name,) = error.args
     return ApiError(
-        status.HTTP_409_CONFLICT, f"{slug!r} already has a preset named {name!r}", name=name
+        status.HTTP_409_CONFLICT,
+        f'A preset named "{error.existing}" already exists.',
+        name=name,
+        existing=error.existing,
     )
 
 
-def _missing(slug: str, preset_id: str) -> ApiError:
-    return ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no preset {preset_id!r}")
+def _missing(preset_id: str) -> ApiError:
+    return ApiError(
+        status.HTTP_404_NOT_FOUND,
+        "That preset no longer exists; it may have been deleted elsewhere.",
+        preset_id=preset_id,
+    )
 
 
-def require_saved(slug: str, preset_id: str) -> None:
-    if preset_id.startswith(TEMPLATE_ID_PREFIX):
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            f"{preset_id!r} ships with {slug!r} and is read-only; duplicate it to change it",
-        )
+def require_saved(presets: PresetStore, slug: str, preset_id: str) -> None:
+    """403 for a preset the template ships; 404 for a `template-*` id it does not have."""
+    if not preset_id.startswith(TEMPLATE_ID_PREFIX):
+        return
+    try:
+        presets.find(slug, preset_id)
+    except PresetNotFoundError:
+        raise _missing(preset_id) from None
+    raise ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "This preset ships with the template and is read-only; duplicate it to change it.",
+        preset_id=preset_id,
+    )
+
+
+def _changed(events: EventBus, slug: str) -> None:
+    """Tells another tab, or the assistant's page, to read the presets again (#357)."""
+    emit(events, PresetsChanged(slug=slug))
 
 
 @router.get(
@@ -167,11 +195,13 @@ async def create_run(slug: str, body: ParamPresetCreate, state: AppState) -> Par
     """The ``preset_create`` operation's run (#1054)."""
     await _validated(slug, body.params, state)
     try:
-        return await asyncio.to_thread(state.presets.create, slug, body)
-    except PresetExistsError:
-        raise _taken(slug, body.name) from None
+        created = await asyncio.to_thread(state.presets.create, slug, body)
+    except PresetExistsError as error:
+        raise _taken(error) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    _changed(state.events, slug)
+    return created
 
 
 @router.post(
@@ -214,7 +244,7 @@ async def duplicate_run(
     try:
         source = await asyncio.to_thread(state.presets.find, slug, preset_id)
     except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
+        raise _missing(preset_id) from None
     await _validated(slug, source.params, state)
     # The original's details come along too (#327): only the name is the copy's own.
     # Every write path checks inputs before storing them, so this should not fail; a
@@ -230,11 +260,13 @@ async def duplicate_run(
         detail = str(error.errors()[0]["msg"]) if isinstance(error, ValidationError) else str(error)
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
     try:
-        return await asyncio.to_thread(state.presets.create, slug, copy)
-    except PresetExistsError:
-        raise _taken(slug, body.name) from None
+        created = await asyncio.to_thread(state.presets.create, slug, copy)
+    except PresetExistsError as error:
+        raise _taken(error) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    _changed(state.events, slug)
+    return created
 
 
 @router.patch(
@@ -280,13 +312,15 @@ async def update_run(
     if body.params is not None:
         await _validated(slug, body.params, state)
     try:
-        return await asyncio.to_thread(state.presets.update, slug, preset_id, body)
+        updated = await asyncio.to_thread(state.presets.update, slug, preset_id, body)
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
-    except PresetExistsError:
-        raise _taken(slug, body.name or "") from None
+        raise _missing(preset_id) from None
+    except PresetExistsError as error:
+        raise _taken(error) from None
+    _changed(state.events, slug)
+    return updated
 
 
 @router.delete(
@@ -296,12 +330,17 @@ async def update_run(
     description="A template's own presets are read-only (403).",
 )
 def delete_preset(
-    slug: SlugPath, preset_id: PresetIdPath, catalogue: CatalogueDep, presets: PresetsDep
+    slug: SlugPath,
+    preset_id: PresetIdPath,
+    catalogue: CatalogueDep,
+    presets: PresetsDep,
+    events: EventsDep,
 ) -> Response:
     require_model_exists(catalogue, slug)
-    require_saved(slug, preset_id)
+    require_saved(presets, slug, preset_id)
     try:
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
+        raise _missing(preset_id) from None
+    _changed(events, slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
