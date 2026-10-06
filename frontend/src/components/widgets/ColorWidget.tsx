@@ -10,7 +10,8 @@ export function ColorWidget({
 }: {
   param: Param
   value: string
-  extruder?: number
+  /** null: the latest render never used this colour (#938). */
+  extruder?: number | null
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
@@ -21,7 +22,13 @@ export function ColorWidget({
       id={id}
       label={param.caption ?? param.name}
       name={param.name}
-      readout={extruder ? <span className="text-muted">extruder {extruder}</span> : undefined}
+      readout={
+        extruder === null ? (
+          <span className="text-faint">not in this render</span>
+        ) : extruder ? (
+          <span className="text-muted">extruder {extruder}</span>
+        ) : undefined
+      }
     >
       <div className="flex items-center gap-2">
         <input
