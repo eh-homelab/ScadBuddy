@@ -47,6 +47,9 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     assert "scadbuddy_render_jobs_rejected_total 0.0" in text
     assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
     assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
+    # Only outcomes something emits: a series stuck at 0 reads as "never happens"
+    # (review #1066 4.2).
+    assert 'scadbuddy_render_jobs_finished_total{outcome="cancelled"}' not in text
 
 
 def _metrics_once(client: TestClient, line: str) -> str:

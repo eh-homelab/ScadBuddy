@@ -8,6 +8,7 @@ import { runHarness } from '../src/harness/run.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
+import type { ToolServices } from '../src/tools/registry.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 
 // Runs one eval scenario through the REAL harness (src/harness/run.ts
@@ -158,8 +159,7 @@ export async function runScenario(
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
     renderWaitMs: 5_000,
-    operationFollowMs: 15 * 60_000,
-  }
+  } satisfies ToolServices
   const principal = { id: `eval:${scenario.id}`, kind: 'browser' as const, tiers: tiersUpTo('outward') }
   const stop = new AbortController()
   const timer = setTimeout(() => stop.abort(new Error('eval timed out')), options.timeoutMs ?? 300_000)

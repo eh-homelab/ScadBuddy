@@ -6,10 +6,17 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.client import (
+    Client,
+    WorkflowExecutionStatus,
+    WorkflowFailureError,
+    WorkflowHandle,
+    WorkflowUpdateFailedError,
+)
 from temporalio.exceptions import ApplicationError, CancelledError, FailureError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
@@ -24,6 +31,7 @@ from scadbuddy.render.job_models import (
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     CLAIMS_ACTIVITY,
+    CLOSING,
     QUEUE_FULL,
     RELEASE_UPDATE,
     AcceptRender,
@@ -60,6 +68,8 @@ class FakeActivities:
         block_solids: asyncio.Event | None = None,
         queue_full: int | None = None,
         block_cancelled: asyncio.Event | None = None,
+        block_claims: asyncio.Event | None = None,
+        fail_running: asyncio.Event | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.projections: list[Projection] = []
@@ -67,6 +77,9 @@ class FakeActivities:
         self.accepts = 0
         self.queue_full = queue_full
         self.block_cancelled = block_cancelled
+        self.block_claims = block_claims
+        self.fail_running = fail_running
+        self.claiming = 0
         self.fail_main = fail_main
         self.block_main = block_main
         self.block_solids = block_solids
@@ -132,6 +145,9 @@ class FakeActivities:
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:
         self.projections.append(projection)
+        if projection.state == "running" and self.fail_running is not None:
+            await self.fail_running.wait()
+            raise ApplicationError("the database went away", non_retryable=True)
         if projection.state == "cancelled" and self.block_cancelled is not None:
             await self.block_cancelled.wait()
 
@@ -156,6 +172,9 @@ class FakeActivities:
 
     @activity.defn(name=CLAIMS_ACTIVITY)
     async def render_claims(self, job_id: str, claims: int) -> None:
+        self.claiming += 1
+        if self.block_claims is not None:
+            await self.block_claims.wait()
         self.claims.append(claims)
 
 
@@ -416,6 +435,17 @@ async def test_a_piece_resumes_from_the_activity_it_was_on() -> None:
         assert second.calls == ["render_solids", "finish_piece"]
 
 
+async def _decided_after_an_activity(handle: WorkflowHandle[Any, Any]) -> bool:
+    """Whether a workflow task completed after an activity did."""
+    completed = False
+    async for event in handle.fetch_history_events():
+        if event.HasField("activity_task_completed_event_attributes"):
+            completed = True
+        elif completed and event.HasField("workflow_task_completed_event_attributes"):
+            return True
+    return False
+
+
 async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_the_run() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -507,6 +537,75 @@ async def test_a_second_accepted_coalesces_with_one_more_claim() -> None:
         assert acts.accepts == 1 and acts.claims == [2]
 
 
+async def test_a_request_coalesced_into_a_render_that_raises_gets_its_job() -> None:
+    """The run waits for the coalesced request's `accepted` (in its claims write)
+    before it fails, so the request is answered rather than refused as
+    still-accepting and re-sent into a new run (review #1066 1.1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        claims, fail = asyncio.Event(), asyncio.Event()
+        acts = FakeActivities(block_claims=claims, fail_running=fail)
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            second = asyncio.create_task(start_render(client, queue, start_of(job), id=wid))
+            while not acts.claiming:
+                await asyncio.sleep(0.05)
+            fail.set()
+            handle = client.get_workflow_handle(wid)
+            # The `failed` write landed and the run has taken its turn on it.
+            while not await _decided_after_an_activity(handle):
+                await asyncio.sleep(0.05)
+            claims.set()
+            answer = await asyncio.wait_for(second, timeout=30)
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), timeout=30)
+        assert answer.job is not None and answer.coalesced and answer.job.claims == 2
+
+
+async def test_accepted_after_the_render_raised_is_rejected_as_closing() -> None:
+    """A request that reaches the run once its render has failed, while it waits for
+    its handlers, is rejected, so it starts a fresh render rather than joining the
+    failure (review #1066 (6) 1); rejected, it leaves no trace in the run's history, so
+    its id is free for the next run (review #1066 (7) 1)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        claims, fail = asyncio.Event(), asyncio.Event()
+        acts = FakeActivities(block_claims=claims, fail_running=fail)
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            # A coalesced request in its claims write holds the failed run open.
+            second = asyncio.create_task(start_render(client, queue, start_of(job), id=wid))
+            while not acts.claiming:
+                await asyncio.sleep(0.05)
+            fail.set()
+            handle = client.get_workflow_handle(wid)
+            while not await _decided_after_an_activity(handle):
+                await asyncio.sleep(0.05)
+            late = uuid.uuid4().hex
+            with pytest.raises(WorkflowUpdateFailedError) as rejected:
+                await asyncio.wait_for(
+                    handle.execute_update(ACCEPTED_UPDATE, id=late, result_type=RenderAnswer),
+                    timeout=30,
+                )
+            claims.set()
+            await asyncio.wait_for(second, timeout=30)
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), timeout=30)
+            ids = [
+                e.workflow_execution_update_accepted_event_attributes.accepted_request.meta.update_id
+                async for e in handle.fetch_history_events()
+                if e.HasField("workflow_execution_update_accepted_event_attributes")
+            ]
+        assert isinstance(rejected.value.cause, ApplicationError)
+        assert rejected.value.cause.type == CLOSING
+        assert late not in ids
+        assert acts.claims == [2]
+
+
 async def test_release_of_one_of_two_claims_keeps_rendering() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -557,7 +656,7 @@ async def test_the_last_release_cancels_and_projects_cancelled_with_its_reason()
         assert last.failure is not None and last.failure.error == SUPERSEDED_ERROR
 
 
-async def test_accepted_after_the_last_release_answers_closing() -> None:
+async def test_accepted_after_the_last_release_is_rejected_as_closing() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         gate, projecting = asyncio.Event(), asyncio.Event()
@@ -574,17 +673,21 @@ async def test_accepted_after_the_last_release_answers_closing() -> None:
             )
             while not [p for p in acts.projections if p.state == "cancelled"]:
                 await asyncio.sleep(0.01)
-            late = await handle.execute_update(ACCEPTED_UPDATE, result_type=RenderAnswer)
+            with pytest.raises(WorkflowUpdateFailedError) as rejected:
+                await handle.execute_update(ACCEPTED_UPDATE, result_type=RenderAnswer)
             projecting.set()
             await release
             await handle.result()
             gate.set()
-        assert late.closing and late.job is None
+        assert isinstance(rejected.value.cause, ApplicationError)
+        assert rejected.value.cause.type == CLOSING
         last = [p for p in acts.projections if p.state][-1]
         assert last.failure is not None and last.failure.error == CANCELLED_ERROR
 
 
-async def test_a_full_queue_answers_queue_full_and_fails_the_execution() -> None:
+async def test_a_full_queue_answers_queue_full_and_completes_the_execution() -> None:
+    """Back-pressure, not a defect: the refused run closes completed, so it never
+    counts as a failed workflow (review #1066 3.1)."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         acts = FakeActivities(queue_full=3)
@@ -592,8 +695,10 @@ async def test_a_full_queue_answers_queue_full_and_fails_the_execution() -> None
             job = _job(width=54)
             wid = f"render-{job.id}"
             answer = await start_render(client, queue, start_of(job), id=wid)
-            with pytest.raises(WorkflowFailureError):
-                await client.get_workflow_handle(wid).result()
+            handle = client.get_workflow_handle(wid)
+            await handle.result()
+            described = await handle.describe()
+        assert described.status == WorkflowExecutionStatus.COMPLETED
         assert answer.queue_full == 3 and answer.job is None
         assert acts.projections == [] and acts.calls == []
 

@@ -15,8 +15,10 @@ import httpx
 import psycopg
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
@@ -147,6 +149,47 @@ def test_a_slow_check_that_is_not_bambuddy_is_not_blamed_on_bambuddy(
     assert problem["type"] == "about:blank"
     assert problem["detail"] == "the check did not finish within 6s; nothing was done"
     assert not effect.called
+
+
+@respx.mock
+def test_a_slow_settings_read_in_the_check_neither_blocks_the_loop_nor_blames_bambuddy(
+    app: FastAPI, client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settings are a Postgres read: the check makes it off the event loop, so the
+    budget still answers, and before ``waiting_on_bambuddy``, so a slow read is not
+    Bambuddy's 504 (review #1063 fifth review 1a)."""
+    configure(client)
+    link(client, make_output(client, model), 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    queue = mock_enqueue()
+    store = getattr(app.state, STATE_ATTR).settings_store
+    real_load = store.load
+    on_loop: list[bool] = []
+
+    def slow_load() -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        if len(on_loop) == 1:
+            time.sleep(9)
+        return real_load()
+
+    monkeypatch.setattr(store, "load", slow_load)
+
+    began = time.monotonic()
+    response = client.post(
+        "/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex}
+    )
+
+    assert response.status_code == 504, response.text
+    problem = response.json()
+    assert problem["type"] == "about:blank"
+    assert problem["detail"] == "the check did not finish within 6s; nothing was done"
+    assert time.monotonic() - began < 12
+    assert on_loop and not any(on_loop)
+    assert not queue.called
 
 
 # --- every Bambuddy kind (review #1063 7) ----------------------------------------

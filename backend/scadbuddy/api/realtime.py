@@ -322,19 +322,30 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
             )
 
 
-@router.websocket("/ws")
-async def realtime(websocket: WebSocket, state: StateDep) -> None:
+async def refuse_foreign_origin(websocket: WebSocket, state: AppState, what: str) -> bool:
+    """Close ``websocket`` with 1008 before accepting it, and say True, when its
+    ``Origin`` is not `origin_allowed`. Browsers do not apply the same-origin policy to
+    sockets, so this is all that keeps another site's page off every socket (the
+    realtime one, #266; the language servers', #1317). Call it before taking a permit."""
     origin = websocket.headers.get("origin")
     public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
-    if not origin_allowed(origin, public_url, state.settings.allowed_origin_list):
-        logger.warning(
-            "refused a realtime socket from origin %r: not the public URL's origin (%r) "
-            "and not in SCADBUDDY_ALLOWED_ORIGINS (%r)",
-            origin,
-            public_url,
-            state.settings.allowed_origins,
-        )
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    if origin_allowed(origin, public_url, state.settings.allowed_origin_list):
+        return False
+    logger.warning(
+        "refused a %s socket from origin %r: not the public URL's origin (%r) "
+        "and not in SCADBUDDY_ALLOWED_ORIGINS (%r)",
+        what,
+        origin,
+        public_url,
+        state.settings.allowed_origins,
+    )
+    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    return True
+
+
+@router.websocket("/ws")
+async def realtime(websocket: WebSocket, state: StateDep) -> None:
+    if await refuse_foreign_origin(websocket, state, "realtime"):
         return
     # No await between the check and the acquire, so nothing can take the permit in
     # between (the same pattern as `api/lsp.py`). Refused sockets reconnect with

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_VERSION } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
@@ -115,6 +116,38 @@ describe('CustomizePage with a template UI', () => {
     expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${UI_DEMO_VERSION}/ui/index.js`])
   })
 
+  it('keeps the interface mounted across a commit that leaves ui/ alone, and remounts on one that does (#846)', async () => {
+    const model = models.find((m) => m.slug === UI_DEMO_SLUG)!
+    const uiCommit = 'c'.repeat(40)
+    let record = { ...model, version: 'a'.repeat(40), ui_version: uiCommit }
+    server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json(record)))
+    const urls: string[] = []
+    let mounts = 0
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return {
+        mount: (root: ShadowRoot) => {
+          mounts += 1
+          root.textContent = 'custom'
+        },
+      }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toBe('custom'))
+    // An "Edit details": a new record revision, the same interface.
+    record = { ...record, version: 'b'.repeat(40), name: 'Renamed' }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await screen.findByRole('heading', { name: 'Renamed' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(mounts).toBe(1)
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${uiCommit}/ui/index.js`])
+    // A commit to ui/ does remount it, from that commit.
+    record = { ...record, version: 'd'.repeat(40), ui_version: 'd'.repeat(40) }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await waitFor(() => expect(mounts).toBe(2))
+    expect(urls.at(-1)).toBe(`/api/v1/models/${UI_DEMO_SLUG}/versions/${'d'.repeat(40)}/ui/index.js`)
+  })
+
   it('loads the live module when the record has no revision', async () => {
     withRecord(UI_DEMO_SLUG, { version: null })
     const urls: string[] = []
@@ -209,6 +242,51 @@ describe('CustomizePage with a template UI', () => {
     expect(renders).toBe(1)
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
+
+  it('drops "Saved …" once a UI-state-only change leaves the output behind (#848)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 5000 })
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    host?.inputs.set({ ...host.inputs.get(), demo: { touched: true } })
+    await waitFor(() => expect(screen.queryByText(/^Saved /)).toBeNull())
+    expect(screen.getByTestId('generate')).toBeEnabled()
+  }, 20_000)
+
+  it('host.generate() still resolves when a UI-state write lands while the output saves (#848)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let posted = false
+    server.use(
+      http.post('/api/v1/models/:slug/outputs', async () => {
+        posted = true
+        await held
+        return undefined // on to the default handler
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const run = host!.generate()
+    await waitFor(() => expect(posted).toBe(true), { timeout: 5000 })
+    host!.inputs.set({ ...host!.inputs.get(), demo: { generating: true } })
+    release()
+    await expect(run).resolves.toMatchObject({ outputId: expect.any(String) })
+    expect(screen.queryByText(/^Saved /)).toBeNull()
+  }, 20_000)
 
   it('a colour bound outside params starts no render and leaves the extruder numbers to params', async () => {
     let host: Host | undefined

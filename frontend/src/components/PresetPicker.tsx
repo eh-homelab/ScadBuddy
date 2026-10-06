@@ -2,8 +2,8 @@ import { useId, useRef, useState, type FormEvent } from 'react'
 import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
-import type { CustomizerSchema, ParamPreset } from '../api/types'
-import { sameValues, type ParamValues } from '../lib/params'
+import type { CustomizerSchema, ParamPreset, ParamValue } from '../api/types'
+import { defaultValues, sameValues, type ParamValues } from '../lib/params'
 import {
   applyPreset,
   parsePresetTags,
@@ -11,7 +11,7 @@ import {
   presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
-import type { InputsExtra } from '../lib/inputs'
+import { splitInputs, type InputsExtra } from '../lib/inputs'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -31,6 +31,16 @@ interface Selection {
   preset: ParamPreset
   /** The values the preset put on screen, so an edit since shows as a change to it. */
   applied: ParamValues
+}
+
+/** A value the selected preset stores for a parameter this template no longer has. */
+interface Skipped {
+  name: string
+  value: ParamValue
+}
+
+function describeSkipped(skipped: readonly Skipped[]): string {
+  return skipped.map(({ name, value }) => `${name} = ${JSON.stringify(value)}`).join(', ')
 }
 
 function message(caught: unknown): string {
@@ -53,7 +63,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const saved = presets.filter((preset) => preset.origin === 'mine')
 
   const [selection, setSelection] = useState<Selection | null>(null)
-  const [skipped, setSkipped] = useState<string[]>([])
+  const [skipped, setSkipped] = useState<Skipped[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   /**
@@ -75,14 +85,37 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  /** #359 — the preset a pick would apply over unsaved edits, while it asks. */
+  const [pending, setPending] = useState<ParamPreset | null>(null)
+  /** #358 — an Update would drop the skipped values for good, so it asks first. */
+  const [confirmingUpdate, setConfirmingUpdate] = useState(false)
 
   const selected = selection?.preset
   const modified = selection !== null && !sameValues(values, selection.applied)
   const editable = selected?.origin === 'mine'
+  // Edits a pick would lose: values that are neither the selected preset's nor, with
+  // none selected, the defaults.
+  const unsaved = !sameValues(values, selection ? selection.applied : defaultValues(schema))
 
-  function pick(id: string) {
-    setError(null)
+  /**
+   * #359 — a pick replaces every value on screen, so with unsaved edits it asks first.
+   * The select stays on the current preset meanwhile, so arrowing through the list
+   * stops at the first preset instead of applying each one in turn.
+   */
+  function choose(id: string) {
+    // While it asks, a further change (a key held down on the select) waits its turn.
+    if (pending) return
     const preset = presets.find((candidate) => candidate.id === id)
+    if (preset && unsaved) {
+      setPending(preset)
+      return
+    }
+    pick(preset)
+  }
+
+  /** Applies `preset`, or with none clears the selection and leaves the values alone. */
+  function pick(preset: ParamPreset | undefined) {
+    setError(null)
     if (!preset) {
       setSelection(null)
       setSkipped([])
@@ -90,7 +123,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
     }
     const applied = applyPreset(schema, preset)
     setSelection({ preset, applied: applied.values })
-    setSkipped(applied.skipped)
+    const stored = splitInputs(preset.inputs, preset.params).params
+    setSkipped(applied.skipped.map((name) => ({ name, value: stored[name] as ParamValue })))
     onApply(applied.values, applied.extra)
   }
 
@@ -237,8 +271,15 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
     else void saveAs(event)
   }
 
-  async function update() {
+  async function update(confirmed = false) {
     if (!selected || !editable || busy) return
+    // The server refuses a parameter the template does not have, so the stored values
+    // cannot be kept: Update replaces them, and says so before it does.
+    if (skipped.length > 0 && !confirmed) {
+      setConfirmingUpdate(true)
+      return
+    }
+    setConfirmingUpdate(false)
     setBusy(true)
     setError(null)
     try {
@@ -282,7 +323,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
         <select
           id="preset-select"
           value={selected?.id ?? ''}
-          onChange={(event) => pick(event.target.value)}
+          onChange={(event) => choose(event.target.value)}
           disabled={presetsState.loading && !presetsState.data}
           className="sb-field min-w-0 flex-1 cursor-pointer"
         >
@@ -378,7 +419,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
       {skipped.length > 0 && (
         <p role="status" className="text-[12px] text-warn">
           Skipped {skipped.length === 1 ? 'a value' : `${skipped.length} values`} this template no
-          longer has: {skipped.join(', ')}
+          longer has: {describeSkipped(skipped)}
         </p>
       )}
       {(error ?? presetsState.error) && (
@@ -469,6 +510,64 @@ export function PresetPicker({ slug, schema, values, extra, onApply }: Props) {
             {nameError}
           </p>
         )}
+      </Dialog>
+
+      <Dialog
+        open={pending !== null}
+        title={`Apply preset ${pending?.name ?? ''}?`}
+        description={
+          selected
+            ? `You changed ${selected.name} since you picked it.`
+            : 'The values on screen have changes no preset holds.'
+        }
+        onClose={() => setPending(null)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              // The preset as asked about, not looked up again: it may have changed since.
+              // Not USER_ONLY: replacing the values on screen stays in the page, so the
+              // assistant may confirm a pick it made (spec §8.1).
+              onClick={() => {
+                pick(pending ?? undefined)
+                setPending(null)
+              }}
+            >
+              Replace my changes
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-muted">
+          Applying {pending?.name} replaces them. To keep them, cancel and{' '}
+          {editable ? `update ${selected?.name} or ` : ''}save them as a preset first.
+        </p>
+      </Dialog>
+
+      <Dialog
+        open={confirmingUpdate}
+        title={`Update preset ${selected?.name ?? ''}`}
+        description="This template no longer has every parameter the preset sets."
+        onClose={() => setConfirmingUpdate(false)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmingUpdate(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => void update(true)} disabled={busy} {...USER_ONLY}>
+              {busy && <Spinner />}
+              Update and drop them
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-muted">
+          {selected?.name} also sets {describeSkipped(skipped)}, which this template no longer has.
+          Updating drops them; note them first to re-enter them on the new parameters.
+        </p>
       </Dialog>
 
       <Dialog

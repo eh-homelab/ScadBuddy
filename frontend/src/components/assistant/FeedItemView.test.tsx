@@ -7,7 +7,7 @@ import { FeedItemView } from './FeedItemView'
 const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
-  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you }
+  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you, ...(state === 'closed' ? { reason: 'it expired' } : {}) }
   return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
@@ -16,9 +16,9 @@ describe('the approval card', () => {
     const cases: [Parameters<typeof card>[0], string | null][] = [
       ['pending', null],
       ['sent', 'Sending your answer…'],
-      ['queued', 'Not connected: your answer goes first when the assistant reconnects.'],
       ['approved', 'Approved by You.'],
       ['denied', 'Denied by You.'],
+      ['closed', 'Your decision was not taken: it expired.'],
     ]
     for (const [state, text] of cases) {
       const { unmount } = card(state)
@@ -266,9 +266,9 @@ describe('the question card (#940)', () => {
   it('says where the answer is once it is not pending', () => {
     const cases: [Partial<Question>, string][] = [
       [{ state: 'sent' }, 'Sending your answer…'],
-      [{ state: 'queued' }, 'Not connected: your answer goes first when the assistant reconnects.'],
       [{ state: 'answered', answers: ['Blue'], by: you }, 'Answered by You: Blue'],
       [{ state: 'cancelled', reason: 'interrupted by You' }, 'Not answered: interrupted by You.'],
+      [{ state: 'closed', reason: 'it was already resolved elsewhere' }, 'Your answer was not taken: it was already resolved elsewhere.'],
     ]
     for (const [extra, text] of cases) {
       const { unmount } = ask([colour], extra)
@@ -344,5 +344,91 @@ describe('the attention card (#815)', () => {
     expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('agent-attention-timer')).not.toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('No reply: nobody replied in time (on_timeout: proceed).')
+  })
+})
+
+describe('the done summary (#815 §4)', () => {
+  type Question = Extract<FeedItem, { kind: 'question' }>
+  const summary = '**While nobody answered (attention request 01234567 timed out)**\n- created preset `night` of sign (save_preset)'
+
+  function post(extra: Partial<Question> = {}) {
+    const onAnswer = vi.fn()
+    const item: Question = {
+      kind: 'question',
+      id: 'done1',
+      tool: 't1',
+      questions: [
+        {
+          question: 'Rendered the sign headlessly; the plate still needs your tab.',
+          header: 'Done',
+          multiSelect: false,
+          options: [
+            { label: 'Dismiss', description: '' },
+            { label: 'Got it', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'done', summary },
+      state: 'pending',
+      ...extra,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={onAnswer} />)
+    return onAnswer
+  }
+
+  it('renders a name from a tool literally: the agent puts it in a code span, so no link or emphasis', () => {
+    // As agent questions/doneSummary.ts writes a hostile model slug and tool name.
+    post({ attention: { reason: 'done', summary: '**What this turn changed**\n- created preset `x` of `evil [click](http://e)` (`a*b*c`)' } })
+    const record = screen.getByTestId('agent-done-summary')
+    expect(record.querySelector('a, em')).toBeNull()
+    expect(record).toHaveTextContent('created preset x of evil [click](http://e) (a*b*c)')
+  })
+
+  it("shows the agent's message and ScadBuddy's own record, with no timer and nothing to reply, and dismisses", async () => {
+    const user = userEvent.setup()
+    const onAnswer = post()
+    expect(screen.getByRole('heading', { name: 'The assistant is done' })).toBeInTheDocument()
+    expect(screen.getByText('Rendered the sign headlessly; the plate still needs your tab.')).toBeInTheDocument()
+    expect(screen.getByTestId('agent-done-summary')).toHaveTextContent(/While nobody answered.*created preset night of sign \(save_preset\)/)
+    expect(screen.queryByTestId('agent-attention-timer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(onAnswer).toHaveBeenCalledWith('done1', ['Dismiss'])
+  })
+
+  it('once dismissed or replaced, says so and keeps the record', () => {
+    post({ state: 'answered', answers: ['Dismiss'], by: you })
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Dismissed by You.')
+    expect(screen.getByTestId('agent-done-summary')).toBeInTheDocument()
+  })
+})
+
+describe('the tab-disconnected card (#815)', () => {
+  it('says the tab is back once the agent resolved it as reconnected', () => {
+    const item: FeedItem = {
+      kind: 'question',
+      id: 'att2',
+      tool: 't2',
+      questions: [
+        {
+          question: 'I need your ScadBuddy tab for browser_snapshot, but it is not connected.',
+          header: 'Tab disconnected',
+          multiSelect: false,
+          options: [
+            { label: "I'm back", description: '' },
+            { label: 'Carry on without the tab', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date().toISOString() },
+      state: 'cancelled',
+      reason: 'the ScadBuddy tab is connected again',
+      reconnected: true,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back. The assistant re-reads the page before it changes anything.')
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
   })
 })
