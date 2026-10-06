@@ -1,9 +1,10 @@
-import { condition, defineQuery, defineUpdate, isCancellation, setHandler } from '@temporalio/workflow'
+import { CancellationScope, condition, defineQuery, defineUpdate, isCancellation, setHandler, sleep } from '@temporalio/workflow'
 
 // A TypeScript stand-in for agent-durable's DurableSession (scadbuddy_durable/workflow.py),
 // with its names, so test/durable.temporal.test.ts checks the wire shape of the agent
 // service's calls without Python. It records what it receives; a Stop (cancellation)
-// returns a state the next execution must be started with.
+// returns a state the next execution must be started with; with `stop_ms` in its input, only
+// that long after the Stop, as the plugin ends its task before the execution returns.
 
 export type Seen = { args: unknown[]; messages: unknown[]; reviews: unknown[] }
 
@@ -41,7 +42,11 @@ export async function DurableSession(input: unknown, state: unknown, inbox: unkn
   try {
     await condition(() => false)
   } catch (err) {
-    if (isCancellation(err)) return { handed_over: messages.length }
+    if (isCancellation(err)) {
+      const stopMs = (input as { stop_ms?: number }).stop_ms
+      if (stopMs) await CancellationScope.nonCancellable(() => sleep(stopMs))
+      return { handed_over: messages.length }
+    }
     throw err
   }
   return null

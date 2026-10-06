@@ -145,15 +145,17 @@ export class TemporalDurableSessions implements DurableSessions {
   }
 
   /**
-   * The latest execution's status and its chain (the first run's id, which
-   * Continue-As-New keeps and a new start does not), or undefined when the ID has none.
+   * The latest execution's status, its chain (the first run's id, which Continue-As-New
+   * keeps and a new start does not), and whether a Stop was requested of it (`stopping`),
+   * or undefined when the ID has none.
    */
-  async #describe(sessionId: string): Promise<{ status: string; chain: string } | undefined> {
+  async #describe(sessionId: string): Promise<{ status: string; chain: string; stopping: boolean } | undefined> {
     try {
       const described = await this.#ask(() => this.#client.workflow.getHandle(durableWorkflowId(sessionId)).describe())
       return {
         status: described.status.name,
         chain: described.raw.workflowExecutionInfo?.firstRunId || described.runId,
+        stopping: described.raw.workflowExtendedInfo?.cancelRequested === true,
       }
     } catch (err) {
       if (notFound(err)) return undefined
@@ -161,10 +163,33 @@ export class TemporalDurableSessions implements DurableSessions {
     }
   }
 
+  /**
+   * A stopped execution still running: the plugin ends its task (and the session reads
+   * `idle`) before the execution returns its state. An Update it accepted meanwhile would
+   * be lost with it, so the send waits for it to close, up to D, and is then handed over.
+   */
+  async #closed(sessionId: string): Promise<{ status: string; chain: string; stopping: boolean } | undefined> {
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), this.#sendDeadlineMs)
+    try {
+      await this.#client.connection.withAbortSignal(abort.signal, () =>
+        this.#client.workflow.getHandle(durableWorkflowId(sessionId)).result(),
+      )
+    } catch (err) {
+      // Closed some other way (terminated, failed) is closed too.
+      if (abort.signal.aborted) throw new DurableRefused('the session is still stopping; send again')
+      if (unreachable(err)) throw new DurableUnavailable((err as Error).message)
+    } finally {
+      clearTimeout(timer)
+    }
+    return this.#describe(sessionId)
+  }
+
   async send(input: DurableSessionInput, message: DurableMessage, options: DurableSendOptions = {}): Promise<DurableSendResult> {
     const sessionId = input.session_id
     const workflowId = durableWorkflowId(sessionId)
-    const before = await this.#describe(sessionId)
+    let before = await this.#describe(sessionId)
+    if (before?.status === 'RUNNING' && before.stopping) before = await this.#closed(sessionId)
     const status = before?.status
     let state: unknown = null
     let start = input

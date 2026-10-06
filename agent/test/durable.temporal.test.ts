@@ -91,6 +91,24 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     await durable.cancel(sid)
   }, 120_000)
 
+  it('a send while a Stop is still closing the execution waits for it, and is handed over', async () => {
+    const sid = randomUUID()
+    const durable = new TemporalDurableSessions(env.client, db.sql)
+    // The stand-in returns its state this long after the cancel (the plugin's end of task).
+    const input = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: null, stop_ms: 2_000 }
+    await durable.send(input, { text: 'first', context: null })
+    expect(await durable.cancel(sid)).toBe(true)
+    // Sent at once: the stopping execution would accept it, then close and lose it.
+    expect(await durable.send(input, { text: 'after stop', context: null })).toEqual({
+      started: 'handed_over',
+      resumedFresh: false,
+    })
+    const seen = await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)
+    expect(seen.args[1]).toEqual({ handed_over: 1 })
+    expect(seen.messages).toEqual([{ text: 'after stop', context: null }])
+    await durable.cancel(sid)
+  }, 120_000)
+
   it('a terminated execution with no snapshot starts from nothing and says so', async () => {
     const sid = randomUUID()
     const durable = new TemporalDurableSessions(env.client, db.sql)
