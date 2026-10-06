@@ -24,6 +24,9 @@ export function HistoryPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
+  // #939 — the breadcrumb names the model by its record. The schema's `title` is the
+  // .scad file OpenSCAD exported, "model" for every model.
+  const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
   // on `print:<output id>`, which this list does not follow.
   const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
@@ -64,7 +67,7 @@ export function HistoryPage() {
           </Link>
           <span className="text-faint">/</span>
           <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
-            {schemaState.data?.title ?? slug}
+            {modelState.data?.name ?? slug}
           </Link>
           <span className="text-faint">/</span>
           <h1 className="text-[13px] font-medium">History</h1>
@@ -289,6 +292,8 @@ function OutputRow({
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
+  // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
+  const label = output.name ?? shortId(output.id)
 
   return (
     <li className="rounded-[6px] border border-line bg-surface p-3">
@@ -296,7 +301,7 @@ function OutputRow({
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
             <ColorStrip colors={output.colors ?? []} size="sm" />
-            <span className="text-[13px] text-ink">{output.name ?? shortId(output.id)}</span>
+            <span className="text-[13px] text-ink">{label}</span>
             <span className="text-[12px] text-faint">{timeAgo(output.created_at)}</span>
           </div>
           <p className="sb-num mt-1 text-[12px] text-muted">
@@ -328,13 +333,20 @@ function OutputRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" onClick={onEdit}>
+          <Button size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>
             Edit
           </Button>
-          <Button size="sm" onClick={onSend}>
+          <Button size="sm" onClick={onSend} aria-label={`Send again ${label}`}>
             Send again
           </Button>
-          <Button size="sm" variant="danger" onClick={onDelete} disabled={deleting} {...USER_ONLY}>
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={onDelete}
+            disabled={deleting}
+            aria-label={`Delete ${label}`}
+            {...USER_ONLY}
+          >
             {deleting ? <Spinner /> : 'Delete'}
           </Button>
         </div>
@@ -350,9 +362,9 @@ function OutputRow({
                 <dt className="text-muted">{entry.caption}</dt>
                 <dd className="sb-num min-w-0">
                   <span className="text-ink">{formatValue(entry.value)}</span>
-                  <span className="ml-2 text-faint line-through">
-                    {formatValue(entry.initial)}
-                  </span>
+                  {/* #975 — read as "21, default 20", not "2120": the strike-through alone is CSS. */}
+                  <span className="sr-only">, default </span>
+                  <del className="ml-2 text-faint">{formatValue(entry.initial)}</del>
                 </dd>
               </div>
             ))}

@@ -7,6 +7,7 @@ A delete runs no openscad and stays a plain route (plan 3e Ruling 3).
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from scadbuddy.api import presets as presets_api
@@ -38,7 +39,9 @@ def preset_kinds(state: AppState) -> list[OperationKind]:
 
     async def update_check(request: dict[str, Any]) -> dict[str, Any]:
         require_model_exists(state.catalogue, request["slug"])
-        presets_api.require_saved(request["slug"], request["preset_id"])
+        await asyncio.to_thread(
+            presets_api.require_saved, state.presets, request["slug"], request["preset_id"]
+        )
         return {}
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:

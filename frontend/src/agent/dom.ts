@@ -122,7 +122,11 @@ export function isDisabled(element: Element): boolean {
 export function activeDialog(root: ParentNode = document): Element | null {
   const dialogs = [...root.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open]')]
   const modal = dialogs.filter(
-    (dialog) => isVisible(dialog) && (dialog.getAttribute('aria-modal') === 'true' || dialog.tagName === 'DIALOG'),
+    (dialog) =>
+      isVisible(dialog) &&
+      // `data-modal`: ui/Dialog, which drops aria-modal beside the assistant (#798) and
+      // is no less modal to the agent for it.
+      (dialog.getAttribute('aria-modal') === 'true' || dialog.hasAttribute('data-modal') || dialog.tagName === 'DIALOG'),
   )
   return modal.at(-1) ?? null
 }

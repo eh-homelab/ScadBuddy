@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { command } from './command.js'
+import { command, isRunning } from './command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -252,13 +252,15 @@ export const libraryTools: Tool[] = [
     summarize: ({ name, commit }) =>
       commit ? `Delete the ${name} checkout at ${commit}` : `Delete every checkout of library ${name}`,
     handler: async ({ name, commit }, ctx) => {
-      await command(ctx, `remove ${name} checkouts`, (headers) =>
+      const removed = await command(ctx, `remove ${name} checkouts`, (headers) =>
         ctx.backend.DELETE('/api/v1/libraries/{name}', {
           params: { path: { name }, query: { commit: commit ?? null } },
           headers,
         }),
       )
-      return json({ removed: name, commit: commit ?? 'all' })
+      // Still running past the follow window (it waits out a pin holding the gate):
+      // hand back the operation to follow, not a removal that may yet be refused.
+      return json(isRunning(removed) ? removed : { removed: name, commit: commit ?? 'all' })
     },
   }),
 

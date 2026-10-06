@@ -9,12 +9,15 @@ export function Field({
   label,
   name,
   readout,
+  error,
   children,
 }: {
   id: string
   label: string
   name: string
   readout?: ReactNode
+  /** #921 — why the value cannot be rendered; the input names it with `aria-describedby={`${id}-error`}`. */
+  error?: string | null
   children: ReactNode
 }) {
   return (
@@ -26,6 +29,11 @@ export function Field({
         <span className="sb-num shrink-0 text-[11px] text-faint">{readout ?? name}</span>
       </div>
       {children}
+      {error && (
+        <p id={`${id}-error`} role="alert" className="mt-1 text-[12px] text-warn">
+          {error}
+        </p>
+      )}
     </div>
   )
 }

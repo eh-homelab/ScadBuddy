@@ -106,6 +106,11 @@ describe('chatReducer', () => {
     const late = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: you })], closed)
     expect(late.sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
     expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    // An expiry or a cancel is not a denial (#979).
+    const expired = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, decision: 'expired', reason: 'no decision before it expired' })], waiting)
+    expect(expired.sessions.s1?.items[0]).toMatchObject({ state: 'expired' })
+    const cancelled = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, decision: 'cancelled', reason: 'interrupted by You' })], waiting)
+    expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     // The route's own 2xx resolves the card without the socket.
     expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
     // A failure that lands after the server resolved it changes nothing on the card.
