@@ -73,6 +73,7 @@ from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalRefusedError,
     TemporalUnavailableError,
 )
 
@@ -353,7 +354,7 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError) as error:
+    except (RPCError, TemporalUnavailableError, TemporalRefusedError) as error:
         raise _temporal_problem(error) from None
     except WorkflowUpdateFailedError as error:
         # The worker's failure text is for the log, not the client (review #1066 5.1).
@@ -390,14 +391,18 @@ async def render_model(
     )
 
 
-def _temporal_problem(error: RPCError | TemporalUnavailableError) -> ApiError:
+def _temporal_problem(
+    error: RPCError | TemporalUnavailableError | TemporalRefusedError,
+) -> ApiError:
     """What the route answers when Temporal did not take the render's start, as the
     print route does: only a failed connect wrote nothing; any other may follow a start
     Temporal persisted, which the same request sent again follows (review #1066 (8) 2).
     ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
     `Idempotency-Key` when it is true, so a detail tells a client to send again only
     then (review #1066 (10) 3, 4)."""
-    if isinstance(error, RPCError) and error.status not in TRANSIENT_RPC:
+    if isinstance(error, TemporalRefusedError) or (
+        isinstance(error, RPCError) and error.status not in TRANSIENT_RPC
+    ):
         # A wrong namespace or a denied permission: configuration. Temporal's message
         # stays in the log. The refusal may still follow a start it persisted.
         logger.error("Temporal refused to start a render", exc_info=error)

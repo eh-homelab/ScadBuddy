@@ -49,4 +49,32 @@ test.describe('catalogue filters (#276)', () => {
     await expect(page).toHaveURL(/\/\?q=creme&view=cards$/)
     await expect(page.getByTestId('result-count')).toHaveText(`1 of ${all}`)
   })
+
+  // #932 — at phone width the header actions did not wrap, so Add model sat past the
+  // screen's edge, and every tag chip rendered before the first model (112 of them in
+  // production, 120 Tab presses from the search box to the first card).
+  test('at phone width Add model is reachable and the tags fold away', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+    await expect(page.getByTestId('result-count')).toHaveText(`${all} of ${all}`)
+
+    const add = page.getByRole('button', { name: 'Add model' })
+    const box = (await add.boundingBox())!
+    expect(box.x + box.width, 'Add model ends on screen').toBeLessThanOrEqual(390)
+    await add.click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.keyboard.press('Escape')
+
+    // The chips sit behind one disclosure, so the first card follows the filters.
+    const toggle = page.getByRole('button', { name: /^Tags/ })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByRole('button', { name: 'kitchen 1' })).toHaveCount(0)
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await page.getByRole('button', { name: 'kitchen 1' }).click()
+    await expect(page.getByTestId('result-count')).toHaveText(`1 of ${all}`)
+    // A selected tag stays in view with the list folded, so it can be cleared.
+    await toggle.click()
+    await expect(page.getByRole('button', { name: 'kitchen 1' })).toHaveAttribute('aria-pressed', 'true')
+  })
 })

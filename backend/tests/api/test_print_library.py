@@ -342,3 +342,87 @@ def test_a_library_run_answers_202_before_the_slice_finishes_and_a_retry_is_its_
     assert ended["status"] == "succeeded"
     assert ended["result"]["library_file_id"] == 89
     assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
+    client: TestClient,
+) -> None:
+    """#976: a library-file run has no output, and its archive was never listed."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    slice_routes()
+    queued_again = queue_route(item_id=51)
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+    assert response.status_code == 200, response.text
+    # The scheduler dispatched the item: Bambuddy made archive 90 and named it on the item.
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 51,
+                "printer_id": 1,
+                "archive_id": 90,
+                "library_file_id": 89,
+                "library_file_name": "spoollock.gcode.3mf",
+                "status": "printing",
+                "plate_id": 1,
+            },
+        )
+    )
+    respx.get(f"{API}/archives/90").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **recording("archive-detail.json"),
+                "id": 90,
+                "status": "printing",
+                "print_name": "Bambu Spool Lock or shim UPDATED",
+                "photos": [],
+                "finish_photo": None,
+                "timelapse_path": None,
+            },
+        )
+    )
+    respx.get(f"{API}/archives/90/runs").mock(
+        return_value=httpx.Response(200, json=recording("archive-runs.json"))
+    )
+
+    listed = client.get("/api/v1/prints", params={"status": "printing"})
+
+    assert listed.status_code == 200, listed.text
+    [summary] = listed.json()["items"]
+    assert summary["archive_id"] == 90
+    assert summary["library_file_id"] == 89
+    assert summary["output_id"] is None and summary["slug"] is None
+    assert summary["output_name"] == "Bambu Spool Lock or shim UPDATED"
+    assert summary["status"] == "printing"
+    assert summary["params_diff"] is None
+    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/90/thumbnail"}
+
+    # It opens, and its media is served, like an output's print.
+    detail = client.get("/api/v1/prints/90")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["provenance"] is None
+    assert detail.json()["links"]["customize_url"] is None
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+    respx.get(f"{API}/archives/90/thumbnail").mock(
+        return_value=httpx.Response(200, content=b"png", headers={"content-type": "image/png"})
+    )
+    assert client.get("/api/v1/prints/90/thumbnail").status_code == 200
+
+    # Once Bambuddy drops the queue item, the print stays listed.
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    assert [item["archive_id"] for item in client.get("/api/v1/prints").json()["items"]] == [90]
+
+    # And it prints again, on the printer and plate it printed on.
+    reprint = client.post("/api/v1/prints/90/reprint")
+    assert reprint.status_code == 201, reprint.text
+    sent = json.loads(queued_again.calls.last.request.content)
+    assert sent["archive_id"] == 90 and sent["printer_id"] == 1

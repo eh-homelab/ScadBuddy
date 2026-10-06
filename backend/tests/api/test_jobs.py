@@ -28,6 +28,8 @@ from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
 )
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
@@ -227,6 +229,7 @@ def _unreachable() -> TemporalUnavailableError:
             True,
         ),
         (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started", True),
+        (TemporalBusyError("render-x"), "to follow it if it started", True),
     ],
 )
 def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
@@ -248,10 +251,12 @@ def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
         RPCError("Namespace nope is not found.", RPCStatusCode.NOT_FOUND, b""),
         RPCError("denied for nope", RPCStatusCode.PERMISSION_DENIED, b""),
         RPCError("nope is invalid", RPCStatusCode.INVALID_ARGUMENT, b""),
+        # What `start_command` raises for a refusal since #1316 (review #1066 of c144c02).
+        TemporalRefusedError("render-nope"),
     ],
 )
 def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
-    client: TestClient, model: str, refusal: RPCError, caplog: pytest.LogCaptureFixture
+    client: TestClient, model: str, refusal: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A wrong namespace or a denied permission is configuration, never "cannot reach
     Temporal, try again shortly"; Temporal's message stays in the log (review #1066 (8)

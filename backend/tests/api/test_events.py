@@ -208,6 +208,21 @@ def test_duplicating_and_deleting_publish_created_and_deleted(
     assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": "copy"}]
 
 
+@pytest.mark.requires_postgres
+def test_every_preset_write_publishes_presets_changed(
+    client: TestClient, model: str, events: list[Event]
+) -> None:
+    """#357: another tab, or the assistant, sees a preset change without a reload."""
+    url = f"/api/v1/models/{model}/presets"
+    saved = _ok(client.post(url, json={"name": "Big", "params": {"width": 25}}), 201)
+    _ok(client.patch(f"{url}/{saved['id']}", json={"name": "Bigger"}))
+    copy = _ok(client.post(f"{url}/{saved['id']}/duplicate", json={"name": "Copy"}), 201)
+    _ok(client.delete(f"{url}/{copy['id']}"), 204)
+    # A refused write changed nothing, so it says nothing.
+    assert client.post(url, json={"name": "bigger", "params": {}}).status_code == 409
+    assert published(events, "presets.changed") == [{"kind": "presets.changed", "slug": model}] * 4
+
+
 @pytest.mark.requires_git
 def test_every_commit_publishes_version_committed(
     client: TestClient, mine: str, events: list[Event]

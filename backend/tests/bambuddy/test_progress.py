@@ -79,6 +79,46 @@ def test_the_queue_route_reports_the_slice_failure_rather_than_an_absent_item() 
     assert progress.fix == SLICE_FIX
 
 
+def test_a_failed_slice_job_reports_bambuddys_own_error_detail() -> None:
+    """Bambuddy's ``GET /slice-jobs/{id}`` reports a failure as ``error_status`` and
+    ``error_detail`` (``backend/app/api/routes/slice_jobs.py``), not ``error``. This is
+    that route's whole failed body."""
+    job = SliceJob.model_validate(
+        {
+            "job_id": 9,
+            "status": "failed",
+            "kind": "library_file",
+            "source_id": 12,
+            "source_name": "dice.3mf",
+            "created_at": "2026-10-06T10:00:00+00:00",
+            "started_at": "2026-10-06T10:00:01+00:00",
+            "completed_at": "2026-10-06T10:00:09+00:00",
+            "progress": None,
+            "error_status": 422,
+            "error_detail": "object outside the build plate",
+        }
+    )
+    assert job.failure == "object outside the build plate"
+    progress = from_queue(None, slice_job=job, slice_job_id=9, bambuddy_url=URL)
+    assert progress.error_message == "object outside the build plate"
+
+
+def test_a_structured_slice_error_detail_still_reads_as_a_message() -> None:
+    """``error_detail`` is FastAPI's ``HTTPException.detail``, which may be a dict. It
+    must not fail validation of the whole poll."""
+    job = SliceJob.model_validate(
+        {"job_id": 9, "status": "failed", "error_status": 400, "error_detail": {"msg": "bad plate"}}
+    )
+    assert job.failure is not None
+    assert "bad plate" in job.failure
+
+
+def test_a_failed_slice_with_only_a_status_code_says_so() -> None:
+    job = SliceJob.model_validate({"job_id": 9, "status": "failed", "error_status": 500})
+    assert job.failure is not None
+    assert "500" in job.failure
+
+
 def test_a_queued_item_is_not_settled_and_waiting_is_not_failing() -> None:
     """``waiting_reason`` explains a queued item that is not printing. Showing it as an
     error would turn every normal queue wait into one."""

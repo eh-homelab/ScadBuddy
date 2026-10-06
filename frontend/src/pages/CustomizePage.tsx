@@ -29,6 +29,8 @@ import {
   checkParamValue,
   defaultValues,
   diffFromDefaults,
+  outOfRange,
+  rangeProblem,
   sameValues,
   type ParamValues,
 } from '../lib/params'
@@ -219,6 +221,8 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /** #350 — counts resets to the defaults, which leave no preset selected. */
+  const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
   // The inputs as of the last write, ahead of the render that shows it: two writes in one
   // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
@@ -272,6 +276,12 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // #921 — a number outside its declared range is flagged on its field; the render
+  // would only answer 422, so none is started and Generate waits until it is fixed.
+  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
+  // Nothing to render until there is a seed; once there is, an empty one is a model
+  // with no parameters, whose defaults still render (#941).
   const {
     job,
     rendering,
@@ -280,15 +290,15 @@ export function CustomizePage() {
     retry: retryRender,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
-  const upToDate = settled && settledFor === debounced && !rendering
+  const upToDate = settled && settledFor === debounced && !rendering && !invalid
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
   const output =
-    settled && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
@@ -318,6 +328,7 @@ export function CustomizePage() {
     if (schema) {
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+      setResets((n) => n + 1)
     }
   }, [schema])
 
@@ -661,9 +672,9 @@ export function CustomizePage() {
   }
 
   // The model's own name (#179): what Edit details renames, and what the page
-  // shows once its record is in. `schema.title` is OpenSCAD's customizer title,
-  // which no metadata edit changes, so it only stands in until then.
-  const displayName = modelState.data?.name ?? schema.title ?? slug
+  // shows once its record is in. Not `schema.title`: that is the .scad file OpenSCAD
+  // exported, "model" for every model (#939), so the slug stands in until then.
+  const displayName = modelState.data?.name ?? slug
 
   const originLabel =
     record?.origin === 'builtin'
@@ -688,6 +699,11 @@ export function CustomizePage() {
         stage={renderStage}
         plate={plate}
         captureRef={captureRef}
+        sourceLink={
+          origin && (
+            <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+          )
+        }
         leading={
           // The page slot has no parameters flyout: the template's own page is the panel.
           full && customUi?.slot !== 'page' && (
@@ -702,6 +718,7 @@ export function CustomizePage() {
         controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
         // The flyout lies over the scene; the readouts move clear of it.
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
+        rejected={Boolean(renderError)}
       />
     </Suspense>
   )
@@ -721,7 +738,7 @@ export function CustomizePage() {
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
-          disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
+          disabled={uiGenerate.generating || rendering || !settled || Boolean(invalid) || job?.status !== 'done'}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -780,6 +797,8 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      pinned={version !== undefined}
+      resetKey={resets}
     />
   )
   const templateUi = customUi && (
@@ -795,8 +814,15 @@ export function CustomizePage() {
   )
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
+    // #971 — `short:` scrolls the stacked page on a short window; full screen is the view
+    // alone, so none of it applies there. #362 — minmax(0, 1fr), not the implicit auto
+    // column: an auto track grows to its widest child's min-content (a long preset name,
+    // a row of slider boxes), which on a phone held every pane wider than the screen.
+    <div
+      className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
+    >
+      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971, #362). */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
             Models
@@ -818,7 +844,7 @@ export function CustomizePage() {
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {version && (
             <button
               type="button"
@@ -971,11 +997,11 @@ export function CustomizePage() {
           data-testid="workspace"
           // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
           // frame) the `window` mode is this element covering the window.
-          className={`grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] ${
+          className={`grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] ${
             full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
-          <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
             {uiPresets}
             {uiOrigin}
           </div>
@@ -986,7 +1012,7 @@ export function CustomizePage() {
       <div
         ref={workspace}
         data-testid="workspace"
-        className={`grid min-h-0 grid-cols-1 ${
+        className={`grid min-h-0 grid-cols-[minmax(0,1fr)] ${
           full
             ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
                 fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
@@ -1000,12 +1026,12 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
                 {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                 {uiPresets}
                 {uiOrigin}
@@ -1022,6 +1048,7 @@ export function CustomizePage() {
               onChange={onChange}
               onReset={onReset}
               reveal={reveal}
+              growsWithPage={!full}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1034,6 +1061,8 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    pinned={version !== undefined}
+                    resetKey={resets}
                   />
                 </>
               }
@@ -1041,7 +1070,9 @@ export function CustomizePage() {
           )}
         </div>
 
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+        <div
+          className={`grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
+        >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into
@@ -1064,6 +1095,12 @@ export function CustomizePage() {
               className="border-t border-line px-3 py-2 text-[12px] text-muted"
             >
               {renderBusyText(renderBusy)}
+            </p>
+          )}
+          {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
+          {invalid && templateUi && (
+            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+              {invalid}
             </p>
           )}
           {renderError && (

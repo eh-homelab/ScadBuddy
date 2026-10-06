@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { shutdown } from '../src/shutdown.js'
 import { appFetch, BACKEND, connect, MCP_URL, testApp } from './helpers/mcp.js'
@@ -43,6 +43,26 @@ describe('/mcp session limits', () => {
     clients.push(await connect(t.app, { address: '127.0.0.1' }))
     await expect(connect(t.app, { address: '127.0.0.1' })).rejects.toMatchObject({ code: 429 })
     clients.push(await connect(t.app, { address: '127.0.0.2' }))
+  })
+
+  it('keeps an active session when the wall clock steps forward (#1485)', async () => {
+    const t = testApp({ settings: { mode: 'disabled' }, mcp: { idleSessionMs: 60_000, sweepIntervalMs: 10 } })
+    const client = await connect(t.app)
+    clients.push(client)
+    const id = (client.transport as unknown as StreamableHTTPClientTransport).sessionId!
+    // Let the client's standing GET stream open first: it counts as activity too.
+    await sleep(50)
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now').mockImplementation(() => now.call(Date) + 3_600_000)
+    try {
+      await sleep(100)
+    } finally {
+      stepped.mockRestore()
+    }
+    const res = await appFetch(t.app, {
+      headers: { 'mcp-session-id': id, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    })(MCP_URL, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' }) })
+    expect(res.status).toBe(200)
   })
 
   it('sweeps an idle session on its timer, with no other session opening', async () => {
