@@ -20,6 +20,7 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
@@ -722,6 +723,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
         ],
+    )
+    # A write from a page on another origin is refused before its body is read (#962).
+    app.add_middleware(
+        CrossSiteGate,
+        public_url=lambda: state.settings_store.load().public_url,
+        allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth

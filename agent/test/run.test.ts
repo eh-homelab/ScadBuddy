@@ -421,8 +421,11 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
         messages.push(m)
       }
     })()
-    await expect(run).rejects.toThrow(/abort/i)
-    expect(messages.some((m) => m.type === 'result')).toBe(false)
+    // Interrupted first (run.ts stopFirst, #1168): Claude Code ends the turn
+    // with an error result, and the SDK throws on it.
+    await expect(run).rejects.toThrow(/error result/i)
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
+    expect(fake.messageCalls()).toHaveLength(1)
     expect(Date.now() - started).toBeLessThan(10_000)
   })
 
