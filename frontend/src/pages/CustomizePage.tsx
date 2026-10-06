@@ -291,6 +291,17 @@ export function CustomizePage() {
     settledFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // #938 — the colours the latest finished render used and the values it ran with, kept
+  // while the next one runs so the extruder labels do not fall back to a guess and back
+  // on every change. Kept per model, so another model's render never labels this one's.
+  const [rendered, setRendered] = useState<
+    { slug: string; colors: string[]; params: ParamValues } | undefined
+  >(undefined)
+  const doneColors = job?.status === 'done' ? (job.colors ?? undefined) : undefined
+  const doneParams = settledFor ?? NOTHING
+  if (doneColors && (doneColors !== rendered?.colors || doneParams !== rendered.params))
+    setRendered({ slug, colors: doneColors, params: doneParams })
+  const renderedOutput = rendered?.slug === slug ? rendered : undefined
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering && !invalid
@@ -1048,6 +1059,7 @@ export function CustomizePage() {
               onChange={onChange}
               onReset={onReset}
               reveal={reveal}
+              rendered={renderedOutput}
               growsWithPage={!full}
               toolbar={
                 <>
