@@ -34,7 +34,8 @@ export const paramValue =z.union([z.boolean(), z.number(), z.string()])
 // `catchall`, not `z.record`: the MCP server bundled in @anthropic-ai/claude-agent-sdk
 // 0.3.283 fails `tools/list` with "Cannot read properties of undefined (reading
 // 'push')" for any tool whose input has a `z.record` field (measured 2026-09-27;
-// test/projections.test.ts lists every tool through it). The JSON Schema is the
+// 0.3.287 lists one, #1540; test/projections.test.ts lists every tool through
+// it). The JSON Schema is the
 // same object-with-additionalProperties either way.
 export const params = z
   .object({})

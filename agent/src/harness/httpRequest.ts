@@ -124,8 +124,8 @@ const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(['authorization', 'cooki
 export const HttpRequestInput = {
   method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD run at once, the others wait for the user to approve'),
   url: z.string().max(8192).describe('Absolute http:// or https:// URL; LAN hosts and plain http are allowed'),
-  // `catchall`, not `z.record`: see `params` in tools/common.ts (the SDK's
-  // bundled MCP server fails tools/list on a z.record field).
+  // `catchall`, not `z.record`: see `params` in tools/common.ts (the MCP server
+  // bundled in SDK 0.3.283 failed tools/list on a z.record field).
   headers: z
     .object({})
     .catchall(z.string().max(8192))
@@ -141,8 +141,9 @@ export const HttpRequestInput = {
     .describe(`Deadline for the whole request, redirects included (default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_TIMEOUT_MS})`),
 }
 // Defaults are applied here, not with zod's `.default()`: the MCP server
-// bundled in the SDK validates tool input without applying them (measured:
-// "expected nonoptional, received undefined").
+// bundled in the SDK validated tool input without applying them (measured on
+// SDK 0.3.283: "expected nonoptional, received undefined"; 0.3.287 applies
+// them, #1540).
 export type HttpRequestInputArgs = z.infer<z.ZodObject<typeof HttpRequestInput>>
 export type HttpRequestArgs = Omit<HttpRequestInputArgs, 'method' | 'timeout_ms'> & { method: HttpMethod; timeout_ms: number }
 

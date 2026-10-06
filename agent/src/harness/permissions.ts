@@ -10,7 +10,7 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 // needs_approval with an ApprovalGate (a session turn, #258: src/approvals/)
 // PARKS the call: `canUseTool` awaits the gate, which settles once a human
 // decides, the approval expires, or the turn is interrupted. Measured on SDK
-// 0.3.283 (test/approvals.sdk.test.ts): the call waits with no deadline of the
+// 0.3.283 and 0.3.287 (test/approvals.sdk.test.ts): the call waits with no deadline of the
 // SDK's own, the model is sent nothing meanwhile, and on approval the tool
 // runs with the input the gate returns. sdk.d.ts says the same: on
 // `CanUseTool`, "permission prompts have no park deadline"; the `dialogExpiry`
@@ -29,7 +29,7 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 //   - REWRITE its input (an alias of the backend's origin onto the backend's):
 //     the call is then allowed at its tier and canUseTool hands the SDK the
 //     new input as `updatedInput`, which the tool runs with (sdk.d.ts,
-//     0.3.283, `PermissionResult`; measured for a plugin tool in
+//     0.3.283 and 0.3.287, `PermissionResult`; measured for a plugin tool in
 //     test/headlessBrowser.e2e.test.ts). The hook passes such a call on
 //     without a verdict, as it does every allowed one.
 //
@@ -40,7 +40,7 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 //     (https://code.claude.com/docs/en/agent-sdk/permissions). Without a gate
 //     it denies anything that is not allowed. With a gate it answers `ask` for
 //     outward calls, which forces the permission prompt, i.e. `canUseTool`
-//     (sdk.d.ts, 0.3.283: "With a permission prompt surface (stdio/SDK
+//     (sdk.d.ts, 0.3.283 and 0.3.287: "With a permission prompt surface (stdio/SDK
 //     canUseTool), the 'ask' path surfaces via a can_use_tool
 //     control_request"), so no allow rule can let an outward call skip the
 //     gate. Allowed tools pass on without a verdict;

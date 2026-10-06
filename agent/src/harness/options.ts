@@ -6,7 +6,7 @@ import type { Options } from '@anthropic-ai/claude-agent-sdk'
 // and must build every query's options through this function.
 //
 // Option semantics are quoted from the pinned SDK's own type declarations
-// (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, 0.3.283):
+// (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, 0.3.283 and 0.3.287):
 //
 //   tools: "`[]` (empty array) - Disable all built-in tools"
 //   settingSources: "Pass `[]` to disable filesystem settings (SDK isolation
