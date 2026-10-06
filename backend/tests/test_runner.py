@@ -350,6 +350,29 @@ async def test_a_failed_run_names_the_files_it_could_not_open(tmp_path: Path) ->
     assert raised.value.missing_files == ("pic.svg", "mask.png")
 
 
+#: #952, measured on 2026.09.28: a lone rotate_extrude that touches the axis exports
+#: degenerate triangles lib3mf refuses. OpenSCAD logs it, writes an empty 3MF and
+#: still exits 0.
+EXPORT_ERROR_OPENSCAD = """#!/bin/sh
+echo "EXPORT-ERROR: Can't add triangle to 3MF model."
+echo "Top level object is a 3D object (PolySet):"
+"""
+
+
+async def test_an_export_error_fails_the_run_though_openscad_exits_0(tmp_path: Path) -> None:
+    binary = tmp_path / "export-error-openscad"
+    binary.write_text(EXPORT_ERROR_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert str(raised.value) == "openscad could not export: Can't add triangle to 3MF model."
+    assert raised.value.returncode == 0
+    assert any("EXPORT-ERROR" in line for line in raised.value.log_tail)
+
+
 # ── #281: free-text values that would steer import()/surface() off the model ──
 
 TEXT_PARAMETER = Parameter(name="label", type="string", initial="/default/is/the/templates")
@@ -551,6 +574,29 @@ def test_a_value_outside_the_range_is_refused_by_name(
     with pytest.raises(ParameterValueError, match=message) as refused:
         format_scad_value(parameter, value)
     assert refused.value.parameter == "n"
+
+
+def _text(**changes: object) -> Parameter:
+    return Parameter(name="label", type="string", max_length=5).model_copy(update=changes)
+
+
+@pytest.mark.parametrize("value", ["", "abcde", "ab😀de"])
+def test_a_string_within_its_max_length_is_taken(value: str) -> None:
+    """Code points, as OpenSCAD's len() and the customizer's counter count (#920)."""
+    format_scad_value(_text(), value)
+
+
+def test_a_string_past_its_max_length_is_refused_by_name() -> None:
+    """#1330: `// 5` was only the browser's to enforce."""
+    with pytest.raises(
+        ParameterValueError, match="'label' must be at most 5 characters, got 6"
+    ) as refused:
+        format_scad_value(_text(), "abcdef")
+    assert refused.value.parameter == "label"
+
+
+def test_a_string_without_a_max_length_takes_any_length() -> None:
+    format_scad_value(_text(max_length=None), "x" * 500)
 
 
 def test_the_step_is_not_enforced() -> None:

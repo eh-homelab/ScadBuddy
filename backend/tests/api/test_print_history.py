@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
+from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_send import API, BASE, configure, make_output
@@ -589,3 +590,36 @@ def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
     assert _day(link, dated(datetime(2026, 9, 27, 2, 0, tzinfo=perth))) == date(2026, 9, 26)
     assert _day(link, dated(datetime(2026, 9, 26, 23, 30, tzinfo=UTC))) == date(2026, 9, 26)
     assert _day(link, None) == date(2026, 9, 26)
+
+
+def _print_89(*runs: ArchiveRun) -> print_history.PrintOutcome:
+    """#950's /prints/89: a 15.01 g archive whose one run read a whole spool."""
+    summary = print_history.PrintSummary.model_construct(
+        status="completed", printer_id=1, printer_name=None
+    )
+    archive = ArchiveDetail(id=89, status="completed", filament_used_grams=15.01, cost=13.91)
+    return print_history._outcome(summary, archive, list(runs))
+
+
+def _run(run_id: int, grams: float | None, cost: float | None) -> ArchiveRun:
+    return ArchiveRun(id=run_id, status="completed", filament_used_grams=grams, cost=cost)
+
+
+def test_a_run_reading_far_over_the_archive_is_flagged_and_does_not_set_the_cost() -> None:
+    outcome = _print_89(_run(1, 1004.2, 13.91))
+
+    (run,) = outcome.runs
+    assert run.filament_used_grams == 1004.2, "what Bambuddy recorded is still shown"
+    assert run.filament_reading_suspect
+    # The run's own price per gram, at the archive's 15.01 g.
+    assert run.cost == pytest.approx(0.21)
+    assert outcome.cost == pytest.approx(0.21)
+    assert outcome.filament_used_grams == 15.01
+
+
+def test_runs_that_agree_with_the_archive_are_taken_as_they_are() -> None:
+    outcome = _print_89(_run(1, 14.9, 13.91), _run(2, 6.0, 0.1))
+
+    assert [run.filament_reading_suspect for run in outcome.runs] == [False, False]
+    assert [run.cost for run in outcome.runs] == [13.91, 0.1]
+    assert outcome.cost == 13.91

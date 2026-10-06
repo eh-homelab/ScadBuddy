@@ -14,11 +14,11 @@ They run on the ``library`` worker, which is in the API process and holds the da
 volume (phase 3a), so they share the API's checkout gate and install semaphore. Every
 kind runs once: a git commit is not deduped.
 
-The gate, the semaphore and the render leases are in-process ``asyncio`` primitives:
-they hold only while every process that pins, removes or renders from the volume is
-this one. Before the ``library`` worker leaves the API process, or the API runs more
-than one replica, the gate and the leases must move to Postgres advisory locks (#872
-tracks the leases a separate render worker takes).
+The gate and the semaphore are in-process ``asyncio`` primitives: they hold only while
+every process that pins or removes on the volume is this one. Before the ``library``
+worker leaves the API process, or the API runs more than one replica, they must move to
+Postgres advisory locks. Render leases are already rows in ``library_leases`` (#872), so
+a removal here sees a separate render worker's, and asks Postgres for them in a thread.
 """
 
 from __future__ import annotations
@@ -206,7 +206,7 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
         directory = libraries.paths.libraries / name
         if commit is not None:
             directory /= commit
-        jobs = state.checkouts.leased(directory)
+        jobs = await asyncio.to_thread(state.checkouts.leased, directory)
         if jobs:
             raise ApiError(
                 status.HTTP_409_CONFLICT,

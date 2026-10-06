@@ -53,7 +53,6 @@ async function getJob(ctx: ToolContext, id: string) {
  * tool "submits a render and streams progress until it settles").
  */
 export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  // Monotonic, as every deadline here: the wall clock can step mid-wait (review #1066 (10)).
   const deadline = performance.now() + ctx.renderWaitMs
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)

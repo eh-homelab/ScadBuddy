@@ -1,6 +1,7 @@
 """The presets the bundled models define (`models/<name>/model.json`'s `presets`) are
 valid ones: the store reads every entry, each has an explicit id, and every value is one
-a render of that model accepts."""
+a render of that model accepts. Also that the bundled models' labels are written for
+the reader, not the template author."""
 
 from __future__ import annotations
 
@@ -79,3 +80,24 @@ async def test_every_bundled_default_is_in_its_customizer_range(tmp_path: Path, 
     schema = await export_schema(MODELS / slug / "model.scad", config=config)
     defaults = {p.name: p.initial for p in schema.parameters if p.initial is not None}
     build_defines(schema, defaults)
+
+
+@pytest.mark.requires_openscad
+async def test_name_keychain_typeface_label_is_for_the_reader(tmp_path: Path) -> None:
+    """OpenSCAD makes the comment above a parameter its label, so an author's note
+    there is shown to every user (#922)."""
+    config = Config(openscad=load_config().openscad, data_dir=tmp_path)
+    schema = await export_schema(MODELS / "name-keychain" / "model.scad", config=config)
+    font = next(p for p in schema.parameters if p.name == "font")
+    assert font.caption == "Typeface"
+
+
+@pytest.mark.requires_openscad
+@pytest.mark.parametrize("slug", TEMPLATES)
+async def test_no_bundled_label_carries_an_authors_note(tmp_path: Path, slug: str) -> None:
+    """The note on how the font dropdown is filled was copied into every template that
+    has one, and each showed it as the field's label (#922)."""
+    config = Config(openscad=load_config().openscad, data_dir=tmp_path)
+    schema = await export_schema(MODELS / slug / "model.scad", config=config)
+    noted = [p.name for p in schema.parameters if "the app fills" in (p.caption or "")]
+    assert noted == []

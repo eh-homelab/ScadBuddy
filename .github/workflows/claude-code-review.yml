@@ -428,6 +428,101 @@ jobs:
       # follows once findings are fixed or filed as issues.
       # Shared in substance with eh-homelab/clusters and WonderForgeLabs/forge — keep
   # the three in sync when the gate logic changes.
+      # ── Backstop: a clean review that never posted (#918) ─────────────────
+      # On large aggregate PRs (#895, #928, #961, and #1028 as late as
+      # 2026-10-06, run 37449729956) the review can end `subtype=success`,
+      # `is_error=false`, with no permission denials at all, and simply never
+      # call `gh pr comment`. The gate below then fails closed, which is
+      # correct, but the review was paid for and its findings are lost.
+      #
+      # So before the assertion, check once; when the summary is missing,
+      # resume THE SAME session (it already holds the review) and tell it to
+      # post. The post still comes from claude[bot] carrying the sha marker,
+      # so the finder, the classifier and the gate judge it exactly like any
+      # other summary: this cannot pass anything the review did not write.
+      # When the resume also posts nothing, the assertion below fails as it
+      # always has.
+      - name: Check whether the review posted its summary
+        id: summary_probe
+        if: always() && steps.review.outcome == 'success' && steps.review.outputs.session_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          comments="$(mktemp)"
+          if ! gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s 'add // []' > "$comments"; then
+            # Unknown is not "missing": leave the assertion below to decide.
+            echo "::warning::Could not list PR comments; skipping the resume backstop."
+            echo "found=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if .github/scripts/review-summary-for-sha.sh "$HEAD_SHA" "$comments" > /dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::The review ended cleanly but posted no summary for ${HEAD_SHA}; resuming its session to post it (#918)."
+
+      - name: Resume the review to post its summary
+        id: review_resume
+        if: always() && steps.summary_probe.outputs.found == 'false'
+        # The assertion below is what fails the run; this step only tries.
+        continue-on-error: true
+        uses: anthropics/claude-code-action@ed670b4cf9de2a5a570d130d2f6197b9e543cd64 # v1
+        env:
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "*"
+          # Same tools, model and deny list as the review step: this is the same
+          # reviewer continuing, not a new one with more reach.
+          claude_args: |
+            --resume ${{ steps.review.outputs.session_id }} --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),Bash(shellcheck:*),Bash(jq:*),Bash(yq:*)" --model "claude-opus-5-5"
+          additional_permissions: |
+            actions: read
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Edit",
+                  "MultiEdit",
+                  "Write",
+                  "NotebookEdit",
+                  "Bash(git add:*)",
+                  "Bash(git commit:*)",
+                  "Bash(git rm:*)",
+                  "Bash(git push:*)"
+                ]
+              }
+            }
+          prompt: |
+            Your review of PR #${{ github.event.inputs.pr_number }} ended without
+            posting its summary comment, so the merge gate has nothing to grade.
+            Posting it is the deliverable; do it now.
+
+            Do not start the review again. Write the review from what you have
+            already found in this session, in the format the original
+            instructions gave: a `## Blocking` section and a `## Non-blocking`
+            section, each present (`None.` when empty). Where you did not get to
+            part of the diff, say which part under `## Blocking`, as one finding
+            titled "Not reviewed", so the gate does not pass on an unread change.
+            The last line MUST be exactly:
+
+                <!-- claude-review-sha: ${{ github.sha }} -->
+
+            Post it as ONE top-level PR comment, in a single Bash call, passing
+            the body on stdin through a quoted heredoc:
+
+              gh pr comment ${{ github.event.inputs.pr_number }} --repo ${{ github.repository }} --body-file - <<'CLAUDE_REVIEW_EOF'
+              <your review, ending with the marker line above>
+              CLAUDE_REVIEW_EOF
+
+            No `$(...)`, no redirection, no file: those are refused in this job.
+            Put the closing `CLAUDE_REVIEW_EOF` alone on its own line.
+
       # ── Did the review actually post anything? (#123) ─────────────────────
       # The classifier below reads a review summary out of the PR's comments. It
       # used to take "the most recent one by claude[bot]" on trust, which is fine

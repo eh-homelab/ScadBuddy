@@ -1398,6 +1398,7 @@ if (reprinted) {
       failure_reason: null,
       printer_id: 1,
       printer_name: '3DP-31B-598',
+      filament_reading_suspect: false,
     },
     {
       id: 72,
@@ -1411,6 +1412,7 @@ if (reprinted) {
       failure_reason: null,
       printer_id: 1,
       printer_name: '3DP-31B-598',
+      filament_reading_suspect: false,
     },
   ]
 }

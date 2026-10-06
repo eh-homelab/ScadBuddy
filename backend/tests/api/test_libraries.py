@@ -55,6 +55,7 @@ from scadbuddy.library.libraries import (
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
+    CheckoutLeases,
     LibraryDeclarationError,
     LibraryNotInstalledError,
     LibraryStore,
@@ -64,7 +65,7 @@ from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import set_fake_env
-from tests.conftest import make_library_upstream
+from tests.conftest import make_library_upstream, open_pg_pool
 from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
@@ -1301,6 +1302,36 @@ def test_a_pin_refused_before_its_clone_leaves_no_operation(
     assert "public" in private.json()["detail"]
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+
+
+def test_a_checkout_the_render_worker_is_reading_is_not_removed(
+    lib_client: TestClient,
+    paths: DataPaths,
+    pg_conninfo: str,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """#872: the worker's lease, taken on its own gate and pool, refuses the API's
+    removal."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+    worker_pool = open_pg_pool(pg_conninfo, size=1)
+    try:
+        worker = CheckoutLeases(worker_pool, paths.libraries)
+        job_id = "c" * 32
+        token = worker.take(job_id, [checkout])
+        refused = lib_client.delete("/api/v1/libraries/BOSL2")
+        worker.drop(token)
+    finally:
+        worker_pool.close()
+    after = lib_client.delete("/api/v1/libraries/BOSL2")
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["jobs"] == [job_id]
+    assert after.status_code == 204, after.text
+    assert not checkout.exists()
 
 
 def test_a_lease_elsewhere_does_not_block_a_removal(

@@ -73,8 +73,21 @@ describe('CatalogueFilters', () => {
     other.remove()
   })
 
+  it('folds the tags behind a toggle, keeping a selected one in view (#932)', async () => {
+    const { user } = setup({ tags: ['keychain'] })
+    const toggle = screen.getByRole('button', { name: 'Tags 2' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'keychain 2' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: 'Tea & Coffee 1' })).not.toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: 'Tea & Coffee 1' })).toBeInTheDocument()
+  })
+
   it('toggles a tag chip, with its count', async () => {
     const { onChange, user } = setup({ tags: ['keychain'] })
+    await user.click(screen.getByRole('button', { name: 'Tags 2' }))
     const on = screen.getByRole('button', { name: 'keychain 2' })
     expect(on).toHaveAttribute('aria-pressed', 'true')
     await user.click(on)
@@ -125,6 +138,7 @@ describe('CatalogueFilters', () => {
     const user = userEvent.setup()
     render(<Stateful initial={DEFAULT_QUERY} onChange={onChange} />)
 
+    await user.click(screen.getByRole('button', { name: 'Tags 2' }))
     await user.type(screen.getByRole('searchbox'), 'ab')
     await user.click(screen.getByRole('button', { name: 'keychain 2' }))
     await settle()
