@@ -24,11 +24,12 @@ interface Props {
    */
   reveal?: { name: string }
   /**
-   * #938 — the colours the latest finished render used, in extruder order. With them a
-   * colour parameter is labelled with the extruder it actually got, or as not in the
-   * render; without them, by its place among the colour parameters.
+   * #938 — the latest finished render: the colours it used, in extruder order, and the
+   * values it ran with. With it a colour parameter unchanged since is labelled with the
+   * extruder it actually got, or as not in the render; without it, by its place among
+   * the colour parameters.
    */
-  renderedColors?: string[]
+  rendered?: { colors: string[]; params: ParamValues }
   /**
    * #971 — on a short stacked window the page scrolls, so the list takes its full
    * height rather than scrolling in a box. Off where the panel has a height of its own
@@ -47,7 +48,7 @@ export function ParameterPanel({
   onReset,
   toolbar,
   reveal,
-  renderedColors,
+  rendered,
   growsWithPage = false,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
@@ -91,9 +92,10 @@ export function ParameterPanel({
     tabRefs.current[next]?.focus()
   }
 
-  const extruders = useMemo<Map<string, number | null>>(
-    () => (renderedColors ? extrudersIn(schema, values, renderedColors) : extrudersOf(schema, values)),
-    [schema, values, renderedColors],
+  const extruders = useMemo<Map<string, number | null | undefined>>(
+    () =>
+      rendered ? extrudersIn(schema, values, rendered.colors, rendered.params) : extrudersOf(schema, values),
+    [schema, values, rendered],
   )
   const extruderOf = (name: string) => extruders.get(name)
 

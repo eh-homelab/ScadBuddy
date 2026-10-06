@@ -188,6 +188,20 @@ describe('CustomizePage', () => {
     expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
   })
 
+  // #938 review — the previous render's colours cannot speak for a colour changed since:
+  // while its render is pending, the edited field must not claim it is not printed.
+  it('does not label a just-changed colour "not in this render" while it renders', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    await user.clear(hex)
+    await user.type(hex, '#00FF00')
+    expect(field).not.toHaveTextContent('not in this render')
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()

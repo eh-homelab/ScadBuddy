@@ -57,7 +57,7 @@ describe('extrudersIn', () => {
   const values = defaultValues(keychainSchema)
 
   it("numbers each colour parameter by its colour's place in the render", () => {
-    expect(extrudersIn(keychainSchema, values, ['#E8532F', '#1b6ca8'])).toEqual(
+    expect(extrudersIn(keychainSchema, values, ['#E8532F', '#1b6ca8'], values)).toEqual(
       new Map([
         ['body_color', 2],
         ['text_color', 1],
@@ -67,10 +67,32 @@ describe('extrudersIn', () => {
 
   it('marks a colour the render never used as in no extruder (null)', () => {
     // A hard-coded colour took extruder 1; neither parameter was drawn with.
-    expect(extrudersIn(keychainSchema, values, ['#3366FF'])).toEqual(
+    expect(extrudersIn(keychainSchema, values, ['#3366FF'], values)).toEqual(
       new Map([
         ['body_color', null],
         ['text_color', null],
+      ]),
+    )
+  })
+
+  it('says nothing about a colour changed since the render, rather than "not in this render"', () => {
+    // The render ran with the defaults; Text has since changed to a colour it never saw.
+    const edited = { ...values, text_color: '#00FF00' }
+    expect(extrudersIn(keychainSchema, edited, ['#E8532F', '#1B6CA8'], values)).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', undefined],
+      ]),
+    )
+  })
+
+  it('says nothing about a colour that is not hex, which the render reports resolved', () => {
+    // The backend resolves CSS names; the render reports "red" as #FF0000.
+    const named = { ...values, body_color: 'red' }
+    expect(extrudersIn(keychainSchema, named, ['#FF0000', '#E8532F'], named)).toEqual(
+      new Map([
+        ['body_color', undefined],
+        ['text_color', 2],
       ]),
     )
   })
