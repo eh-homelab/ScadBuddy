@@ -251,6 +251,11 @@ def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: Da
     record = client.get(f"/api/v1/models/{model}").json()
     assert record["version"] != ui
     assert record["ui_version"] == ui
+    # The ui commit's files come from the live directory, never a fresh export.
+    served = client.get(f"/api/v1/models/{model}/versions/{ui}/ui/index.js")
+    assert served.status_code == 200
+    assert served.headers["cache-control"] == "no-cache"
+    assert not paths.model_revision_dir(model, ui).exists()
     _with_ui(paths, model, {"index.js": b"export function mount() { /* two */ }\n"})
     two = _commit(paths, "ui two")
     assert client.get(f"/api/v1/models/{model}").json()["ui_version"] == two
