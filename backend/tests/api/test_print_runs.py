@@ -27,6 +27,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
@@ -673,7 +674,7 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     response = start(client, output_id, body())
 
     assert response.status_code == 503, response.text
-    assert response.json()["type"] == printing_api.STILL_ACCEPTING_PROBLEM
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
     assert len(starts) == 1
 
 
@@ -693,4 +694,4 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
     response = start(client, output_id, body())
 
     assert response.status_code == 503, response.text
-    assert response.json()["type"] == printing_api.STILL_ACCEPTING_PROBLEM
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM

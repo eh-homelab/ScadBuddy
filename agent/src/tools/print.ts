@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -39,79 +40,7 @@ const runId = z
 
 type PrintRun = Awaited<ReturnType<typeof getRun>>
 
-type FetchResult<T> = { data?: T; error?: unknown; response: Response }
-
-/** How many more times a print run request no ScadBuddy answer described is sent (#470). */
-export const RUN_REATTEMPTS = 3
-
-/** The backend's 503 while Temporal has not yet answered a print's start (#1052). */
-const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
-
-/**
- * How long a print's start is sent again while the backend says it is still accepting
- * it: the browser's `printRunPoll.acceptingMs` (frontend/src/api/client.ts), past the
- * accept's own worst case of three 60 s checks. Counting it against `RUN_REATTEMPTS`
- * gave up within a minute, and a second print_output would be a second print (review
- * #1061).
- */
-export const ACCEPTING_MS = 240_000
-
-function stillAccepting(result: FetchResult<unknown>): boolean {
-  const { error, response } = result
-  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown }) : {}
-  return response.status === 503 && problem.type === STILL_ACCEPTING
-}
-
-/**
- * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
- * from something in between, whose body is not one of the backend's problems (they
- * always carry a `detail`). Or the backend answered that it is still accepting the same
- * request. The same rule as the browser client's `unanswered`.
- */
-function unanswered(result: FetchResult<unknown>): boolean {
-  const { error, response } = result
-  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
-  if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
-  return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
-}
-
-/**
- * `send`, again while it goes unanswered (a dropped connection, fetch's `TypeError`, or
- * a proxy's own 502/503/504/524), as the browser client's `reattach` does. Safe only for a
- * request keyed to its run: the POST's `request_id` makes a re-send the same run, never a
- * second print, and the GET only reads. A problem the backend wrote is never re-sent.
- */
-async function reattach<T>(
-  ctx: ToolContext,
-  send: () => Promise<FetchResult<T>>,
-  what: string,
-  gaveUp = '',
-): Promise<T> {
-  const began = Date.now()
-  // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
-  for (let misses = 0; ; ) {
-    let result: FetchResult<T>
-    try {
-      result = await send()
-    } catch (caught) {
-      if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
-      if (misses++ >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
-      continue
-    }
-    if (unanswered(result)) {
-      const accepting = stillAccepting(result)
-      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
-        throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
-      }
-      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
-      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
-      continue
-    }
-    return ok(Promise.resolve(result), what)
-  }
-}
+export { RUN_REATTEMPTS } from './command.js'
 
 async function getRun(ctx: ToolContext, id: string) {
   return ok(
@@ -430,14 +359,14 @@ export const printTools: Tool[] = [
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],
     summarize: ({ output_id }) => `Send output ${output_id} to Bambuddy's library`,
-    handler: async ({ output_id }, { backend }) =>
+    handler: async ({ output_id }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/outputs/{output_id}/send', {
+        await command(ctx, `send ${output_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/outputs/{output_id}/send', {
             params: { path: { output_id } },
             body: { mode: 'library' },
+            headers,
           }),
-          `send ${output_id}`,
         ),
       ),
   }),
@@ -611,10 +540,11 @@ export const printTools: Tool[] = [
     routes: ['POST /api/v1/print/projects'],
     summarize: ({ name, project_id }) =>
       project_id !== undefined ? `Link Bambuddy project ${project_id}` : `Create the Bambuddy project "${name ?? ''}"`,
-    handler: async (args, { backend }) =>
+    handler: async (args, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/print/projects', {
+        await command(ctx, 'create project', (headers) =>
+          ctx.backend.POST('/api/v1/print/projects', {
+            headers,
             body: {
               name: args.name ?? null,
               description: args.description ?? null,
@@ -626,7 +556,6 @@ export const printTools: Tool[] = [
               parent_id: args.parent_id ?? null,
             },
           }),
-          'create project',
         ),
       ),
   }),
@@ -643,14 +572,14 @@ export const printTools: Tool[] = [
     routes: ['POST /api/v1/outputs/{output_id}/project-file'],
     summarize: ({ output_id, project_id }) =>
       `Upload output ${output_id}'s 3MF into Bambuddy project ${project_id}'s folder`,
-    handler: async ({ output_id, project_id }, { backend }) =>
+    handler: async ({ output_id, project_id }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/outputs/{output_id}/project-file', {
+        await command(ctx, `file ${output_id} in project ${project_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/outputs/{output_id}/project-file', {
             params: { path: { output_id } },
             body: { project_id },
+            headers,
           }),
-          `file ${output_id} in project ${project_id}`,
         ),
       ),
   }),
@@ -669,14 +598,14 @@ export const printTools: Tool[] = [
     routes: ['POST /api/v1/print/outputs/{output_id}/project'],
     summarize: ({ output_id, project_id }) =>
       `File output ${output_id}'s prints under Bambuddy project ${project_id ?? '(its own)'}`,
-    handler: async ({ output_id, project_id, queue_item_ids }, { backend }) =>
+    handler: async ({ output_id, project_id, queue_item_ids }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/print/outputs/{output_id}/project', {
+        await command(ctx, `file ${output_id} under a project`, (headers) =>
+          ctx.backend.POST('/api/v1/print/outputs/{output_id}/project', {
             params: { path: { output_id } },
             body: { ...(project_id === undefined ? {} : { project_id }), queue_item_ids },
+            headers,
           }),
-          `file ${output_id} under a project`,
         ),
       ),
   }),
