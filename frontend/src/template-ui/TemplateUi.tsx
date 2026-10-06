@@ -9,9 +9,12 @@ import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './hos
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
-import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
+import { UI_API_SUPPORTED, type Mount, type MountResult, type TemplateUiFailure, type UiDeclaration } from './types'
 
 const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
+
+/** How long a template's `mount` may take before the page falls back to the form (#847). */
+export const MOUNT_TIMEOUT_MS = 15_000
 
 interface Props {
   slug: string
@@ -92,7 +95,29 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
         const mount = mountOf(module)
         if (!mount) throw new Error(`${ui.module} does not export a mount function`)
         if (!active) return
-        const result = await mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api })
+        const mounting = Promise.resolve(mount(root, created.host, { slot, version: version ?? null, theme: theme(), api: ui.api }))
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let result: MountResult
+        try {
+          // A mount that never settles would leave the panel empty for good (#847).
+          result = await Promise.race([
+            mounting,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error(`mount() did not finish within ${MOUNT_TIMEOUT_MS / 1000} s`)),
+                MOUNT_TIMEOUT_MS,
+              )
+            }),
+          ])
+        } catch (cause) {
+          // The page has moved on to the form: a mount that finishes after all is undone.
+          mounting.then((late) => {
+            if (typeof late === 'function') late()
+          }, () => {})
+          throw cause
+        } finally {
+          clearTimeout(timer)
+        }
         if (active) cleanup = result
         else if (typeof result === 'function') result()
       } catch (cause) {

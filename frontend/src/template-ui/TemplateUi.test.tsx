@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import type { HostDeps } from './host'
 import { setUiModuleLoader } from './loadModule'
-import { TemplateUi } from './TemplateUi'
+import { MOUNT_TIMEOUT_MS, TemplateUi } from './TemplateUi'
 import type { Host, Mount } from './types'
 
 const UI = { module: 'ui/index.js', slot: 'panel' as const, api: 1 }
@@ -62,6 +62,35 @@ describe('TemplateUi', () => {
     const onFailure = vi.fn()
     render(<TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />)
     await waitFor(() => expect(onFailure).toHaveBeenCalledWith({ file: 'ui/index.js', message: expect.stringContaining(message) }))
+  })
+
+  it('falls back when mount never settles, and undoes a mount that finishes late (#847)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      let called: () => void = () => {}
+      const mounted = new Promise<void>((resolve) => {
+        called = resolve
+      })
+      let finish: (cleanup: () => void) => void = () => {}
+      withModule(() => {
+        called()
+        return new Promise((resolve) => {
+          finish = resolve
+        })
+      })
+      const onFailure = vi.fn()
+      render(<TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />)
+      await mounted
+      await vi.advanceTimersByTimeAsync(MOUNT_TIMEOUT_MS - 1)
+      expect(onFailure).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(onFailure).toHaveBeenCalledWith({ file: 'ui/index.js', message: expect.stringContaining('did not finish') })
+      const cleanup = vi.fn()
+      await act(async () => finish(cleanup))
+      expect(cleanup).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses an unsupported api major without loading anything', async () => {
