@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
+import { cameraFraming, framingSpan, sceneOffset, shouldRefit } from '../lib/previewFrame'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
@@ -129,6 +130,12 @@ export function Preview({
     }
   }, [job])
 
+  // #364 — the GLB that has been drawn, or failed to load: until one of them is the
+  // shown one, the render is not on screen yet, so the spinner stays.
+  const [loadedUrl, setLoadedUrl] = useState<string>()
+  const [brokenUrl, setBrokenUrl] = useState<string>()
+  const loading = shown !== undefined && loadedUrl !== shown.url && brokenUrl !== shown.url
+
   const theme = useViewerTheme()
   const cancelled = job?.status === 'cancelled'
   // A cancelled job gets its own copy in `RenderError` (nothing was wrong with the
@@ -151,13 +158,18 @@ export function Preview({
         // The loader keeps a failed load cached, so any remount would only rethrow it:
         // drop it as soon as it fails, and the next load of that URL fetches again.
         onError={() => {
-          if (shown) useLoader.clear(GLTFLoader, shown.url)
+          if (!shown) return
+          useLoader.clear(GLTFLoader, shown.url)
+          setBrokenUrl(shown.url)
         }}
         fallback={(_, retry) => <PreviewFailed captureRef={captureRef} onRetry={retry} />}
       >
         <Canvas
           key={theme.bg}
           data-testid="preview-canvas"
+          // #364 — draw only when something changed (the controls, a new model), not
+          // every frame: an idle page otherwise keeps the GPU busy.
+          frameloop="demand"
           gl={{ preserveDrawingBuffer: true, antialias: true }}
           camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
           onCreated={({ gl, get }) => {
@@ -200,7 +212,9 @@ export function Preview({
 
           {shown && (
             <Suspense fallback={null}>
-              <Model url={shown.url} bbox={shown.bbox} />
+              {/* #364 — a failed render's outline would describe a model that is not
+                  what the parameters now give. */}
+              <Model url={shown.url} bbox={shown.bbox} outline={!failed} onLoaded={setLoadedUrl} />
             </Suspense>
           )}
 
@@ -227,10 +241,10 @@ export function Preview({
             {plate && <PlateBadge plate={plate} />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {rendering && (
+            {(rendering || loading) && (
               <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
                 <Spinner /> Rendering
-                {stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
+                {rendering && stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
               </span>
             )}
             {controls}
@@ -486,27 +500,28 @@ function BuildPlate({ theme, size }: { theme: ViewerTheme; size: [number, number
 }
 
 /**
- * Frames the model once, when its size is first known. After that the view is the
- * viewer's: orbiting is never yanked back by the next render.
+ * Frames the model when its size is first known, and again when a new render's size
+ * moves far from the one framed (#364: a preset can take a box from 80 to 258 mm).
+ * Otherwise the view is the viewer's: a small edit never yanks an orbit back.
  */
 function FitCamera({ bbox }: { bbox?: BoundingBox }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
-  const framed = useRef(false)
+  const invalidate = useThree((state) => state.invalidate)
+  const framedSpan = useRef<number | null>(null)
 
   useEffect(() => {
-    if (!bbox || framed.current || !controls) return
-    framed.current = true
+    if (!bbox || !controls || !shouldRefit(framedSpan.current, bbox.size)) return
+    framedSpan.current = framingSpan(bbox.size)
 
-    const [width, depth, height] = bbox.size
-    const span = Math.max(width, depth, height, 20)
-    const distance = span * 1.9 + 40
+    const { target, distance } = cameraFraming(bbox.size)
     const direction = new THREE.Vector3(0.78, 0.62, 0.86).normalize()
     camera.position.copy(direction.multiplyScalar(distance))
-    controls.target.set(0, height / 2, 0)
+    controls.target.set(...target)
     camera.lookAt(controls.target)
     controls.update()
-  }, [bbox, camera, controls])
+    invalidate?.()
+  }, [bbox, camera, controls, invalidate])
 
   return null
 }
@@ -518,10 +533,25 @@ function FitCamera({ bbox }: { bbox?: BoundingBox }) {
  * OpenSCAD's Z-up, which stood the model on its edge; the msw fixture happened to be
  * authored Z-up too, so every mocked test agreed with it.
  */
-function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
+function Model({
+  url,
+  bbox,
+  outline,
+  onLoaded,
+}: {
+  url: string
+  bbox?: BoundingBox
+  outline: boolean
+  onLoaded: (url: string) => void
+}) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   const group = useRef<THREE.Group>(null)
+  // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
+  // centred on the plate. Move the model there, as the slicer will.
+  const offset = useMemo(() => (bbox ? sceneOffset(bbox) : ([0, 0, 0] as const)), [bbox])
+
+  useEffect(() => onLoaded(url), [onLoaded, url])
 
   const edges = useMemo(() => {
     if (!bbox) return null
@@ -534,8 +564,10 @@ function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
 
   return (
     <group ref={group}>
-      <primitive object={scene} />
-      {edges && (
+      <group position={offset}>
+        <primitive object={scene} />
+      </group>
+      {edges && outline && (
         <lineSegments name={BBOX_OBJECT} position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
           <edgesGeometry args={[edges]} attach="geometry" />
           <lineBasicMaterial

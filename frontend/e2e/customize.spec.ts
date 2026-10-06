@@ -380,3 +380,71 @@ test.describe('font picker', () => {
     await expect(dialog).toBeVisible()
   })
 })
+
+test.describe('customizer at 200% zoom (#971)', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
+
+  // A 1440×900 laptop at 200% browser zoom: WCAG 1.4.10's reflow case.
+  test.use({ viewport: { width: 720, height: 450 } })
+
+  test('scrolls the page rather than squeezing the parameters and the preview to slivers', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const panel = page.getByRole('region', { name: 'Parameters' }).getByRole('tabpanel')
+    await expect(panel).toBeVisible()
+    const canvas = page.getByTestId('preview-canvas')
+    await expect(canvas).toBeVisible()
+
+    // Each tall enough to use, however little of the window is left for them.
+    // The list's own scroll box, not the list: that is as tall as its content anyway.
+    const listHeight = await panel.evaluate((list) => list.parentElement?.clientHeight ?? 0)
+    const canvasBox = await canvas.boundingBox()
+    if (!canvasBox) throw new Error('not laid out')
+    expect(listHeight).toBeGreaterThanOrEqual(120)
+    // And none of the panel is cut off under the preview.
+    const section = page.getByRole('region', { name: 'Parameters' })
+    expect(await section.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1)
+    const sectionBox = await section.boundingBox()
+    const previewTop = (await page.getByRole('tab', { name: 'Preview' }).boundingBox())?.y ?? 0
+    if (!sectionBox) throw new Error('not laid out')
+    expect(sectionBox.y + sectionBox.height).toBeLessThanOrEqual(previewTop + 1)
+    expect(canvasBox.height).toBeGreaterThanOrEqual(200)
+
+    // The first parameter can be brought into view and used.
+    const first = panel.getByRole('textbox').first()
+    await first.scrollIntoViewIfNeeded()
+    await expect(first).toBeInViewport()
+  })
+
+  test('leaves full screen alone: the whole window is the view, and the flyout scrolls its parameters', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const canvas = page.getByTestId('preview-canvas')
+    await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit full screen' })).toBeVisible()
+
+    // Not capped at 60vh: full screen is the view, all of it.
+    await expect.poll(async () => (await canvas.boundingBox())?.height).toBe(450)
+
+    // The flyout's parameters can all be reached, by scrolling its own list.
+    await page.getByRole('button', { name: 'Parameters', exact: true }).click()
+    const section = page.getByRole('region', { name: 'Parameters' })
+    await expect(section).toBeVisible()
+    const list = section.getByRole('tabpanel')
+    // Inside the window: the list's box ends on screen, and what it holds scrolls in it.
+    const box = await list.evaluate((element) => element.parentElement?.getBoundingClientRect().bottom ?? 0)
+    expect(box).toBeLessThanOrEqual(450 + 1)
+    const last = list.locator('[data-param]').last()
+    await last.scrollIntoViewIfNeeded()
+    await expect(last).toBeInViewport()
+  })
+
+  test("keeps the model's actions inside the window", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    for (const action of await page.getByRole('main').getByRole('button').all()) {
+      if (!(await action.isVisible())) continue
+      const box = await action.boundingBox()
+      if (box) expect(box.x + box.width, (await action.textContent()) ?? '').toBeLessThanOrEqual(720)
+    }
+  })
+})
