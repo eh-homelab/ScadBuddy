@@ -6,15 +6,15 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.job_models import Job, JobResult, JobTableKind, StepInfo
 from scadbuddy.render.schema import ParamValue
 
 
@@ -119,3 +119,81 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+
+
+#: `TemplatePipeline`'s first step and its claim count (#1053): local activities, so
+#: they never wait behind openscad runs for the worker's activity slots.
+ACCEPT_ACTIVITY = "render_accept"
+CLAIMS_ACTIVITY = "render_claims"
+#: The Update a supersede sends the job's execution.
+RELEASE_UPDATE = "release"
+#: Why a claim is released: the API sends ``superseded``; ``cancelled`` is a release
+#: sent by hand (a withdrawal has no route yet, review #1066 3.2).
+ReleaseReason = Literal["superseded", "cancelled"]
+#: `render_accept`'s refusal: `render_queue_max` jobs already wait.
+QUEUE_FULL = "QueueFull"
+#: `accepted`'s rejection by a run that is closing (its last claim released, or its
+#: render raised). Rejected, the Update is not in the run's history, so its id is free
+#: for the run that starts next (review #1066 (7) 1).
+CLOSING = "RenderClosing"
+#: `accepted`'s failure when the run's first step failed past its bounded retries (an
+#: error no retry fixes; an older build's row on the key is `LEGACY_PENDING`): the run
+#: completes with no row, and the route answers 500 `render-unstartable` (review #1066
+#: (10) 1).
+RENDER_UNSTARTABLE = "RenderUnstartable"
+#: `render_accept`'s failure while an older build's pending row holds the key and its
+#: workflow still runs: past the retries the run closes with no row, and `accepted`
+#: answers `closing`, so the request is still accepting and is sent again (review #1066
+#: (11) 2).
+LEGACY_PENDING = "LegacyPending"
+#: `render_accept`'s failure on another state that passes, answered as `LEGACY_PENDING`
+#: is: Postgres out of reach, or Temporal unable to say whether an older row's workflow
+#: runs (review #1066 (11)).
+ACCEPT_TRANSIENT = "AcceptTransient"
+
+
+class RenderStart(BaseModel):
+    """`render-<render_key>`'s input (spec 2026-10-01 §4.5): what the route resolved."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    slug: str
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    model_version: str | None = None
+    render_key: str
+    kind: JobTableKind = "render"
+    #: `render_queue_max` when the request was made; 0 is no limit.
+    max_pending: int = 0
+    search_attributes: bool = False
+    #: The first caller's ``traceparent`` (#988), written on the row `render_accept`
+    #: inserts: what a coalesced request links to.
+    traceparent: str | None = None
+    #: The pending job of the slug this request replaces: its slot is not counted
+    #: against `max_pending`, so a supersede never needs a free one (review #1066 (9) 3).
+    supersedes: str | None = None
+
+
+class AcceptRender(BaseModel):
+    start: RenderStart
+    workflow_id: str
+    run_id: str
+
+
+class RenderAnswer(BaseModel):
+    """The `accepted` Update's answer: the job, or why there is none."""
+
+    job: Job | None = None
+    #: A later request that joined the open execution, with one more claim.
+    coalesced: bool = False
+    #: How many jobs wait, when the queue was full and nothing was started.
+    queue_full: int | None = None
+    #: The execution is closing, and starts again. Normally a rejection (`CLOSING`);
+    #: an answer only for an Update that waited for the run's first step while a
+    #: release sent by hand took its last claim.
+    closing: bool = False
+
+
+class ReleaseAnswer(BaseModel):
+    #: The job, cancelled by this release; None while other claims remain.
+    cancelled: Job | None = None

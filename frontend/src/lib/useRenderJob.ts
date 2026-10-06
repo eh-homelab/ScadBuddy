@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { ApiError, api } from '../api/client'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError, api, newRequestId, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
 import type { Job } from '../api/types'
 import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
 import type { ParamValues } from './params'
@@ -37,20 +37,66 @@ export interface RenderState {
    */
   settledFor: ParamValues | undefined
   /**
-   * Seconds until the submit is tried again, while the server's render queue is
-   * full (503 with `retry_after`, only when SCADBUDDY_RENDER_QUEUE_MAX is set).
-   * Not an error: the preview is still coming.
+   * Seconds until the submit is tried again, and why: a 503 with `retry_after` (a full
+   * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; Temporal unavailable; the
+   * request still being accepted; or no answer from ScadBuddy). Not an error: the
+   * preview is still coming.
    */
-  busy: number | undefined
+  busy: RenderBusy | undefined
+  /** Submits the same render again: after an `error` the caller offers it as "try again". */
+  retry: () => void
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
 }
 
-/** How long a refused render asks to wait: only a queue-full 503 carries it. */
+export type BusyReason = 'queue-full' | 'temporal-unavailable' | 'still-accepting' | 'unanswered'
+
+export interface RenderBusy {
+  seconds: number
+  reason: BusyReason
+}
+
+/**
+ * How many times a render is sent again on a 503 that is not a full queue before it is
+ * shown as an error: an outage outlasts a preview's patience, and "try again" (`retry`)
+ * sends it once more (review #1066 (11) 1). A full queue waits as long as it names.
+ */
+export const TRANSIENT_RETRIES = 5
+
+function busyReason(cause: ApiError): BusyReason {
+  switch (cause.problem.type) {
+    case TEMPORAL_UNAVAILABLE:
+      return 'temporal-unavailable'
+    case STILL_ACCEPTING:
+      return 'still-accepting'
+    case UNANSWERED:
+      return 'unanswered'
+    default:
+      return 'queue-full'
+  }
+}
+
+/**
+ * How long a refused render asks to wait: a 503's `retry_after`, from its body (a full
+ * queue) or its `Retry-After` header (the client copies it in: still accepting, Temporal
+ * unavailable, or an unanswered request with one).
+ */
 function retryAfterSeconds(cause: unknown): number | undefined {
   if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
   const seconds = cause.problem['retry_after']
   return typeof seconds === 'number' && seconds > 0 ? seconds : undefined
+}
+
+/**
+ * Whether a refusal left no claim under its key: a full queue's. Its answer is what the
+ * key's run completed with, so sent again under that key it is answered from that run;
+ * the retry takes a new key. Any other refusal may hold a claim, which only a re-send
+ * with the same key keeps as one (review #1066 (7) 3).
+ */
+function claimedNothing(cause: unknown): boolean {
+  if (!(cause instanceof ApiError)) return false
+  const { type } = cause.problem
+  return type !== STILL_ACCEPTING && type !== TEMPORAL_UNAVAILABLE && type !== UNANSWERED
 }
 
 const STALE_CHECK_MS = 250
@@ -75,7 +121,9 @@ export function useRenderJob(
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
-  const [busy, setBusy] = useState<number | undefined>(undefined)
+  const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
+  const [attempt, setAttempt] = useState(0)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
   const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
@@ -87,6 +135,9 @@ export function useRenderJob(
     if (!slug || !params) return
 
     const mine = ++generation.current
+    // Aborted when a newer submit supersedes this one: it stops re-sending a render
+    // the server is still accepting, after one last send that learns the job it made.
+    const superseded = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let unfollow: (() => void) | undefined
     let stopped = false
@@ -181,15 +232,28 @@ export function useRenderJob(
       // A full queue is transient ("about one render"): retry after the delay it
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
-      for (;;) {
+      let requestId = newRequestId()
+      for (let transient = 0; ; ) {
         try {
-          const { job_id } = await api.render(slug, joinInputs(params, extraRef.current), version, supersedes)
+          const { job_id } = await api.render(
+            slug,
+            joinInputs(params, extraRef.current),
+            version,
+            supersedes,
+            superseded.signal,
+            requestId,
+          )
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
+          // A full queue is waited out; any other wait is retried `TRANSIENT_RETRIES`
+          // times, then shown as an error the person can try again.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
-          setBusy(wait)
+          const reason = busyReason(cause as ApiError)
+          if (reason !== 'queue-full' && transient++ >= TRANSIENT_RETRIES) throw cause
+          if (claimedNothing(cause)) requestId = newRequestId()
+          setBusy({ seconds: wait, reason })
           await waitUnlessStale(wait)
           if (isStale()) throw cause
         }
@@ -212,13 +276,14 @@ export function useRenderJob(
 
     return () => {
       stopped = true
+      superseded.abort()
       unfollow?.()
       if (timer) clearTimeout(timer)
       // The job is no longer followed, so its last step is no longer news: the
       // preview must not name it through the debounce before the next submit.
       setStage(undefined)
     }
-  }, [slug, params, version, extraRef])
+  }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, settledFor, stage }
+  return { job, rendering, error, busy, retry, settledFor, stage }
 }

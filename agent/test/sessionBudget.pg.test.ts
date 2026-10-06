@@ -170,6 +170,115 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
   })
 
+  // claude-sonnet-4-5 at $3 / $15 / $0.30 cache read per MTok: 100k input +
+  // 200k cache read + 1000 output (4000 streamed characters) = $0.375.
+  const stall = {
+    model: 'claude-sonnet-4-5',
+    usage: { input_tokens: 100_000, cache_read_input_tokens: 200_000, output_tokens: 1 },
+    text: 'x'.repeat(4000),
+  }
+  const CUT = 0.375
+
+  /** Sends `text`, waits until the reply has started streaming, and stops it. */
+  async function stopMidReply(id: string, text: string) {
+    const turn = await m.send(id, browser, text)
+    for (let i = 0; i < 200; i++) {
+      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > 4)) break
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    expect(await m.interrupt(id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+  }
+
+  describe('a turn stopped mid-reply (#991)', () => {
+    it('charges what the cut-off request used, shows it on the meter, and does not count it again on the next turn', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4, 10)
+
+      next = { stall }
+      await stopMidReply(session.id, 'write a long essay')
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect(events.findLast((e) => e.type === 'session.result')).toMatchObject({ budgetUsd: 1 })
+      expect((events.findLast((e) => e.type === 'session.result') as { costUsd: number }).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
+      await expectPanelAccepts(events)
+
+      // The next turn resumes, and its total restores the transcript's, which
+      // never held the cut-off request: 0.4 before + 0.05 now.
+      next = { reply: 'OK', costUsd: 0.45 }
+      const after = await (await m.send(session.id, browser, 'reply OK')).done
+      // Its SDK budget is what is left after the cut-off turn.
+      expect(runs.at(-1)!.maxBudgetUsd).toBeCloseTo(1 - 0.4 - CUT, 10)
+      expect(after).toMatchObject({ kind: 'result', subtype: 'success', turns: 2 })
+      if (after.kind !== 'result') throw new Error('unreachable')
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+    })
+
+    it('counts it once when the interrupt still ends in a result', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      // The interrupt's `aborted_streaming` result: the resumed total, unchanged.
+      next = { stall, resultCostUsd: 0.4 }
+      await stopMidReply(session.id, 'write a long essay')
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      const results = (await m.events.read(session.id)).map((e) => e.event).filter((e) => e.type === 'session.result')
+      expect(results).toHaveLength(2)
+      expect((results.at(-1) as { costUsd: number }).costUsd).toBeCloseTo(0.4 + CUT, 10)
+    })
+
+    it('counts each of two stops in a row once, whatever the float rounding of the totals', async () => {
+      // claude-opus-5, 40k input at $5/MTok: exactly $0.20. Stored as 0.1 +
+      // 0.2 = 0.30000000000000004, from which 0.2 does not take back 0.1.
+      const cut = { stall: { model: 'claude-opus-5', usage: { input_tokens: 40_000 } }, resultCostUsd: 0.1 }
+      next = { reply: 'done', costUsd: 0.1 }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = cut
+      await stopMidReply(session.id, 'write a long essay')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.3, 10)
+      // The second stop's result restores the same $0.10 the transcript holds.
+      next = cut
+      await stopMidReply(session.id, 'and another')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.5, 10)
+    })
+
+    it('charges a turn that died mid-reply, with no stop, and shows it on the meter', async () => {
+      const { session } = await m.start(browser, { origin: 'chat' })
+      next = { stall, dies: 'Claude Code process exited with code 1' }
+      const outcome = await (await m.send(session.id, browser, 'write a long essay')).done
+      expect(outcome).toMatchObject({ kind: 'failed' })
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(CUT, 10)
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+      expect((events.findLast((e) => e.type === 'session.result') as { costUsd: number }).costUsd).toBeCloseTo(CUT, 10)
+      await expectPanelAccepts(events)
+    })
+
+    it('counts a first turn stopped before anything else was spent', async () => {
+      const { session } = await m.start(browser, { origin: 'chat' })
+      next = { stall, resultCostUsd: 0 }
+      await stopMidReply(session.id, 'write a long essay')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(CUT, 10)
+    })
+
+    it('spends the budget: a session whose stopped turns used it takes no more turns', async () => {
+      const { session } = await m.start(browser, { origin: 'chat' })
+      // 400k input at $3/MTok: $1.20 of the $1 budget.
+      next = { stall: { model: 'claude-sonnet-4-5', usage: { input_tokens: 400_000 } } }
+      await stopMidReply(session.id, 'write a long essay')
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(1.2, 10)
+      next = { reply: 'never', costUsd: 0.01 }
+      const sent = runs.length
+      await expect(m.send(session.id, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+      expect(runs).toHaveLength(sent)
+    })
+  })
+
   describe('raising one session’s budget', () => {
     it('adds to budget_usd, lets the session go on, announces it and audits it', async () => {
       const id = await spentSession()
@@ -297,6 +406,31 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(await m.get(child.id, browser)).toMatchObject({ ownCostUsd: 0.1 })
       // $0.40 + $0.10: the parent's spend is not written into the fork's own.
       expect((await m.get(parent, browser)).costUsd).toBeCloseTo(0.5, 9)
+    })
+
+    it('charges a fork’s stopped turn to the shared budget (#991)', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      next = { stall }
+      await stopMidReply(child.id, 'write a long essay')
+      const after = await m.get(child.id, browser)
+      // Charged to the fork's own row, and so drawn from the lineage's one budget.
+      expect(after.ownCostUsd).toBeCloseTo(CUT, 10)
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT, 10)
+      expect((await m.get(parent, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      // The parent's next turn is given what the lineage has left after it.
+      expect(await spend(parent, browser, 0.45)).toBeCloseTo(1 - 0.4 - CUT, 9)
+    })
+
+    it('a fork whose stopped turn spent the lineage’s budget leaves the parent none', async () => {
+      const parent = await started()
+      const child = await m.fork(parent, browser)
+      // 300k input at $3/MTok: $0.90, past the $0.60 the lineage had left.
+      next = { stall: { model: 'claude-sonnet-4-5', usage: { input_tokens: 300_000 } } }
+      await stopMidReply(child.id, 'write a long essay')
+      for (const id of [parent, child.id]) {
+        await expect(m.send(id, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+      }
     })
 
     it('shares it with a fork of a fork', async () => {
