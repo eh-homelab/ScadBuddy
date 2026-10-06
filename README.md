@@ -201,10 +201,19 @@ on shutdown.
   references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
-    supersedes a waiting preview, or matches one, is never refused.
+    matches a job still open (pending or running) joins it and is never refused, and
+    the waiting preview a request supersedes does not count against the limit.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
-    (`render_jobs`), so accepted renders survive a restart; a pending row whose
-    workflow never started is started by the API's reconciler.
+    (`render_jobs`), so accepted renders survive a restart. A row is written by its
+    workflow's first activity, so it exists only once Temporal has the render; with
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
+    every five minutes the API fails the rows nothing will settle: one whose workflow
+    closed without settling it (terminated by hand, say), and a pending or running one
+    an older release left with no workflow running. Each pass lists the open
+    `TemplatePipeline` runs from Visibility once and describes only rows over 30 s old
+    that the listing leaves out; `scadbuddy_render_settle_failed_total` and
+    `scadbuddy_render_settle_errors_total` count what it failed and the passes that
+    could not finish.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
@@ -398,10 +407,19 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (or use a `Recreate` rollout) before the new API starts, and start the API before
   the render workers. At start the API fails every render the old queue left
   `running` (no workflow; nothing would finish it), with an error naming the
-  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  upgrade; its `pending` renders are failed too (#1053: nothing reconciles them). From a release
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading to the release with #1053** moves renders onto the command shape: the
+  workflow `render-<render key>` inserts its own row. Do not let an older API overlap a
+  new one: stop the old API pods (or use a `Recreate` rollout, as the manifest does)
+  before the new API starts. An older API beside it would restart this release's
+  waiting renders as its own (its reconciler) and count requests into them that the
+  workflow never sees (its insert). The older render workers may keep running: they
+  finish the renders pinned to their build. A pending row of the older API's that no
+  workflow will run is failed, once it is 30 s old, by the next render of its key or
+  the API's next pass over such rows.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
 

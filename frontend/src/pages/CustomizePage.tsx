@@ -48,7 +48,7 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
-import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
+import { RENDER_DEBOUNCE_MS, type RenderBusy, useRenderJob } from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -63,6 +63,20 @@ const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
 /** An import's origin for the page's label; a URL the record holds that does not parse
  *  must not take the page down. */
+/** The banner while a refused render waits to be sent again, worded by why it waits. */
+function renderBusyText({ seconds, reason }: RenderBusy): string {
+  switch (reason) {
+    case 'temporal-unavailable':
+      return `ScadBuddy cannot reach its render service; retrying in ${seconds} s.`
+    case 'still-accepting':
+      return `The render service is still accepting this preview; checking again in ${seconds} s.`
+    case 'unanswered':
+      return `ScadBuddy did not answer; this preview will be retried in ${seconds} s.`
+    case 'queue-full':
+      return `The render queue is full; this preview will be retried in ${seconds} s.`
+  }
+}
+
 function importedFrom(originUrl: string): string {
   try {
     return `imported from ${new URL(originUrl).host}`
@@ -273,6 +287,7 @@ export function CustomizePage() {
     rendering,
     error: renderError,
     busy: renderBusy,
+    retry: retryRender,
     settledFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
@@ -1077,7 +1092,7 @@ export function CustomizePage() {
               data-testid="render-busy"
               className="border-t border-line px-3 py-2 text-[12px] text-muted"
             >
-              The render queue is full; this preview will be retried in {renderBusy} s.
+              {renderBusyText(renderBusy)}
             </p>
           )}
           {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
@@ -1088,7 +1103,10 @@ export function CustomizePage() {
           )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
-              {renderError.message}
+              {renderError.message}{' '}
+              <Button size="sm" onClick={retryRender}>
+                Try again
+              </Button>
             </p>
           )}
           {/* Full screen is the view and its parameters; the actions wait outside it. */}
