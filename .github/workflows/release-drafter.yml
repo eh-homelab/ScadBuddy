@@ -35,7 +35,7 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: release-drafter/release-drafter@v7.7.0
+      - uses: release-drafter/release-drafter@v7.9.0
         with:
           config-name: release-drafter.yml@${{ github.event.repository.default_branch }}
         env:
@@ -95,7 +95,7 @@ jobs:
       # `pull_request`, not `pull_request_target`: this repo takes no fork
       # contributions, and pull_request_target would hand a write token to a
       # run triggered by an untrusted head for no gain.
-      - uses: release-drafter/release-drafter/autolabeler@v7.7.0
+      - uses: release-drafter/release-drafter/autolabeler@v7.9.0
         if: ${{ steps.config.outputs.present == 'true' }}
         with:
           config-name: release-drafter.yml@${{ github.event.repository.default_branch }}

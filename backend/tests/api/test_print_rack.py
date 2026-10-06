@@ -13,9 +13,14 @@ import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from psycopg_pool import PoolTimeout
 
+from scadbuddy.api.analyzers import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.settings import Settings
+from scadbuddy.library import settings_store
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
@@ -46,6 +51,71 @@ def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: Test
     forgot = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": None})
     assert forgot.json() == {"printer_id": 1, "algorithm": "least_used"}
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [psycopg.errors.QueryCanceled("canceling statement"), PoolTimeout("no connection")],
+    ids=["write", "pool"],
+)
+def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """#1129 review: the bounded save's timeouts are expected, not a crash."""
+
+    def timed_out(*_: object) -> None:
+        raise error
+
+    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", timed_out)
+    response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+
+
+def test_a_dropped_connection_does_not_claim_nothing_was_saved(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1189 review: a connection lost mid-save may have committed, so the 503 must not
+    say nothing was saved; a timeout that rolled back can."""
+
+    def dropped(*_: object) -> None:
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.api.printing"):
+        response = client.put(
+            "/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"}
+        )
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    assert "nothing was saved" not in response.json()["detail"]
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.api.printing"]
+    assert getattr(record, "printer_id", None) == 1
+    assert getattr(record, "error", None) == "OperationalError"
+    assert record.exc_info is None
+
+
+def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129 review: the whole route, against a real row lock, not a stubbed store."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    path = "/api/v1/print/printers/1/rack-algorithm"
+    assert client.put(path, json={"algorithm": "oldest_first"}).status_code == 200
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
+        response = client.put(path, json={"algorithm": "bambuddy"})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
+
+
+def test_the_rack_algorithm_routes_503_is_declared(client: TestClient) -> None:
+    put = client.get("/openapi.json").json()["paths"][
+        "/api/v1/print/printers/{printer_id}/rack-algorithm"
+    ]["put"]
+    assert "503" in put["responses"]
 
 
 def test_an_unknown_algorithm_is_refused(client: TestClient) -> None:

@@ -87,7 +87,8 @@ RESCAN_INTERVAL = 300.0
 #: watch loop, so one that never returns would hold the watch open. A hook cut off here
 #: is not retried now: the rack's settle leaves the archives it had not yet started
 #: unrecorded until that output settles again (another print of it), which records them
-#: with its own time; the warning names the output so the gap can be traced. Cutting a
+#: with its own time; the warning names the output, and the rack logs the archive ids
+#: it left unrecorded, so the gap can be traced. Cutting a
 #: hook off stops the wait, not the work: a database read or write it started in a
 #: thread runs on until Postgres answers, so the archive whose write was in flight may
 #: still be recorded.

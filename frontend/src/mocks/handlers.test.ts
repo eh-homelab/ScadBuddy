@@ -884,6 +884,16 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(poster.headers.get('Content-Type')).toBe('image/png')
   })
 
+  it('serves a thumbnail of an image and of a video poster (#624)', async () => {
+    const items = (await api.getModel(GALLERY_SLUG)).media ?? []
+    const slug = encodeURIComponent(GALLERY_SLUG)
+    for (const item of items) {
+      const response = await fetch(`/api/v1/models/${slug}/media/${item.id}/thumbnail`)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe('image/webp')
+    }
+  })
+
   it('drops the cover with the last image', async () => {
     const removed = await api.deleteMedia('name-keychain', 'thumbnail')
     expect(removed.media).toEqual([])
