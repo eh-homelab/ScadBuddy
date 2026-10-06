@@ -97,6 +97,30 @@ describe('PresetPicker', () => {
     ])
   })
 
+  it('names the preset on Update, and says "Changed from" in a live region (#351)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Old engraving')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
+
+    expect(screen.getByRole('button', { name: 'Update preset Old engraving' })).toBeInTheDocument()
+    expect(screen.getByTestId('preset-modified').closest('[role="status"]')).toHaveTextContent(
+      'Changed from Old engraving',
+    )
+  })
+
+  it('opens Save as preset with its name field focused, and gives focus back on closing (#351)', async () => {
+    const { user } = render()
+    await picker()
+    const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
+    await user.click(saveAs)
+    const dialog = screen.getByRole('dialog')
+    const field = within(dialog).getAllByRole('textbox')[0]
+    expect(field).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(saveAs).toHaveFocus()
+  })
+
   it('applies a preset over the defaults and renders it', async () => {
     const renders = watchRenders()
     const { user } = render()
@@ -247,7 +271,7 @@ describe('PresetPicker', () => {
     const { user } = render()
     await user.selectOptions(await picker(), 'Old engraving')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
-    await user.click(screen.getByRole('button', { name: 'Update' }))
+    await user.click(screen.getByRole('button', { name: /^Update preset / }))
 
     const dialog = screen.getByRole('dialog', { name: 'Update preset Old engraving' })
     expect(dialog).toHaveTextContent('engrave_depth = 2')
@@ -259,7 +283,7 @@ describe('PresetPicker', () => {
     expect(update).not.toHaveBeenCalled()
     expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth')
 
-    await user.click(screen.getByRole('button', { name: 'Update' }))
+    await user.click(screen.getByRole('button', { name: /^Update preset / }))
     await user.click(
       within(screen.getByRole('dialog', { name: 'Update preset Old engraving' })).getByRole('button', {
         name: 'Update and drop them',
@@ -312,11 +336,11 @@ describe('PresetPicker', () => {
     const update = vi.spyOn(api, 'updatePreset')
     const { user } = render()
     await user.selectOptions(await picker(), 'Mum')
-    expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Update preset / })).not.toBeInTheDocument()
 
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
     expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum')
-    await user.click(screen.getByRole('button', { name: 'Update' }))
+    await user.click(screen.getByRole('button', { name: /^Update preset / }))
 
     await waitFor(() => expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument())
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
@@ -329,7 +353,7 @@ describe('PresetPicker', () => {
     await user.selectOptions(await picker(), 'Tiny')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
     expect(screen.getByTestId('preset-modified')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Update preset / })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Delete preset/ })).not.toBeInTheDocument()
   })
 
@@ -380,7 +404,7 @@ describe('PresetPicker', () => {
     expect(within(select).getByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')
     // The copy is the user's, so it can be changed and deleted, unlike the original.
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
-    expect(screen.getByRole('button', { name: 'Update' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Update preset / })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Delete preset Tiny for Bo' })).toBeInTheDocument()
   })
 
