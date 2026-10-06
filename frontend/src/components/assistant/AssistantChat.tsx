@@ -52,7 +52,7 @@ export interface OpenRequest {
 /** How many sessions the picker's model filter asks the agent for: its list route's maximum (agent routes/sessions.ts LIST_LIMIT_MAX). */
 const PICKER_FILTER_LIMIT = 500
 
-/** The panel's Advanced switch, per browser (the Library page's pattern). */
+/** The panel's Advanced switch, remembered per browser as the Library page's is. */
 const ADVANCED_KEY = 'scadbuddy.assistant.advanced'
 
 function readAdvanced(): boolean {
@@ -100,6 +100,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     })
   }
   const composer = useRef<HTMLTextAreaElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const takeOverButton = useRef<HTMLButtonElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
   const touchedId = useId()
@@ -141,6 +143,26 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     composer.current?.focus()
   }, [focusKey])
 
+  // #992 — what was focused (Stop, a session's row) goes away, and focus with it to
+  // <body>. Asked for here, it lands after the render that shows the session: in the
+  // composer, or on Take over when another agent holds it (the composer is locked).
+  const [refocus, setRefocus] = useState(0)
+  const focusSession = () => setRefocus((n) => n + 1)
+  useEffect(() => {
+    if (refocus === 0) return
+    const box = composer.current
+    const target = box && !box.disabled ? box : (takeOverButton.current ?? heading.current)
+    target?.focus()
+  }, [refocus])
+  // Take over goes, and the composer unlocks, only once the handoff lands.
+  const handingOver = useRef(false)
+  useEffect(() => {
+    if (owned && handingOver.current) {
+      handingOver.current = false
+      composer.current?.focus()
+    }
+  }, [owned])
+
   // Before the socket is open this only sets what is on screen; the connection attaches it.
   const { select } = chat
   useEffect(() => {
@@ -148,6 +170,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     setPickerOpen(false)
     select(openRequest.sessionId)
     onOpenHandled?.()
+    focusSession()
   }, [openRequest, select, onOpenHandled])
 
   // Follow the stream. Instant when the user asked for reduced motion.
@@ -217,7 +240,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex shrink-0 items-center gap-1.5 border-b border-line px-3 py-2">
-        <h2 className="text-[13px] font-semibold">Assistant</h2>
+        <h2 ref={heading} tabIndex={-1} className="text-[13px] font-semibold outline-none">
+          Assistant
+        </h2>
         <div className="ml-auto flex items-center gap-1">
           <Button
             variant="ghost"
@@ -292,13 +317,17 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                     onClick={() => {
                       chat.select(s.id)
                       setPickerOpen(false)
+                      focusSession()
                     }}
-                    className={`flex w-full flex-col gap-1 px-3 py-1.5 text-left hover:bg-surface-3 ${
-                      s.id === state.activeId ? 'bg-surface-3' : ''
+                    className={`flex w-full flex-col gap-1 border-l-2 px-3 py-1.5 text-left hover:bg-surface-3 ${
+                      s.id === state.activeId ? 'border-accent bg-surface-3' : 'border-transparent'
                     }`}
                   >
                     <span className="truncate text-[12.5px]">{s.title}</span>
                     <span className="flex items-center gap-1.5">
+                      {s.id === state.activeId && (
+                        <span className="rounded-[4px] bg-accent/15 px-1 text-[10.5px] font-medium text-accent">Open</span>
+                      )}
                       <OriginBadge origin={s.origin} />
                       <OwnerBadge owner={s.owner} />
                       <span className="text-[11px] text-faint">{statusLabel(s.status)}</span>
@@ -321,7 +350,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             {statusLabel(active.status)}
           </span>
           {busy && (
-            <Button variant="danger" size="sm" onClick={() => chat.interrupt(active.id)}>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => {
+                chat.interrupt(active.id)
+                // The button goes once the turn has stopped; the next thing is a message.
+                focusSession()
+              }}
+            >
               Stop
             </Button>
           )}
@@ -339,7 +376,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           {!owned && (
             <div className="flex w-full items-center gap-2">
               <span className="text-muted">Controlled by {active.owner.label}</span>
-              <Button size="sm" data-agent-user-only="" onClick={() => chat.takeOver(active.id)}>
+              <Button
+                ref={takeOverButton}
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => {
+                  handingOver.current = true
+                  chat.takeOver(active.id)
+                }}
+              >
                 Take over
               </Button>
             </div>
@@ -384,6 +429,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
           />
         ))}
+        {itemCount === 0 && !busy && advanced && (
+          // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
+          <p className="text-[12px] text-muted">
+            Advanced: tool arguments, sources and memory details will be shown.
+          </p>
+        )}
         {itemCount === 0 && !busy && prompts.length > 0 && owned && (
           <div>
             <p className="mb-2 text-[12px] text-muted">Try asking</p>

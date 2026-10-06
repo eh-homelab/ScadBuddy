@@ -588,3 +588,13 @@ async def test_a_makerworld_model_page_is_refused_with_the_way_round_it(url: str
     assert "MakerWorld" in message
     assert "Upload" in message
     assert not mock.calls
+
+
+def test_the_fetch_budget_ends_before_the_gateway_does() -> None:
+    """#966: past Envoy's 15 s route timeout the client already has a plain-text 504,
+    yet an import that finishes behind it still creates the model, so a retry 409s.
+    The fetch's whole budget must end first, with room left for the parse check
+    `_create` runs after it, so a slow host gets the importer's own 422."""
+    gateway_route_timeout = 15.0
+    parse_check_headroom = 5.0
+    assert url_import.IMPORT_TIMEOUT + parse_check_headroom <= gateway_route_timeout

@@ -26,6 +26,11 @@ const CSS = `
 .total { padding: 8px 12px; font-size: 12px; color: var(--sb-muted); }
 .pieces { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 .pieces li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--sb-line); }
+/* #362 — a phone has no room for the form beside the preview: stack them. */
+@media (max-width: 640px) {
+  .house { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .side { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--sb-line); }
+}
 `
 
 function element(tag, props = {}, ...children) {

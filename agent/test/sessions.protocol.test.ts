@@ -173,8 +173,9 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'tool.call', sessionId: S, id: 't1', name: 'n', input: {}, risk: 'write' }),
     event({ type: 'tool.result', sessionId: S, id: 't1', ok: true, summary: '' }),
     event({ type: 'approval.required', sessionId: S, id: 'a1', tool: 't1', summary: 'print box.3mf', risk: 'outward' }),
-    event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, by: { kind: 'browser', id: 'browser', label: 'You' } }),
-    event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false }),
+    event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, decision: 'approved', by: { kind: 'browser', id: 'browser', label: 'You' } }),
+    event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false, decision: 'expired', reason: 'no decision before it expired' }),
+    event({ type: 'approval.resolved', sessionId: S, id: 'a3', approved: false, decision: 'cancelled', reason: 'interrupted by You' }),
     event({
       type: 'question.asked',
       sessionId: S,

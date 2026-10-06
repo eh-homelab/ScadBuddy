@@ -300,6 +300,51 @@ describe('MediaManager (#279)', () => {
     expect(await serverIds(BUILTIN_SLUG)).toEqual(['front', 'bbbbbbbbbbbb'])
   })
 
+  // #1321 — the caption saves on blur, and that write used to disable every row
+  // action under the pointer, so the click that blurred it was dropped.
+  describe('after editing a caption', () => {
+    it.each([
+      ['Move down', [GALLERY[1], GALLERY[0], GALLERY[2], GALLERY[3]]],
+      ['Make cover', [GALLERY[1], GALLERY[0], GALLERY[2], GALLERY[3]]],
+    ] as const)('saves it and still does what %s says, on the first click', async (name, order) => {
+      const { user } = await render()
+      const row = name === 'Make cover' ? 1 : 0
+      const field = within(item(row)).getByRole('textbox', { name: 'Caption' })
+      await user.clear(field)
+      await user.type(field, 'cap1X')
+
+      await user.click(within(item(row)).getByRole('button', { name }))
+
+      await waitFor(() => expect(shownIds()).toEqual(order))
+      expect(await serverIds()).toEqual(order)
+      const saved = (await api.getModel(GALLERY_SLUG)).media?.find((m) => m.id === GALLERY[row])
+      expect(saved?.caption).toBe('cap1X')
+    })
+
+    it('opens the delete confirmation on the first click', async () => {
+      const { user } = await render()
+      const field = within(item(0)).getByRole('textbox', { name: 'Caption' })
+      await user.type(field, ' more')
+
+      await user.click(within(item(0)).getByRole('button', { name: 'Delete' }))
+
+      expect(within(item(0)).getByText(/Delete this image\?/)).toBeInTheDocument()
+    })
+  })
+
+  it('keeps focus in the moved row after a move from the keyboard (#1321)', async () => {
+    const { user } = await render()
+    within(item(1)).getByRole('button', { name: 'Move up' }).focus()
+
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(shownIds()).toEqual([GALLERY[1], GALLERY[0], GALLERY[2], GALLERY[3]]))
+    // Moved to the top, Move up is disabled; focus goes to the row's next action.
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body))
+    expect(item(0).contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).toBe(within(item(0)).getByRole('button', { name: 'Move down' }))
+  })
+
   it('says why a write failed and keeps the list as it was', async () => {
     vi.spyOn(api, 'reorderMedia').mockRejectedValue(new Error('the database is down'))
     const { user } = await render()

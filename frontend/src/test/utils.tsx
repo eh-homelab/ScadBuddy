@@ -17,17 +17,23 @@ function parse(route: string) {
   return { pathname, search: search ? `?${search}` : '' }
 }
 
-/** Renders inside a router so components using `Link`/`useParams` work. */
+/**
+ * Renders inside a router so components using `Link`/`useParams` work.
+ *
+ * `rerender` takes the bare element and re-renders it in place inside the same
+ * router, as testing-library's does: component state survives (#1013).
+ */
 export function renderPage(
   ui: ReactElement,
   { route = '/', path, state, userEventOptions, ...options }: Options = {},
 ) {
   const user = userEvent.setup(userEventOptions)
-  const view = render(
-    <MemoryRouter initialEntries={[state === undefined ? route : { ...parse(route), state }]}>
-      {path ? <Routes><Route path={path} element={ui} /></Routes> : ui}
-    </MemoryRouter>,
-    options,
+  const entries = [state === undefined ? route : { ...parse(route), state }]
+  const tree = (element: ReactElement) => (
+    <MemoryRouter initialEntries={entries}>
+      {path ? <Routes><Route path={path} element={element} /></Routes> : element}
+    </MemoryRouter>
   )
-  return { user, ...view }
+  const view = render(tree(ui), options)
+  return { user, ...view, rerender: (next: ReactElement) => view.rerender(tree(next)) }
 }

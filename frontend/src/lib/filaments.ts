@@ -229,14 +229,16 @@ export function checkPlan(
 
 /**
  * The picker's opening selection (#78): the spools this model last printed with, slot by
- * slot, and the server's auto-match wherever nothing is remembered or the remembered
- * spool is no longer in the inventory.
+ * slot, and the server's auto-match wherever nothing is remembered, the remembered spool
+ * is no longer in the inventory, or its colour no longer fits the slot's (#933). Which
+ * spools still fit is the server's call (`colour_matches`, the auto-match's own cut-off),
+ * as the download's seed is (`seed_plan` in `bambuddy/filaments.py`).
  */
 export function seedPlan(options: FilamentOptions, remembered: SlotChoice[]): SlotChoice[] {
-  const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
   return (options.slots ?? []).flatMap((slot) => {
+    const fits = new Set(slot.colour_matches ?? [])
     const kept = remembered.find(
-      (choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id),
+      (choice) => choice.slot_id === slot.slot_id && fits.has(choice.spool_id),
     )
     const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
     return choice ? [{ ...choice }] : []

@@ -39,7 +39,12 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    LibraryStore,
+)
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
@@ -297,7 +302,8 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths)
     uploads = BambuddyUploadStore(pool)
-    checkouts = CheckoutGate()
+    # Render leases in Postgres, so a removal here sees the render worker's (#872).
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
@@ -326,8 +332,8 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
-    # Lazy, so the API boots while Temporal is down: its renders wait, and the
-    # reconciler starts them once it is back.
+    # Lazy, so the API boots while Temporal is down: a render is then refused with
+    # `temporal-unavailable` (#1053) until it is back.
     temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
     render = RenderService(
         projection=projection,
@@ -336,6 +342,7 @@ def _build_core(settings: Settings) -> AppState:
         config=config,
         paths=paths,
         metrics=metrics,
+        search_attributes=settings.temporal_search_attributes,
     )
     previews = (
         build_previews(catalogue, outputs, render, config) if settings.preview_renders else None
