@@ -459,6 +459,30 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "local"
 
 
+def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1253: the inbox is not env-seeded, so with no row its value is StoredSettings'
+    default, not an attribute of the deployment's ``Settings`` (which has none)."""
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="bambuddy",
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        with pytest.raises(StoreNotReadyError, match="library folder"):
+            store.save(SettingsPatch(bambuddy_url="https://b.test"))
+        store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+        # A stored inbox counts: it is not refused as an unknown env setting.
+        store.save(SettingsPatch(bambuddy_url="https://c.test"))
+        assert store.load().bambuddy_url == "https://c.test"
+    finally:
+        store.close()
+
+
 def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     store: SettingsStore, settings: Settings
 ) -> None:

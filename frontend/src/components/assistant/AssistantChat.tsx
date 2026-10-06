@@ -52,7 +52,7 @@ export interface OpenRequest {
 /** How many sessions the picker's model filter asks the agent for: its list route's maximum (agent routes/sessions.ts LIST_LIMIT_MAX). */
 const PICKER_FILTER_LIMIT = 500
 
-/** The panel's Advanced switch, per browser (the Library page's pattern). */
+/** The panel's Advanced switch, remembered per browser as the Library page's is. */
 const ADVANCED_KEY = 'scadbuddy.assistant.advanced'
 
 function readAdvanced(): boolean {
@@ -384,6 +384,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
           />
         ))}
+        {itemCount === 0 && !busy && advanced && (
+          // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
+          <p className="text-[12px] text-muted">
+            Advanced: tool arguments, sources and memory details will be shown.
+          </p>
+        )}
         {itemCount === 0 && !busy && prompts.length > 0 && owned && (
           <div>
             <p className="mb-2 text-[12px] text-muted">Try asking</p>

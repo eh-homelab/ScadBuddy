@@ -1,5 +1,6 @@
 import type { Param } from '../../api/types'
 import { Field } from './Field'
+import { NumberInput } from './NumberInput'
 
 export function SliderWidget({
   param,
@@ -34,14 +35,13 @@ export function SliderWidget({
           onChange={(event) => onChange(Number(event.target.value))}
           className="h-1.5 w-full flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-[var(--sb-accent)]"
         />
-        <input
-          type="number"
+        <NumberInput
           min={min}
           max={max}
           step={step}
           value={value}
           aria-label={`${param.caption ?? param.name} value`}
-          onChange={(event) => onChange(Number(event.target.value))}
+          onCommit={onChange}
           className="sb-field sb-num w-[4.5rem] shrink-0 text-right"
         />
       </div>

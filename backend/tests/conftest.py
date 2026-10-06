@@ -23,8 +23,8 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from psycopg import Connection
-from psycopg.conninfo import make_conninfo
+from psycopg import Connection, sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
@@ -37,6 +37,7 @@ from scadbuddy.core.tracing import DEFAULT_SAMPLER
 from scadbuddy.library import url_import
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render import confinement
 from scadbuddy.render.job_models import Job, JobResult, now
 from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
@@ -152,6 +153,16 @@ def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_only_real_openscad(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fake openscads are scripts reading and writing the test's own files, which
+    the sandbox (#994) rightly refuses them; a test of the real binary keeps it."""
+    if not request.node.get_closest_marker("requires_openscad"):
+        monkeypatch.setattr(confinement, "landlock_abi", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
 def _skip_without_openscad_lsp(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad_lsp") and openscad_lsp_binary() is None:
         pytest.skip("openscad-lsp is not on PATH")
@@ -209,14 +220,41 @@ UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
 UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
 
 
+@pytest.fixture(scope="session")
+def _pg_database_url() -> Iterator[str | None]:
+    """The database this process's tests make their schemas in: the test database
+    itself, or under pytest-xdist one of its own per worker, dropped afterwards.
+
+    A schema per test is not isolation enough once tests run at once: advisory locks
+    (`migrate`'s fixed MIGRATION_LOCK among them) and LISTEN/NOTIFY channels (the
+    event bus's `scadbuddy_events`) are per DATABASE, so two workers sharing one
+    would serialise every migration and hear each other's events."""
+    url = postgres_url()
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if url is None or worker is None:
+        yield url
+        return
+    database = f"{conninfo_to_dict(url).get('dbname') or 'postgres'}_{worker}"
+    create = sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database))
+    drop = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database))
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(drop)  # a killed run's
+        conn.execute(create)
+    try:
+        yield make_conninfo(url, dbname=database)
+    finally:
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(drop)
+
+
 @pytest.fixture
-def pg_conninfo() -> Iterator[str]:
+def pg_conninfo(_pg_database_url: str | None) -> Iterator[str]:
     """A throwaway schema on the test Postgres, dropped afterwards.
 
     Skips the test without one: every test that starts the app needs it, since the
     settings live in Postgres (#401).
     """
-    url = postgres_url()
+    url = _pg_database_url
     if url is None:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
     schema = f"test_{uuid.uuid4().hex[:12]}"
