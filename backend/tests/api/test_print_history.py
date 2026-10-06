@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -18,7 +19,7 @@ from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
-from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -624,3 +625,55 @@ def test_runs_that_agree_with_the_archive_are_taken_as_they_are() -> None:
     assert [run.filament_reading_suspect for run in outcome.runs] == [False, False]
     assert [run.cost for run in outcome.runs] == [13.91, 0.1]
     assert outcome.cost == 13.91
+
+
+def record_library(client: TestClient, queue_item_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record_library(89, queue_item_id, plate_id=1, printer_id=1)
+    )
+
+
+@respx.mock
+def test_library_prints_are_linked_only_for_the_first_unfiltered_page(
+    client: TestClient, model: str
+) -> None:
+    """#1663: a later page or a slug filter cannot show a print linked now."""
+    configure(client)
+    record_library(client, 51)
+    item = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "pending"})
+    )
+
+    later = client.get("/api/v1/prints", params={"cursor": "100"})
+    filtered = client.get("/api/v1/prints", params={"slug": model})
+
+    assert later.status_code == 200, later.text
+    assert filtered.status_code == 200, filtered.text
+    assert not item.called
+
+    first = client.get("/api/v1/prints")
+
+    assert first.status_code == 200, first.text
+    assert item.call_count == 1
+
+
+@respx.mock
+def test_the_list_answers_when_linking_a_library_print_fails_on_the_database(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1662: the link is logged and retried on the next list, never a 500."""
+    configure(client)
+    record_library(client, 51)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing", "archive_id": 90})
+    )
+
+    async def failing(self: PrintLinkStore, *args: object) -> None:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(PrintLinkStore, "link_library", failing)
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
