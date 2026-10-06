@@ -8,7 +8,9 @@ import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
 import { BUILTIN_SLUG, keychainSchema } from '../mocks/fixtures'
-import { resetMockState } from '../mocks/handlers'
+import { resetMockState, setMockPresets } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
+import { presets as fixturePresets } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
 import { renderPage } from '../test/utils'
@@ -326,10 +328,10 @@ describe('PresetPicker', () => {
     const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
     await user.type(name, 'mum')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('already has a preset')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('A preset named "Mum" already exists.')
     // The server's reason is about the name, so the Name field is marked with it.
     expect(name).toHaveAttribute('aria-invalid', 'true')
-    expect(name).toHaveAccessibleDescription(/already has a preset/)
+    expect(name).toHaveAccessibleDescription(/already exists/)
   })
 
   it('updates a saved preset once its values are changed', async () => {
@@ -346,6 +348,22 @@ describe('PresetPicker', () => {
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
       inputs: { params: { name: 'Mummy', body_color: '#222222', text_color: '#FFFFFF' } },
     })
+  })
+
+  it('puts "Changed from" on its own line, truncated, as a status (#352)', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+
+    const note = screen.getByTestId('preset-modified')
+    // Not squeezed into the buttons' row, where it wrapped word by word.
+    const update = screen.getByRole('button', { name: /^Update preset / })
+    expect(note.parentElement).not.toBe(update.parentElement)
+    // Above them, one line, the whole name kept for the eye that hovers.
+    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(note).toHaveClass('truncate')
+    expect(note).toHaveAttribute('title', 'Changed from Mum')
+    expect(screen.getByRole('status', { name: 'Changed from Mum' })).toBe(note)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
@@ -632,6 +650,66 @@ describe('PresetPicker', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
   })
+
+  it('follows a preset deleted in another tab (#357)', async () => {
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Mum')
+    // Another tab deletes it: the server says the template's presets changed.
+    setMockPresets(
+      'name-keychain',
+      (fixturePresets['name-keychain'] ?? []).filter((preset) => preset.name !== 'Mum'),
+    )
+    emitRealtime('presets.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+
+    await waitFor(() => expect(within(select).queryByRole('option', { name: 'Mum' })).toBeNull())
+    expect(select).toHaveValue('')
+    expect(screen.getByRole('alert')).toHaveTextContent('That preset was deleted elsewhere.')
+    // The values it put on screen stay.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
+  })
+
+  it('lists a preset saved elsewhere, the assistant\'s included (#357)', async () => {
+    render()
+    const select = await picker()
+    setMockPresets('name-keychain', [
+      ...(fixturePresets['name-keychain'] ?? []),
+      { id: 'c'.repeat(32), name: 'From the assistant', origin: 'mine', params: {}, description: '', tags: [] },
+    ])
+    emitRealtime('presets.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    expect(await within(select).findByRole('option', { name: 'From the assistant' })).toBeInTheDocument()
+  })
+
+  it.each(['Update', 'Delete'])(
+    'drops a preset that %s finds deleted elsewhere, without its id (#357)',
+    async (action) => {
+      const { user } = render()
+      const select = await picker()
+      await user.selectOptions(select, 'Mum')
+      // Gone on the server, and this tab was not told.
+      setMockPresets(
+        'name-keychain',
+        (fixturePresets['name-keychain'] ?? []).filter((preset) => preset.name !== 'Mum'),
+      )
+      if (action === 'Update') {
+        await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+        await user.click(screen.getByRole('button', { name: 'Update preset Mum' }))
+      } else {
+        await user.click(screen.getByRole('button', { name: 'Delete preset Mum' }))
+        await user.click(
+          within(screen.getByRole('dialog', { name: 'Delete preset Mum' })).getByRole('button', {
+            name: 'Delete preset',
+          }),
+        )
+      }
+
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent('That preset was deleted elsewhere.')
+      expect(alert).not.toHaveTextContent('a1b2c3d4')
+      expect(within(select).queryByRole('option', { name: 'Mum' })).toBeNull()
+      expect(select).toHaveValue('')
+    },
+  )
 
   it('Reset to defaults clears the selected preset, so Update cannot empty it (#350)', async () => {
     const patches: unknown[] = []

@@ -21,8 +21,12 @@ export type FakeTurn =
       /** Keeps the stream open after the result until this settles (the SDK's last appends). */
       holdAfterResult?: Promise<void>
     }
-  /** Waits until the query is aborted, then throws as the SDK does. */
-  | { hang: true }
+  /**
+   * Waits until the query is aborted, then throws as the SDK does; or, with
+   * `resultOnAbortUsd`, ends with the interrupt's `error_during_execution`
+   * result carrying that total, as Claude Code does after stopFirst (#1168).
+   */
+  | { hang: true; resultOnAbortUsd?: number }
   /**
    * Starts a reply (message_start with this usage, then `text`) and waits for
    * the abort, as a model cut off mid-reply (#991). Then ends with the
@@ -55,6 +59,22 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
     return (async function* () {
       await Promise.resolve()
       if ('hang' in turn) {
+        if (turn.resultOnAbortUsd !== undefined) {
+          await new Promise<void>((resolve) => {
+            if (run.signal?.aborted) resolve()
+            run.signal?.addEventListener('abort', () => resolve(), { once: true })
+          })
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            errors: [],
+            num_turns: 1,
+            total_cost_usd: turn.resultOnAbortUsd,
+            session_id,
+          } as unknown as SDKMessage
+          return
+        }
         await new Promise((_, reject) => {
           const fail = () => reject(new Error('Claude Code process aborted by user'))
           if (run.signal?.aborted) fail()
