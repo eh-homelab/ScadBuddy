@@ -7,7 +7,7 @@
 2. From the record on, every outcome *completes* the execution and is recorded: one
    ``try`` holds the rest, and whatever an activity raised becomes ``print_fail``.
 3. A run that succeeded or may have queued stays open for its repeat window, so a
-   repeat (``USE_EXISTING``) gets the same row (§5.2).
+   repeat (``USE_EXISTING``) gets the same row (§5.2); a cancelled one closes at once.
 
 ``print_slice_start`` and ``print_enqueue`` each start something Bambuddy does not
 dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
@@ -31,13 +31,20 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
-from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    FailureError,
+    WorkflowAlreadyStartedError,
+    is_cancelled_exception,
+)
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.library.outputs import PlateSend
+    from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         PRINT_RUN_WORKFLOW,
@@ -105,6 +112,21 @@ CANCELLED = PrintRunError(
     title="Conflict",
     detail="This print was cancelled before it started. Nothing was queued; print again.",
 )
+#: What a run cancelled after its record and before its first ``POST /queue/`` records:
+#: Bambuddy may have sliced a plate, but nothing was queued (review #1316 (9) 2a).
+CANCELLED_UNQUEUED = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This print was cancelled before it was queued. Bambuddy may have sliced it,"
+    " but nothing was queued; print again.",
+)
+#: What a run cancelled after it began queueing records: a plate may be queued.
+CANCELLED_QUEUEING = PrintRunError(
+    status=409,
+    title="Conflict",
+    detail="This print was cancelled while it was being queued, so it may be queued; check"
+    " Bambuddy's queue before printing again.",
+)
 #: What a run answers when its check ends after every client stopped waiting for it.
 UNWAITED = PrintRunError(
     status=409,
@@ -114,6 +136,25 @@ UNWAITED = PrintRunError(
 )
 
 
+#: ``workflow.patched`` id for review #1316's cancel handling: from the last plate's
+#: ``print_enqueue`` on, a cancel waits for the last activities, and a cancel the run
+#: absorbed ends its repeat window. A history from before it (#1061) replays with
+#: neither.
+CANCEL_PATCH = "print-cancel-ends-window"
+#: ``workflow.patched`` id for review #1316 (3): ``print_start_enqueue`` and every
+#: plate's ``print_enqueue`` and ``print_record`` wait through a cancel, so what was
+#: queued is recorded, and the run stops before the next ``POST /queue/``. A history from
+#: before it cancels them, as ``CANCEL_PATCH`` alone did.
+PLATES_PATCH = "print-cancel-records-every-plate"
+#: ``workflow.patched`` id for review #1316 (13) 3a: ``print_fail`` is a record, and
+#: waits through a cancel as the others do, so the run ends with the error it records
+#: and its execution completes. A history from before it cancels ``print_fail`` and ends
+#: the execution cancelled (``cancelled_during_fail_1061``).
+FAIL_PATCH = "print-cancel-waits-for-fail"
+#: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
+FOLLOW_PATCH = "follow-print"
+
+
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
 class PrintRunWorkflow:
     def __init__(self) -> None:
@@ -121,6 +162,14 @@ class PrintRunWorkflow:
         self.refusal: PrintRunError | None = None
         self.updates = 0
         self.search_attributes = False
+        #: Whether ``_print`` has reached the first ``POST /queue/``.
+        self.enqueue_attempted = False
+        #: Whether ``print_start_enqueue`` wrote the row's column and the run then
+        #: stopped before that POST: its record clears the column (review #1316 (8) 2).
+        self.enqueue_unstarted = False
+        #: Whether the run caught a cancel and carried on; it then holds no repeat
+        #: window, since Temporal drops a second cancel request (review #1316 2).
+        self.cancel_absorbed = False
 
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> AcceptAnswer:
@@ -174,7 +223,7 @@ class PrintRunWorkflow:
         try:
             run = await asyncio.shield(insert)
         except asyncio.CancelledError:
-            cancelled = True
+            cancelled = self.cancel_absorbed = True
             run = await insert
         accepted = Accepted(run=run, source=checked.source, prepared=checked.prepared)
         if cancelled:
@@ -186,29 +235,64 @@ class PrintRunWorkflow:
                 self.row = await self._print(input, accepted)
             except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
                 # The record exists: whatever happened is recorded, and the execution
-                # completes.
-                self.row = await self._fail(input, accepted, problem_of(error))
+                # completes. A cancel is recorded as one (review #1061 (3) 1).
+                if not is_cancelled_exception(error):
+                    problem = problem_of(error)
+                else:
+                    self.cancel_absorbed = True
+                    # The row exists and a plate may be sliced: never "before it
+                    # started" (review #1316 (9) 2a).
+                    problem = CANCELLED_QUEUEING if self.enqueue_attempted else CANCELLED_UNQUEUED
+                self.row = await self._fail(input, accepted, problem)
         self._upsert(status=self.row.status, may_have_queued=self.row.may_have_queued)
-        if self.row.status == "succeeded" or self.row.may_have_queued:
+        if (self.row.status == "succeeded" or self.row.may_have_queued) and not (
+            self.cancel_absorbed and workflow.patched(CANCEL_PATCH)
+        ):
             # Repeats of a body-only key inside the window get this row (§5.2). A cancel
-            # ends the window early but the execution still completes, so the failed-only
-            # reuse policy keeps a re-sent request off a second print (review #1061).
+            # ends the window early; a re-sent request still does not print twice: for a
+            # body-only key (`ALLOW_DUPLICATE`) `accept_run`'s `runs.store.find` answers
+            # this row inside its repeat window, and for a `request_id` key the
+            # failed-only reuse policy refuses a second start (review #1316 (2) 2).
             with suppress(asyncio.CancelledError):
                 await workflow.sleep(timedelta(seconds=input.repeat_window_s))
         await workflow.wait_condition(workflow.all_handlers_finished)
         return self.row
 
+    async def _shielded[T](
+        self, handle: workflow.ActivityHandle[T], patch: str = CANCEL_PATCH
+    ) -> T:
+        """``handle``'s result, waited for through a cancel: the activity is not
+        cancelled. A run from before ``patch`` cancels it, as it did then."""
+        try:
+            return await asyncio.shield(handle)
+        except asyncio.CancelledError:
+            if not workflow.patched(patch):
+                handle.cancel()
+            else:
+                self.cancel_absorbed = True
+            return await handle
+
+    def _stop_if_cancelled(self) -> None:
+        """A cancel a shielded activity absorbed stops the run before what comes next."""
+        if self.cancel_absorbed:
+            raise asyncio.CancelledError
+
     async def _fail(
         self, input: PrintRunInput, accepted: Accepted, error: PrintRunError
     ) -> PrintRun:
-        failed: PrintRun = await workflow.execute_activity(
+        record = workflow.start_activity(
             "print_fail",
-            FailInput(run_id=accepted.run.id, slug=input.slug, error=error),
+            FailInput(
+                run_id=accepted.run.id,
+                slug=input.slug,
+                error=error,
+                unqueued=self.enqueue_unstarted,
+            ),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
         )
-        return failed
+        return await self._shielded(record, FAIL_PATCH)
 
     async def _refuse(self, refusal: PrintRunError) -> None:
         """Answer the Update with ``refusal``; nothing was written."""
@@ -228,8 +312,8 @@ class PrintRunWorkflow:
         outcomes: list[QueueOutcome] = []
         queued: list[QueuedPlate] = []
         sent: list[PlateSend] = []
-        enqueue_attempted = False
-        for plate in planned.plates:
+        last = len(planned.plates) - 1
+        for index, plate in enumerate(planned.plates):
             started = await workflow.execute_activity(
                 "print_slice_start",
                 SliceStartInput(
@@ -249,16 +333,31 @@ class PrintRunWorkflow:
                 heartbeat_timeout=HEARTBEAT,
                 retry_policy=READ_RETRY,
             )
-            if not enqueue_attempted:
-                # Before the first POST /queue/: from here a failure may have queued.
-                enqueue_attempted = True
-                await workflow.execute_activity(
-                    "print_start_enqueue",
-                    accepted.run.id,
-                    start_to_close_timeout=SHORT,
-                    retry_policy=RECORD_RETRY,
-                )
-            queued_plate = await workflow.execute_activity(
+            if not self.enqueue_attempted:
+                # Before the first POST /queue/: from here a failure may have queued. The
+                # flag follows the row's column, so a cancel's message agrees with it. A
+                # cancel it absorbed stops the run before that POST, so it is recorded
+                # as queueing nothing, and the column is cleared (review #1316 (8) 2).
+                try:
+                    await self._shielded(
+                        workflow.start_activity(
+                            "print_start_enqueue",
+                            accepted.run.id,
+                            start_to_close_timeout=SHORT,
+                            retry_policy=RECORD_RETRY,
+                        ),
+                        PLATES_PATCH,
+                    )
+                except (ActivityError, asyncio.CancelledError):
+                    # As #1061 did, which counted the run as queueing from here on. A
+                    # cancel reaches here only on its histories, whose `print_fail` it
+                    # replays (review #1316 (9) 2b).
+                    self.enqueue_attempted = True
+                    raise
+                self.enqueue_unstarted = self.cancel_absorbed
+                self._stop_if_cancelled()
+                self.enqueue_attempted = True
+            enqueue = workflow.start_activity(
                 "print_enqueue",
                 EnqueueInput(
                     planned=planned,
@@ -270,6 +369,12 @@ class PrintRunWorkflow:
                 start_to_close_timeout=SHORT,
                 retry_policy=ONCE,
             )
+            # A cancel cannot take back a POST /queue/ in flight, so it waits for it: on
+            # the last plate the run goes on to succeed (review #1316 (2) 1); before it,
+            # the plate is recorded and the run stops (review #1316 (3) 1).
+            queued_plate = await (
+                self._shielded(enqueue) if index == last else self._shielded(enqueue, PLATES_PATCH)
+            )
             outcome = QueueOutcome(
                 slice_job_id=started.job_id,
                 sliced_library_file_id=sliced,
@@ -279,7 +384,7 @@ class PrintRunWorkflow:
             )
             outcomes.append(outcome)
             queued.append(queued_plate)
-            sent = await workflow.execute_activity(
+            record = workflow.start_activity(
                 "print_record",
                 RecordInput(
                     source=accepted.source,
@@ -293,30 +398,76 @@ class PrintRunWorkflow:
                 start_to_close_timeout=SHORT,
                 retry_policy=BOUNDED_RETRY,
             )
-        result = await workflow.execute_activity(
-            "print_finish",
-            FinishInput(
-                input=input,
-                run_id=accepted.run.id,
-                planned=planned,
-                outcomes=outcomes,
-                queued=queued,
-            ),
-            result_type=PrintRunResult,
-            start_to_close_timeout=SHORT,
-            # Every plate is queued: from here a settings read that fails for a while
-            # delays the run and never fails it (review #1061 1).
-            retry_policy=RECORD_RETRY,
+            # Once the last plate is queued, a cancel waits for the rest and the run
+            # still ends succeeded, as the insert is shielded (review #1316 1).
+            sent = await (
+                self._shielded(record) if index == last else self._shielded(record, PLATES_PATCH)
+            )
+            if index != last:
+                self._stop_if_cancelled()
+        result: PrintRunResult = await self._shielded(
+            workflow.start_activity(
+                "print_finish",
+                FinishInput(
+                    input=input,
+                    run_id=accepted.run.id,
+                    planned=planned,
+                    outcomes=outcomes,
+                    queued=queued,
+                ),
+                result_type=PrintRunResult,
+                start_to_close_timeout=SHORT,
+                # Every plate is queued: from here a settings read that fails for a while
+                # delays the run and never fails it (review #1061 1).
+                retry_policy=RECORD_RETRY,
+            )
         )
         # Only the record is left, and it does not give up either (review #1061).
-        finished: PrintRun = await workflow.execute_activity(
-            "print_succeed",
-            SucceedInput(input=input, run_id=accepted.run.id, result=result),
-            result_type=PrintRun,
-            start_to_close_timeout=SHORT,
-            retry_policy=RECORD_RETRY,
+        finished: PrintRun = await self._shielded(
+            workflow.start_activity(
+                "print_succeed",
+                SucceedInput(input=input, run_id=accepted.run.id, result=result),
+                result_type=PrintRun,
+                start_to_close_timeout=SHORT,
+                retry_policy=RECORD_RETRY,
+            )
         )
+        # Patched: a run started on a build without the follow replays without it
+        # (review #1061); `PrintRun` runs in the wild since #1061 merged.
+        if (
+            workflow.patched(FOLLOW_PATCH)
+            and input.source.kind == "output"
+            and input.source.output_id is not None
+        ):
+            await self._follow(input.source.output_id)
         return finished
+
+    async def _follow(self, output_id: str) -> None:
+        """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
+        this run, or a poke to the one already following the output (a child start has
+        no id-conflict policy). A poke that finds it closed in between starts it once more."""
+        for _ in range(2):
+            try:
+                await workflow.start_child_workflow(
+                    FOLLOW_WORKFLOW,
+                    output_id,
+                    id=follow_id(output_id),
+                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                    cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+                )
+                return
+            except WorkflowAlreadyStartedError:
+                pass
+            try:
+                await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
+                    POKE_SIGNAL
+                )
+                return
+            except FailureError:
+                continue
+        # Only a log, so no command: no `patched` (review #1091 3). The progress route
+        # starts the follow again once someone opens the output.
+        workflow.logger.warning("could not follow the print", extra={"output_id": output_id})
 
     def _upsert(
         self,

@@ -25,9 +25,10 @@ statement on its own row, so neither can drop the other's change.
 from __future__ import annotations
 
 import logging
+import time
 import types
 from dataclasses import dataclass
-from typing import Any, Literal, Self, Union, get_args, get_origin
+from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -455,14 +456,35 @@ class SettingsStore:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def snapshot(self) -> SettingsSnapshot:
+    def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
+        """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a
+        connection and every statement after it share one deadline. A pool wait that runs
+        out raises ``PoolTimeout``; a statement that does raises ``QueryCanceled``.
+
+        It bounds a read Postgres is slow to answer (a held lock, a slow plan), since
+        ``statement_timeout`` is enforced by the server. The bound starts at the first
+        ``set_config``, so the ``BEGIN`` and ``SET TRANSACTION`` before it are not bounded
+        by it. A connection that gets no reply
+        at all (a half-open socket) is not bounded here: that is #1226. It bounds this
+        read only: a pool-wide statement timeout would also cut short the saves'
+        deliberate lock waits and the migration."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection(timeout=timeout) as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            rows = conn.execute("SELECT name, value FROM settings").fetchall()
-            choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
-            beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
+
+            def read(query: LiteralString) -> list[DictRow]:
+                if deadline is not None:
+                    # statement_timeout bounds each statement on its own, so each one
+                    # gets what is left of the read's budget.
+                    left = max(1, int((deadline - time.monotonic()) * 1000))
+                    conn.execute("SELECT set_config('statement_timeout', %s, true)", [str(left)])
+                return conn.execute(query).fetchall()
+
+            rows = read("SELECT name, value FROM settings")
+            choices = read("SELECT model_id, choices FROM model_print_choices")
+            beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
         stored_rows = {row["name"]: row["value"] for row in rows}
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
@@ -502,8 +524,8 @@ class SettingsStore:
             stored=StoredSettings.model_validate(values), runtime=runtime, sources=sources
         )
 
-    def load(self) -> StoredSettings:
-        return self.snapshot().stored
+    def load(self, timeout: float | None = None) -> StoredSettings:
+        return self.snapshot(timeout).stored
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
@@ -565,17 +587,26 @@ class SettingsStore:
         ).fetchall()
         stored = {row["name"]: row["value"] for row in rows}
 
+        def deployment(name: str) -> Any:
+            # The environment's value, else the default. The inbox is not env-seeded,
+            # so the deployment's `Settings` has no such attribute (#1253).
+            if name in ENV_SEEDED:
+                return getattr(self.defaults, name)
+            return StoredSettings.model_fields[name].get_default(call_default_factory=True)
+
         def merged(name: str) -> Any:
             if name in changes:
                 return changes[name]
             if name in reset or name not in stored:
-                # The deployment's own value: the environment's, else the default.
-                return getattr(self.defaults, name)
+                return deployment(name)
+            if name not in ENV_SEEDED:
+                # Read as `snapshot` reads it: as stored, with no env check to pass.
+                return stored[name]
             try:
                 return check_value(name, stored[name])
             except ValueError:
                 # As `snapshot` reads it: a refused row follows the environment.
-                return getattr(self.defaults, name)
+                return deployment(name)
 
         backend = merged("store_backend") or "local"
         if backend == "bambuddy" and (

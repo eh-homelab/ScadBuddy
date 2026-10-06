@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import shutil
 import threading
+import time
 import zipfile
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -962,6 +965,65 @@ def test_a_patch_without_a_name_leaves_it_alone(client: TestClient) -> None:
     response = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"})
     assert response.status_code == 200
     assert response.json()["name"] == before["name"]
+
+
+def _create_named(client: TestClient, slug: str, name: str) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={"file": (f"{slug}.scad", SOURCE.encode(), "application/octet-stream")},
+    )
+    assert response.status_code == 201, response.text
+    assert client.patch(f"/api/v1/models/{slug}", json={"name": name}).status_code == 200
+
+
+def test_a_rename_to_another_models_name_is_refused_and_nothing_is_committed(
+    client: TestClient,
+) -> None:
+    """#947: the catalogue listed two models of one name, told apart by a badge."""
+    _create_named(client, "gadget", "Gadget")
+    _create_named(client, SLUG, "Widget")
+    before = client.get(f"/api/v1/models/{SLUG}").json()
+
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": " gadget "})
+
+    assert response.status_code == 409, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "gadget" in response.json()["detail"]
+    after = client.get(f"/api/v1/models/{SLUG}").json()
+    assert (after["name"], after["version"]) == ("Widget", before["version"])
+
+
+def test_a_model_keeps_a_name_it_already_shares(client: TestClient, paths: DataPaths) -> None:
+    """A seeded copy has its built-in's name; saving its details unchanged, or with
+    its own name in another case, is not a rename onto another model's."""
+    _create_named(client, "gadget", "Gadget")
+    _create_named(client, SLUG, "Widget")
+    meta = paths.model_meta(SLUG)
+    meta.write_text(json.dumps({**json.loads(meta.read_text()), "name": "Gadget"}))
+
+    same = client.patch(f"/api/v1/models/{SLUG}", json={"name": "Gadget", "description": "d"})
+    recased = client.patch(f"/api/v1/models/{SLUG}", json={"name": "GADGET"})
+
+    assert same.status_code == 200, same.text
+    assert recased.status_code == 200, recased.text
+    assert recased.json()["name"] == "GADGET"
+
+
+def test_a_metadata_edit_moves_updated_at(client: TestClient, paths: DataPaths) -> None:
+    """#947: ``updated_at`` read model.scad alone, so an Edit details commit left
+    "Updated 45 minutes ago" on the card."""
+    _create(client)
+    hour_ago = time.time() - 3600
+    for path in (paths.model_source(SLUG), paths.model_meta(SLUG)):
+        os.utime(path, (hour_ago, hour_ago))
+    before = datetime.fromisoformat(client.get(f"/api/v1/models/{SLUG}").json()["updated_at"])
+
+    patched = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"}).json()
+
+    after = datetime.fromisoformat(patched["updated_at"])
+    assert after - before > timedelta(minutes=30)
+    listed = next(row for row in client.get("/api/v1/models").json() if row["slug"] == SLUG)
+    assert listed["updated_at"] == patched["updated_at"]
 
 
 # ── hostile JSON ──────────────────────────────────────────────────────────────

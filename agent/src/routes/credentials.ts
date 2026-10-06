@@ -15,7 +15,7 @@ import type { ConnectionTest } from '../harness/testConnection.js'
 import { assertGatewayHostAllowed, EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type KekStatus, SealError } from '../secrets.js'
-import { jsonBodyLimit, type RemoteAddress, uiRequestProblem } from './guard.js'
+import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/credentials (issue #255; several credentials since #1093). The
@@ -235,6 +235,12 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   // Every write is outward tier; see guard.ts for what is and is not checked.
   app.on(['PUT', 'DELETE', 'POST'], [base, `${base}/*`], async (c, next) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress)
+    if (problem) return c.json({ detail: problem }, 403)
+    await next()
+  })
+  // Reads are the UI's too, as every sibling read is (#989).
+  app.on('GET', [base, `${base}/*`], async (c, next) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'credential reads')
     if (problem) return c.json({ detail: problem }, 403)
     await next()
   })

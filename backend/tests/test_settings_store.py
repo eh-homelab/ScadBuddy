@@ -459,6 +459,30 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "local"
 
 
+def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1253: the inbox is not env-seeded, so with no row its value is StoredSettings'
+    default, not an attribute of the deployment's ``Settings`` (which has none)."""
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="bambuddy",
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        with pytest.raises(StoreNotReadyError, match="library folder"):
+            store.save(SettingsPatch(bambuddy_url="https://b.test"))
+        store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+        # A stored inbox counts: it is not refused as an unknown env setting.
+        store.save(SettingsPatch(bambuddy_url="https://c.test"))
+        assert store.load().bambuddy_url == "https://c.test"
+    finally:
+        store.close()
+
+
 def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     store: SettingsStore, settings: Settings
 ) -> None:
@@ -478,6 +502,68 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
 
     store.forget_remembered()
     assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_a_bounded_settings_read_gives_up_on_a_held_table(settings: Settings) -> None:
+    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
+    the bound is this read's own, so the next read on the same connection is not
+    bounded by it."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    try:
+        before = _connection_and_bound(store)
+        with psycopg.connect(settings.database_url) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=0.2)
+        after = _connection_and_bound(store)
+    finally:
+        store.close()
+    assert after == before
+
+
+def _connection_and_bound(store: SettingsStore) -> tuple[int, str]:
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT pg_backend_pid() AS pid, current_setting('statement_timeout') AS bound"
+        ).fetchone()
+    assert row is not None
+    return row["pid"], row["bound"]
+
+
+def test_a_settings_read_timeout_bounds_the_whole_read(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1111: the timeout is the read's whole budget, not each statement's: a read that
+    waits most of it on one table gets only the rest for the next."""
+    budget = 2.0
+    settings_holder = psycopg.connect(settings.database_url)
+    release = threading.Timer(0.6 * budget, settings_holder.commit)
+    try:
+        settings_holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+        with psycopg.connect(settings.database_url) as beds, beds.transaction():
+            beds.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+            release.start()
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=budget)
+            elapsed = time.monotonic() - started
+    finally:
+        release.cancel()
+        release.join()
+        settings_holder.close()
+    # The read waits 0.6 budgets on one table and the rest on the other: about one
+    # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
+    # unit would give up at once.
+    assert 0.9 * budget < elapsed < 1.45 * budget
+
+
+def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
+    store: SettingsStore,
+) -> None:
+    """#1111: the bound leaves an ordinary read alone."""
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
+    assert store.load(timeout=5) == store.load()
 
 
 def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(

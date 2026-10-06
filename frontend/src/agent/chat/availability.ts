@@ -136,7 +136,7 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
 // One read shared by every caller in the tab (the shell, Settings).
 let current: AiAvailability & { state: AiState } = { available: false, state: 'checking' }
 let inflight: Promise<AiAvailability & { state: AiState }> | null = null
-let lastRead = Number.NEGATIVE_INFINITY
+let lastRead = -Infinity
 /** Bumped by `resetAiAvailability`, so a read started before it is dropped. */
 let generation = 0
 const listeners = new Set<() => void>()
@@ -182,7 +182,7 @@ export function resetAiAvailability(next: AiAvailability & { state: AiState } = 
   generation += 1
   current = next
   inflight = null
-  lastRead = Number.NEGATIVE_INFINITY
+  lastRead = -Infinity
 }
 
 function subscribe(listener: () => void) {

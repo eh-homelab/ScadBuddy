@@ -4,6 +4,7 @@ import { api, ApiError } from '../api/client'
 import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
 import { Button } from '../components/ui/Button'
+import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
@@ -25,6 +26,11 @@ export function VersionsPage() {
   const [diffError, setDiffError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  // #975 — a restore rewrites the model, so it is asked about first, and then said.
+  const [confirming, setConfirming] = useState<ModelVersion | null>(null)
+  const [restored, setRestored] = useState('')
+  /** The revision a restore made, to take focus once the list shows it. */
+  const [focusCommit, setFocusCommit] = useState<string | null>(null)
 
   const versions = versionsState.data
   // #184 — a built-in's history is readable, but the server refuses a restore.
@@ -63,14 +69,23 @@ export function VersionsPage() {
     }
   }, [slug, selected, base])
 
-  async function restore(commit: string) {
+  useEffect(() => {
+    if (!focusCommit || !versions?.some((version) => version.commit === focusCommit)) return
+    document.querySelector<HTMLElement>(`[data-version-select="${CSS.escape(focusCommit)}"]`)?.focus()
+    setFocusCommit(null)
+  }, [versions, focusCommit])
+
+  async function restore(version: ModelVersion) {
     setBusy(true)
     setError(undefined)
+    setRestored('')
     try {
-      const created = await api.restoreVersion(slug, commit)
+      const created = await api.restoreVersion(slug, version.commit)
       // Show what just happened, not what was selected before it.
       setSelected(created.commit)
       setBase(PARENT)
+      setRestored(`Restored ${version.short} as a new version, ${created.commit.slice(0, 7)}.`)
+      setFocusCommit(created.commit)
       versionsState.reload()
       modelState.reload()
     } catch (cause) {
@@ -135,6 +150,11 @@ export function VersionsPage() {
           </div>
         )}
 
+        {/* Always in the page, so the message is announced when it lands. */}
+        <p data-testid="versions-status" role="status" className={`text-[12px] text-ok ${restored ? 'mb-3' : ''}`}>
+          {restored}
+        </p>
+
         {error && (
           <p role="alert" className="mb-3 rounded-[6px] bg-warn/10 px-3 py-2 text-[12px] text-warn">
             {error}
@@ -164,7 +184,7 @@ export function VersionsPage() {
                     setSelected(version.commit)
                     setBase(PARENT)
                   }}
-                  onRestore={() => void restore(version.commit)}
+                  onRestore={() => setConfirming(version)}
                   onCustomize={() =>
                     void navigate(`${modelPath(slug)}?version=${encodeURIComponent(version.commit)}`)
                   }
@@ -209,6 +229,36 @@ export function VersionsPage() {
           </div>
         )}
 
+        <Dialog
+          open={confirming !== null}
+          title={`Restore version ${confirming?.short ?? ''}?`}
+          description={
+            current
+              ? `The model's source goes back to ${confirming?.short ?? ''}, as a new version on top of ${current.short}. Nothing is lost: ${current.short} stays in the history.`
+              : undefined
+          }
+          onClose={() => setConfirming(null)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setConfirming(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const version = confirming
+                  setConfirming(null)
+                  if (version) void restore(version)
+                }}
+              >
+                Restore
+              </Button>
+            </>
+          }
+        >
+          <p className="text-[13px] text-muted">{confirming?.message}</p>
+        </Dialog>
+
         {current && (
           <p className="sb-num mt-4 text-[12px] text-faint">
             This model is at {current.short}.
@@ -248,6 +298,7 @@ function VersionRow({
         type="button"
         onClick={onSelect}
         aria-pressed={selected}
+        data-version-select={version.commit}
         className="block w-full text-left"
       >
         <span className="flex items-center gap-2">
@@ -266,11 +317,17 @@ function VersionRow({
       </button>
 
       <div className="mt-2 flex flex-wrap gap-2">
-        <Button size="sm" onClick={onCustomize}>
+        {/* #975 — named after the revision, so a list of these buttons tells them apart. */}
+        <Button size="sm" onClick={onCustomize} aria-label={`Customize this version, ${version.short}`}>
           Customize this version
         </Button>
         {canRestore && (
-          <Button size="sm" onClick={onRestore} disabled={busy || version.current}>
+          <Button
+            size="sm"
+            onClick={onRestore}
+            disabled={busy || version.current}
+            aria-label={`Restore this version, ${version.short}`}
+          >
             Restore this version
           </Button>
         )}

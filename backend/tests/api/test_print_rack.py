@@ -273,9 +273,9 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
     assert asyncio.run(rack_usage(client).picked_items([51])) == set()
 
 
-def test_the_rack_feature_hooks_the_settle_write_into_the_watcher(client: TestClient) -> None:
+def test_the_rack_feature_hooks_the_settle_write_into_the_follow(client: TestClient) -> None:
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    assert len(state.print_watcher.on_settled) == 1
+    assert len(state.print_follower.on_settled) == 1
 
 
 CHECK_04 = {"nozzles": [{"size": "0.4"}], "tier": "standard"}
@@ -543,3 +543,72 @@ def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: 
     assert response.status_code == 200, response.text
     assert not [c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]
     assert not [w for w in response.json()["warnings"] if w["kind"].startswith("rack-")]
+
+
+def _both_sides_high_flow() -> None:
+    """The rack recording with a 0.4 High Flow mounted on both sides (#1238)."""
+    status = invented_status()
+    high_flow = {"nozzle_type": "HH01", "nozzle_diameter": "0.4"}
+    status["nozzles"] = [high_flow, high_flow]
+    for entry in status["nozzle_rack"]:
+        if entry["id"] in (0, 1):
+            entry.update(high_flow)
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+
+
+def _high_flow_sides(warnings: list[dict[str, Any]]) -> set[str]:
+    return {
+        side
+        for warning in warnings
+        if warning["kind"] == "hf-mounted"
+        for side in ("left", "right")
+        if warning["message"].startswith(f"The {side} nozzle")
+    }
+
+
+@respx.mock
+def test_a_rack_pick_drops_the_rack_sides_high_flow_warning(client: TestClient, model: str) -> None:
+    """#1238: the rack swaps a Standard hotend onto the rack side (the right), so the
+    mounted High Flow there no longer matters. The left's warning stands."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id)
+
+    assert result["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(result["warnings"]) == {"left"}
+
+
+@respx.mock
+def test_without_a_rack_pick_both_high_flow_warnings_stand(client: TestClient, model: str) -> None:
+    """Left to Bambuddy, nothing is picked here, so nothing says what the right gets."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id, rack_algorithm="bambuddy")
+
+    assert result["rack"]["position"] is None
+    assert _high_flow_sides(result["warnings"]) == {"left", "right"}
+
+
+@respx.mock
+def test_a_run_that_picked_from_the_rack_drops_the_rack_sides_high_flow_warning(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == {"left"}

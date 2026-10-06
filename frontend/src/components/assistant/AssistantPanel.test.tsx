@@ -1,16 +1,17 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { useRef, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { Link, Route, Routes } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
+import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { HttpResponse, http } from 'msw'
 import { AppShell } from '../AppShell'
+import { Dialog } from '../ui/Dialog'
 import { ResourceSessions } from './ResourceSessions'
 
 /** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
@@ -215,6 +216,20 @@ describe('assistant panel', () => {
     window.localStorage.removeItem('scadbuddy.assistant.advanced')
   })
 
+  it('says on an empty chat what Advanced will show, so the switch visibly takes effect (#1488)', async () => {
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: 'New chat' }))
+    const note = /Advanced: tool arguments, sources and memory details will be shown/
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.getByText(note)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+  })
+
   it('holds the outward step until Approve, then sends the decision', async () => {
     const { user } = await openAndSend()
     const card = screen.getByRole('region', { name: 'Needs your approval' })
@@ -227,14 +242,14 @@ describe('assistant panel', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     })
-    expect(sentOf('approval.decision')).toEqual([])
+    expect(respondRequests()).toEqual([])
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
     expect(screen.getByTestId('agent-status')).toHaveTextContent('Waiting for approval')
 
     await user.click(approve)
-    expect(sentOf('approval.decision')).toEqual([
-      { v: 1, type: 'approval.decision', sessionId: 'chat-1', id: expect.any(String), approve: true },
-    ])
+    // Through the one respond route (#815), not the socket.
+    expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
+    expect(sentOf('approval.decision')).toEqual([])
     await screen.findByText('Queued 2 copies in the Keychains project.')
     await screen.findByText('Sent. Two copies are in the queue.')
     expect(within(card).getByText('Approved by You.')).toBeInTheDocument()
@@ -244,7 +259,7 @@ describe('assistant panel', () => {
   it('Deny sends a refusal and nothing is sent', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
-    expect(sentOf('approval.decision')).toMatchObject([{ approve: false }])
+    expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
     await screen.findByText('Denied: nothing was sent.')
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })
@@ -320,6 +335,51 @@ describe('assistant panel', () => {
     expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   })
 
+  describe('keyboard focus (#992)', () => {
+    it('Stop by keyboard leaves focus in the composer, not on <body>', async () => {
+      const { user } = await openAndSend()
+      screen.getByRole('button', { name: 'Stop' }).focus()
+      await user.keyboard('{Enter}')
+      await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+      expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
+    })
+
+    it('picking a session by keyboard puts focus in its composer, and marks it the open one', async () => {
+      const { user } = await openAndSend()
+      await user.click(screen.getByRole('button', { name: 'New chat' }))
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const picker = screen.getByRole('navigation', { name: 'Sessions' })
+      within(picker).getByRole('button', { name: /Make the name bigger/ }).focus()
+      await user.keyboard('{Enter}')
+
+      expect(screen.queryByRole('navigation', { name: 'Sessions' })).not.toBeInTheDocument()
+      await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus())
+
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const reopened = screen.getByRole('navigation', { name: 'Sessions' })
+      const open = within(reopened).getByRole('button', { name: /Make the name bigger/ })
+      expect(open).toHaveAttribute('aria-current', 'true')
+      expect(open).toHaveTextContent('Open')
+      for (const other of within(reopened).getAllByRole('button').filter((b) => b !== open)) {
+        expect(other).not.toHaveAttribute('aria-current')
+        expect(other).not.toHaveTextContent(/\bOpen\b/)
+      }
+    })
+
+    it("picking an agent's session puts focus on Take over, since its composer is locked", async () => {
+      const { user } = renderShell()
+      await user.click(screen.getByRole('button', { name: 'Assistant' }))
+      await user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+      within(screen.getByRole('navigation', { name: 'Sessions' }))
+        .getByRole('button', { name: /Tune the gridfinity bin/ })
+        .focus()
+      await user.keyboard('{Enter}')
+
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Take over' })).toHaveFocus())
+    })
+  })
+
   it('lists sessions with origin and owner, and takes over one an agent controls', async () => {
     const { user } = renderShell()
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
@@ -341,6 +401,8 @@ describe('assistant panel', () => {
     expect(sentOf('session.handoff')).toEqual([{ v: 1, type: 'session.handoff', sessionId: EXTERNAL_SESSION_ID }])
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled())
     expect(screen.queryByText('Controlled by Claude Desktop')).not.toBeInTheDocument()
+    // #992 — Take over is gone: focus is where the next message is typed.
+    expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
   })
 
   it("opens a session that changed the page's model in the panel, closed or already open (#931)", async () => {
@@ -589,5 +651,132 @@ describe('assistant panel', () => {
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
     expect(await screen.findByText(/Ignored a malformed message/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+})
+
+/** A page with a dialog, as the customizer's Print is. */
+function DialogPage({ startOpen = false }: { startOpen?: boolean }) {
+  const [open, setOpen] = useState(startOpen)
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Print…
+      </button>
+      <Dialog open={open} title="Print" onClose={() => setOpen(false)} footer={<button type="button">Print it</button>}>
+        <input aria-label="Copies" />
+      </Dialog>
+    </>
+  )
+}
+
+describe('the assistant beside a dialog (#798)', () => {
+  async function openBoth() {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    return { ...view, composer, dialog }
+  }
+
+  it('lets the chat be typed in while the dialog stays open', async () => {
+    const { user, composer, dialog } = await openBoth()
+    expect(within(dialog).getByRole('textbox', { name: 'Copies' })).toHaveFocus()
+
+    await user.click(composer)
+    await user.keyboard('Which spool is the grey one?')
+    expect(composer).toHaveValue('Which spool is the grey one?')
+    expect(dialog).toBeInTheDocument()
+  })
+
+  it('is not hidden from screen readers by the dialog while it is beside it', async () => {
+    const { user, dialog } = await openBoth()
+    expect(dialog).not.toHaveAttribute('aria-modal', 'true')
+
+    // Without the chat beside it, the dialog is modal again.
+    await user.click(screen.getByRole('button', { name: 'Close assistant' }))
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+  })
+
+  it('does not close the dialog for an Escape pressed in the chat', async () => {
+    const { user, composer } = await openBoth()
+    await user.click(composer)
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('moves between the dialog and the chat with Ctrl+`', async () => {
+    const { composer, dialog } = await openBoth()
+    const copies = within(dialog).getByRole('textbox', { name: 'Copies' })
+    expect(copies).toHaveFocus()
+
+    pressShortcut()
+    await waitFor(() => expect(composer).toHaveFocus())
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeVisible()
+    pressShortcut()
+    await waitFor(() => expect(copies).toHaveFocus())
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeVisible()
+  })
+
+  it('leaves focus in the chat when a dialog opens while the user is typing there', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    // As the agent's open_print_dialog does: the dialog opens without the user's click.
+    fireEvent.click(screen.getByRole('button', { name: 'Print…' }))
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(composer).toHaveFocus()
+  })
+})
+
+describe('a dialog with no room beside the assistant (#798)', () => {
+  /** Lays the panel out as on a phone: no 360px left of it for the dialog. */
+  function narrow() {
+    const panel = screen.getByRole('complementary', { name: 'Assistant' })
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 520, width: 400, top: 0, bottom: 800, height: 800, x: 120, y: 0, toJSON: () => ({}),
+    })
+  }
+  afterEach(() => vi.restoreAllMocks())
+
+  it('covers the chat: modal, and takes focus from the composer when it opens', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    narrow()
+    // Opened as the agent's open_print_dialog does, with focus still in the chat.
+    fireEvent.click(screen.getByRole('button', { name: 'Print…' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+    expect(within(dialog).getByRole('textbox', { name: 'Copies' })).toHaveFocus()
+  })
+
+  it('does not send Ctrl+` focus into the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+
+    pressShortcut()
+    await act(async () => {})
+    expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
+  it('owns Escape, even from the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    composer.focus()
+
+    await view.user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Print' })).not.toBeInTheDocument()
   })
 })

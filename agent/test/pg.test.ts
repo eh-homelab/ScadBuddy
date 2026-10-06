@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import postgres from 'postgres'
@@ -23,6 +23,31 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const SECRET = 'sk-ant-api03-postgres-test-secret-5b5b'
+
+/**
+ * Holds MIGRATION_LOCK on another connection until the test finishes, standing in
+ * for one of the other pg suites mid-migration on the shared key (#1643). A try,
+ * so it never queues itself: if another suite holds the key, that is the same
+ * contention.
+ */
+async function holdSharedLock(): Promise<void> {
+  const contender = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
+  let contending!: () => void
+  const isContending = new Promise<void>((resolve) => (contending = resolve))
+  let stop!: () => void
+  const stopped = new Promise<void>((resolve) => (stop = resolve))
+  const contention = contender.begin(async (tx) => {
+    await tx`SELECT pg_try_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+    contending()
+    await stopped
+  })
+  onTestFinished(async () => {
+    stop()
+    await contention.catch(() => {})
+    await contender.end({ timeout: 5 })
+  })
+  await isContending
+}
 
 describe.skipIf(!TEST_DATABASE_URL)(
   `the ai_* tables in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
@@ -63,6 +88,30 @@ describe.skipIf(!TEST_DATABASE_URL)(
         }
       })
 
+      it('the NULL-safe done checks apply over a row the loose ones let through, clearing it', async () => {
+        const strict = '20261005T1800Z_attention_done_null_checks'
+        await migrate(db.sql, MIGRATIONS.filter((m) => m.id < strict))
+        const [session] = await db.sql<{ id: string }[]>`
+          INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+          VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1)
+          RETURNING id`
+        // A plain question (attention_reason NULL) carrying a summary and the unattended flag.
+        await db.sql`
+          INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions, tool, summary, unattended)
+          VALUES (gen_random_uuid(), ${session!.id}, gen_random_uuid(), 'toolu_q', '[]', 'AskUserQuestion', 'x', true)`
+        expect(await migrate(db.sql, MIGRATIONS.filter((m) => m.id <= strict))).toEqual([strict])
+        expect(await db.sql`SELECT summary, unattended FROM ai_questions`).toEqual([{ summary: null, unattended: false }])
+        expect(
+          await db.sql`
+            SELECT conname, convalidated FROM pg_constraint
+            WHERE conrelid = 'ai_questions'::regclass AND conname IN ('ai_questions_summary_check', 'ai_questions_unattended_check')
+            ORDER BY conname`,
+        ).toEqual([
+          { conname: 'ai_questions_summary_check', convalidated: true },
+          { conname: 'ai_questions_unattended_check', convalidated: true },
+        ])
+      })
+
       it('apply a later migration on top of an existing schema', async () => {
         await migrate(db.sql)
         const next = [...MIGRATIONS, { id: '29990101T0000Z_example', sql: 'CREATE TABLE ai_example (id int PRIMARY KEY)' }]
@@ -71,20 +120,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it('apply a file with an OLDER timestamp that arrives after newer ones ran (a late-merged branch)', async () => {
+        await holdSharedLock()
+        // The test's own key (#1643): it migrates several times, and queued behind the
+        // other pg suites on MIGRATION_LOCK it ran past vitest's 5 s timeout.
+        const own = { lockKey: MIGRATION_LOCK + 16431n }
         const newer = { id: '29990102T0000Z_newer', sql: 'CREATE TABLE ai_newer (id int PRIMARY KEY)' }
         const older = {
           id: '29990101T0000Z_older',
           sql: 'CREATE TABLE ai_older (id int PRIMARY KEY); INSERT INTO ai_newer VALUES (1)',
         }
-        expect(await migrate(db.sql, [...MIGRATIONS, newer])).toEqual([...MIGRATIONS.map((m) => m.id), newer.id])
-        expect(await migrate(db.sql, [...MIGRATIONS, newer, older])).toEqual([older.id])
+        expect(await migrate(db.sql, [...MIGRATIONS, newer], own)).toEqual([...MIGRATIONS.map((m) => m.id), newer.id])
+        expect(await migrate(db.sql, [...MIGRATIONS, newer, older], own)).toEqual([older.id])
         expect(await db.sql`SELECT * FROM ai_newer`).toHaveLength(1)
         // Several unapplied files go in timestamp order, whatever order they were passed in.
         const [c, d] = [
           { id: '29990104T0000Z_d', sql: 'INSERT INTO ai_c VALUES (1)' },
           { id: '29990103T0000Z_c', sql: 'CREATE TABLE ai_c (id int)' },
         ]
-        expect(await migrate(db.sql, [...MIGRATIONS, newer, older, c!, d!])).toEqual([d!.id, c!.id])
+        expect(await migrate(db.sql, [...MIGRATIONS, newer, older, c!, d!], own)).toEqual([d!.id, c!.id])
       })
 
       it('leave a ledger row for a file this build does not have alone', async () => {
@@ -100,16 +153,20 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it('record a checksum and refuse an applied file whose SQL changed (finding 10)', async () => {
-        await migrate(db.sql)
+        await holdSharedLock()
+        // The test's own key (#1643): it migrates several times, and queued behind the
+        // other pg suites on MIGRATION_LOCK it ran past vitest's 5 s timeout.
+        const own = { lockKey: MIGRATION_LOCK + 16432n }
+        await migrate(db.sql, MIGRATIONS, own)
         const rows = await db.sql<{ checksum: string }[]>`SELECT checksum FROM ai_migrations ORDER BY id`
         expect(rows.map((r) => r.checksum)).toEqual(MIGRATIONS.map(migrationChecksum))
 
         const first = MIGRATIONS[0]!.id
         const edited = MIGRATIONS.map((m, i) => (i === 0 ? { ...m, sql: `${m.sql}\n-- edited` } : m))
-        await expect(migrate(db.sql, edited)).rejects.toThrow(MigrationChecksumError)
-        await expect(migrate(db.sql, edited)).rejects.toThrow(`ai migration ${first} was applied with different SQL`)
+        await expect(migrate(db.sql, edited, own)).rejects.toThrow(MigrationChecksumError)
+        await expect(migrate(db.sql, edited, own)).rejects.toThrow(`ai migration ${first} was applied with different SQL`)
         // The original still passes.
-        expect(await migrate(db.sql)).toEqual([])
+        expect(await migrate(db.sql, MIGRATIONS, own)).toEqual([])
       })
 
       describe('from the positional ledger (before #491)', () => {
@@ -216,39 +273,54 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       it('give up on a held advisory lock after lock_timeout, and ready() retries (finding 3)', async () => {
         const errors: unknown[] = []
+        // The test's own key (#1249): other pg suites migrate their schemas under
+        // MIGRATION_LOCK in parallel and can hold it past this connection's 200 ms
+        // lock_timeout, so under the shared key the retries below raced them.
+        const lockKey = MIGRATION_LOCK + 1249n
         const holder = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
+        // Another suite migrating, holding the shared lock for the whole test. With
+        // the test's own key it makes no difference.
+        const contender = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
         const waiting = connectDatabase(TEST_DATABASE_URL!, {
           searchPath: schema,
-          migrate: { lockTimeoutMs: 200 },
+          migrate: { lockTimeoutMs: 200, lockKey },
           onMigrationError: (err) => errors.push(err),
         })
         let release!: () => void
         const released = new Promise<void>((resolve) => (release = resolve))
         let locked!: () => void
         const isLocked = new Promise<void>((resolve) => (locked = resolve))
+        let contending!: () => void
+        const isContending = new Promise<void>((resolve) => (contending = resolve))
+        let stopContending!: () => void
+        const contended = new Promise<void>((resolve) => (stopContending = resolve))
         const held = holder.begin(async (tx) => {
-          await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+          await tx`SELECT pg_advisory_xact_lock(${lockKey.toString()}::bigint)`
           locked()
           await released
         })
+        const contention = contender.begin(async (tx) => {
+          await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
+          contending()
+          await contended
+        })
         try {
-          await isLocked
+          await Promise.all([isLocked, isContending])
           const started = Date.now()
           expect(await waiting.ready()).toBe(false)
           expect(Date.now() - started).toBeLessThan(5000)
           expect(String(errors[0])).toMatch(/lock timeout/i)
           release()
           await held
-          // Test files running in parallel migrate their own schemas under the
-          // same advisory lock and can hold it past this connection's 200 ms
-          // lock_timeout, so allow ready() a few retries.
-          let ready = false
-          for (let i = 0; i < 20 && !ready; i++) ready = await waiting.ready()
-          expect(ready).toBe(true)
+          // Nothing else takes the test's key, so the first retry gets it.
+          expect(await waiting.ready()).toBe(true)
         } finally {
           release()
+          stopContending()
           await held.catch(() => {})
+          await contention.catch(() => {})
           await holder.end({ timeout: 5 })
+          await contender.end({ timeout: 5 })
           await waiting.close()
         }
       })

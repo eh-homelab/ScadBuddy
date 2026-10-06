@@ -454,12 +454,17 @@ export const MAX_TOUCHES_PER_CALL = 100
 /** The longest id stored; longer ones are cut (they come from a tool result). */
 export const ID_MAX = 300
 
-/** At most ID_MAX UTF-16 units, cut between code points: never half a surrogate pair. */
-function bounded(value: string | null | undefined): string | null {
-  if (value == null || value.length <= ID_MAX) return value ?? null
-  const kept = value.slice(0, ID_MAX)
+/** The first `max` UTF-16 units of `value`, cut between code points: never half a surrogate pair. */
+export function cutBetweenCodePoints(value: string, max: number): string {
+  if (value.length <= max) return value
+  const kept = value.slice(0, max)
   const last = kept.charCodeAt(kept.length - 1)
   return last >= 0xd800 && last <= 0xdbff ? kept.slice(0, -1) : kept
+}
+
+/** At most ID_MAX UTF-16 units, cut between code points: never half a surrogate pair. */
+function bounded(value: string | null | undefined): string | null {
+  return value == null ? null : cutBetweenCodePoints(value, ID_MAX)
 }
 
 export class SessionResources implements TouchedSink {

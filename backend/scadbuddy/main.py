@@ -4,9 +4,9 @@ import asyncio
 import importlib
 import logging
 import pkgutil
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Final
 
@@ -20,10 +20,12 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -53,9 +55,11 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     bambuddy_worker,
     connect,
+    follow_worker,
     reconcile_lost_operations,
     reconcile_lost_runs,
 )
+from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -351,13 +355,14 @@ async def _prepare_catalogue(state: AppState) -> None:
 
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
-    queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure leaves the projection to the
-    lifespan's guard, which closes everything a failed start opened, each once."""
+    queue left running, connect the in-process worker's client, prune, and start the
+    service (which settles the pending rows no workflow will run, then prunes). A
+    failure leaves the projection to the lifespan's guard, which closes everything a
+    failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
     await _prepare_catalogue(state)
-    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # What a pre-Temporal release was running, nothing
     # will finish (#546).
     failed = await asyncio.to_thread(projection.fail_legacy_running)
     if failed:
@@ -368,15 +373,6 @@ async def _start_render(state: AppState) -> None:
     if settings.temporal_worker_inprocess:
         # Eager: a worker cannot run on the API's lazy client (dev and tests).
         state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-    # Before the reconciler's first pass (`service.start`), which starts only rows
-    # that name a workflow: what a pre-Temporal release's queue left pending
-    # becomes this path's.
-    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-    if adopted:
-        logger.info(
-            "adopted the renders the legacy queue left pending",
-            extra={"count": len(adopted), "job_ids": adopted},
-        )
     await service.prune()
     await service.start()
 
@@ -452,50 +448,90 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
-        watcher=state.print_watcher,
         rack=state.components.get(RACK_USAGE),
+        links=state.print_links,
     )
     ops = state.components.get(OPERATIONS)
     activities = [
         *PrintActivities(deps).all(),
         *operation_activities(ops.store, state.settings_store, ops.kinds),
     ]
-    while not stop.is_set():
-        # A worker that fails is said at once and started again: until then every
-        # print run waits on a queue nothing polls.
-        worker = bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities)
-        if not await _serve_until(
-            worker, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
-        ):
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    # Beside the workers (review #1091 4): each follow it starts may wait out an RPC
+    # timeout on a slow Temporal, and the queue is polled meanwhile.
+    handoff = asyncio.create_task(_hand_off_watches(state, client))
+    try:
+        while not stop.is_set():
+            # A worker that fails is said at once and started again: until then every
+            # print run waits on a queue nothing polls.
+            queue = settings.temporal_task_queue_bambuddy
+            workers = [
+                bambuddy_worker(client, queue, activities),
+                follow_worker(
+                    client,
+                    queue,
+                    FollowActivities(
+                        state.print_follower, running=state.metrics.print_follows_running
+                    ).follow_print,
+                ),
+            ]
+            if not await _serve_until(
+                workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+            ):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        # A row whose follow did not start stays for the next boot.
+        handoff.cancel()
+        with suppress(asyncio.CancelledError):
+            await handoff
+
+
+async def _hand_off_watches(state: AppState, client: Client) -> None:
+    """Follow on Temporal the prints the old in-process watcher recorded (#268)."""
+    try:
+        resumed = await resume_followed(
+            state.projection.pool,
+            client,
+            state.settings.temporal_task_queue_bambuddy,
+            datetime.now(UTC),
+        )
+        if resumed:
+            logger.info(
+                "following on Temporal the prints the old watcher followed",
+                extra={"output_ids": resumed},
+            )
+    except Exception:
+        logger.exception("could not hand the old watcher's prints to FollowPrint")
 
 
 async def _serve_until(
-    worker: Worker, stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
+    workers: Sequence[Worker], stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
 ) -> bool:
-    """Run ``worker`` and ``alongside`` until ``stop``: True. A worker that ends first,
+    """Run ``workers`` and ``alongside`` until ``stop``: True. A worker that ends first,
     failed or not, is said at once (review #1061: a poller that dies while running
-    would otherwise leave the queue unpolled until the pod restarts): False."""
-    running = asyncio.create_task(worker.run())
+    would otherwise leave the queue unpolled until the pod restarts), and the others
+    are shut down so all start again together: False."""
+    running = [asyncio.create_task(worker.run()) for worker in workers]
     beside = asyncio.create_task(alongside)
     stopping = asyncio.create_task(stop.wait())
     try:
-        await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({*running, stopping}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         beside.cancel()
         stopping.cancel()
-    if running.done():
-        error = running.exception()
+    ended = [task for task in running if task.done()]
+    for task in ended:
+        error = task.exception()
         logger.error(
             "the print worker failed; starting it again",
             exc_info=error if error is not None else RuntimeError("the worker stopped"),
         )
-        return False
-    await worker.shutdown()
-    with suppress(Exception):
-        await running
-    return True
+    for worker, task in zip(workers, running, strict=True):
+        if not task.done():
+            await worker.shutdown()
+            with suppress(Exception):
+                await task
+    return not ended
 
 
 async def _end_lost_runs_until(
@@ -595,7 +631,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
-    # its reconciler), so it runs inside the `try` whose `finally` releases them: a
+    # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
     backfill: asyncio.Task[None] | None = None
@@ -618,8 +654,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
-        # Follows the prints a previous process was following (#268).
-        await state.print_watcher.start()
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
         # After the projection has opened: the jobs in it are references too.
@@ -664,10 +698,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
-        # Before the watcher: a run's last activity starts one.
         stop_printing.set()
         await _stop_print_worker(printing)
-        await state.print_watcher.aclose()
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)
@@ -730,6 +762,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
         ],
+    )
+    # A write from a page on another origin is refused before its body is read (#962).
+    app.add_middleware(
+        CrossSiteGate,
+        public_url=lambda: state.settings_store.load().public_url,
+        allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth

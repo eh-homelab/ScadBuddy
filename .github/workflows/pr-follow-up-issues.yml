@@ -33,6 +33,11 @@ jobs:
           fetch-depth: 1
 
       - name: Create Follow-Up Issues
+        id: follow-up
+        # Never red the job on its own: whether the run DELIVERED is decided by
+        # the verify step below, from the result, not from this step's exit
+        # status (#1020 — this step was `success` on a run that filed nothing).
+        continue-on-error: true
         uses: anthropics/claude-code-action@ed670b4cf9de2a5a570d130d2f6197b9e543cd64 # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
@@ -40,7 +45,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "*"
           claude_args: |
-            --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),mcp__github__create_issue,mcp__github__add_issue_comment,mcp__github__update_issue,mcp__github__search_issues" --model "claude-sonnet-5"
+            --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),mcp__github__create_issue,mcp__github__add_issue_comment,mcp__github__update_issue,mcp__github__search_issues" --model "claude-opus-5-5"
 
           prompt: |
             REPO: ${{ github.repository }}
@@ -53,9 +58,32 @@ jobs:
             2. Use `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments` to get inline review comments
             3. Use `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews` to get review bodies
 
+            ## Which findings to file: Blocking only
+
+            File issues ONLY for outstanding **Blocking** findings. Never file a
+            `pr-feedback` issue for a Non-blocking finding — those do not gate the
+            merge and filing them is what flooded the backlog.
+
+            - The review summary (the latest `claude[bot]` comment ending in a
+              `<!-- claude-review-sha: ... -->` marker) has a `## Blocking` and a
+              `## Non-blocking` section. Take findings from its `## Blocking`
+              section only, and only those still outstanding (not fixed by a later
+              push — the latest summary is authoritative for that).
+            - A review summary with no `## Blocking` section is an older-format
+              review. From it, file only findings that are correctness bugs a user
+              can hit, security issues, data-loss / crash-consistency gaps, CI /
+              merge-gate integrity problems, violations of the repo's verified
+              facts (spec §3), or a change with no test at all. Skip extra
+              edge-case tests, wording, naming, style, refactors, small perf and
+              speculative hardening.
+            - Apply the same Blocking bar to human review comments and inline
+              comments: file them only if they meet it.
+            - If no outstanding Blocking findings remain, create no issues; post
+              the summary comment saying so.
+
             ## Feedback Grouping
 
-            Group all review findings into small, logically related chunks optimized for concurrent fixes. This prevents merge conflicts when multiple people address feedback simultaneously.
+            Group the outstanding Blocking findings into small, logically related chunks optimized for concurrent fixes. This prevents merge conflicts when multiple people address feedback simultaneously.
 
             ### Grouping Rules
 
@@ -84,7 +112,20 @@ jobs:
 
             ### Output: Create GitHub Issues
 
-            For each NEW feedback group (not already covered by existing issues), create a separate GitHub issue using `mcp__github__create_issue`:
+            For each NEW feedback group (not already covered by existing issues), create a separate GitHub issue, yourself, one call per issue (no sub-agents — a handful of issues does not need them).
+
+            Use `mcp__github__create_issue`, or `gh issue create` passing the body on
+            stdin through a quoted heredoc, in a single Bash call:
+
+              gh issue create --repo ${{ github.repository }} --label pr-feedback --title "<title>" --body-file - <<'FOLLOW_UP_EOF'
+              <body>
+              FOLLOW_UP_EOF
+
+            Never `--body "$(cat <<EOF ...)"`, and never write the body to a file
+            first: command substitution (`$(...)`) and redirection (`>`, `tee`) are
+            refused in this job, so each attempt is denied and the issue is never
+            filed (#1020: PR #973's run hit 8 denials and filed nothing). Put the
+            closing `FOLLOW_UP_EOF` alone on its own line with no leading spaces.
 
             **Title format:** `[PR #${{ github.event.pull_request.number }} feedback] <group description>`
 
@@ -115,17 +156,43 @@ jobs:
 
             **Labels:** Apply `pr-feedback`.
 
-            ### Delegate Issue Creation
-
-            After you have completed the review and grouping, delegate the creation of individual GitHub issues to Sonnet sub-agents in parallel (one sub-agent per group). Provide each sub-agent with the exact title, body, and labels.
-
             ### Summary Comment
 
             After all feedback issues are created, post a single summary comment on the PR listing:
-            - Total number of findings
+            - Total number of Blocking findings filed (Non-blocking ones are never filed)
             - Number of groups created
             - Links to each created issue with its group title
             - Which groups can be fixed concurrently vs. which need sequencing
+
+            Post it with `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file - <<'FOLLOW_UP_EOF'`,
+            the same heredoc shape as above. **Its last line MUST be exactly:**
+
+                <!-- claude-follow-up: run=${{ github.run_id }} issues=<numbers> -->
+
+            where `<numbers>` is a comma-separated list, no spaces, of every open
+            `pr-feedback` issue that now tracks one of this PR's outstanding
+            Blocking findings (created or updated by this run, or already open and
+            still relevant), or `none` when there are no outstanding Blocking findings.
+            The workflow checks that this comment exists and that every issue it
+            names is open, labelled `pr-feedback` and titled for this PR; a run
+            whose summary is missing or wrong fails. Post the summary even when
+            something went wrong, saying what, so the PR records it.
+
+      # The run's real result (#1020). Fails when the agent step did not
+      # complete, when it posted no summary for THIS run, or when the summary
+      # names an issue that is not an open pr-feedback issue for this PR. Also
+      # names every permission-denied call. Rules and tests live in
+      # .github/scripts/follow-up-verify{,.test}.sh.
+      - name: Verify the follow-up run delivered
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          EXECUTION_FILE: ${{ steps.follow-up.outputs.execution_file }}
+          STEP_OUTCOME: ${{ steps.follow-up.outcome }}
+        run: bash .github/scripts/follow-up-verify.sh
 
   # `always()` ALONE is wrong here, and it is wrong in a way that only shows up
   # on unrelated labels. This workflow triggers on `pull_request: labeled` — any

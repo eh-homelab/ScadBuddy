@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -60,6 +61,20 @@ def test_an_unhandled_error_becomes_a_500_problem(app: FastAPI) -> None:
     assert response.json()["detail"] == "RuntimeError: boom"
 
 
+def test_a_database_error_s_text_is_not_echoed(app: FastAPI) -> None:
+    """#965: a driver message carries SQL and bound values; only its type is said."""
+
+    def explode() -> Catalogue:
+        raise psycopg.errors.UntranslatableCharacter("unnamed portal parameter $3 = 'secret'")
+
+    app.dependency_overrides[get_catalogue] = explode
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/models")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "UntranslatableCharacter"
+
+
 @pytest.fixture
 def frontend(tmp_path: Path) -> Path:
     directory = tmp_path / "dist"
@@ -67,6 +82,35 @@ def frontend(tmp_path: Path) -> Path:
     (directory / "index.html").write_text(INDEX, encoding="utf-8")
     (directory / "assets" / "app.js").write_text("console.log(1)\n", encoding="utf-8")
     return directory
+
+
+WRONG_METHODS = (
+    ("DELETE", "/api/v1/settings", "GET, PUT"),
+    ("OPTIONS", "/api/v1/models", "GET, POST"),
+    ("POST", "/healthz", "GET"),
+)
+
+
+def assert_allow_names_every_method(client: TestClient) -> None:
+    """#1318: RFC 9110 wants every method in Allow, not just the first route's."""
+    for method, path, allow in WRONG_METHODS:
+        response = client.request(method, path, headers={"Origin": "http://testserver"})
+        assert response.status_code == 405, path
+        assert response.headers["allow"] == allow, path
+        assert response.headers["content-type"] == "application/problem+json", path
+
+
+def test_a_405_allows_every_method_the_path_has(client: TestClient) -> None:
+    assert_allow_names_every_method(client)
+
+
+def test_a_405_allows_every_method_the_path_has_beside_the_spa(
+    frontend: Path, settings: Settings
+) -> None:
+    """With the bundle mounted at ``/`` the router never raises the 405 itself."""
+    settings = settings.model_copy(update={"frontend_dir": frontend})
+    with TestClient(create_app(settings)) as client:
+        assert_allow_names_every_method(client)
 
 
 def test_the_spa_is_served_with_a_fallback_for_client_routes(

@@ -193,13 +193,53 @@ export class QuestionService {
   }
 
   /**
+   * One row by id, pending or not, for the respond route (routes/pendingInput.ts):
+   * what it checks a response against before `answer()` takes it.
+   */
+  async entry(
+    id: string,
+  ): Promise<
+    | {
+        sessionId: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        pending: boolean
+        outcome: Row['outcome']
+        reason: string | null
+      }
+    | undefined
+  > {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql<
+      {
+        session_id: string
+        kind: 'question' | 'attention'
+        questions: QuestionView[]
+        outcome: Row['outcome']
+        reason: string | null
+      }[]
+    >`SELECT session_id, kind, questions, outcome, reason FROM ai_questions WHERE id = ${id}`
+    return (
+      row && {
+        sessionId: row.session_id,
+        kind: row.kind,
+        questions: row.questions,
+        pending: row.outcome === null,
+        outcome: row.outcome,
+        reason: row.reason,
+      }
+    )
+  }
+
+  /**
    * Every question and attention request still waiting for the user, oldest
    * first (at most PENDING_CAP), then the undismissed `done` summaries, newest
    * first (at most PENDING_CAP more). The summaries have their own cap: nothing
    * expires them, so under one shared cap enough of them would push a question
-   * a turn is parked on off the badge.
+   * a turn is parked on off the badge. `summariesTruncated`: there were more
+   * summaries than that, so the oldest are not listed and the badge says so.
    */
-  async listPending(): Promise<PendingQuestion[]> {
+  async listPending(): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
     type Pending = {
       id: string
       session_id: string
@@ -220,8 +260,9 @@ export class QuestionService {
     const done = await this.deps.sql<Pending[]>`
       SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
       FROM ai_questions WHERE outcome IS NULL AND attention_reason = 'done' AND expires_at IS NULL
-      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP}`
-    return [...waiting, ...done].map((r) => ({
+      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP + 1}`
+    const summariesTruncated = done.length > PENDING_CAP
+    const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
       id: r.id,
       sessionId: r.session_id,
       kind: r.kind,
@@ -234,6 +275,7 @@ export class QuestionService {
       createdAt: r.created_at.toISOString(),
       expiresAt: r.expires_at?.toISOString() ?? null,
     }))
+    return { questions, summariesTruncated }
   }
 
   /**
@@ -455,36 +497,51 @@ export class QuestionService {
     for (const wake of this.waiters.get(id) ?? []) wake()
   }
 
-  private pause(id: string, signal: AbortSignal, ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      const set = this.waiters.get(id) ?? new Set()
-      this.waiters.set(id, set)
-      const done = () => {
-        clearTimeout(timer)
-        set.delete(done)
-        if (set.size === 0 && this.waiters.get(id) === set) this.waiters.delete(id)
-        signal.removeEventListener('abort', done)
-        resolve()
-      }
-      const timer = setTimeout(done, ms)
-      set.add(done)
-      signal.addEventListener('abort', done, { once: true })
-    })
-  }
-
   /**
    * Waits until the question is resolved; undefined once `signal` aborts first,
    * 'due' once `deadline` (performance.now ms, an attention request's timer) passes first.
+   *
+   * The waiter is registered before the first read and stays for the whole
+   * wait, so a wake() that lands while a read is in flight is kept, not lost:
+   * that read may have seen the row before the commit that resolved it, and
+   * the wait re-reads at once rather than sleeping a full `pollMs` (#1394).
    */
   private async waitFor(id: string, signal: AbortSignal, deadline?: number): Promise<Row | 'due' | undefined> {
-    for (;;) {
-      if (signal.aborted) return undefined
-      const row = await this.row(id)
-      if (!row) throw new Error(`question ${id} no longer exists`)
-      if (row.outcome !== null) return row
-      const left = deadline === undefined ? this.pollMs : deadline - performance.now()
-      if (left <= 0) return 'due'
-      await this.pause(id, signal, Math.min(this.pollMs, left))
+    let woken: boolean
+    let resume: (() => void) | undefined
+    const waiter = () => {
+      woken = true
+      resume?.()
+    }
+    const set = this.waiters.get(id) ?? new Set()
+    this.waiters.set(id, set)
+    set.add(waiter)
+    try {
+      for (;;) {
+        if (signal.aborted) return undefined
+        woken = false
+        const row = await this.row(id)
+        if (!row) throw new Error(`question ${id} no longer exists`)
+        if (row.outcome !== null) return row
+        const left = deadline === undefined ? this.pollMs : deadline - performance.now()
+        if (left <= 0) return 'due'
+        if (woken) continue
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer)
+            resume = undefined
+            signal.removeEventListener('abort', done)
+            resolve()
+          }
+          const timer = setTimeout(done, Math.min(this.pollMs, left))
+          resume = done
+          if (signal.aborted) return done()
+          signal.addEventListener('abort', done, { once: true })
+        })
+      }
+    } finally {
+      set.delete(waiter)
+      if (set.size === 0 && this.waiters.get(id) === set) this.waiters.delete(id)
     }
   }
 
@@ -673,14 +730,28 @@ export class QuestionService {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
       if (attention?.reason === 'done') return { answered: false, posted: true, message: 'posted' }
-      // A failed check (the hub, the database) must not leave the row with
-      // nothing waiting on it: the wait goes on, and the hub or the timer ends it.
-      await attention?.onParked?.().catch(() => undefined)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
       const deadline = attention ? performance.now() + attention.timeoutS * 1000 : undefined
-      const waited = await this.waitFor(id, signal, deadline)
+      // The check runs beside the wait, never before it: an answer, a reconnect
+      // (wake), the timer or the abort ends the wait however long the check
+      // takes, and a hung check (a pool or lock wait) cannot stall the call
+      // (#1352). A failed check leaves the wait going on for the hub or the
+      // timer to end. A settled check wakes the wait, which re-reads its row.
+      const parked = new AbortController()
+      if (attention?.onParked) {
+        attention.onParked(parked.signal).then(
+          () => this.wake(id),
+          () => this.wake(id),
+        )
+      }
+      let waited: Row | 'due' | undefined
+      try {
+        waited = await this.waitFor(id, signal, deadline)
+      } finally {
+        parked.abort()
+      }
       const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay

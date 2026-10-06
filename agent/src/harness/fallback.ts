@@ -202,18 +202,30 @@ type Spend = {
   turns: number
 }
 
+/**
+ * USD: how far below what it should carry a resumed total may read and still
+ * have carried it. The prior the manager passes is a float difference
+ * (`cost_usd - unpriced_cost_usd`, #991) that can land an ulp or two above
+ * the total the transcript restores; a restore that did not happen is short
+ * by a whole turn's spend, far more than this.
+ */
+export const RESTORED_EPSILON = 1e-9
+
+/** Whether a resumed total holds `carried`, what it should have carried in. */
+export const carries = (total: number, carried: number): boolean => total >= carried - RESTORED_EPSILON
+
 /** What a result's total says this attempt spent itself. */
 function ownCost(result: SDKResultMessage, spend: Spend, resumed: boolean): number {
   const carried = resumed ? spend.prior + spend.usd : 0
   // A total below what it should have carried in: the restore did not happen.
-  return result.total_cost_usd >= carried ? result.total_cost_usd - carried : result.total_cost_usd
+  return carries(result.total_cost_usd, carried) ? Math.max(result.total_cost_usd - carried, 0) : result.total_cost_usd
 }
 
 /** The final result, with the earlier attempts' turns, and their cost when its total does not already hold it. */
 function withSpent(message: SDKMessage, spend: Spend, resumed: boolean): SDKMessage {
   if (message.type !== 'result' || (spend.usd === 0 && spend.turns === 0)) return message
   const carried = resumed ? spend.prior + spend.usd : 0
-  const total = resumed && message.total_cost_usd >= carried ? message.total_cost_usd : message.total_cost_usd + spend.usd
+  const total = resumed && carries(message.total_cost_usd, carried) ? message.total_cost_usd : message.total_cost_usd + spend.usd
   return { ...message, total_cost_usd: total, num_turns: message.num_turns + spend.turns }
 }
 

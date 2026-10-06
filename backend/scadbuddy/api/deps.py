@@ -16,11 +16,11 @@ from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import Follower
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
@@ -39,7 +39,12 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    LibraryStore,
+)
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
@@ -144,8 +149,8 @@ class AppState:
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
-    #: Follows each started print until it settles (#268).
-    print_watcher: PrintWatcher
+    #: What `FollowPrint`'s activity reads with (#1053), on the follow worker.
+    print_follower: Follower
     #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
     #: start them.
     print_runs: PrintCommands
@@ -297,7 +302,8 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths)
     uploads = BambuddyUploadStore(pool)
-    checkouts = CheckoutGate()
+    # Render leases in Postgres, so a removal here sees the render worker's (#872).
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
@@ -326,8 +332,8 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
-    # Lazy, so the API boots while Temporal is down: its renders wait, and the
-    # reconciler starts them once it is back.
+    # Lazy, so the API boots while Temporal is down: a render is then refused with
+    # `temporal-unavailable` (#1053) until it is back.
     temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
     render = RenderService(
         projection=projection,
@@ -336,6 +342,7 @@ def _build_core(settings: Settings) -> AppState:
         config=config,
         paths=paths,
         metrics=metrics,
+        search_attributes=settings.temporal_search_attributes,
     )
     previews = (
         build_previews(catalogue, outputs, render, config) if settings.preview_renders else None
@@ -346,7 +353,7 @@ def _build_core(settings: Settings) -> AppState:
     print_links = PrintLinkStore(pool)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
-        # The watcher links archives too (#306), so a print nobody watches is found.
+        # The follow links archives too (#306), so a print nobody watches is found.
         async with client_for(settings_store.load()) as client:
             return await progress_for(
                 client,
@@ -381,13 +388,11 @@ def _build_core(settings: Settings) -> AppState:
         metrics=metrics,
         events=events,
         print_progress=print_progress,
-        print_watcher=PrintWatcher(
+        print_follower=Follower(
             outputs=outputs,
             observer=print_progress,
             read=read_progress,
             events=events,
-            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
-            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
         print_runs=PrintCommands(
             store=PrintRunStore(pool, events=transactional_events(events)),
@@ -530,10 +535,6 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
-def get_print_watcher(state: StateDep) -> PrintWatcher:
-    return state.print_watcher
-
-
 #: Problem ``type`` for a route that needs the database when none is configured.
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
@@ -584,7 +585,6 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
-PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]

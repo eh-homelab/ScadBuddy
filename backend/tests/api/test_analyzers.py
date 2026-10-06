@@ -148,6 +148,31 @@ def test_unknown_subjects_are_404(client: TestClient) -> None:
     _ok(client.post("/api/v1/analyzers/run", json={"target": {"slug": "missing"}}), 404)
 
 
+@pytest.mark.parametrize(
+    ("route", "params", "named"),
+    [
+        ("run", {"width": 12, "nope": "x"}, ["nope"]),
+        ("run", {"width": "wide"}, ["width"]),
+        ("fixes/preview", {"nope": 1}, ["nope"]),
+        ("fixes/apply", {"nope": 1}, ["nope"]),
+    ],
+)
+def test_a_configurations_params_are_checked_as_a_render_checks_them(
+    client: TestClient, model: str, route: str, params: dict[str, Any], named: list[str]
+) -> None:
+    """#995: a configuration the render route would refuse is refused here too, rather
+    than judged and reported as "Nothing to report"."""
+    body: dict[str, Any] = {"target": {"slug": model, "params": params}}
+    if route != "run":
+        body |= {"diagnostic_key": "SB2001", "fix_id": "silk-gloss"}
+    if route == "fixes/apply":
+        body["fingerprint"] = "0" * 64
+    problem = _ok(client.post(f"/api/v1/analyzers/{route}", json=body), 422)
+    assert problem["parameters"] == named
+    render = client.post(f"/api/v1/models/{model}/render", json={"params": params})
+    assert render.status_code == 422 and render.json()["parameters"] == named
+
+
 @respx.mock
 def test_silk_on_supertack_is_found_from_the_plan_and_the_choices(
     client: TestClient, model: str

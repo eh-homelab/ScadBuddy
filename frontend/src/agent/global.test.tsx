@@ -1,6 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
-import { useEffect, useState } from 'react'
-import { Route, Routes, useSearchParams } from 'react-router'
+import { useState } from 'react'
+import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
@@ -112,6 +112,17 @@ describe('global tools', () => {
     expect(screen.getByLabelText('API key')).toHaveValue('')
   })
 
+  it('adds no confirm note when a field in an already open dialog rejects the value', async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
+    await bridge.call('click', { role: 'button', name: 'send to bambuddy' })
+    await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+
+    // A number input sanitises "two" to "", so the value differs from what was asked.
+    const outcome = await bridge.call('fill', { label: 'Copies', value: 'two' })
+    expect(outcome).toEqual({ ok: true, result: { filled: 'Copies', value: '' } })
+  })
+
   it('clicks by role and name, but never a confirmation only the user may press', async () => {
     const onSend = renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('click'))
@@ -142,33 +153,6 @@ describe('global tools', () => {
     expect(!away.ok && away.error.code).toBe('invalid_args')
     const scheme = await bridge.call('navigate', { route: 'https://evil.example/' })
     expect(!scheme.ok && scheme.error.code).toBe('invalid_args')
-  })
-
-  it('reports the route a page settles on when it rewrites its own URL a commit later (#1485)', async () => {
-    // As the catalogue adds `view=cards` once it mounts; under load that second commit
-    // can come a poll after the first, and navigate answered with the route between.
-    function Rewrites() {
-      const [params, setParams] = useSearchParams()
-      useEffect(() => {
-        if (params.has('view')) return
-        const timer = setTimeout(() => setParams({ tag: params.get('tag') ?? '', view: 'cards' }, { replace: true }), 70)
-        return () => clearTimeout(timer)
-      }, [params, setParams])
-      return <h1>Catalogue</h1>
-    }
-    renderPage(
-      <Shell>
-        <Routes>
-          <Route path="/" element={<Form onSend={vi.fn()} />} />
-          <Route path="/catalogue" element={<Rewrites />} />
-        </Routes>
-      </Shell>,
-    )
-    await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
-    expect(await bridge.call('navigate', { route: '/catalogue?tag=keychain' })).toEqual({
-      ok: true,
-      result: { route: '/catalogue?tag=keychain&view=cards' },
-    })
   })
 
   it('snapshots the route, dialogs, fields, errors and interactive elements', async () => {

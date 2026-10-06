@@ -7,7 +7,8 @@ import { FeedItemView } from './FeedItemView'
 const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
-  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you }
+  const reason = state === 'closed' ? 'it expired' : state === 'cancelled' ? 'interrupted by You' : undefined
+  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, ...(state === 'expired' || state === 'cancelled' ? {} : { by: you }), ...(reason ? { reason } : {}) }
   return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
@@ -16,9 +17,12 @@ describe('the approval card', () => {
     const cases: [Parameters<typeof card>[0], string | null][] = [
       ['pending', null],
       ['sent', 'Sending your answer…'],
-      ['queued', 'Not connected: your answer goes first when the assistant reconnects.'],
       ['approved', 'Approved by You.'],
       ['denied', 'Denied by You.'],
+      ['closed', 'Your decision was not taken: it expired.'],
+      // Nobody denied these (#979).
+      ['expired', 'Expired: nobody decided in time, so it was not run.'],
+      ['cancelled', 'Cancelled: interrupted by You.'],
     ]
     for (const [state, text] of cases) {
       const { unmount } = card(state)
@@ -266,9 +270,9 @@ describe('the question card (#940)', () => {
   it('says where the answer is once it is not pending', () => {
     const cases: [Partial<Question>, string][] = [
       [{ state: 'sent' }, 'Sending your answer…'],
-      [{ state: 'queued' }, 'Not connected: your answer goes first when the assistant reconnects.'],
       [{ state: 'answered', answers: ['Blue'], by: you }, 'Answered by You: Blue'],
       [{ state: 'cancelled', reason: 'interrupted by You' }, 'Not answered: interrupted by You.'],
+      [{ state: 'closed', reason: 'it was already resolved elsewhere' }, 'Your answer was not taken: it was already resolved elsewhere.'],
     ]
     for (const [extra, text] of cases) {
       const { unmount } = ask([colour], extra)
@@ -428,7 +432,7 @@ describe('the tab-disconnected card (#815)', () => {
       reconnected: true,
     }
     render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
-    expect(screen.getByRole('status')).toHaveTextContent('The tab is back; the assistant re-checks the page before going on.')
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back. The assistant re-reads the page before it changes anything.')
     expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
   })
 })

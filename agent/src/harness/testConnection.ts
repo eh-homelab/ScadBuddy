@@ -34,7 +34,7 @@ export async function testConnection(credential: Credential, options: Connection
   const done = (ok: boolean, detail: string): ConnectionTest => ({
     ok,
     detail: redact(detail, [credential.secret]),
-    duration_ms: Math.round(performance.now() - started),
+    duration_ms: performance.now() - started,
     model,
   })
   try {

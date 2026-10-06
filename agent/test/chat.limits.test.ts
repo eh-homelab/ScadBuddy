@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ChatConnection, type ChatConnectionOptions } from '../src/routes/chat.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
@@ -126,6 +126,32 @@ describe('ChatConnection backpressure', () => {
     connection.close()
     await settle()
     expect(fake.active()).toBe(0)
+  })
+
+  it('does not give up on a slow client when the wall clock steps forward (#1485)', async () => {
+    const fake = fakeManager({ events: 1000 })
+    const socket = slowSocket(60)
+    const connection = new ChatConnection(fake.manager, socket.send, {
+      ...socket.options,
+      limits: { highWater: 100, drainStallMs: 60_000 },
+    })
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(JSON.stringify(clientMessage({ type: 'session.attach', sessionId: randomUUID() })))
+    await settle()
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now').mockImplementation(() => now.call(Date) + 3_600_000)
+    try {
+      await settle()
+      expect(socket.overflowed()).toBe(0)
+      socket.drain()
+      await settle()
+      expect(deltas(socket.out)).toBe(3)
+    } finally {
+      stepped.mockRestore()
+      connection.close()
+      await settle()
+    }
   })
 
   it('closes a client that never drains, and stops following', async () => {

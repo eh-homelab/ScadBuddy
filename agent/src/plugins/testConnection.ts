@@ -120,7 +120,7 @@ export async function testPlugin(
   const done = (ok: boolean, detail: string, tools: PluginToolView[] = [], truncated = false): PluginTest => ({
     ok,
     detail: redact(detail, secrets),
-    duration_ms: Math.round(performance.now() - started),
+    duration_ms: performance.now() - started,
     server,
     tools,
     truncated,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -17,10 +18,19 @@ from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureEr
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
-from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import (
+    Interceptor,
+    SignalExternalWorkflowInput,
+    UnsandboxedWorkflowRunner,
+    Worker,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
+)
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, SliceStarted
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, FollowInput
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import (
@@ -37,6 +47,7 @@ from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows import print_activities, printing
 from scadbuddy.workflows.commands import start_command
+from scadbuddy.workflows.follow import FollowPrint, follow_id, follow_queue
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -58,6 +69,8 @@ from scadbuddy.workflows.print_models import (
 from scadbuddy.workflows.printing import (
     ACCEPT_TIMEOUT,
     CANCELLED,
+    CANCELLED_QUEUEING,
+    CANCELLED_UNQUEUED,
     CLIENT_ACCEPTING,
     READ_RETRY,
     UNWAITED,
@@ -93,6 +106,8 @@ class Fake:
         #: How many of the next `print_insert` attempts fail before one succeeds.
         self.insert_failures = 0
         self.record_error: Exception | None = None
+        self.follows: list[FollowInput] = []
+        self.output_id = uuid.uuid4().hex
         #: How many of the next `print_succeed` attempts fail before one succeeds.
         self.succeed_failures = 0
         #: How many of the next `print_finish` attempts fail before one succeeds.
@@ -102,6 +117,16 @@ class Fake:
         #: Set, the insert waits on it, then records its row anyway (it never heartbeats).
         self.insert_gate: asyncio.Event | None = None
         self.project_id: int | None = None
+        #: An activity named here waits on its event, so a test can cancel while it runs.
+        self.gates: dict[str, asyncio.Event] = {}
+        #: How long `print_start_enqueue` takes once its gate opens.
+        self.start_enqueue_delay = 0.0
+        #: The queue items `print_record` wrote, in order.
+        self.recorded: list[int] = []
+
+    async def _gate(self, name: str) -> None:
+        if name in self.gates:
+            await self.gates[name].wait()
 
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
@@ -137,6 +162,7 @@ class Fake:
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
         self.calls.append("plan")
+        await self._gate("plan")
         if self.plan_error is not None:
             raise self.plan_error
         return PlannedRun(
@@ -157,16 +183,20 @@ class Fake:
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
         self.calls.append("slice_wait")
+        await self._gate("slice_wait")
         return 52
 
     @activity.defn(name="print_start_enqueue")
     async def start_enqueue(self, run_id: str) -> None:
         self.calls.append("start_enqueue")
+        await self._gate("start_enqueue")
+        await asyncio.sleep(self.start_enqueue_delay)
         self.enqueue_attempted = True
 
     @activity.defn(name="print_enqueue")
     async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
         self.calls.append(f"enqueue:{input.plate_id}")
+        await self._gate("enqueue")
         if self.enqueue_error is not None:
             raise self.enqueue_error
         return QueuedPlate(item_id=50 + input.plate_id)
@@ -174,13 +204,16 @@ class Fake:
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
         self.calls.append("record")
+        await self._gate("record")
         if self.record_error is not None:
             raise self.record_error
+        self.recorded.extend(input.outcome.queue_item_ids)
         return input.sent
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         self.calls.append("finish")
+        await self._gate("finish")
         if self.finish_failures:
             self.finish_failures -= 1
             raise RuntimeError("the settings could not be read")
@@ -192,15 +225,28 @@ class Fake:
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:
         self.calls.append("succeed")
+        await self._gate("succeed")
         if self.succeed_failures:
             self.succeed_failures -= 1
             raise RuntimeError("the database blinked")
         return self._run("succeeded", result=input.result)
 
+    @activity.defn(name=FOLLOW_ACTIVITY)
+    async def follow_print(self, input: FollowInput) -> str:
+        self.follows.append(input)
+        return "settled"
+
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
-        self.calls.append(f"fail:{input.error.status}:{input.error.detail}")
-        return self._run("failed", error=input.error, may_have_queued=self.enqueue_attempted)
+        self.calls.append(
+            f"fail:{input.error.status}:{input.error.detail}" + (":unqueued" * input.unqueued)
+        )
+        await self._gate("fail")
+        return self._run(
+            "failed",
+            error=input.error,
+            may_have_queued=self.enqueue_attempted and not input.unqueued,
+        )
 
     def all(self) -> list[Callable[..., Any]]:
         return [
@@ -232,18 +278,24 @@ def fake() -> Fake:
 @pytest.fixture
 async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
-    async with Worker(
-        client, task_queue=queue, workflows=[PrintRunWorkflow], activities=fake.all()
+    async with (
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[PrintRunWorkflow, FollowPrint],
+            activities=fake.all(),
+        ),
+        Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
     ):
         yield queue
 
 
-def run_input(*, window: float = 0.0) -> PrintRunInput:
+def run_input(*, window: float = 0.0, output_id: str | None = None) -> PrintRunInput:
     return PrintRunInput(
         subject="o" * 32,
         slug="demo",
         key=uuid.uuid4().hex,
-        source=SourceSpec(kind="output", output_id="o" * 32),
+        source=SourceSpec(kind="output", output_id=output_id or "o" * 32),
         request=REQUEST,
         repeat_window_s=window,
     )
@@ -439,6 +491,150 @@ def test_outcomes_are_plain_models() -> None:
     assert QueueOutcome(slice_job_id=1, sliced_library_file_id=2, printer_id=1).queue_item_ids == []
 
 
+async def test_an_output_run_starts_its_follow(client: Client, worker: str, fake: Fake) -> None:
+    arg = run_input(output_id=uuid.uuid4().hex)
+    await start(client, worker, arg)
+    run = await ended(client, arg)
+    assert run.status == "succeeded"
+    assert arg.source.output_id is not None
+    follow = client.get_workflow_handle(follow_id(arg.source.output_id))
+    assert await follow.result() == "settled"
+    assert [f.output_id for f in fake.follows] == [arg.source.output_id]
+
+
+async def test_a_second_run_pokes_the_follow_already_running(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    output = uuid.uuid4().hex
+    # A follow already running for the output, on a queue nobody serves: it stays open.
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    try:
+        arg = run_input(output_id=output)
+        await start(client, worker, arg)
+        assert (await ended(client, arg)).status == "succeeded"
+        signals = [
+            e
+            async for e in handle.fetch_history_events()
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED
+        ]
+        assert [e.workflow_execution_signaled_event_attributes.signal_name for e in signals] == [
+            "poke"
+        ]
+    finally:
+        await handle.terminate()
+
+
+class _LoseFirstPoke(WorkflowOutboundInterceptor):
+    """The follow closed between the child start and the poke: the signal fails."""
+
+    lost = False
+
+    async def signal_external_workflow(self, input: SignalExternalWorkflowInput) -> None:
+        if not self.lost:
+            self.lost = True
+            raise ApplicationError("workflow execution already completed")
+        await super().signal_external_workflow(input)
+
+
+class _LosingPokes(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_LoseFirstPoke(outbound))
+
+
+class LosePokes(Interceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> type[WorkflowInboundInterceptor]:
+        return _LosingPokes
+
+
+async def test_a_poke_that_finds_the_follow_closed_starts_it_again(
+    client: Client, fake: Fake
+) -> None:
+    """Review I5: a new print is never left unfollowed because the follow of the last one
+    closed between the child start and the poke."""
+    output = uuid.uuid4().hex
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    try:
+        async with (
+            Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LosePokes()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ),
+            Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
+        ):
+            arg = run_input(output_id=output)
+            await start(client, queue, arg)
+            assert (await ended(client, arg)).status == "succeeded"
+        signals = [
+            e
+            async for e in handle.fetch_history_events()
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED
+        ]
+        assert len(signals) == 1
+    finally:
+        await handle.terminate()
+
+
+class _LoseEveryPoke(WorkflowOutboundInterceptor):
+    async def signal_external_workflow(self, input: SignalExternalWorkflowInput) -> None:
+        raise ApplicationError("workflow execution already completed")
+
+
+class _LosingEveryPoke(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_LoseEveryPoke(outbound))
+
+
+class LoseEveryPoke(Interceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> type[WorkflowInboundInterceptor]:
+        return _LosingEveryPoke
+
+
+async def test_a_print_left_unfollowed_is_logged(
+    client: Client, fake: Fake, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1091 3: both rounds of start and poke failing leave the print to the
+    progress route; the run still succeeds, and says so."""
+    output = uuid.uuid4().hex
+    await client.start_workflow(
+        FollowPrint.run, output, id=follow_id(output), task_queue=f"idle-{uuid.uuid4().hex[:8]}"
+    )
+    handle = client.get_workflow_handle(follow_id(output))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    try:
+        with caplog.at_level(logging.WARNING, logger="temporalio.workflow"):
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[PrintRunWorkflow, FollowPrint],
+                activities=fake.all(),
+                interceptors=[LoseEveryPoke()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                arg = run_input(output_id=output)
+                await start(client, queue, arg)
+                assert (await ended(client, arg)).status == "succeeded"
+                # The follow comes after the record: the run's execution ends after it.
+                await client.get_workflow_handle(f"print-{arg.key}").result()
+    finally:
+        await handle.terminate()
+    assert any("could not follow the print" in r.message for r in caplog.records)
+
+
 async def test_a_queued_print_whose_record_blinks_still_ends_succeeded(
     client: Client, worker: str, fake: Fake
 ) -> None:
@@ -541,7 +737,6 @@ def real_activities(settings: _Settings | None = None) -> PrintActivities:
             catalogue=unused,
             store=unused,
             observer=unused,
-            watcher=unused,
         )
     )
 
@@ -643,7 +838,6 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print() -> None:
             catalogue=unused,
             store=unused,
             observer=unused,
-            watcher=unused,
         )
     )
     # A worker whose clock is behind: by its own, the run is a few seconds old.
@@ -716,3 +910,112 @@ async def test_a_cancel_during_the_insert_answers_the_run_recorded_as_cancelled(
         assert fake.calls == ["check", "insert", f"fail:409:{CANCELLED.detail}"]
     finally:
         fake.insert_gate.set()
+
+
+async def cancel_during(
+    client: Client, worker: str, fake: Fake, activity_name: str, *, window: float = 0.0
+) -> PrintRun:
+    """Start a run, cancel it while ``activity_name`` first runs, and return how it ended:
+    within 60 s, so a cancel that leaves a repeat window open fails the test."""
+    gate = fake.gates[activity_name] = asyncio.Event()
+    arg = run_input(window=window)
+    try:
+        await start(client, worker, arg)
+        while not any(call.split(":")[0] == activity_name for call in fake.calls):
+            await asyncio.sleep(0.05)
+        handle = client.get_workflow_handle(f"print-{arg.key}")
+        await handle.cancel()
+        while not any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in (await handle.fetch_history()).events
+        ):
+            await asyncio.sleep(0.05)
+        gate.set()
+        finished = await asyncio.wait_for(ended(client, arg), timeout=60)
+        assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+        return finished
+    finally:
+        gate.set()
+
+
+async def test_a_cancel_during_print_fail_waits_for_the_record(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (13) 3a: ``print_fail`` is a record, shielded as the others are. A
+    cancel while it runs waits for it, so the run ends with its real error, and the
+    execution completes rather than ending cancelled with the row ``running``."""
+    error = PrintRunError(status=504, title="Gateway Timeout", detail="queue timed out")
+    fake.enqueue_error = ApplicationError(error.detail, error, type=FAILED, non_retryable=True)
+    finished = await cancel_during(client, worker, fake, "fail", window=600)
+    assert finished.status == "failed"
+    assert finished.error == error
+
+
+@pytest.mark.parametrize("activity_name", ["enqueue", "record", "finish", "succeed"])
+async def test_a_cancel_once_every_plate_is_queued_still_ends_succeeded(
+    client: Client, worker: str, fake: Fake, activity_name: str
+) -> None:
+    """Review #1061 (3) 1: from the last ``print_enqueue`` on, the print is queued, so a
+    cancel must not record it failed; the last ``print_enqueue`` (whose ``POST /queue/``
+    a cancel cannot take back, review #1316 (2) 1) and ``print_record``, ``print_finish``
+    and ``print_succeed`` are shielded, as the insert is (review #1316 1). The cancel also
+    ends the repeat window, rather than being swallowed (review #1316 2)."""
+    finished = await cancel_during(client, worker, fake, activity_name, window=600)
+    assert finished.status == "succeeded"
+    assert not any(call.startswith("fail") for call in fake.calls)
+
+
+@pytest.mark.parametrize("activity_name", ["plan", "slice_wait"])
+async def test_a_cancel_before_any_enqueue_is_recorded_cancelled(
+    client: Client, worker: str, fake: Fake, activity_name: str
+) -> None:
+    """Review #1061 (3) 1: a cancel, never "failed unexpectedly while preparing". The
+    row exists and Bambuddy may have sliced a plate, so not "before it started" either
+    (review #1316 (9) 2a)."""
+    finished = await cancel_during(client, worker, fake, activity_name)
+    assert finished.status == "failed" and not finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}"
+    assert "nothing was queued" in CANCELLED_UNQUEUED.detail
+    assert "before it started" not in CANCELLED_UNQUEUED.detail
+
+
+async def test_a_cancel_after_the_enqueue_says_the_print_may_be_queued(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """The first of two plates is queued and the second is not: the run may be queued,
+    and the cancel ends its repeat window (review #1316 2)."""
+    fake.plates = [1, 2]
+    finished = await cancel_during(client, worker, fake, "record", window=600)
+    assert "enqueue:2" not in fake.calls
+    assert finished.status == "failed" and finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
+    assert "check Bambuddy's queue" in CANCELLED_QUEUEING.detail
+
+
+async def test_a_cancel_during_an_earlier_plates_enqueue_records_its_item_and_stops(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (3) 1: the ``POST /queue/`` for plate 1 may land after the cancel, so
+    the run waits for it and records its item, then queues no further plate."""
+    fake.plates = [1, 2]
+    finished = await cancel_during(client, worker, fake, "enqueue", window=600)
+    assert fake.recorded == [51]
+    assert "enqueue:2" not in fake.calls and "slice_start:2" not in fake.calls
+    assert finished.status == "failed" and finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_QUEUEING.detail}"
+
+
+async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the_row(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1316 (3) 2: ``print_start_enqueue`` writes the row's ``enqueue_attempted``;
+    the run waits for it, then stops before any ``POST /queue/``, so it records that
+    nothing was queued, and its message and the row's ``may_have_queued`` agree (review
+    #1316 (8) 2)."""
+    # Its write lands well after the cancel: a run that did not wait records first.
+    fake.start_enqueue_delay = 2.0
+    finished = await cancel_during(client, worker, fake, "start_enqueue", window=600)
+    assert not any(call.startswith("enqueue") for call in fake.calls)
+    assert fake.enqueue_attempted  # the write finished before the run failed
+    assert finished.status == "failed" and not finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}:unqueued"

@@ -276,6 +276,17 @@ def _part_sources(
     )
 
 
+#: What OpenSCAD logs when the render it is asked to export draws nothing.
+EMPTY_TOP_LEVEL = "Current top level object is empty."
+
+
+def _empty_plate(index: int, count: int) -> str:
+    return (
+        f"plate {index} of {count} rendered no geometry: the template asks for "
+        f"echo(plates = {count}) but draws nothing when $plate = {index}"
+    )
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -320,18 +331,31 @@ async def plate_layout(
         defines = plate_defines(index)
         raw = plate_dir / RAW_RENDER_NAME
         try:
-            await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
+            output = await render_3mf(
+                scad_path, schema, params, raw, config=config, extra_defines=defines
+            )
         except OpenSCADError as error:
+            # OpenSCAD will not export an empty top-level object: it exits 1
+            # before there is a 3MF to find empty (#1328).
+            empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
             raise OpenSCADError(
-                f"plate {index} of {count}: {error}",
+                _empty_plate(index, count) if empty else f"plate {index} of {count}: {error}",
                 error.log_tail,
                 error.returncode,
                 diagnostics=error.diagnostics,
                 diagnostics_dropped=error.diagnostics_dropped,
+                missing_files=error.missing_files,
             ) from error
         split = split_by_material(raw)
         if not split:
-            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
+            # A file the plate could not open is often why it drew nothing (#451).
+            raise OpenSCADError(
+                _empty_plate(index, count),
+                output.log_tail,
+                diagnostics=output.diagnostics,
+                diagnostics_dropped=output.diagnostics_dropped,
+                missing_files=output.missing_files,
+            )
         for part in split:
             if part.colour not in colours:
                 colours.append(part.colour)
@@ -807,9 +831,20 @@ async def _render_solids(
     with stage("solids"):
         # One plate unless the template asked for more (spec §6.4); every plate
         # beyond the ordinary render is rendered and solidified here.
-        layout = await plate_layout(
-            prepared.scad, schema, staged, preview_parts, output.plates or 1, work, config=config
-        )
+        try:
+            layout = await plate_layout(
+                prepared.scad,
+                schema,
+                staged,
+                preview_parts,
+                output.plates or 1,
+                work,
+                config=config,
+            )
+        except OpenSCADError as error:
+            # A failed plate warns as a failed whole render does (#451).
+            error.warnings = failed_render_warnings(error.missing_files, schema, params)
+            raise
     layout.save(work / LAYOUT_NAME)
     return layout
 

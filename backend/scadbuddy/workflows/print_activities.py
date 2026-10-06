@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+import psycopg
 from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
@@ -28,6 +29,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
@@ -43,8 +45,7 @@ from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSo
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import PrintWatcher
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
@@ -84,9 +85,10 @@ class PrintDeps:
     catalogue: Catalogue
     store: PrintRunStore
     observer: ProgressObserver
-    watcher: PrintWatcher
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None
+    #: Where a library file's queue items are recorded for the print history (#976).
+    links: PrintLinkStore | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -262,7 +264,7 @@ class PrintActivities:
     async def record(self, input: RecordInput) -> list[PlateSend]:
         """One plate's queue items on the output, as soon as it is queued (#83)."""
         if input.source.kind == "library":
-            # Recorded nowhere in ScadBuddy: Bambuddy's queue and archives are the record.
+            await self._record_library(input)
             return input.sent
         settings = self._settings()
         try:
@@ -277,6 +279,25 @@ class PrintActivities:
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
+
+    async def _record_library(self, input: RecordInput) -> None:
+        """A library file's queue items, so its archives reach the print history
+        (#976). Best effort: the plate is queued, and failing the run over its history
+        would tell the user it was not."""
+        links = self.d.links
+        if links is None or not links.available:
+            return
+        assert input.source.file_id is not None
+        try:
+            for queue_item_id in input.outcome.queue_item_ids:
+                await links.record_library(
+                    input.source.file_id,
+                    queue_item_id,
+                    plate_id=input.plate_id,
+                    printer_id=input.outcome.printer_id,
+                )
+        except (psycopg.Error, DatabaseRequiredError):
+            logger.exception("could not record library file %s's print", input.source.file_id)
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
@@ -319,17 +340,19 @@ class PrintActivities:
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An
             # output deleted while it printed has nothing left to follow.
+            # The workflow then starts its `FollowPrint` (#1053).
             try:
                 meta = require_output(self.d.outputs, spec.output_id)
                 self.d.observer.started(meta)
-                await self.d.watcher.started(meta.id)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         return run
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
-        return await self.d.store.fail(input.run_id, input.slug, input.error)
+        return await self.d.store.fail(
+            input.run_id, input.slug, input.error, unqueued=input.unqueued
+        )
 
     def all(self) -> list[Callable[..., Any]]:
         return [

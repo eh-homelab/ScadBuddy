@@ -18,7 +18,7 @@ cd backend
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy              # strict; files = scadbuddy, tests
-uv run --frozen pytest
+uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
@@ -35,6 +35,12 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+Under pytest-xdist each worker makes its schemas in a database of its own
+(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+because advisory locks and NOTIFY channels are per database: workers sharing one would
+serialise every `migrate` and hear each other's events. So the test role needs
+`CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
+Temporal dev server.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -142,8 +148,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages the worker's activities run; `render_job` runs them in one
   process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
-  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
-  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
+  workflow's first (local) activity inserts the row, identical requests join it as
+  claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
@@ -274,8 +281,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
   badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts; a
-  browser_* call that finds no tab in such a session parks the same way as a
+  the one read of every parked call, approvals and answers, that the badge counts, and
+  `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
+  any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
+  a browser_* call that finds no tab in such a session parks the same way as a
   `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
   tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
@@ -465,10 +474,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
-- `claude-review` is a merge gate: the review runs after CI, then a classifier passes
-  only when every finding in the review for *this* commit is fixed or tracked in an
-  open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
-  to the PR files those `pr-feedback` issues automatically.
+- `claude-review` is a merge gate: the review runs after CI and sorts its findings into
+  `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
+  finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
+  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
+  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
+  `pr-feedback` issues automatically.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed
