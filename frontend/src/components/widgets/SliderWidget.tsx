@@ -1,4 +1,5 @@
 import type { Param } from '../../api/types'
+import { rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { NumberInput } from './NumberInput'
 
@@ -25,6 +26,7 @@ export function SliderWidget({
   const min = param.min ?? 0
   const max = param.max ?? 100
   const step = param.step ?? 1
+  const error = rangeProblem(param, value)
 
   return (
     <Field
@@ -32,6 +34,7 @@ export function SliderWidget({
       label={param.caption ?? param.name}
       name={param.name}
       readout={<span className="text-ink">{value}</span>}
+      error={error}
     >
       <div className="flex items-center gap-2.5">
         <input
@@ -51,6 +54,8 @@ export function SliderWidget({
           step={step}
           value={value}
           aria-label={`${param.caption ?? param.name} value`}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
           onCommit={onChange}
           // Padding, border and the spin buttons take the 2.5 rem; never under 4.5 rem.
           style={{ '--sb-box-chars': boxChars(min, max, step, value) } as React.CSSProperties}

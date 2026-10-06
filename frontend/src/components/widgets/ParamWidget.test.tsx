@@ -113,6 +113,53 @@ describe('number and integer', () => {
   })
 })
 
+// #921: a value outside the declared range is flagged on the field, in its own words.
+describe.each([
+  {
+    kind: 'number field',
+    param: { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: 'Letter height', min: 8, max: 40 } as Param,
+    label: 'Letter height',
+  },
+  {
+    kind: 'slider box',
+    param: {
+      group: 'Main',
+      name: 'text_size',
+      type: 'slider',
+      initial: 14,
+      caption: 'Letter height',
+      min: 8,
+      max: 40,
+      step: 1,
+    } as Param,
+    label: 'Letter height value',
+  },
+])('the $kind range (#921)', ({ param, label }) => {
+  const field = () => screen.getByRole('spinbutton', { name: label })
+
+  it('says an out-of-range value is out of range, with the label and the range', async () => {
+    const { user } = setup(param, 14)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(field()).not.toHaveAttribute('aria-invalid')
+
+    await user.clear(field())
+    await user.type(field(), '500{Enter}')
+    expect(field()).toHaveValue(500)
+    expect(field()).toHaveAttribute('aria-invalid', 'true')
+    expect(field()).toHaveAccessibleDescription('Letter height must be between 8 and 40.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Letter height must be between 8 and 40.')
+  })
+
+  it('clears the message once the value is back in range', async () => {
+    const { user } = setup(param, 500)
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    await user.clear(field())
+    await user.type(field(), '40')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(field()).not.toHaveAttribute('aria-invalid')
+  })
+})
+
 // #1323: a number box keeps what is typed as a draft and commits only a parseable number.
 describe.each([
   {

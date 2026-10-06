@@ -550,6 +550,34 @@ describe('CustomizePage', () => {
     expect(sent).toEqual([-12])
   }, 20000)
 
+  it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    expect(size).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Text size must be between 6 and 28.')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    // Longer than the debounce: a render of 500 would have been asked for by now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(size)
+    await user.type(size, '20')
+    expect(screen.queryByText(/must be between/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent).not.toContain(500)
+    expect(sent.at(-1)).toBe(20)
+  }, 20000)
+
   it('links to the versions panel', async () => {
     render()
     await firstRender()
