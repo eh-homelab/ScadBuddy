@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 
 from psycopg import Connection
@@ -162,17 +162,18 @@ class PrintLinkStore:
             self._record_library, library_file_id, queue_item_id, plate_id, printer_id
         )
 
-    async def pending_library(self, within: timedelta, limit: int) -> list[PendingLibraryPrint]:
-        """The library files' queue items recorded within ``within`` whose archive is
-        not known yet, newest first, at most ``limit``."""
-        return await asyncio.to_thread(self._pending_library, within, limit)
+    async def pending_library(self, limit: int) -> list[PendingLibraryPrint]:
+        """The library files' queue items whose archive is not known yet and that are
+        not gone, newest first, at most ``limit``."""
+        return await asyncio.to_thread(self._pending_library, limit)
 
     async def link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
         """The archive a library file's queue item reported."""
         await asyncio.to_thread(self._link_library, queue_item_id, archive_id, name)
 
     async def library_gone(self, queue_item_id: int) -> None:
-        """Bambuddy dropped the item before it named an archive: stop reading it."""
+        """Bambuddy dropped or settled the item before it named an archive: stop
+        reading it."""
         await asyncio.to_thread(self._library_gone, queue_item_id)
 
     def _record(self, output_id: str, link: PrintLink) -> None:
@@ -256,13 +257,13 @@ class PrintLinkStore:
                 (queue_item_id, library_file_id, plate_id, printer_id),
             )
 
-    def _pending_library(self, within: timedelta, limit: int) -> list[PendingLibraryPrint]:
+    def _pending_library(self, limit: int) -> list[PendingLibraryPrint]:
         with self._require().connection() as conn:
             rows = conn.execute(
                 "SELECT queue_item_id, library_file_id FROM library_bambuddy_prints"
-                " WHERE archive_id IS NULL AND NOT gone AND first_seen > now() - %s"
+                " WHERE archive_id IS NULL AND NOT gone"
                 " ORDER BY first_seen DESC LIMIT %s",
-                (within, limit),
+                (limit,),
             ).fetchall()
         return [PendingLibraryPrint.model_validate(dict(row)) for row in rows]
 
