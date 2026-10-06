@@ -682,3 +682,54 @@ describe('the assistant beside a dialog (#798)', () => {
     expect(composer).toHaveFocus()
   })
 })
+
+describe('a dialog with no room beside the assistant (#798)', () => {
+  /** Lays the panel out as on a phone: no 360px left of it for the dialog. */
+  function narrow() {
+    const panel = screen.getByRole('complementary', { name: 'Assistant' })
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 520, width: 400, top: 0, bottom: 800, height: 800, x: 120, y: 0, toJSON: () => ({}),
+    })
+  }
+  afterEach(() => vi.restoreAllMocks())
+
+  it('covers the chat: modal, and takes focus from the composer when it opens', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    narrow()
+    // Opened as the agent's open_print_dialog does, with focus still in the chat.
+    fireEvent.click(screen.getByRole('button', { name: 'Print…' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+    expect(within(dialog).getByRole('textbox', { name: 'Copies' })).toHaveFocus()
+  })
+
+  it('does not send Ctrl+` focus into the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+
+    pressShortcut()
+    await act(async () => {})
+    expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
+  it('owns Escape, even from the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    composer.focus()
+
+    await view.user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Print' })).not.toBeInTheDocument()
+  })
+})

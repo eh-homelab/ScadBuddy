@@ -29,6 +29,22 @@ function topmost(panel: HTMLElement | null): boolean {
 const MIN_BESIDE = 360
 
 /**
+ * The room to keep for `companion` at the right edge, in CSS pixels: 0 when there is
+ * none to spare (a phone), so the dialog covers it; null when it is not laid out
+ * (jsdom), where it counts as beside.
+ */
+function roomFor(companion: HTMLElement): number | null {
+  const { left, width } = companion.getBoundingClientRect()
+  if (width === 0) return null
+  return left >= MIN_BESIDE ? window.innerWidth - left : 0
+}
+
+/** Whether `companion` is usable beside the dialog, measured now. */
+function besideNow(companion: HTMLElement | null): companion is HTMLElement {
+  return companion !== null && roomFor(companion) !== 0
+}
+
+/**
  * A modal dialog. #351 — on opening, focus goes to the first focusable element (an
  * `autoFocus` one keeps it), falling back to the panel; Tab and Shift+Tab stay inside;
  * and on closing, focus goes back to whatever had it before the dialog opened.
@@ -42,13 +58,7 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
   const [reserve, setReserve] = useState<number | null>(null)
   useLayoutEffect(() => {
     if (!open || !companion) return
-    const measure = () => {
-      const { left, width } = companion.getBoundingClientRect()
-      // Not laid out (jsdom): beside, as far as anything here can tell.
-      if (width === 0) return setReserve(null)
-      const room = window.innerWidth - left
-      setReserve(left >= MIN_BESIDE ? room : 0)
-    }
+    const measure = () => setReserve(roomFor(companion))
     measure()
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
     observer?.observe(companion)
@@ -74,8 +84,9 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
     if (!open) return
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      // The companion's own Escape (closing the assistant) is not this dialog's.
-      if (companion?.contains(event.target as Node)) return
+      // The companion's own Escape (closing the assistant) is not this dialog's, while it
+      // is usable beside it; covered by the dialog, it is no one else's.
+      if (besideNow(companion) && companion.contains(event.target as Node)) return
       // Only the topmost modal closes: a dialog opened from inside another (Duplicate
       // from a built-in's Media, #279) comes later in the document, and the one under
       // it stays open. The outer listener runs first, so `defaultPrevented` cannot tell.
@@ -93,9 +104,10 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
   useEffect(() => {
     const panel = panelRef.current
     if (!open || !panel) return
-    // Left where it is in the companion: the agent may open a dialog while the user types.
+    // Left where it is in a companion beside it: the agent may open a dialog while the
+    // user types. Measured here, not read from `reserve`: this runs before that is set.
     const at = document.activeElement
-    if (!panel.contains(at) && !companion?.contains(at)) focusInto(panel)
+    if (!panel.contains(at) && !(besideNow(companion) && companion.contains(at))) focusInto(panel)
     return () => {
       // Back to the opener, unless the dialog's own action already put focus somewhere
       // (another dialog, a page it went to): only focus that fell to <body> with the

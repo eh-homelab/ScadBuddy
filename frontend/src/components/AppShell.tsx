@@ -135,6 +135,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const toggle = useCallback(() => {
     // A decision may just have landed in the panel or elsewhere.
     refreshAttention()
+    const dialog = topmostDialog()
+    // A dialog open beside the panel; one that covers it (aria-modal) does not count.
+    const besideDialog = dialog?.getAttribute('aria-modal') === 'true' ? null : dialog
     if (leaveFullscreen()) {
       openPanel()
       // The browser's own full screen ends a moment later, and until it has, nothing
@@ -142,11 +145,12 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       if (document.fullscreenElement) {
         document.addEventListener('fullscreenchange', openPanel, { once: true })
       }
-    } else if (open && topmostDialog()) {
+    } else if (open && besideDialog) {
       // #798 — beside a dialog, the shortcut moves between the two rather than closing
       // the panel: the dialog stays open, and so does the chat about it.
-      const dialog = topmostDialog()
-      if (dialog && panelElement?.contains(document.activeElement)) focusInto(dialog)
+      // Only beside it: a dialog that covers the panel (aria-modal) keeps the focus, and
+      // the shortcut closes the panel as it always has.
+      if (panelElement?.contains(document.activeElement)) focusInto(besideDialog)
       else setFocusKey((k) => k + 1)
     } else if (open) {
       closePanel()
