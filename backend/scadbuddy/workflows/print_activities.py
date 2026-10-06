@@ -326,7 +326,9 @@ class PrintActivities:
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
-        return await self.d.store.fail(input.run_id, input.slug, input.error)
+        return await self.d.store.fail(
+            input.run_id, input.slug, input.error, unqueued=input.unqueued
+        )
 
     def all(self) -> list[Callable[..., Any]]:
         return [

@@ -277,6 +277,7 @@ export function CustomizePage() {
     rendering,
     error: renderError,
     busy: renderBusy,
+    retry: retryRender,
     settledFor,
     stage: renderStage,
   } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
@@ -1067,7 +1068,10 @@ export function CustomizePage() {
           )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
-              {renderError.message}
+              {renderError.message}{' '}
+              <Button size="sm" onClick={retryRender}>
+                Try again
+              </Button>
             </p>
           )}
           {/* Full screen is the view and its parameters; the actions wait outside it. */}

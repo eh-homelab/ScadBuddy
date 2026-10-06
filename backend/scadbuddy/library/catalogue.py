@@ -197,6 +197,11 @@ class ModelExistsError(ValueError):
     pass
 
 
+class ModelNameTakenError(ValueError):
+    """A rename onto the name another model has (#947); ``args`` is that model's slug
+    and name."""
+
+
 class StaleVersionError(RuntimeError):
     """An edit made against a revision the model has since moved past (#252): the
     caller read ``expected`` and the model is at ``current`` now."""
@@ -818,6 +823,9 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
+        # A metadata edit writes model.json alone, and is as much a change (#947).
+        with contextlib.suppress(FileNotFoundError):
+            modified = max(modified, self.paths.model_meta(slug).stat().st_mtime)
         media, media_cover = self._media_listing(slug, meta, media_of, cover_of)
         thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
@@ -1150,6 +1158,8 @@ class Catalogue:
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
+            if patch.name is not None:
+                self._require_name_free(slug, self._meta(slug, raw).name, patch.name)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
@@ -1161,6 +1171,23 @@ class Catalogue:
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
+
+    def _require_name_free(self, slug: str, current: str, name: str) -> None:
+        """:class:`ModelNameTakenError` when ``name`` renames ``slug`` onto another
+        model's name, ignoring case (#947). Keeping its own name is no rename, so a
+        model that already shares one (a seeded copy has its built-in's) still saves."""
+        wanted = name.casefold()
+        if wanted == current.casefold():
+            return
+        for other in self.slugs():
+            if other == slug:
+                continue
+            try:
+                taken = self._meta(other, self.read_raw_meta(other)).name
+            except (InvalidModelMetaError, OSError):
+                continue
+            if taken.casefold() == wanted:
+                raise ModelNameTakenError(other, taken)
 
     def pin_library(
         self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
