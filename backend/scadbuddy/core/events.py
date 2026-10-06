@@ -168,6 +168,16 @@ class PrintRunEvent(BaseEvent):
     run_id: str
 
 
+class OperationEvent(BaseEvent):
+    """An operation (#1053, spec 2026-10-01 §4.2) was accepted or ended: re-read
+    ``GET /operations/{operation_id}``."""
+
+    kind: Literal["operation.changed"] = "operation.changed"
+    operation_id: str
+    op_kind: str
+    subject: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -274,6 +284,7 @@ Event = Annotated[
     | OutputEvent
     | PrintEvent
     | PrintRunEvent
+    | OperationEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled

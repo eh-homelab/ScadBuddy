@@ -13,6 +13,7 @@ the Settings printer or pipeline, else the fallback plate.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping
@@ -24,10 +25,13 @@ from scadbuddy.bambuddy.extruders import slicer_nozzle_stats
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -180,3 +184,50 @@ async def file_into_project(
         bambuddy_url=client.config.web_url(f"/projects/{project_id}"),
         edit_url=link,
     )
+
+
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
+
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
+        return {}
+    if schema is None:
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
+    """
+    try:
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)

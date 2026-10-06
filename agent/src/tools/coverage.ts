@@ -64,6 +64,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'GET /api/v1/models/{slug}/media/{item_id}',
       'GET /api/v1/models/{slug}/media/{item_id}/poster',
+      'GET /api/v1/models/{slug}/media/{item_id}/thumbnail',
     ] as const
   ).map((operation) => ({
     operation,

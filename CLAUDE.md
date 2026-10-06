@@ -157,6 +157,18 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
+  Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
+  finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+- `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
+  `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
+  attempts) and `component.py` (`OPERATIONS`, `OperationsDep`). A feature registers
+  its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list;
+  the Bambuddy kinds are `bambuddy/operations.py`. `api/operations.py` `run_operation`
+  is how a route runs a kind (`Idempotency-Key` header; 202 with the operation past the
+  deadline) and serves `GET /operations/{id}`. The browser's `command()`
+  (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`) send the
+  key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
@@ -262,7 +274,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
   badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
-  the one read of every parked call, approvals and answers, that the badge counts);
+  the one read of every parked call, approvals and answers, that the badge counts; a
+  browser_* call that finds no tab in such a session parks the same way as a
+  `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
@@ -355,9 +370,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI

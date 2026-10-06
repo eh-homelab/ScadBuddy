@@ -8,7 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useLocation } from 'react-router'
 import { attentionCount, attentionDetail, attentionLabel, summaryLabel, useAttention, useAttentionTitle } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
@@ -21,7 +21,9 @@ import type { ChatTransportFactory } from '../agent/chat/transport'
 import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
+import { ErrorBoundary } from './ErrorBoundary'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { Button } from './ui/Button'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
@@ -54,6 +56,7 @@ interface Props {
 }
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
+  const location = useLocation()
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
@@ -246,7 +249,15 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         )}
         <div className="relative flex min-h-0 flex-1">
           <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-            <Outlet />
+            {/* #361 — the last resort: one page that throws never blanks the app, and
+                leaving it clears the error. Reload, not an in-place retry: what lands
+                here is mostly a lazy chunk that failed, which React caches as failed. */}
+            <ErrorBoundary
+              resetKey={location.pathname}
+              fallback={() => <PageFailed />}
+            >
+              <Outlet />
+            </ErrorBoundary>
           </main>
           {shown && mounted && (
             <aside
@@ -271,5 +282,16 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         </div>
       </div>
     </AssistantOpenerContext.Provider>
+  )
+}
+
+function PageFailed() {
+  return (
+    <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]">
+      <p className="text-ink">This page stopped working. The details are in the browser console.</p>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        Reload page
+      </Button>
+    </div>
   )
 }

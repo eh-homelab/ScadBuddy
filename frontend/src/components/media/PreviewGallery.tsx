@@ -27,7 +27,11 @@ export function PreviewGallery({ slug, media, label, hidden, children }: Props) 
   const slides = useMemo(() => toSlides(slug, media ?? []), [slug, media])
   // Held as the slug it was chosen on, so it never follows the user to another model.
   const [galleryOf, setGalleryOf] = useState<string | null>(null)
-  const [open, setOpen] = useState<number | null>(null)
+  // The lightbox's slide, held with its slug too, so Back with it open never leaves it
+  // showing over the next model (#624).
+  const [openOn, setOpenOn] = useState<{ slug: string; index: number } | null>(null)
+  const open = openOn?.slug === slug ? openOn.index : null
+  const setOpen = (index: number | null) => setOpenOn(index === null ? null : { slug, index })
   const ids = useId()
   const tabs = useRef<Array<HTMLButtonElement | null>>([])
 
@@ -54,7 +58,8 @@ export function PreviewGallery({ slug, media, label, hidden, children }: Props) 
       role="tab"
       id={`${ids}-${value}-tab`}
       aria-selected={view === value}
-      aria-controls={`${ids}-${value}`}
+      // The gallery panel is rendered only while it is selected (#624).
+      aria-controls={value === 'preview' || view === 'gallery' ? `${ids}-${value}` : undefined}
       tabIndex={view === value ? 0 : -1}
       onClick={() => select(value)}
       className={`-mb-px border-b-2 px-2.5 py-1.5 text-[12px] transition-colors ${
@@ -113,9 +118,10 @@ export function PreviewGallery({ slug, media, label, hidden, children }: Props) 
   )
 }
 
-/** One item in the strip: the image, or a video's poster with a play badge. */
+/** One item in the strip: a small copy of the image, or of a video's poster with a play badge. */
 function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
-  const src = slide.kind === 'video' ? slide.poster : slide.src
+  // The small copy, never the original: eight 4 MB photos are 32 MB of strip (#624).
+  const src = slide.thumbnail
   return (
     <button
       type="button"

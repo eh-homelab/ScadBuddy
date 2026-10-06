@@ -404,3 +404,31 @@ describe('the done summary (#815 §4)', () => {
     expect(screen.getByTestId('agent-done-summary')).toBeInTheDocument()
   })
 })
+
+describe('the tab-disconnected card (#815)', () => {
+  it('says the tab is back once the agent resolved it as reconnected', () => {
+    const item: FeedItem = {
+      kind: 'question',
+      id: 'att2',
+      tool: 't2',
+      questions: [
+        {
+          question: 'I need your ScadBuddy tab for browser_snapshot, but it is not connected.',
+          header: 'Tab disconnected',
+          multiSelect: false,
+          options: [
+            { label: "I'm back", description: '' },
+            { label: 'Carry on without the tab', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date().toISOString() },
+      state: 'cancelled',
+      reason: 'the ScadBuddy tab is connected again',
+      reconnected: true,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back; the assistant re-checks the page before going on.')
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+  })
+})

@@ -13,9 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import InvalidSlugError, slugify
@@ -496,3 +498,11 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = meta.id
     # A built-in's bare slug: `:` is not a character a saved file name can carry.
     return f"{meta.slug.removeprefix(BUILTIN_PREFIX)}-{suffix}.3mf"
+
+
+def require_output(store: OutputStore, output_id: str) -> OutputMeta:
+    """The output, or the 404 a route answers for it."""
+    try:
+        return store.get(output_id)
+    except OutputNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
