@@ -673,6 +673,11 @@ export function CustomizePage() {
         stage={renderStage}
         plate={plate}
         captureRef={captureRef}
+        sourceLink={
+          origin && (
+            <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+          )
+        }
         leading={
           // The page slot has no parameters flyout: the template's own page is the panel.
           full && customUi?.slot !== 'page' && (
