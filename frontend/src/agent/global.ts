@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { useLocation, useNavigate } from 'react-router'
+import { useContext, useEffect, useRef } from 'react'
+import { createPath, UNSAFE_NavigationContext, useLocation, useNavigate } from 'react-router'
 import {
   activeDialog,
   findByRole,
@@ -46,6 +46,16 @@ function optionValue(select: HTMLSelectElement, label: string, value: string): s
 }
 
 /**
+ * Where the router's history is now: it moves the moment a navigation is asked for,
+ * before React renders it. The browser and memory histories both expose it; `fallback`
+ * for a navigator that does not.
+ */
+function historyRoute(navigator: object, fallback: string): string {
+  const { location } = navigator as { location?: { pathname: string; search: string } }
+  return location ? createPath({ pathname: location.pathname, search: location.search }) : fallback
+}
+
+/**
  * The tools every route has — `navigate`, `snapshot` and the fallbacks `click` and
  * `fill` — registered by the app shell, which is mounted under the router for as long as
  * the app is. It also tells the bridge where the router is.
@@ -56,8 +66,17 @@ export function useGlobalAgentTools() {
   const location = useLocation()
   const route = `${location.pathname}${location.search}`
   const current = useLatest(route)
+  const { navigator } = useContext(UNSAFE_NavigationContext)
+  /**
+   * The route once this commit's effects have run (#761). Effects run children first,
+   * so by the time this one runs, a page that rewrites its own URL in an effect (the
+   * catalogue's `view=cards`) has already asked the router to: the history then says
+   * where the page is going, and the two differ until that commit lands too.
+   */
+  const settled = useRef(route)
 
   useEffect(() => {
+    settled.current = route
     bridge.setRoute(route)
   }, [bridge, route])
 
@@ -70,10 +89,16 @@ export function useGlobalAgentTools() {
       // redirect (an unknown path lands on "/") still counts as having moved.
       // One that redirects straight back to where it started never changes it, so the
       // wait is short and its end is an answer, not an error.
-      const landed = await waitFor(() => (current.current !== from ? current.current : undefined), {
-        timeout: 1000,
-        what: 'the route to change',
-      }).catch(() => current.current)
+      // Moved, and settled: the page has run its effects on the route and asked for no
+      // other (a page that rewrites its URL takes a second commit; answering between
+      // the two gave the route before the rewrite).
+      const landed = await waitFor(
+        () => {
+          const now = settled.current
+          return now !== from && now === historyRoute(navigator, now) ? now : undefined
+        },
+        { timeout: 1000, what: 'the route to change' },
+      ).catch(() => current.current)
       return { route: landed }
     },
 

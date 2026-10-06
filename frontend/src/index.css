@@ -1,6 +1,13 @@
 @import 'tailwindcss';
 
 /*
+ * #971 — the stacked (below lg) layout on a short window: a 1440x900 laptop at 200%
+ * zoom is 720x450. There the page scrolls rather than splitting the height into slivers.
+ */
+@custom-variant short (@media (max-width: 1023.98px) and (max-height: 640px));
+@custom-variant stacked-tall (@media (max-width: 1023.98px) and (min-height: 640.02px));
+
+/*
  * ScadBuddy reads as an instrument panel inside Bambuddy's dark chrome: steel-dark
  * surfaces, hairline rules, a 4 px rhythm. The only saturated colour in the UI is
  * the model's own filament colours — everything else stays quiet so the swatches
@@ -17,8 +24,10 @@
   --sb-line: #28313f;
   --sb-line-strong: #3a4557;
   --sb-text: #dde4ee;
-  --sb-muted: #8895a7;
-  --sb-faint: #5d6a7c;
+  /* #970 — every text token reads at WCAG AA (4.5:1) on bg, surface and surface-2,
+     checked by theme.contrast.test.ts; muted stays a clear step above faint. */
+  --sb-muted: #9ea9b9;
+  --sb-faint: #7c8a9d;
   --sb-accent: #f2a93b;
   --sb-accent-ink: #1a1204;
   --sb-ok: #4ade80;
@@ -48,11 +57,13 @@
     --sb-line: #d3dae4;
     --sb-line-strong: #b4bfcd;
     --sb-text: #161b23;
-    --sb-muted: #5b6878;
-    --sb-faint: #808d9d;
-    --sb-accent: #b96f05;
+    /* #970 — AA, as the dark theme: the accent was 3.9:1 as text and 3.7:1 under
+       the primary buttons' ink. */
+    --sb-muted: #4a5565;
+    --sb-faint: #606d7d;
+    --sb-accent: #9b5d04;
     --sb-accent-ink: #fff8ec;
-    --sb-ok: #15803d;
+    --sb-ok: #147c3b;
     --sb-warn: #b91c1c;
     --sb-focus: #1d4ed8;
     --sb-side-bg: #e7f5e9;

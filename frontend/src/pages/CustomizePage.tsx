@@ -792,8 +792,13 @@ export function CustomizePage() {
   )
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
+    // #971 — `short:` scrolls the stacked page on a short window; full screen is the view
+    // alone, so none of it applies there.
+    <div
+      className={`grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
+    >
+      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971). */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
             Models
@@ -815,7 +820,7 @@ export function CustomizePage() {
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {version && (
             <button
               type="button"
@@ -997,7 +1002,7 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
           {choosing ? null : templateUi ? (
@@ -1019,6 +1024,7 @@ export function CustomizePage() {
               onChange={onChange}
               onReset={onReset}
               reveal={reveal}
+              growsWithPage={!full}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1039,7 +1045,9 @@ export function CustomizePage() {
           )}
         </div>
 
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+        <div
+          className={`grid min-h-0 grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
+        >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into

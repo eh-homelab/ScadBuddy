@@ -107,7 +107,7 @@ name = "MIA"; // 12
 font = "DejaVu Sans:style=Bold"; // font
 
 // Largest letter height in mm (smaller if the name is long for the board)
-name_size = 14; // [8:1:30]
+name_size = 13; // [8:1:30]
 
 /* [Hidden] */
 
@@ -152,7 +152,7 @@ bed_d = 320;
 // intersected with the board. probe_slide renders each row's beads swept by
 // the free room along the track (grown by probe_gap) intersected with the
 // board. probe_wall renders any part of the rows' tracks and knobs, grown by
-// probe_wall, that lies outside the outline.
+// probe_wall (the name by a true distance), that lies outside the outline.
 probe_gap = 0;
 probe_move = [0, 0, 0];
 probe_slide = false;
@@ -258,15 +258,81 @@ function track_len(n, f = FREE) = 2 * end_gap + BODY + (n - 1) * PITCH + f;
 function beads_in(iv, f = FREE) = len(iv) < 2 ? 0 : let(room = iv[1] - iv[0] - 2 * wall)
     room < track_len(1, f) ? 0 : min(beads_per_row, 1 + floor((room - track_len(1, f)) / PITCH));
 
-// Name: an estimate of its width at size 1 (DejaVu Sans Bold advances),
-// then the size that fits a stretch.
-function has(set, ch) = search(ch, set) != [];
-function adv(ch) = has("Iijl.,:;!|' ", ch) ? 0.4 : has("MWmw@", ch) ? 1.08 : has("ftr", ch) ? 0.52 : 0.8;
-function name_w1(s) = len(s) == 0 ? 0 : [for (k = [0:len(s) - 1]) adv(s[k])] * [for (k = [0:len(s) - 1]) 1];
+// Name: its ink box, from per-glyph metrics of DejaVu Sans Bold measured at
+// size 10 with textmetrics() offline (ASCII 32..126), as [advance, ink x min,
+// ink x max, ink y min, ink y max], rounded outward. textmetrics() itself is
+// not used because MakerWorld's OpenSCAD does not have it. Anything outside
+// ASCII counts as the widest, tallest and deepest glyph the face has up to
+// U+017F. Kerning only ever pulls letters together, so the box is never short.
+GLYPH10 = [
+    [4.835, 0.0, 0.0, 0.0, 0.0], [6.334, 1.94, 4.4, 0.0, 10.13], [7.236, 1.31, 5.92, 6.36, 10.13],
+    [11.637, 0.94, 10.7, 0.0, 9.98], [9.664, 1.08, 8.73, -2.05, 10.56],
+    [13.916, 0.44, 13.48, -0.2, 10.32], [12.112, 0.83, 11.54, -0.2, 10.32],
+    [4.252, 1.31, 2.94, 6.36, 10.13], [6.348, 1.19, 5.24, -1.84, 10.55],
+    [6.348, 1.1, 5.16, -1.84, 10.55], [7.263, 0.27, 6.99, 3.85, 10.32],
+    [11.637, 1.46, 10.17, 0.0, 8.71], [5.276, 0.73, 3.86, -1.98, 2.63],
+    [5.764, 0.74, 5.02, 3.01, 4.99], [5.276, 1.41, 3.86, 0.0, 2.63],
+    [5.073, 0.0, 5.08, -1.29, 10.13], [9.664, 0.65, 9.01, -0.2, 10.32],
+    [9.664, 1.56, 8.72, 0.0, 10.13], [9.664, 1.09, 8.47, 0.0, 10.32],
+    [9.664, 0.92, 8.57, -0.2, 10.32], [9.664, 0.62, 9.04, 0.0, 10.13],
+    [9.664, 1.06, 8.7, -0.2, 10.13], [9.664, 0.85, 8.93, -0.2, 10.3],
+    [9.664, 0.92, 8.57, 0.0, 10.13], [9.664, 0.84, 8.81, -0.2, 10.32],
+    [9.664, 0.71, 8.79, -0.2, 10.3], [5.554, 1.54, 4.01, 0.0, 7.6],
+    [5.554, 0.87, 4.01, -1.98, 7.6], [11.637, 1.46, 10.17, 0.41, 8.3],
+    [11.637, 1.46, 10.17, 2.0, 6.7], [11.637, 1.46, 10.17, 0.41, 8.3],
+    [8.057, 0.95, 7.16, 0.0, 10.32], [13.889, 0.91, 12.91, -2.42, 9.77],
+    [10.749, 0.06, 10.69, 0.0, 10.13], [10.586, 1.27, 9.62, 0.0, 10.13],
+    [10.193, 0.69, 9.31, -0.2, 10.32], [11.529, 1.27, 10.81, 0.0, 10.13],
+    [9.488, 1.27, 8.48, 0.0, 10.13], [9.488, 1.27, 8.33, 0.0, 10.13],
+    [11.4, 0.69, 10.39, -0.2, 10.32], [11.624, 1.27, 10.35, 0.0, 10.13],
+    [5.168, 1.27, 3.9, 0.0, 10.13], [5.168, -0.79, 3.9, -2.78, 10.13],
+    [10.762, 1.27, 11.19, 0.0, 10.13], [8.85, 1.27, 8.48, 0.0, 10.13],
+    [13.821, 1.27, 12.55, 0.0, 10.13], [11.624, 1.27, 10.35, 0.0, 10.13],
+    [11.807, 0.69, 11.12, -0.2, 10.32], [10.179, 1.27, 9.62, 0.0, 10.13],
+    [11.807, 0.69, 11.12, -2.03, 10.32], [10.695, 1.27, 10.42, 0.0, 10.13],
+    [10.003, 0.99, 8.99, -0.2, 10.32], [9.474, 0.06, 9.41, 0.0, 10.13],
+    [11.278, 1.27, 10.01, -0.2, 10.13], [10.749, 0.06, 10.69, 0.0, 10.13],
+    [15.32, 0.4, 14.89, 0.0, 10.13], [10.708, 0.26, 10.44, 0.0, 10.13],
+    [10.057, -0.15, 10.2, 0.0, 10.13], [10.071, 0.62, 9.45, 0.0, 10.13],
+    [6.348, 1.19, 5.41, -1.84, 10.56], [5.073, 0.0, 5.08, -1.29, 10.13],
+    [6.348, 0.94, 5.16, -1.84, 10.56], [11.637, 1.4, 10.24, 6.34, 10.13],
+    [6.944, 0.0, 6.95, -3.28, -1.99], [6.944, 0.63, 4.48, 8.56, 11.12],
+    [9.372, 0.59, 8.29, -0.2, 7.78], [9.942, 1.16, 9.32, -0.2, 10.56],
+    [8.233, 0.59, 7.31, -0.2, 7.78], [9.942, 0.62, 8.79, -0.2, 10.56],
+    [9.42, 0.59, 8.75, -0.2, 7.78], [6.043, 0.26, 6.17, 0.0, 10.56],
+    [9.942, 0.62, 8.79, -3.0, 7.77], [9.888, 1.16, 8.81, 0.0, 10.56],
+    [4.761, 1.16, 3.6, 0.0, 10.56], [4.761, -0.47, 3.6, -3.0, 10.56],
+    [9.237, 1.16, 9.51, 0.0, 10.56], [4.761, 1.16, 3.6, 0.0, 10.56],
+    [14.472, 1.15, 13.38, 0.0, 7.78], [9.888, 1.16, 8.81, 0.0, 7.78],
+    [9.542, 0.59, 8.95, -0.2, 7.78], [9.942, 1.16, 9.32, -2.89, 7.78],
+    [9.942, 0.62, 8.79, -2.89, 7.77], [6.849, 1.16, 6.81, 0.0, 7.78],
+    [8.267, 0.71, 7.61, -0.2, 7.78], [6.639, 0.17, 6.33, 0.0, 9.76],
+    [9.888, 1.08, 8.73, -0.2, 7.6], [9.054, 0.2, 8.86, 0.0, 7.6], [12.831, 0.48, 12.36, 0.0, 7.6],
+    [8.959, 0.2, 8.75, 0.0, 7.6], [9.054, 0.16, 8.81, -3.0, 7.6], [8.084, 0.62, 7.43, 0.0, 7.6],
+    [9.888, 1.73, 8.16, -2.27, 10.56], [5.073, 1.76, 3.31, -3.28, 10.62],
+    [9.888, 1.73, 8.16, -2.27, 10.56], [11.637, 1.46, 10.17, 2.93, 5.77]
+];
+GLYPH10_OTHER = [16.21, -0.79, 18.37, -3.28, 12.98];
+function glyph10(ch) = let(o = ord(ch)) o >= 32 && o <= 126 ? GLYPH10[o - 32] : GLYPH10_OTHER;
+function pen10(s, i) = i <= 0 ? 0 : pen10(s, i - 1) + glyph10(s[i - 1])[0];
+// [x min, x max, y min, y max] of the name's ink at size 10, the first letter's
+// pen at x = 0 and the baseline at y = 0 ([0, 0, 0, 0] when nothing is inked).
+function ink10(s) = let(
+    gs = [for (i = [0:len(s) - 1]) let(g = glyph10(s[i])) if (g[2] > g[1]) [pen10(s, i) + g[1], pen10(s, i) + g[2], g[3], g[4]]])
+    len(gs) == 0 ? [0, 0, 0, 0]
+    : [min([for (q = gs) q[0]]), max([for (q = gs) q[1]]), min([for (q = gs) q[2]]), max([for (q = gs) q[3]])];
 HAS_NAME = len(name) > 0;
-NAME_BAND = name_size + 2 * wall;
+NAME_INK = HAS_NAME ? ink10(name) : [0, 0, 0, 0];
+NAME_W1 = (NAME_INK[1] - NAME_INK[0]) / 10;  // ink width at size 1
+NAME_H1 = (NAME_INK[3] - NAME_INK[2]) / 10;  // ink height at size 1
+// The faces the table measures (DejaVu Sans Book is narrower than the Bold).
+MEASURED_FONT = font == "DejaVu Sans:style=Bold" || font == "DejaVu Sans" || font == "DejaVu Sans:style=Book";
+// The name's band holds its ink at the asked size (taller than name_size when
+// it has capitals with accents, or letters that hang below the line), plus the
+// wall above and below.
+NAME_BAND = NAME_H1 * name_size + 2 * wall;
 MIN_NAME = 6;
-function name_fit(iv) = len(iv) < 2 ? 0 : min(name_size, (iv[1] - iv[0] - 2 * wall) / name_w1(name));
+function name_fit(iv) = len(iv) < 2 || NAME_W1 <= 0 ? 0 : min(name_size, (iv[1] - iv[0] - 2 * wall) / NAME_W1);
 
 // Row r (0 = top) of a stack whose top is at y_top.
 function row_y(y_top, r) = y_top - ROW_HALF - r * ROW_P;
@@ -363,11 +429,16 @@ module board_blank() {
     }
 }
 
+// The name, centred on its band by its measured ink box. The box it is
+// clipped to is the band less the wall, which the ink of a measured face never
+// reaches (verify.sh checks the inlay is the whole of the text); it only keeps
+// a wider face off the board's edge, and the render log says when that can be.
 module name_2d() {
     if (NAME_OK)
         translate([(NAME_IV[0] + NAME_IV[1]) / 2, name_y(BEST)])
             intersection() {
-                text(name, size = NAME_S, font = font, halign = "center", valign = "center");
+                scale(NAME_S / 10) translate([-(NAME_INK[0] + NAME_INK[1]) / 2, -(NAME_INK[2] + NAME_INK[3]) / 2])
+                    text(name, size = 10, font = font, halign = "left", valign = "baseline");
                 square([NAME_IV[1] - NAME_IV[0] - 2 * wall, NAME_BAND - 2 * wall], center = true);
             }
 }
@@ -401,13 +472,16 @@ if (HAS_NAME && !NAME_OK)
     echo(str("NOTE: the name does not fit the ", shape, " below the rows and is left out; shorten it, take a row away or raise board_size"));
 else if (HAS_NAME && NAME_S < name_size)
     echo(str("NOTE: name letters are ", round(NAME_S * 10) / 10, " mm (", name_size, " asked) so the name fits"));
+if (NAME_OK && !MEASURED_FONT)
+    echo(str("NOTE: the name is fitted with DejaVu Sans Bold's letter widths; in ", font,
+             " it may be cut off at the ends if that face is wider"));
 
 assert(N_BEADS > 0, str("no row of beads fits a ", board_size, " mm ", shape, "; raise board_size"));
 assert(max(oxs) - min(oxs) <= bed_w && Y_MAX - Y_MIN <= bed_d, "board does not fit the plate");
 
 echo(str("SB_FIDGET beads=", N_BEADS, " rows=[", [for (r = LIVE) ROW_N[r]], "] row_y=[",
          [for (r = LIVE) row_y(BEST, r)], "] x0=[", [for (r = LIVE) track_x0(r)], "] pitch=", PITCH, " free_places=", FREE_PLACES,
-         " free=", FREE, " name_size=", NAME_S, " name_iv=", NAME_IV, " name_y=", HAS_NAME ? name_y(BEST) : 0,
+         " free=", FREE, " name_size=", NAME_S, " name_box=[", NAME_W1 * NAME_S, ", ", NAME_H1 * NAME_S, "] name_iv=", NAME_IV, " name_y=", HAS_NAME ? name_y(BEST) : 0,
          " size=[", max(oxs) - min(oxs), ", ", Y_MAX - Y_MIN, "] top=", T + g + KNOB_UP + 1.5 + 0.35 * D / 2));
 
 // ---------------------------------------------------------------- output
@@ -434,11 +508,15 @@ if (probe_gap > 0 && !probe_slide) {
     translate([-1000, 0, 0]) cube(1);
 } else if (probe_wall > 0) {
     linear_extrude(1) difference() {
-        offset(delta = probe_wall) union() {
-            for (r = LIVE) translate([track_x0(r), row_y(BEST, r) - (S1 + c)])
-                square([track_len(ROW_N[r]), 2 * (S1 + c)]);
-            for (r = LIVE) for (i = [0:ROW_N[r] - 1]) translate([bead_x(r, i), row_y(BEST, r)]) circle(d = D);
-            name_2d();
+        union() {
+            offset(delta = probe_wall) union() {
+                for (r = LIVE) translate([track_x0(r), row_y(BEST, r) - (S1 + c)])
+                    square([track_len(ROW_N[r]), 2 * (S1 + c)]);
+                for (r = LIVE) for (i = [0:ROW_N[r] - 1]) translate([bead_x(r, i), row_y(BEST, r)]) circle(d = D);
+            }
+            // The name grown by a true distance: a sharp (delta) offset mitres
+            // an acute glyph corner, such as the foot of an A, far past it.
+            offset(r = probe_wall) name_2d();
         }
         outline_2d();
     }
