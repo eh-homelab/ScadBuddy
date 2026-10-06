@@ -5,7 +5,7 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/pendingInput'
+import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -227,14 +227,14 @@ describe('assistant panel', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     })
-    expect(sentOf('approval.decision')).toEqual([])
+    expect(respondRequests()).toEqual([])
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
     expect(screen.getByTestId('agent-status')).toHaveTextContent('Waiting for approval')
 
     await user.click(approve)
-    expect(sentOf('approval.decision')).toEqual([
-      { v: 1, type: 'approval.decision', sessionId: 'chat-1', id: expect.any(String), approve: true },
-    ])
+    // Through the one respond route (#815), not the socket.
+    expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
+    expect(sentOf('approval.decision')).toEqual([])
     await screen.findByText('Queued 2 copies in the Keychains project.')
     await screen.findByText('Sent. Two copies are in the queue.')
     expect(within(card).getByText('Approved by You.')).toBeInTheDocument()
@@ -244,7 +244,7 @@ describe('assistant panel', () => {
   it('Deny sends a refusal and nothing is sent', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
-    expect(sentOf('approval.decision')).toMatchObject([{ approve: false }])
+    expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
     await screen.findByText('Denied: nothing was sent.')
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })
@@ -270,6 +270,29 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('shows a done summary beside the badge, not in the waiting count or the tab title (#815)', async () => {
+    setPendingAnswers(1, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you, 1 summary' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 1 waiting for you (1 question), 1 summary')
+    expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toHaveTextContent('1 waiting for you')
+    await waitFor(() => expect(document.title).toBe('(1) ScadBuddy'))
+  })
+
+  it('a done summary alone waits for nothing: no count, no title prefix, but still shown (#815)', async () => {
+    setPendingAnswers(0, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 summary' })
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+    expect(document.title).toBe('ScadBuddy')
   })
 
   it('shows the badge embedded in Bambuddy, but leaves the frame\'s unseen title alone (#815)', async () => {

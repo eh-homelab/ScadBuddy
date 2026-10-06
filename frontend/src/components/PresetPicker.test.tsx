@@ -1,6 +1,9 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
+import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { bridge } from '../agent/bridge'
+import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
@@ -9,7 +12,8 @@ import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
 import { renderPage } from '../test/utils'
-import { defaultValues } from '../lib/params'
+import type { InputsExtra } from '../lib/inputs'
+import { defaultValues, type ParamValues } from '../lib/params'
 import { PresetPicker } from './PresetPicker'
 
 // WebGL does not exist in jsdom; the page is under test here, not the viewer.
@@ -48,6 +52,35 @@ async function savePresetNamed(user: ReturnType<typeof renderPage>['user'], name
   await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 }
 
+/** The picker with values that follow each apply, as the customize page's do. */
+function Harness({ onApply }: { onApply: (values: ParamValues, extra: InputsExtra) => void }) {
+  const [values, setValues] = useState(() => defaultValues(keychainSchema))
+  const [extra, setExtra] = useState<InputsExtra>({ tab: 'lid' })
+  return (
+    <PresetPicker
+      slug="name-keychain"
+      schema={keychainSchema}
+      values={values}
+      extra={extra}
+      onApply={(next, nextExtra) => {
+        setValues(next)
+        setExtra(nextExtra)
+        onApply(next, nextExtra)
+      }}
+    />
+  )
+}
+
+/** The app shell's agent tools (`fill`, `click`), which the page itself does not register. */
+function AgentTools({ children }: { children: React.ReactNode }) {
+  useGlobalAgentTools()
+  return <>{children}</>
+}
+
+function presetId(select: HTMLElement, name: string): string {
+  return (within(select).getByRole('option', { name }) as HTMLOptionElement).value
+}
+
 describe('PresetPicker', () => {
   // Saves and deletes write the mock's state, which no global hook resets.
   beforeEach(() => resetMockState())
@@ -80,6 +113,117 @@ describe('PresetPicker', () => {
       const last = await renders.at(-1)
       expect(last?.inputs.params).toMatchObject({ name: 'Mum', body_color: '#222222' })
     }, { timeout: 4000 })
+  })
+
+  it('asks before a pick replaces edits no preset holds (#359)', async () => {
+    const { user } = render()
+    const select = await picker()
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Emmalina')
+
+    await user.selectOptions(select, 'Mum')
+    const dialog = screen.getByRole('dialog', { name: 'Apply preset Mum?' })
+    expect(dialog).toHaveTextContent('The values on screen have changes no preset holds.')
+    expect(dialog).toHaveTextContent('To keep them, cancel and save them as a preset first.')
+    // Nothing is replaced while it asks, and the picker still shows no preset.
+    expect(name).toHaveValue('Emmalina')
+    expect(select).toHaveValue('')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(name).toHaveValue('Emmalina')
+
+    // Escape closes it the same way, applying nothing.
+    await user.selectOptions(select, 'Mum')
+    expect(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(name).toHaveValue('Emmalina')
+    expect(select).toHaveValue('')
+
+    await user.selectOptions(select, 'Mum')
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).getByRole('button', {
+        name: 'Replace my changes',
+      }),
+    )
+    expect(name).toHaveValue('Mum')
+    expect(select).toHaveDisplayValue('Mum')
+  })
+
+  it('asks before leaving a preset that was changed since it was picked (#359)', async () => {
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Tiny')
+    // Moving between unchanged presets loses nothing, so it does not ask.
+    await user.selectOptions(select, 'Mum')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+    await user.selectOptions(select, 'Tiny')
+    const dialog = screen.getByRole('dialog', { name: 'Apply preset Tiny?' })
+    // The edits are changes to Mum, a saved preset, so Update is the way to keep them.
+    expect(dialog).toHaveTextContent('You changed Mum since you picked it.')
+    expect(dialog).toHaveTextContent('To keep them, cancel and update Mum or save them as a preset first.')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mummy')
+  })
+
+  it('keeps asking about the first preset picked while the dialog is open (#1475)', async () => {
+    const { user } = render()
+    const select = await picker()
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
+
+    fireEvent.change(select, { target: { value: presetId(select, 'Tiny') } })
+    fireEvent.change(select, { target: { value: presetId(select, 'Mum') } })
+    const dialog = screen.getByRole('dialog', { name: 'Apply preset Tiny?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Replace my changes' }))
+    expect(select).toHaveDisplayValue('Tiny')
+  })
+
+  it('clears the selection without asking when "Choose a preset…" is picked over edits (#1475)', async () => {
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Mum')
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.type(name, 'my')
+
+    await user.selectOptions(select, '')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(select).toHaveValue('')
+    expect(name).toHaveValue('Mummy')
+  })
+
+  it("lets the assistant's fill apply a preset over edits once it confirms (#1445)", async () => {
+    const { user } = renderPage(
+      <AgentTools>
+        <CustomizePage />
+      </AgentTools>,
+      { route: '/m/name-keychain', path: '/m/:slug' },
+    )
+    const select = await picker()
+    await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.type(name, 'x')
+    const edited = (name as HTMLInputElement).value
+
+    // The pick asks first, and fill says so rather than returning the old value bare.
+    const filled = await bridge.call('fill', { label: 'Preset', value: 'Mum' })
+    expect(filled).toEqual({
+      ok: true,
+      result: {
+        filled: 'Preset',
+        value: '',
+        confirm: expect.stringContaining('"Apply preset Mum?" opened instead') as unknown,
+      },
+    })
+    expect(name).toHaveValue(edited)
+    expect(select).toHaveValue('')
+
+    // Replacing the values on screen stays in the page, so the assistant may confirm it.
+    expect(await bridge.call('click', { role: 'button', name: 'Replace my changes' })).toMatchObject({ ok: true })
+    expect(name).toHaveValue('Mum')
+    expect(select).toHaveDisplayValue('Mum')
   })
 
   it('says which values it skipped because the template dropped them', async () => {
@@ -451,14 +595,14 @@ describe('PresetPicker', () => {
       }),
     )
     const onApply = vi.fn()
-    const { user } = renderPage(
-      <PresetPicker slug="name-keychain" schema={keychainSchema} values={defaultValues(keychainSchema)} extra={{ tab: 'lid' }} onApply={onApply} />,
-    )
+    const { user } = renderPage(<Harness onApply={onApply} />)
     await savePresetNamed(user, 'Lid')
     await waitFor(() => expect(saved).toEqual({ name: 'Lid', inputs: { params: {}, tab: 'lid' }, description: '', tags: [] }))
     const select = await picker()
+    // Away by way of another preset and back: the harness's values follow each pick.
     await user.selectOptions(select, 'Tiny')
     await user.selectOptions(select, 'Lid')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
   })
 
