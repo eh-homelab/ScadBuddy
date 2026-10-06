@@ -503,11 +503,12 @@ async def check_print(
         printer_id=prepared.printer_id,
         status=prepared.printer_status,
         rack=rack,
+        laid_out=source.lays_out,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
     try:
-        _check_manual_pick(request, prepared.printer_status)
+        _check_manual_pick(request, prepared.printer_status, laid_out=source.lays_out)
     except RunRefusalError as refused:
         errors = [refused.detail]
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
@@ -556,11 +557,14 @@ async def rack_preview(
     printer_id: int,
     status: PrinterStatus | None,
     rack: RackUsage | None,
+    laid_out: bool,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
-    (#484). Every chosen spool counts toward the material test, since the slice may put any
-    of them on the rack side. Advisory: a failure previews nothing."""
+    (#484): the one chosen there for a file the run lays out, Standard for a library file
+    (``laid_out``, :func:`~scadbuddy.bambuddy.extruders.rack_volume_type`). Every chosen
+    spool counts toward the material test, since the slice may put any of them on the
+    rack side. Advisory: a failure previews nothing."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     try:
@@ -571,7 +575,7 @@ async def rack_preview(
         group = RackGroup(
             group_id=0,
             nozzle_diameter=request.choices.nozzles[0].size,
-            volume_type=rack_volume_type(request.choices.nozzles),
+            volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
             # Zero alpha (a Clear spool's 00000000) is no color, never black.
             color=rack_color(first) if first else None,
             materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
@@ -609,11 +613,14 @@ async def rack_preview(
     )
 
 
-def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -> None:
+def _check_manual_pick(
+    request: PrintRunRequest, status: PrinterStatus | None, *, laid_out: bool
+) -> None:
     """Spec §5: a manual pick that cannot print this is a 422 before anything is sliced.
     Judged on the flow the slice will carry, which is what Bambuddy re-checks at
-    dispatch. An unreadable rack refuses nothing: Bambuddy still re-checks it then. A
-    readable status with no rack at all is refused as that, not as one empty position."""
+    dispatch (``laid_out`` as for :func:`rack_preview`). An unreadable rack refuses
+    nothing: Bambuddy still re-checks it then. A readable status with no rack at all is
+    refused as that, not as one empty position."""
     if request.rack_position is None or status is None:
         return
     positions = rack_positions(status.nozzle_rack)
@@ -623,7 +630,7 @@ def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -
             "nozzle rack. Choose Automatic."
         )
     size = request.choices.nozzles[0].size
-    flow = rack_volume_type(request.choices.nozzles)
+    flow = rack_volume_type(request.choices.nozzles, laid_out=laid_out)
     held = positions.get(request.rack_position)
     if held is not None and eligible(held, size, flow):
         return
@@ -738,7 +745,7 @@ async def prepare_run(
     printer_status = await _read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick:
-        _check_manual_pick(request, printer_status)
+        _check_manual_pick(request, printer_status, laid_out=source.lays_out)
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,

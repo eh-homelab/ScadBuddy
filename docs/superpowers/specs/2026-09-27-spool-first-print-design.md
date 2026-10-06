@@ -228,11 +228,13 @@ sliced as Standard). Since #484 the slice states each side's flow as chosen, and
 offered only a side with a nozzle of that flow when one side alone has one (#834), so
 the warning is left for the one side offered when no side has the flow, either side
 when the slicer chooses, and the rack side until a rack pick swaps on a hotend of the
-flow (#1238); a library file is offered no side. It is advisory only, never a refusal,
-and it changes nothing the run sends, since a print may be set up before its nozzle is
-fitted. An unreadable printer status gives no warning rather than assuming a side. The
-dialog shows `hf-mounted` in Simple and Advanced mode alike, and it never holds Print;
-the nozzle step's own note (`not-installed`) stays Advanced only.
+flow (#1238). A library file prints as its author left it: it is offered no side, and
+it is taken as Standard on both, whatever flow is chosen, as are its rack preview and a
+manual rack pick (the flow it states is not read). The warning is advisory only, never
+a refusal, and it changes nothing the run sends, since a print may be set up before its
+nozzle is fitted. An unreadable printer status gives no warning rather than assuming a
+side. The dialog shows `hf-mounted` in Simple and Advanced mode alike, and it never holds
+Print; the nozzle step's own note (`not-installed`) stays Advanced only.
 
 That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL

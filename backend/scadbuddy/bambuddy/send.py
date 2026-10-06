@@ -130,7 +130,9 @@ class Target:
             # A file that lets the slicer use either side must not be reused for one
             # that must keep to one side, nor the other way round.
             key = f"{key}^{','.join(self.nozzle_stats)}"
-        if self.nozzle_volume_type is not None and set(self.nozzle_volume_type) != {_STANDARD}:
+        if self.nozzle_volume_type is not None and any(
+            flow != _STANDARD for flow in self.nozzle_volume_type
+        ):
             # A High Flow file must not be reused for Standard, nor the other way round.
             # All Standard is what the slicer assumes without the key, so it keeps the key
             # it had, and a file recorded before #484 is still reused.

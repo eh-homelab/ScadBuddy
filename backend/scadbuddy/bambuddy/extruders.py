@@ -173,12 +173,12 @@ def high_flow_warnings(
     hotend mounted there now is swapped out and is not warned about (#1238).
 
     ``laid_out``: the file is an output the run lays out, which states the side
-    offered. A library file prints as its author left it (#313), so the slicer may use
-    either side."""
+    offered and each side's flow. A library file prints as its author left it (#313):
+    the slicer may use either side, and it slices as Standard (:func:`_sliced_flows`)."""
     if not nozzles:
         return []
     size = nozzles[0].size
-    flows = _flows(nozzles)
+    flows = _sliced_flows(nozzles, laid_out=laid_out)
     offered = _offered_side(status, nozzles) if laid_out else None
     return [
         high_flow_warning(extruder, flows[extruder])
@@ -211,6 +211,16 @@ def _flows(nozzles: Sequence[NozzleChoice]) -> dict[int, FlowType]:
     return {LEFT: nozzles[0].flow, RIGHT: nozzles[-1].flow}
 
 
+def _sliced_flows(nozzles: Sequence[NozzleChoice], *, laid_out: bool) -> dict[int, FlowType]:
+    """The flow each side is sliced for. An output the run lays out states the flow
+    chosen for each (:func:`slicer_volume_types`). A library file prints as its author
+    left it (#313) and states none unless they saved it High Flow, which is not read,
+    so it is taken as Standard on both sides, as every slice was before #484."""
+    if laid_out:
+        return _flows(nozzles)
+    return {LEFT: "standard", RIGHT: "standard"}
+
+
 def slicer_volume_types(nozzles: Sequence[NozzleChoice]) -> list[str]:
     """``nozzle_volume_type`` for the 3MF: the flow chosen for each extruder, in the
     slicer's order (#484).
@@ -228,10 +238,11 @@ def slicer_volume_types(nozzles: Sequence[NozzleChoice]) -> list[str]:
     return [VOLUME_TYPE[flows[extruder]] for extruder in SLICER_ORDER]
 
 
-def rack_volume_type(nozzles: Sequence[NozzleChoice]) -> str:
+def rack_volume_type(nozzles: Sequence[NozzleChoice], *, laid_out: bool = True) -> str:
     """The flow the rack side is sliced for, which Bambuddy re-checks a rack pick
-    against at dispatch: the right's, the side the rack swaps onto."""
-    return VOLUME_TYPE[_flows(nozzles)[RACK_SIDE]]
+    against at dispatch: the right's, the side the rack swaps onto. ``laid_out`` as
+    for :func:`high_flow_warnings`: a library file's is taken as Standard."""
+    return VOLUME_TYPE[_sliced_flows(nozzles, laid_out=laid_out)[RACK_SIDE]]
 
 
 def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:

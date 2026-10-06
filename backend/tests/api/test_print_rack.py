@@ -669,3 +669,55 @@ def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
     assert check.status_code == 200, check.text
     assert check.json()["rack"]["position"] in (2, 4, 6)
     assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+
+
+def _library_high_flow(**extra: Any) -> dict[str, Any]:
+    return {
+        **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        **extra,
+    }
+
+
+@respx.mock
+def test_a_library_file_with_high_flow_chosen_is_judged_as_standard(client: TestClient) -> None:
+    """A library file is sliced with its own flow, Standard unless its author saved it
+    High Flow, whatever the dialog chose (#313, #484). So the mounted High Flow left is
+    warned of, the preview picks a Standard hotend for the right, and a High Flow position
+    is refused, as Bambuddy's dispatch would refuse it."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post("/api/v1/print/library/89/check", json=_library_high_flow())
+    manual = client.post("/api/v1/print/library/89/check", json=_library_high_flow(rack_position=3))
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+    assert manual.json()["errors"] == [
+        "Rack position 3 holds a 0.4 mm High Flow nozzle, and this prints with a 0.4 mm "
+        "Standard nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
+    client: TestClient,
+) -> None:
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=_library_high_flow())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == {"left"}

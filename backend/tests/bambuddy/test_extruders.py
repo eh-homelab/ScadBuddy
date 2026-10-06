@@ -391,6 +391,18 @@ def test_a_library_file_may_print_on_either_side() -> None:
     ]
 
 
+def test_a_library_file_is_judged_as_standard_whatever_flow_is_chosen() -> None:
+    """A library file states no flow unless its author saved one, so it slices Standard
+    (#313): High Flow chosen does not make the High Flow left match, and the rack side is
+    judged Standard too."""
+    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
+    high_flow = _choose("0.4", "high_flow")
+    assert high_flow_warnings(status, high_flow, laid_out=False) == [
+        high_flow_warning(LEFT, "standard")
+    ]
+    assert rack_volume_type(high_flow, laid_out=False) == "Standard"
+
+
 def test_no_warning_without_a_mounted_nozzle_of_the_size_or_a_status() -> None:
     assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), _size("0.2")) == []
     assert high_flow_warnings(None, STANDARD_04) == []

@@ -83,6 +83,9 @@ _SOURCE_ORDER = {"cloud": 0, "local": 1, "standard": 2, "orca_cloud": 3}
 
 
 class PrintChoices(BaseModel):
+    #: The left side first and the right second, as the dialog's nozzle step lists them;
+    #: one entry is both sides'. The flow each side is sliced for is read in this order
+    #: (``extruders._flows``, #484), so it must not change.
     nozzles: list[NozzleChoice] = Field(min_length=1, max_length=2)
     tier: Tier | None = "standard"
     process_name: str | None = None
