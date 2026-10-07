@@ -93,7 +93,8 @@ logger = logging.getLogger(__name__)
 
 #: A preview's priority on the render queue it shares with user renders (#603): below
 #: Temporal's default of 3 (1 is first, 5 last), so a boot-time or hourly pass of
-#: previews never holds a render someone is waiting for. Its activities inherit it.
+#: previews never holds a render someone is waiting for. `RenderPreview` passes it to its
+#: activity (Temporal 1.32 no longer passes a workflow's priority on by itself).
 PREVIEW_PRIORITY = 4
 
 #: How long a request waits on one Temporal call it makes besides the start (a release,

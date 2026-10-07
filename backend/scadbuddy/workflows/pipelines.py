@@ -297,6 +297,9 @@ class RenderPreview:
             start_to_close_timeout=timedelta(seconds=timeout) + PREVIEW_TRANSFER,
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=1),
+            # The run's own priority (`PREVIEW_PRIORITY`), given outright: Temporal
+            # 1.31 hands an activity its workflow's priority, 1.32 does not (#603).
+            priority=workflow.info().priority,
         )
         return png
 
