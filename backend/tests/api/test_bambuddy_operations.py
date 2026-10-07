@@ -302,6 +302,7 @@ def test_a_key_sent_twice_is_one_effect(client: TestClient, model: str, kind: st
 
 
 @pytest.mark.parametrize("kind", list(KINDS))
+@pytest.mark.keyless
 @respx.mock
 def test_a_request_without_a_key_is_428_and_does_nothing(
     client: TestClient, model: str, pg_conninfo: str, kind: str

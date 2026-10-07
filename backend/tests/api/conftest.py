@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psycopg
 import pytest
 import trimesh
@@ -31,6 +32,7 @@ from tests.support.deployment import (
     BUILD_SERVES_TIMEOUT,
     wait_until_build_serves,
 )
+from tests.support.operations import press
 from tests.support.temporal import (
     WorkflowReaper,
     temporal_available,
@@ -149,6 +151,33 @@ def settings(
 @pytest.fixture
 def app(settings: Settings) -> FastAPI:
     return create_app(settings)
+
+
+#: The methods a write is sent with: each one a deliberate press for its client.
+WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@pytest.fixture(autouse=True)
+def _writes_carry_a_key(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every write an api test sends without an ``Idempotency-Key`` is sent with a fresh
+    one, as the browser's and the agent's ``command()`` do for each press: a command
+    route refuses a keyless request with 428 (#1143). A test that sends its own key (a
+    retry of one press) keeps it, and one marked ``keyless`` sends none, to see that
+    refusal."""
+    if request.node.get_closest_marker("keyless") is not None:
+        return
+    send = TestClient.request
+
+    def keyed(self: TestClient, method: str, url: Any, **kwargs: Any) -> httpx.Response:
+        if method.upper() in WRITE_METHODS:
+            headers = httpx.Headers(kwargs.get("headers"))
+            if "idempotency-key" not in headers:
+                headers["Idempotency-Key"] = press()["Idempotency-Key"]
+            kwargs["headers"] = headers
+        response: httpx.Response = send(self, method, url, **kwargs)
+        return response
+
+    monkeypatch.setattr(TestClient, "request", keyed)
 
 
 @pytest.fixture(autouse=True)

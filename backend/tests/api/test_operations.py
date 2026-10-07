@@ -184,6 +184,7 @@ def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
     assert counts.runs == 1
 
 
+@pytest.mark.keyless
 def test_a_request_without_a_key_is_refused_and_runs_nothing(
     client: TestClient, counts: Counts, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
