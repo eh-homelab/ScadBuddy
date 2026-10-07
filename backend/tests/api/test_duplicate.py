@@ -99,7 +99,9 @@ def test_a_duplicate_of_a_built_in_is_mine_and_points_at_it(client: TestClient) 
     ]
     # Editable, where the built-in is not.
     edited = client.put(
-        "/api/v1/models/my-keychain/source", json={"source": "width = 20;\n", "force": True}
+        "/api/v1/models/my-keychain/source",
+        json={"source": "width = 20;\n", "force": True},
+        headers=press(),
     )
     assert edited.status_code == 200, edited.text
     assert client.get(f"/api/v1/models/{BUILTIN}/source").text == SOURCE
@@ -107,7 +109,11 @@ def test_a_duplicate_of_a_built_in_is_mine_and_points_at_it(client: TestClient) 
 
 def test_a_duplicate_of_a_duplicate_tracks_its_immediate_parent(client: TestClient) -> None:
     _duplicate(client, BUILTIN, "My keychain")
-    client.put("/api/v1/models/my-keychain/source", json={"source": "cube(1);\n", "force": True})
+    client.put(
+        "/api/v1/models/my-keychain/source",
+        json={"source": "cube(1);\n", "force": True},
+        headers=press(),
+    )
     parent_version = client.get("/api/v1/models/my-keychain").json()["version"]
 
     record = _duplicate(client, "my-keychain", "Another keychain")
@@ -607,9 +613,13 @@ def test_a_duplicate_takes_the_thumbnail_and_readme_as_its_own_and_can_edit_them
     assert client.get(f"/api/v1/models/{slug}/thumbnail").content == THUMBNAIL
 
     replaced = client.put(
-        f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{slug}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
-    readme = client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"})
+    readme = client.put(
+        f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"}, headers=press()
+    )
     patched = client.patch(f"/api/v1/models/{slug}", json={"name": "Keyring"}, headers=press())
 
     assert (replaced.status_code, readme.status_code, patched.status_code) == (200, 200, 200)

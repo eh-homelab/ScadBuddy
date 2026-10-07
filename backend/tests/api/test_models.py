@@ -525,7 +525,9 @@ def test_a_source_edit_that_loses_a_delete_race_is_a_404_and_resurrects_nothing(
     shutil.rmtree(paths.model_dir(model))
     with patch.object(Catalogue, "exists", return_value=True):
         response = client.put(
-            f"/api/v1/models/{model}/source", json={"source": "width = 7;\n", "force": True}
+            f"/api/v1/models/{model}/source",
+            json={"source": "width = 7;\n", "force": True},
+            headers=press(),
         )
 
     assert response.status_code == 404
@@ -547,7 +549,9 @@ def test_a_source_swap_racing_a_delete_is_a_404_and_resurrects_nothing(
     paths.tombstones.mkdir(parents=True, exist_ok=True)
     with patch("scadbuddy.library.catalogue.os.replace", lose_the_race_then_replace):
         response = client.put(
-            f"/api/v1/models/{model}/source", json={"source": "width = 7;\n", "force": True}
+            f"/api/v1/models/{model}/source",
+            json={"source": "width = 7;\n", "force": True},
+            headers=press(),
         )
 
     assert response.status_code == 404
@@ -762,7 +766,9 @@ def test_a_nul_in_pasted_source_is_refused_even_when_forced(
     assert created.status_code == 422
     assert "NUL" in created.json()["detail"]
 
-    replaced = client.put(f"/api/v1/models/{model}/source", json={"source": source, "force": force})
+    replaced = client.put(
+        f"/api/v1/models/{model}/source", json={"source": source, "force": force}, headers=press()
+    )
     assert replaced.status_code == 422
 
 
@@ -787,7 +793,9 @@ def test_replacing_the_source_rederives_the_schema(
     before = json.loads(paths.model_schema_cache(model).read_text())["schema"]["source_sha256"]
 
     replacement = 'width = 42;\nlabel = "new";\ncube(width);\n'
-    response = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
+    response = client.put(
+        f"/api/v1/models/{model}/source", json={"source": replacement}, headers=press()
+    )
     assert response.status_code == 200
     assert response.json()["slug"] == model
     assert client.get(f"/api/v1/models/{model}/source").text == replacement
@@ -798,7 +806,7 @@ def test_replacing_the_source_rederives_the_schema(
 
 
 def test_replacing_the_source_keeps_the_metadata(client: TestClient, model: str) -> None:
-    client.put(f"/api/v1/models/{model}/source", json={"source": "width = 1;\n"})
+    client.put(f"/api/v1/models/{model}/source", json={"source": "width = 1;\n"}, headers=press())
     assert client.get(f"/api/v1/models/{model}").json()["name"] == "Demo"
 
 
@@ -806,12 +814,16 @@ def test_a_replacement_that_does_not_parse_is_refused_unless_forced(
     client: TestClient, model: str
 ) -> None:
     original = client.get(f"/api/v1/models/{model}/source").text
-    refused = client.put(f"/api/v1/models/{model}/source", json={"source": "%%FAIL%%\n"})
+    refused = client.put(
+        f"/api/v1/models/{model}/source", json={"source": "%%FAIL%%\n"}, headers=press()
+    )
     assert refused.status_code == 422
     assert client.get(f"/api/v1/models/{model}/source").text == original
 
     forced = client.put(
-        f"/api/v1/models/{model}/source", json={"source": "%%FAIL%%\n", "force": True}
+        f"/api/v1/models/{model}/source",
+        json={"source": "%%FAIL%%\n", "force": True},
+        headers=press(),
     )
     assert forced.status_code == 200
     assert client.get(f"/api/v1/models/{model}/source").text == "%%FAIL%%\n"
@@ -820,14 +832,19 @@ def test_a_replacement_that_does_not_parse_is_refused_unless_forced(
 def test_the_force_query_parameter_forces_a_replacement(client: TestClient, model: str) -> None:
     """The same spelling `POST /models` takes, so a client forces both routes one way."""
     response = client.put(
-        f"/api/v1/models/{model}/source?force=true", json={"source": "%%FAIL%%\n"}
+        f"/api/v1/models/{model}/source?force=true", json={"source": "%%FAIL%%\n"}, headers=press()
     )
     assert response.status_code == 200
     assert client.get(f"/api/v1/models/{model}/source").text == "%%FAIL%%\n"
 
 
 def test_replacing_the_source_of_a_model_that_is_not_there(client: TestClient) -> None:
-    assert client.put("/api/v1/models/nope/source", json={"source": SOURCE}).status_code == 404
+    assert (
+        client.put(
+            "/api/v1/models/nope/source", json={"source": SOURCE}, headers=press()
+        ).status_code
+        == 404
+    )
 
 
 def test_the_check_endpoint_reports_diagnostics_without_saving_anything(
@@ -918,7 +935,9 @@ def test_replacing_the_source_runs_openscad_once(
     set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
 
     replacement = 'width = 3;\nlabel = "x";\n'
-    put = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
+    put = client.put(
+        f"/api/v1/models/{model}/source", json={"source": replacement}, headers=press()
+    )
     assert put.status_code == 200
     assert _openscad_runs(log) == 1
 
@@ -986,7 +1005,9 @@ def test_a_refusal_says_when_it_was_a_timeout(
 
     monkeypatch.setattr("scadbuddy.library.scad.run_openscad", timing_out)
 
-    response = client.put(f"/api/v1/models/{model}/source", json={"source": "cube(1);\n"})
+    response = client.put(
+        f"/api/v1/models/{model}/source", json={"source": "cube(1);\n"}, headers=press()
+    )
     assert response.status_code == 422
     body = response.json()
     assert body["timed_out"] is True
@@ -1002,7 +1023,9 @@ def test_replacing_the_source_swaps_the_file_rather_than_truncating_it(
 
     replacement = "width = 7;\n"
     assert (
-        client.put(f"/api/v1/models/{model}/source", json={"source": replacement}).status_code
+        client.put(
+            f"/api/v1/models/{model}/source", json={"source": replacement}, headers=press()
+        ).status_code
         == 200
     )
 
@@ -1050,7 +1073,7 @@ def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
     created = client.post("/api/v1/models", json={"name": "Huge", "source": huge}, headers=press())
     assert created.status_code == 422
 
-    replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge})
+    replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge}, headers=press())
     assert replaced.status_code == 422
 
     assert _openscad_runs(log) == 0, "openscad ran for a body that was refused on shape"

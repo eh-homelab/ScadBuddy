@@ -143,6 +143,7 @@ test.describe('real backend', () => {
 
     try {
       const edited = await request.put(`/api/v1/models/${slug}/source`, {
+        headers: idempotencyKey(),
         data: { source: second, message: 'Widen the block' },
       })
       expect(edited.ok()).toBeTruthy()

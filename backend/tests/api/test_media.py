@@ -639,7 +639,12 @@ def test_the_first_write_converts_a_legacy_thumbnail(
 
 def test_the_legacy_id_can_be_reordered_and_removed(client: TestClient, model: str) -> None:
     thumbnail = {"file": ("t.png", PNG, "image/png")}
-    assert client.put(f"/api/v1/models/{model}/thumbnail", files=thumbnail).status_code == 200
+    assert (
+        client.put(
+            f"/api/v1/models/{model}/thumbnail", files=thumbnail, headers=press()
+        ).status_code
+        == 200
+    )
     added = _upload(client, model, JPEG).json()["media"]
     converted = added[0]["id"]
 
@@ -704,7 +709,9 @@ def test_setting_the_thumbnail_replaces_an_image_cover(client: TestClient, model
     video = _upload(client, model, WEBM).json()["media"][1]
 
     response = client.put(
-        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", PNG, "image/png")}
+        f"/api/v1/models/{model}/thumbnail",
+        files={"file": ("t.png", PNG, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 200, response.text
@@ -713,9 +720,9 @@ def test_setting_the_thumbnail_replaces_an_image_cover(client: TestClient, model
     assert media[1]["id"] == video["id"]
     assert client.get(f"/api/v1/models/{model}/thumbnail").content == PNG
 
-    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()).status_code == 200
     assert [item["id"] for item in _media(client, model)] == [video["id"]]
-    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 404
+    assert client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()).status_code == 404
 
 
 def test_a_video_whose_file_is_gone_is_reported_missing(
@@ -761,7 +768,7 @@ def test_a_restore_brings_back_a_file_but_not_its_row(
     commit = client.get(f"/api/v1/models/{model}/versions").json()[0]["commit"]
     client.delete(f"/api/v1/models/{model}/media/{image['id']}")
 
-    restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore")
+    restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore", headers=press())
 
     assert restored.status_code == 200, restored.text
     assert (paths.model_dir(model) / "media" / image["file"]).read_bytes() == PNG
@@ -1032,7 +1039,9 @@ def test_other_multipart_routes_keep_the_multipart_cap(
     oversized = PNG + b"\x00" * MAX_MULTIPART_BODY_BYTES
 
     response = small_limit_client.put(
-        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", oversized, "image/png")}
+        f"/api/v1/models/{model}/thumbnail",
+        files={"file": ("t.png", oversized, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 413, response.text

@@ -194,7 +194,11 @@ def test_editing_metadata_publishes_model_updated(
 def test_saving_source_publishes_source_changed_and_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    _ok(client.put(f"/api/v1/models/{model}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.put(
+            f"/api/v1/models/{model}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": model}]
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}]
 
@@ -203,10 +207,10 @@ def test_thumbnail_and_readme_writes_publish_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
     png = {"file": ("thumb.png", PNG_BYTES, "image/png")}
-    _ok(client.put(f"/api/v1/models/{model}/thumbnail", files=png))
-    _ok(client.delete(f"/api/v1/models/{model}/thumbnail"))
-    _ok(client.put(f"/api/v1/models/{model}/readme", json={"content": "# Demo\n"}))
-    _ok(client.delete(f"/api/v1/models/{model}/readme"))
+    _ok(client.put(f"/api/v1/models/{model}/thumbnail", files=png, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()))
+    _ok(client.put(f"/api/v1/models/{model}/readme", json={"content": "# Demo\n"}, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{model}/readme", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}] * 4
 
 
@@ -240,7 +244,11 @@ def test_every_preset_write_publishes_presets_changed(
 def test_every_commit_publishes_version_committed(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    saved = _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    saved = _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     committed = published(events, "version.committed")
     assert committed == [{"kind": "version.committed", "slug": mine, "commit": saved["version"]}]
 
@@ -250,10 +258,14 @@ def test_restoring_a_version_publishes_source_changed_and_its_commit(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
     first = _ok(client.get(f"/api/v1/models/{mine}"))["version"]
-    _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     events.clear()
 
-    restored = _ok(client.post(f"/api/v1/models/{mine}/versions/{first}/restore"))
+    restored = _ok(client.post(f"/api/v1/models/{mine}/versions/{first}/restore", headers=press()))
 
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": mine}]
     assert published(events, "version.committed") == [
@@ -274,6 +286,7 @@ def test_an_upstream_edit_is_announced_to_its_duplicates(
         client.put(
             f"/api/v1/models/{mine}/source",
             json={"source": SOURCE.replace("width = 10", "width = 11")},
+            headers=press(),
         )
     )
 
@@ -294,19 +307,23 @@ def test_merging_dismissing_and_detaching_publish_their_events(
     _ok(
         client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
     )
-    _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/dismiss"))
+    _ok(client.post("/api/v1/models/copy/upstream/dismiss", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/merge"))
+    _ok(client.post("/api/v1/models/copy/upstream/merge", headers=press()))
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": "copy"}]
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
     _ok(client.delete(f"/api/v1/models/{mine}", params={"force": "true"}, headers=press()), 204)
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/detach"))
+    _ok(client.post("/api/v1/models/copy/upstream/detach", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
 
