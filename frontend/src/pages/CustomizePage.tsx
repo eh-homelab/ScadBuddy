@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-r
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -740,6 +740,25 @@ export function CustomizePage() {
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
         <Spinner /> Loading model
       </p>
+    )
+  }
+
+  // #1041 — only a 404 means the model is gone. A 5xx or a gateway timeout (the schema
+  // read runs OpenSCAD) is a failed load, and may well succeed when asked again.
+  if (schemaState.error && !(schemaState.error instanceof ApiError && schemaState.error.status === 404)) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
+        <h1 className="text-[15px] font-medium">Could not load this model</h1>
+        <p className="mt-2 text-[13px] text-muted">{schemaState.error.message}</p>
+        <div className="mt-4 flex items-center justify-center gap-3">
+          <Button size="sm" onClick={schemaState.reload}>
+            Try again
+          </Button>
+          <Link to="/" className="text-[13px] text-accent underline">
+            Back to models
+          </Link>
+        </div>
+      </div>
     )
   }
 
