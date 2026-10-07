@@ -344,5 +344,7 @@ async def update_accepted(
             for event in history.events
         ):
             return
-        assert time.monotonic() < deadline, "the Update was never accepted"
+        if time.monotonic() >= deadline:
+            pending.cancel()
+            raise AssertionError("the Update was never accepted")
         await asyncio.sleep(0.05)
