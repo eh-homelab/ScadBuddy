@@ -24,6 +24,7 @@ from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
+    WorkflowHandle,
     WorkflowUpdateFailedError,
 )
 from temporalio.exceptions import ApplicationError, TimeoutType
@@ -102,6 +103,8 @@ from tests.test_workflows import FakeActivities, _worker
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
 SLUG = "demo"
+#: How long a submit that should return at once may take before the test calls it hung.
+SUBMIT_HANG_BOUND = 120
 
 
 class ProjectingActivities(FakeActivities):
@@ -355,35 +358,50 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last release waits in the workflow for the cancelled job's projection. Held
-    there, the submit still answers with the new job inside its bound, below Envoy's 15 s
-    route timeout (review #1066 (8) 1). `rpc_timeout` bounds each poll, not the Update
-    (the SDK polls again), so a long one stands in for a server that keeps answering
-    polls with no outcome."""
-    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    """A release whose Update never answers -- a server that keeps answering polls
+    with no outcome -- does not hold the submit: past `RELEASE_BOUND` it answers with
+    the new job while the release still waits (review #1066 (8) 1), not only when the
+    whole submit's deadline runs out, which is made too long to count here. Without
+    the bound it would wait for good: no clock in the assertions, so a loaded host
+    cannot fail it."""
     monkeypatch.setattr(submit_module, "RELEASE_BOUND", 1.0, raising=False)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 3600.0)
+    waiting, abandoned = asyncio.Event(), asyncio.Event()
+    execute_update = WorkflowHandle.execute_update
+
+    async def unanswered(self: WorkflowHandle[Any, Any], update: Any, *args: Any, **kw: Any) -> Any:
+        if update != RELEASE_UPDATE:
+            return await execute_update(self, update, *args, **kw)
+        waiting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(WorkflowHandle, "execute_update", unanswered)
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        gate, held = asyncio.Event(), asyncio.Event()
-        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=held)
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
         async with _worker(client, queue, acts):
             old = await service.submit(SLUG, {"width": _w()})
-            began = time.monotonic()
-            async with asyncio.timeout(30):
+            # Only a hang stops here, however slow the host.
+            async with asyncio.timeout(SUBMIT_HANG_BOUND):
                 new = await service.submit(
                     SLUG, {"width": _w()}, supersedes=old.id, request_id=uuid.uuid4().hex
                 )
-            took = time.monotonic() - began
-            held.set()
+            gave_up = abandoned.is_set()
             gate.set()
             await _settled(projection, old.id)
             await _settled(projection, new.id)
         await service.aclose()
 
     assert new.id != old.id
-    print("TOOK", took)
-    assert took < 5
+    # It answered once it gave up on the release, still waiting on its Update.
+    assert waiting.is_set() and gave_up
 
 
 def _classified(error: RPCError, id: str) -> NoReturn:
