@@ -569,6 +569,7 @@ async def test_a_message_whose_nudge_was_lost_runs_on_the_next_nudge_of_a_live_r
     await rig.nudge(wid, inp, lost)
     await rig.event(wid, "done", 2)
     assert rig.fake.takes[1:] == [lost]
+    assert len({token for i, token in rig.fake.attempts if i == lost}) == 1  # one take, maybe retried
     assert [p for p, _ in rig.seen.calls] == ["first", "lost one"]
 
 

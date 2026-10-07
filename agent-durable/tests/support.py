@@ -177,9 +177,10 @@ class FakeInputs:
                 return False
             if not (row[2] == "pending" or (row[2] == "run" and self.tokens.get(inp.id) == inp.token)):
                 return False
+            if row[2] == "pending":  # a retry of the same take is not another take
+                self.takes.append(inp.id)
             self.rows[inp.id] = (row[0], row[1], "run")
             self.tokens[inp.id] = inp.token
-            self.takes.append(inp.id)
             if self.take_gate is not None and self.gate_after_commit:
                 await self.take_gate.wait()
             return True
@@ -299,8 +300,11 @@ class Rig:
     ) -> WorkflowHandle[Any, AgentState]:
         """The nudge for a committed message, with the message id as the Update's id."""
         op = self.operation(wid, inp, state, workflow=workflow)
-        await self.client.execute_update_with_start_workflow(
-            SEND_UPDATE, Nudge(message_id), id=message_id, start_workflow_operation=op
+        await asyncio.wait_for(
+            self.client.execute_update_with_start_workflow(
+                SEND_UPDATE, Nudge(message_id), id=message_id, start_workflow_operation=op
+            ),
+            WAIT,
         )
         return await op.workflow_handle()
 
