@@ -190,6 +190,12 @@ def _raise_if_cancelled() -> None:
         raise asyncio.CancelledError
 
 
+#: `TemplatePipeline._raise_if_stopped` also raises for the job's last release, which
+#: temporalio drops the same way when it lands while the piece is started or signalled
+#: (CI run 37598763836). A run from before it waited on the piece to its end instead.
+RELEASED_IN_FLIGHT_PATCH = "released-while-a-piece-starts"
+
+
 def _target_gone(error: FailureError) -> bool:
     return isinstance(error, ApplicationError) and error.type == EXTERNAL_NOT_FOUND
 
@@ -910,6 +916,15 @@ class TemplatePipeline:
             self._parts[req.piece_key] = Part.of(req, outcome.result)
         return outcome
 
+    def _raise_if_stopped(self) -> None:
+        """`_raise_if_cancelled`, and the same for the job's last release: `release`
+        cancels the work, and temporalio drops that cancel too when it lands while the
+        piece is started or signalled, so the job would wait on the piece to its end.
+        Behind `RELEASED_IN_FLIGHT_PATCH`."""
+        _raise_if_cancelled()
+        if self._released is not None and workflow.patched(RELEASED_IN_FLIGHT_PATCH):
+            raise asyncio.CancelledError
+
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
         Neither a cancelled job nor its closing touches the piece (ABANDON twice)."""
@@ -927,6 +942,7 @@ class TemplatePipeline:
                     cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 )
+                self._raise_if_stopped()
             except WorkflowAlreadyStartedError:
                 piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
                     workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
@@ -936,11 +952,11 @@ class TemplatePipeline:
                     try:
                         await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                     except FailureError as error:
-                        _raise_if_cancelled()
+                        self._raise_if_stopped()
                         if not _target_gone(error):
                             raise
                         continue  # it closed in between; start it again
-                    _raise_if_cancelled()
+                    self._raise_if_stopped()
                     try:
                         await workflow.wait_condition(
                             lambda: key in self._outcomes, timeout=_waiter_recheck()

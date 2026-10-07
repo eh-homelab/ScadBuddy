@@ -163,7 +163,26 @@ def _w() -> int:
     return uuid.uuid4().int % 10**9
 
 
-async def _settled(projection: JobProjection, job_id: str, timeout: float = 30) -> Job:
+#: How long `_settled` and `_until` wait before they call it stuck: a hang guard, not a
+#: budget. A job that cannot settle (a release lost, say) is stuck at any bound; one
+#: that can gets there once its writes land, however slow the host, and a test that
+#: is its worker's first also waits out that worker's Temporal dev server starting.
+WAIT_HANG_BOUND = 120.0
+
+
+@pytest.fixture
+def patient_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test whose property needs the supersede's release to land gives it Temporal's
+    time. The production bounds (`RPC_TIMEOUT` 5 s, `RELEASE_BOUND`, `SUBMIT_DEADLINE`)
+    keep a submit under Envoy's 15 s, and a release past them is only a warning: an
+    Update a loaded dev server had not admitted within 5 s was lost, so the old job never
+    settled (CI run 37598763836). The tests of those bounds set their own."""
+    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    monkeypatch.setattr(submit_module, "RELEASE_BOUND", 62.0)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 120.0)
+
+
+async def _settled(projection: JobProjection, job_id: str, timeout: float = WAIT_HANG_BOUND) -> Job:
     async with asyncio.timeout(timeout):
         while True:
             job = await asyncio.to_thread(projection.read, job_id)
@@ -173,7 +192,7 @@ async def _settled(projection: JobProjection, job_id: str, timeout: float = 30) 
 
 
 async def _until(acts: FakeActivities, call: str) -> None:
-    async with asyncio.timeout(30):
+    async with asyncio.timeout(WAIT_HANG_BOUND):
         while call not in acts.calls:
             await asyncio.sleep(0.05)
 
@@ -296,7 +315,10 @@ async def test_a_submit_that_coalesces_keeps_the_first_submitters_inputs(
 
 
 async def test_superseding_releases_the_old_execution_after_the_new_one_starts(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
 ) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -324,7 +346,10 @@ async def test_superseding_releases_the_old_execution_after_the_new_one_starts(
 
 
 async def test_a_resent_supersede_releases_the_old_job_once(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
 ) -> None:
     """A submit re-sent with its key after a lost answer is the same request: the job it
     supersedes loses one claim, not two (review #1066 finding 1)."""
@@ -474,7 +499,10 @@ async def test_a_start_that_grpc_ended_is_answered_as_a_late_one(
 
 
 async def test_superseding_the_same_render_answers_it_without_a_claim(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
 ) -> None:
     width = _w()
     async with temporal_client() as client:
@@ -495,7 +523,10 @@ async def test_superseding_the_same_render_answers_it_without_a_claim(
 
 
 async def test_superseding_a_finished_job_still_submits(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
 ) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -574,7 +605,10 @@ async def test_a_refused_submit_supersedes_nothing(
 
 
 async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
 ) -> None:
     """With the queue full of the caller's own stale preview, the request replacing it
     is accepted, and that preview is superseded (review #1066 (9) 3)."""
@@ -606,6 +640,7 @@ async def test_a_request_answered_closing_and_resent_after_the_close_gets_a_fres
     deps: WorkerDeps,
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
+    patient_release: None,
 ) -> None:
     """A slider dragged from A to B and back: A's request reaches A's run while B's
     supersede is releasing it, and is answered still-accepting. Sent again with its key
@@ -1171,6 +1206,7 @@ async def test_a_resent_request_is_one_claim_so_a_supersede_still_cancels(
     deps: WorkerDeps,
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
+    patient_release: None,
 ) -> None:
     """A request answered `command-still-accepting` and sent again with its key joins
     its own claim, not a second one, so the supersede that follows cancels the render
