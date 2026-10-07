@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -688,6 +689,23 @@ def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
 
 
+def _live_output_ids(root: Path) -> set[str]:
+    """Every output id under ``root`` with a meta.json. Unlike ``glob``, a slug or output
+    directory that cannot be listed raises instead of being skipped."""
+    live: set[str] = set()
+    with os.scandir(root) as slugs:
+        for slug in slugs:
+            if not slug.is_dir(follow_symlinks=False):
+                continue
+            with os.scandir(slug.path) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False) and os.path.isfile(
+                        os.path.join(entry.path, META_NAME)
+                    ):
+                        live.add(entry.name)
+    return live
+
+
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
 #: its Parts before it writes meta.json (api/outputs.py `create_output`).
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
@@ -703,7 +721,11 @@ def reap_orphan_holds(
 
     It releases nothing when it finds no output at all while holds exist: an outputs
     volume that is unmounted or empty reads like every output deleted, and acting on that
-    would hand every Part to the blob sweep."""
+    would hand every Part to the blob sweep. The cost: once no output is left, holds
+    orphaned by the last delete stay until one is saved again. Nor does it act on a
+    partial read: any directory it cannot list (permissions, a stale NFS handle) raises
+    and ends the pass, since ``Path.glob`` would skip it and its outputs would look
+    deleted."""
     root = store.paths.outputs
     with refs.pool.connection() as conn:
         rows = conn.execute(
@@ -714,7 +736,7 @@ def reap_orphan_holds(
     held = {row["holder_id"] for row in rows}
     if not held:
         return 0
-    live = {path.parent.name for path in root.glob(f"*/*/{META_NAME}")} if root.is_dir() else set()
+    live = _live_output_ids(root) if root.is_dir() else set()
     if not live:
         logger.error(
             "found no outputs while %d hold Parts; not releasing any",

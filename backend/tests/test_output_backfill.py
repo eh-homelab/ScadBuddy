@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import threading
 import time
@@ -432,3 +433,32 @@ async def test_the_reaper_releases_nothing_when_it_finds_no_outputs(
         shutil.rmtree(store.paths.outputs)
         assert reap_orphan_holds(refs, store) == 0
         assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_stops_on_a_directory_it_cannot_list(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1806 review: glob skips an unreadable slug directory, and its outputs would look
+    deleted. The reaper raises and releases nothing instead."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    real = os.scandir
+
+    def refusing(path):  # type: ignore[no-untyped-def]
+        if str(path) != str(store.paths.outputs):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest)
+        hold_parts(refs, "gone", written.manifest)
+        _age_holds(refs, old.id, 2)
+        _age_holds(refs, "gone", 2)
+        monkeypatch.setattr(os, "scandir", refusing)
+        with pytest.raises(PermissionError):
+            reap_orphan_holds(refs, store)
+        holders = _holders(refs, part)
+        assert (OUTPUT_HOLDER, old.id) in holders
+        assert (OUTPUT_HOLDER, "gone") in holders

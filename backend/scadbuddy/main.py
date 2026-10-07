@@ -359,11 +359,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=REAP_SWEEP)
     async def reap_output_holds() -> None:
-        try:
-            await asyncio.to_thread(reap_orphan_holds, state.refs, state.outputs)
-        except Exception:
-            logger.exception("could not reap orphaned output holds")
-            raise
+        # A scan of every output's directory can be slow on a network volume: heartbeat.
+        await _heartbeating(_reap_output_holds_logged(state))
 
     return [
         prune_jobs,
@@ -374,6 +371,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_backfills,
         reap_output_holds,
     ]
+
+
+async def _reap_output_holds_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(reap_orphan_holds, state.refs, state.outputs)
+    except Exception:
+        logger.exception("could not reap orphaned output holds")
+        raise
 
 
 async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
