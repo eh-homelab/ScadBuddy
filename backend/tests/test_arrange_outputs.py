@@ -124,7 +124,7 @@ async def test_a_saved_output_keeps_its_parts_after_the_job_is_pruned(
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
         refs.add(key, "job", "j1")
-        hold_parts(refs, meta.id, written.manifest)
+        hold_parts(refs, meta.id, written.manifest, meta.slug)
         refs.drop_holder("job", "j1")  # what JobProjection.prune does
         blobs = LocalBlobStore(paths.blobs)
         assert key not in sweep_blobs(blobs, refs, grace=0, now=10**12)
