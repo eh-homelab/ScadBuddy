@@ -259,3 +259,28 @@ def test_a_render_that_cannot_start_is_a_422_that_says_why(
     assert "no longer in the template's history" not in body["detail"]
     assert body.get("code") == code
     assert _state(app).outputs.backfill(output_id) is None  # nothing queued
+
+
+def test_a_post_whose_pending_job_does_not_validate_queues_a_new_one(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1803 review: the attach retries a job row that does not validate, so the guard
+    must not 500 on it either, or the output could never be re-queued."""
+    monkeypatch.setattr(backfill_module, "_attach", lambda *args, **kwargs: False)
+    output_id = legacy_output(client, app)
+    store = _state(app).render.store
+    first = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert first.status_code == 202, first.text
+    read = store.read
+    bad = [first.json()["id"]]
+
+    def unreadable(job_id: str) -> Job:
+        if job_id in bad:  # the guard's read only: the render that follows may share the id
+            bad.remove(job_id)
+            Job.model_validate({"id": job_id})  # a ValidationError, a ValueError
+        return read(job_id)
+
+    monkeypatch.setattr(store, "read", unreadable)
+    again = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert again.status_code == 202, again.text
+    assert bad == []  # the guard did read the bad row, and re-queued instead of a 500

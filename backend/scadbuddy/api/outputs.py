@@ -529,7 +529,9 @@ async def backfill_output(
     if pending is not None and pending.error is None:
         try:
             inflight = await asyncio.to_thread(render.store.read, pending.job_id)
-        except JobNotFoundError:
+        except (JobNotFoundError, ValueError):
+            # Gone, or a row that does not validate (which the attach keeps retrying,
+            # #1007): not one to answer with, so a POST re-queues instead of a 500.
             inflight = None
         if inflight is not None and inflight.state in ("pending", "running", "done"):
             return _job_status(inflight, None)
@@ -556,6 +558,8 @@ async def backfill_output(
             fonts,
         )
     except ApiError as error:
+        # The only 409 `render_model` answers is `submit_problems`' SnapshotUnavailableError;
+        # a new one on that path would be relabelled here, so check this if one is added.
         if error.status == status.HTTP_409_CONFLICT:
             # No snapshot of that revision and no history to make one from: as permanent
             # as a missing revision, and a 409 here means "already recorded" (#1007).
