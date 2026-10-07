@@ -208,6 +208,11 @@ on shutdown.
     it hears the job settle, and every API start runs one backstop pass whatever the
     interval, so with 0 a re-render missed while every replica was down waits for the
     next start.
+  - **This release adds a sweep**, `housekeeping_reap_output_holds` (#1007): it releases
+    the Parts holds of an output whose `meta.json` is gone (a delete that raced a
+    write), once the hold is an hour old. It needs the same `Recreate` rollout. It
+    releases nothing when it finds no output at all, so an unmounted data volume
+    cannot hand every Part to the blob sweep.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):

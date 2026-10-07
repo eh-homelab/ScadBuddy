@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -9,7 +10,7 @@ import uuid
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -357,7 +358,7 @@ class OutputStore:
             model_version=version,
             name=name or None,
             job_id=job.id,
-            created_at=datetime.now(UTC),
+            created_at=self._next_created_at(job.slug),
             bbox_mm=result.bbox_mm,
             colors=list(result.colors),
             parts=list(result.parts),
@@ -370,6 +371,19 @@ class OutputStore:
         self.forget_plate_cover(job.slug)
         self._changed(job.slug)
         return meta
+
+    def _next_created_at(self, slug: str) -> datetime:
+        """Now, or just after the model's newest output when the clock reads earlier.
+
+        Outputs are ordered by ``created_at`` (the cover is the oldest's, the list is
+        newest first), and a wall clock that steps back between two saves would put
+        the second before the first. Never earlier than an existing output keeps the
+        order the saves happened in; the stamp then runs ahead by the step."""
+        now = datetime.now(UTC)
+        existing = self._oldest_first(slug)
+        if existing and existing[-1].created_at >= now:
+            return existing[-1].created_at + timedelta(microseconds=1)
+        return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
         path = self.directory(output_id) / BOM_NAME
@@ -678,11 +692,125 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
 
 
-def hold_parts(refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject]) -> None:
-    """The output's Parts outlive the job that rendered them: Arrange reads them (§7)."""
+def hold_parts(
+    refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject], slug: str
+) -> None:
+    """The output's Parts outlive the job that rendered them: Arrange reads them (§7).
+    The output's slug is recorded first, so the reaper can tell a deleted output from
+    one whose slug directory is missing."""
+    _record_slug(refs, output_id, slug)
     for obj in manifest:
         refs.add(obj.part, OUTPUT_HOLDER, output_id)
 
 
 def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
+    with refs.pool.connection() as conn:
+        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+
+def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
+            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
+            (output_id, slug),
+        )
+
+
+def _live_outputs(root: Path) -> dict[str, set[str]]:
+    """Every slug directory under ``root``, with the ids of its outputs that have a
+    meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
+    instead of being skipped. Symlinks are followed, as ``OutputStore``'s own globs
+    follow them: an output it serves must not look deleted."""
+    live: dict[str, set[str]] = {}
+    with os.scandir(root) as slugs:
+        for slug in slugs:
+            if not slug.is_dir(follow_symlinks=True):
+                continue
+            ids = live.setdefault(slug.name, set())
+            with os.scandir(slug.path) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=True) and os.path.isfile(
+                        os.path.join(entry.path, META_NAME)
+                    ):
+                        ids.add(entry.name)
+    return live
+
+
+#: How old an `output` hold must be before the reaper may call it orphaned: a save holds
+#: its Parts before it writes meta.json (api/outputs.py `create_output`).
+ORPHAN_HOLD_GRACE = timedelta(hours=1)
+
+
+def reap_orphan_holds(
+    refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
+) -> int:
+    """Release every `output` hold older than ``grace`` whose output has no meta.json
+    (#1007): a save that failed between holding its Parts and writing meta.json, or a
+    hold taken after a delete's release, leaves holds that nothing else ever drops.
+    Returns how many outputs' holds it released.
+
+    It never mistakes a missing directory for deleted outputs. An output's hold is
+    released only when the reaper knows the output's slug (``output_hold_slugs``) and
+    listed that slug's directory. A slug directory that is missing (not yet copied onto
+    a new volume, say) releases nothing for that slug and is logged. A directory it
+    cannot list (permissions, a stale NFS handle) raises and ends the pass, since
+    ``Path.glob`` would skip it. An unmounted or empty volume lists no slug at all, so
+    releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
+    and with no live output to learn it from) is never released here. The cost of all
+    this: holds orphaned by a model's whole deletion stay until a person drops them."""
+    root = store.paths.outputs
+    with refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT holder_id FROM blob_refs"
+            " WHERE holder_kind = %s AND created_at < now() - %s",
+            (OUTPUT_HOLDER, grace),
+        ).fetchall()
+    held = {row["holder_id"] for row in rows}
+    if not held:
+        return 0
+    live = _live_outputs(root) if root.is_dir() else {}
+    live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
+    # Holds taken before slugs were recorded: a live output tells its own slug.
+    for output_id in sorted(held & live_slug.keys()):
+        _record_slug(refs, output_id, live_slug[output_id])
+    candidates = sorted(held - live_slug.keys())
+    with refs.pool.connection() as conn:
+        slug_rows = conn.execute(
+            "SELECT output_id, slug FROM output_hold_slugs WHERE output_id = ANY(%s)",
+            (candidates,),
+        ).fetchall()
+    slug_of = {row["output_id"]: row["slug"] for row in slug_rows}
+    orphans: list[str] = []
+    missing: dict[str, int] = {}
+    unknown = 0
+    for output_id in candidates:
+        slug = slug_of.get(output_id)
+        if slug is None:
+            unknown += 1
+        elif slug not in live:
+            missing[slug] = missing.get(slug, 0) + 1
+        else:
+            orphans.append(output_id)
+    for slug, n in sorted(missing.items()):
+        logger.error(
+            "the outputs directory of %s is missing while %d of its outputs hold Parts;"
+            " not releasing them",
+            slug,
+            n,
+            extra={"root": str(root), "slug": slug},
+        )
+    for output_id in orphans:
+        release_parts(refs, output_id)
+    if orphans or unknown:
+        # One line to spot an unexpected mass release (#1806 review).
+        logger.warning(
+            "released the Parts of %d orphaned outputs (%d held past the grace; %d of"
+            " unknown template kept)",
+            len(orphans),
+            len(held),
+            unknown,
+            extra={"ids": orphans[:50]},
+        )
+    return len(orphans)

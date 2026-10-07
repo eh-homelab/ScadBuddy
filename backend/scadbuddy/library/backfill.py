@@ -174,7 +174,7 @@ def _attach(
             output_id, job.id, "the re-render wrote no output with this output's objects"
         )
         return False
-    hold_parts(refs, output_id, chosen.manifest)
+    hold_parts(refs, output_id, chosen.manifest, job.slug)
     try:
         outputs.attach_backfill(output_id, chosen)
     except (OutputNotFoundError, FileNotFoundError):
