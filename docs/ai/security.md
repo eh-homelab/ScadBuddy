@@ -609,8 +609,9 @@ not caught; such a process already controls the pod.
   A package may have at most 2000 files and 20 MB.
 - Like the gateway check, this is point-in-time: git resolves the name again itself.
 
-**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
-is refused, with every problem listed, if it has any of the following:
+**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). A package with any
+of the following does not load, and its review lists every problem (`review.refused`),
+unless the admin allows it at approval (below):
 
 - **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block, anywhere in a
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
@@ -640,8 +641,8 @@ is refused, with every problem listed, if it has any of the following:
   [hooks reference](https://code.claude.com/docs/en/hooks) ("MCP tool hook fields")
   does not say their call is permission-checked. `http` hooks may not use `$` or
   `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
-  hooks. There is deliberately no switch to allow one, because it would inherit the
-  credential env (above). Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
+  hooks, because they inherit the credential env (above); only the per-pin approval
+  below can let one run. Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
   `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
   `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
   `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
@@ -654,7 +655,40 @@ is refused, with every problem listed, if it has any of the following:
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
 - **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
-  reserved. The name namespaces the skills (`/<name>:<skill>`).
+  reserved. The name namespaces the skills (`/<name>:<skill>`). This one refuses the
+  install outright.
+
+**Allowing what the vetting refuses.** An admin may load a package exactly as it is, for one
+pin. Everything in `review.refused` is allowable: command hooks, hooks modules, stdio MCP
+servers, LSP servers, monitors, dynamic context injection, the frontmatter and tool rules,
+the hook-event allowlist and the manifest fields. Such a pin installs and shows its
+refusals in the review. `POST …/approve` then answers 409 unless the body also carries
+`allow_refused: true`. In Settings that is a second, user-only checkbox, "Load it as it
+is". The flag (`ai_plugin_packages.allow_refused`) belongs to that approval. Approving a
+re-pin sets it again from that review. A pin with nothing refused is stored without it,
+so a rule added later still refuses that pin.
+
+An allowed pin loads through `allowedPluginPaths` (`run.ts`), which skips
+`assertPluginAllowed()`, and its turn runs with `strictMcpConfig` off so the package's MCP
+servers start. `test/pluginPackages.e2e.test.ts` runs a command hook and a stdio server
+through the real CLI.
+
+This is a decision to run someone else's code **with the Claude credential in its
+environment**. It can read, use or send the key, and it can decide tool calls itself (a
+`PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
+are not ScadBuddy's.
+
+Some checks still apply to an allowed pin, at install and at every load:
+
+- the name rules;
+- a declared file outside the package (`isOutsideProblem()`), which the pinned hash does
+  not cover;
+- symlinks and submodules;
+- the content hash;
+- the egress check on every URL the package declares.
+
+Some per-query settings stay on as well. `disableSkillShellExecution` still blanks
+dynamic context injection, and `tools` still offers no `Bash`, `Read` or `Write`.
 
 Every URL a package declares (MCP servers, http hooks) goes through the egress check at
 install and again at every load. A marketplace entry must have a git source: a relative

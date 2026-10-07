@@ -157,6 +157,17 @@ describe('buildHarnessOptions', () => {
     ).toThrow(PluginRefusedError)
   })
 
+  it('loads a plugin package an admin allowed as it is, and lets its MCP servers start', () => {
+    const allowed = path.resolve('test/fixtures/plugins/command-hook')
+    const options = buildHarnessOptions({ ...base, allowedPluginPaths: [allowed] })
+    expect(options.plugins).toEqual([{ type: 'local', path: allowed }])
+    expect(options.strictMcpConfig).toBe(false)
+    // The vetted list is still checked beside it.
+    expect(() =>
+      buildHarnessOptions({ ...base, allowedPluginPaths: [allowed], pluginPaths: ['test/fixtures/plugins/stdio-mcp'] }),
+    ).toThrow(PluginRefusedError)
+  })
+
   it('redacts the credential from stderr', () => {
     const lines: string[] = []
     const options = buildHarnessOptions({ ...base, stderr: (l) => lines.push(l) })

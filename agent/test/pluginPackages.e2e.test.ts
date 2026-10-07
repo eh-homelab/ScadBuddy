@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage, SDKResultMessage, SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -108,6 +108,63 @@ describe.skipIf(skip !== undefined)(`a harness run with an installed plugin pack
     // The skill's body reached the model: the package really was loaded from the cache.
     const sent = fake.messageCalls().map((r: RecordedRequest) => JSON.stringify(r.body?.messages ?? []))
     expect(sent.some((s) => s.includes(MARKER))).toBe(true)
+  })
+
+  // What `allow_refused` lets through (store.ts): a command hook and a local
+  // MCP server, which pluginProblems refuses, run as Claude Code starts them.
+  it('runs the command hook and starts the local MCP server of a package an admin allowed', async () => {
+    const marker = path.join(stateDir, 'hook-ran')
+    const server = [
+      "import { createInterface } from 'node:readline'",
+      'const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n")',
+      'createInterface({ input: process.stdin }).on("line", (line) => {',
+      '  const m = JSON.parse(line)',
+      '  if (m.id === undefined) return',
+      '  if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "local", version: "1" } } })',
+      '  else if (m.method === "tools/list") send({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "ping", description: "Ping.", inputSchema: { type: "object" } }] } })',
+      '  else send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no" } })',
+      '})',
+    ].join('\n')
+    const allowedRepo = gitRepo({
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'runner' }),
+      'hooks/hooks.json': JSON.stringify({
+        hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: `echo ran > ${marker}` }] }] },
+      }),
+      '.mcp.json': JSON.stringify({ mcpServers: { local: { command: process.execPath, args: ['${CLAUDE_PLUGIN_ROOT}/server.mjs'] } } }),
+      'server.mjs': server,
+    })
+    try {
+      const paths = { stateDir }
+      const installer = new PackageInstaller({
+        fetcher: localFetcher({ runner: allowedRepo }),
+        cacheRoot: pluginCacheDir(paths),
+        resolve: resolver(),
+      })
+      const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/runner.git' }))
+      expect(prepared.review.refused).toEqual([
+        expect.stringMatching(/UserPromptSubmit has a "command" hook/),
+        expect.stringMatching(/MCP server "local" is a local \(stdio\) server/),
+        expect.stringMatching(/MCP server "local" references a variable/),
+      ])
+      const pin = { name: 'runner', fetchUrl: prepared.fetchUrl, fetchPath: prepared.fetchPath, commit: prepared.commit, contentHash: prepared.contentHash, allowRefused: true }
+      const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+      expect(loaded).toMatchObject({ paths: [], problems: [] })
+
+      const { messages } = await collect({
+        paths,
+        credential: gateway(),
+        prompt: 'hi',
+        allowedPluginPaths: loaded.allowedPaths,
+        maxTurns: 1,
+      })
+      const init = messages.find((m): m is SDKSystemMessage => m.type === 'system' && m.subtype === 'init')
+      expect(init?.plugins).toContainEqual(expect.objectContaining({ name: 'runner' }))
+      expect(init?.mcp_servers).toContainEqual(expect.objectContaining({ name: 'plugin:runner:local', status: 'connected' }))
+      expect(init?.tools).toContain('mcp__plugin_runner_local__ping')
+      expect(await readFile(marker, 'utf8')).toBe('ran\n')
+    } finally {
+      allowedRepo.remove()
+    }
   })
 
   // vet.ts refuses a package with dynamic context injection before this

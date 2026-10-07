@@ -82,11 +82,22 @@ export function isInside(root: string, target: string): boolean {
   return resolved === base || resolved.startsWith(base.endsWith(path.sep) ? base : base + path.sep)
 }
 
+const OUTSIDE = ' is outside the plugin'
+
+/**
+ * Whether a problem names a path that leaves the plugin. A plugin package's
+ * admin can allow what the rules refuse (src/plugins/packages/vet.ts), but not
+ * this: such a file is not part of the pinned, hashed package.
+ */
+export function isOutsideProblem(problem: string): boolean {
+  return problem.endsWith(OUTSIDE)
+}
+
 /** Reads a JSON file inside the plugin; a missing default file is `undefined`. */
 function readJson(root: string, relative: string, problems: string[], required: boolean): Json {
   const file = path.resolve(root, relative)
   if (!isInside(root, file)) {
-    problems.push(`${relative} is outside the plugin`)
+    problems.push(`${relative}${OUTSIDE}`)
     return undefined
   }
   if (!existsSync(file)) {

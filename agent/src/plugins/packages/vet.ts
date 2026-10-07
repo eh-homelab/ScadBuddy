@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
-import { declaredConfigs, hookEvents, isInside, pluginProblems } from '../../harness/plugins.js'
+import { declaredConfigs, hookEvents, isInside, isOutsideProblem, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
@@ -52,6 +52,15 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //     in settings.json; ScadBuddy keeps plugin settings in Postgres),
 //     `settings` and a root `settings.json` (their `agent` key replaces the
 //     main thread's agent), and `workflows` (JavaScript).
+//
+// AN ADMIN MAY ALLOW what these rules refuse, for one package at one pin: the
+// review lists every refusal (`refused`), and approving with `allow_refused`
+// loads the package as it is (store.ts). That is a decision to run the
+// package's code with the Claude credential in its environment. Never
+// allowable (`fatal`): a name that is invalid or reserved, a declared file
+// outside the package (not part of the pinned hash), and, in install.ts,
+// symlinks and submodules, the content hash, and the egress check on every
+// URL the package declares.
 
 export type ReviewHook = { event: string; type: string; url?: string }
 export type ReviewMcpServer = { name: string; type: string; url: string }
@@ -69,6 +78,12 @@ export type PackageReview = {
   mcp_servers: ReviewMcpServer[]
   /** Every Markdown and JSON file, for the admin to read. */
   files: string[]
+  /**
+   * What the rules refuse, which loads only when an admin approves the pin
+   * with `allow_refused` (store.ts). Absent in a review stored before #1540's
+   * follow-up, which was refused outright, so empty.
+   */
+  refused?: string[]
 }
 
 export type Endpoint = { what: string; url: string }
@@ -76,7 +91,10 @@ export type Endpoint = { what: string; url: string }
 export type Vetting = {
   /** Undefined when the package has no usable name. */
   review: PackageReview | undefined
+  /** Everything the rules refuse, fatal or not. */
   problems: string[]
+  /** The problems no approval can allow (see the header); a subset of `problems`. */
+  fatal: string[]
   endpoints: Endpoint[]
 }
 
@@ -334,6 +352,7 @@ export function markdownIn(root: string, value: unknown, fallback: string, recur
 export function vetPackage(root: string, fallbackName?: string): Vetting {
   const abs = path.resolve(root)
   const problems = [...pluginProblems(abs)]
+  const fatal = problems.filter(isOutsideProblem)
   const endpoints: Endpoint[] = []
   const declared = declaredConfigs(abs)
   const m = declared.manifest
@@ -342,16 +361,15 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   const rawName = typeof m.name === 'string' ? m.name : fallbackName
   let name: string | undefined
   if (rawName === undefined) {
-    problems.push('the package has no name: add .claude-plugin/plugin.json with a "name"')
+    fatal.push('the package has no name: add .claude-plugin/plugin.json with a "name"')
   } else if (!PLUGIN_NAME_RE.test(rawName) || rawName.includes('--')) {
-    problems.push(
-      `plugin name "${rawName}" is not 2–32 lower-case letters, digits and single hyphens, starting with a letter`,
-    )
+    fatal.push(`plugin name "${rawName}" is not 2–32 lower-case letters, digits and single hyphens, starting with a letter`)
   } else if (RESERVED_PLUGIN_NAMES.has(rawName)) {
-    problems.push(`plugin name "${rawName}" is reserved`)
+    fatal.push(`plugin name "${rawName}" is reserved`)
   } else {
     name = rawName
   }
+  problems.push(...fatal.filter((f) => !problems.includes(f)))
 
   for (const key of ['dependencies', 'userConfig', 'channels', 'settings', 'workflows']) {
     if (m[key] !== undefined) problems.push(`plugin.json "${key}" is not supported for a plugin package`)
@@ -440,12 +458,11 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     : undefined
 
   const unique = [...new Set(problems)]
-  return {
-    review,
-    problems:
-      unique.length > MAX_REPORTED_PROBLEMS
-        ? [...unique.slice(0, MAX_REPORTED_PROBLEMS), `and ${unique.length - MAX_REPORTED_PROBLEMS} more`]
-        : unique,
-    endpoints,
-  }
+  const reported =
+    unique.length > MAX_REPORTED_PROBLEMS
+      ? [...unique.slice(0, MAX_REPORTED_PROBLEMS), `and ${unique.length - MAX_REPORTED_PROBLEMS} more`]
+      : unique
+  const fatalSet = new Set(fatal)
+  if (review) review.refused = reported.filter((p) => !fatalSet.has(p))
+  return { review, problems: reported, fatal: [...fatalSet], endpoints }
 }

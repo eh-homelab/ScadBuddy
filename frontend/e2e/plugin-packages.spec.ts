@@ -32,11 +32,22 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(section.getByText('No plugin packages installed.')).toBeVisible()
 
     // A refused package names each problem.
-    await section.getByLabel('Repository URL').fill('https://git.example/shell.git')
+    await section.getByLabel('Repository URL').fill('https://git.example/reserved.git')
     await section.getByRole('button', { name: 'Fetch and review' }).click()
     const refused = section.getByRole('list', { name: 'Why the package was refused' })
-    await expect(refused.getByRole('listitem')).toHaveCount(2)
-    await expect(refused).toContainText('"command" hook')
+    await expect(refused.getByRole('listitem')).toHaveCount(1)
+    await expect(refused).toContainText('is reserved')
+
+    // One the rules refuse installs, and lists what an approval would allow.
+    await section.getByLabel('Repository URL').fill('https://git.example/shell.git')
+    await section.getByRole('button', { name: 'Fetch and review' }).click()
+    const shell = section.getByRole('listitem', { name: 'Plugin package shell' })
+    const allowable = shell.getByRole('list', { name: 'What the rules refuse in shell' })
+    await expect(allowable.getByRole('listitem')).toHaveCount(2)
+    await expect(allowable).toContainText('"command" hook')
+    await shell.getByRole('button', { name: 'Remove' }).click()
+    await page.getByRole('dialog', { name: 'Remove shell?' }).getByRole('button', { name: 'Remove package' }).click()
+    await expect(shell).toHaveCount(0)
 
     await section.getByLabel('Repository URL').fill('https://git.example/greeter.git')
     await section.getByRole('button', { name: 'Fetch and review' }).click()

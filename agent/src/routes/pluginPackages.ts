@@ -16,7 +16,7 @@ import { ready, type RouteModule } from './module.js'
 //   GET    /api/v1/ai/plugin-packages                  list
 //   GET    /api/v1/ai/plugin-packages/:name            one, with its review and any pending re-pin + diff
 //   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201)
-//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash } as reviewed
+//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
 //   PATCH  /api/v1/ai/plugin-packages/:name            { enabled } (an approved pin only)
 //   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff
 //   DELETE /api/v1/ai/plugin-packages/:name/pending    drop the pending re-pin
@@ -29,6 +29,11 @@ import { ready, type RouteModule } from './module.js'
 // review showed them. Every write, and the fetches, go through the UI guard
 // the other Settings writes use (guard.ts: HTTPS through a trusted proxy or
 // loopback, the UI's origin, JSON bodies).
+//
+// A package whose review lists refusals (vet.ts `refused`) installs, and is
+// approved only with `allow_refused: true`, the admin's decision to load it
+// as it is. Fatal problems (vet.ts `fatal`, egress, symlinks) still refuse
+// the install with a 422.
 
 export type PackageRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -62,6 +67,8 @@ const InstallBody = z.strictObject({ source: Source })
 const ApproveBody = z.strictObject({
   commit_sha: z.string().max(64),
   content_hash: z.string().max(80),
+  /** Load the pin despite what its review's `refused` lists (store.ts). */
+  allow_refused: z.boolean().optional(),
 })
 const PatchBody = z.strictObject({ enabled: z.boolean() })
 const RepinBody = z.strictObject({ ref: z.string().max(200).optional() })
@@ -166,7 +173,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const body = await parseBody(c, ApproveBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     try {
-      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash))
+      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash, body.allow_refused ?? false))
     } catch (err) {
       return refusal(c, err)
     }

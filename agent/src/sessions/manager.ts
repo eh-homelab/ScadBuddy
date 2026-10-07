@@ -1248,6 +1248,7 @@ export class SessionManager {
           await unavailable(problem)
         }
         const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
+        const allowedPluginPaths = packages?.allowedPaths ?? []
         pluginCheck = async (message: SDKMessage) => {
           if (message.type !== 'system' || message.subtype !== 'init') return
           // The SDK skips a plugin it cannot load; the init message lists what it did load
@@ -1257,7 +1258,7 @@ export class SessionManager {
           if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
             await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
           }
-          for (const dir of packages?.paths ?? []) {
+          for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
               await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
             }
@@ -1405,6 +1406,7 @@ export class SessionManager {
               }
             : {}),
           ...(pluginPaths.length ? { pluginPaths } : {}),
+          ...(allowedPluginPaths.length ? { allowedPluginPaths } : {}),
           ...(ownPlugin !== undefined ? { ownPlugin } : {}),
           ...(remotePlugins.length ? { remotePlugins } : {}),
           ...(memory ? { memoryHooks: memory.hooks } : {}),

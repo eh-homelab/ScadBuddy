@@ -142,6 +142,14 @@ export type HarnessRun = {
    */
   pluginPaths?: string[]
   /**
+   * Plugin packages an admin approved with `allow_refused`
+   * (src/plugins/packages/store.ts): loaded WITHOUT that check, so their
+   * command hooks, hooks modules and local MCP servers run, with the
+   * credential env. With any, `strictMcpConfig` is off so a plugin's MCP
+   * servers start; their tools are not ScadBuddy's, so `outward`.
+   */
+  allowedPluginPaths?: string[]
+  /**
    * ScadBuddy's own plugin (ownPlugin.ts `OWN_PLUGIN_DIR`, #896), vetted like
    * `pluginPaths`. Loading it gives the run the Skill and Agent tools, at
    * `read`, so its skills and subagents can be used; a run without it has no
@@ -479,6 +487,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     assertPluginAllowed(p)
     return { type: 'local' as const, path: path.resolve(p) }
   })
+  for (const p of run.allowedPluginPaths ?? []) plugins.push({ type: 'local', path: path.resolve(p) })
   const builtins = [...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []), ...(questions ? [ASK_USER_QUESTION] : [])]
   if (builtins.length) options.tools = builtins
   // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
@@ -498,6 +507,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // started.
     options.strictMcpConfig = false
   }
+  // The same, so an allowed package's MCP servers (local ones too) start.
+  if (run.allowedPluginPaths?.length) options.strictMcpConfig = false
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
   }

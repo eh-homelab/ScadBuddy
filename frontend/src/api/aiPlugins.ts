@@ -74,6 +74,11 @@ export interface PackageReview {
   hooks: { event: string; type: string; url?: string }[]
   mcp_servers: { name: string; type: string; url: string }[]
   files: string[]
+  /**
+   * What the vetting refuses (a command hook, a hooks module, a local MCP server, ...).
+   * Such a pin loads only when approved with `allow_refused`, as it is.
+   */
+  refused?: string[]
 }
 
 export interface FileDiff {
@@ -94,6 +99,8 @@ export interface PluginPackage {
   review: PackageReview
   approved: boolean
   approved_at: string | null
+  /** Approved with what `review.refused` lists allowed: its code runs with the Claude credential. */
+  allow_refused: boolean
   enabled: boolean
   pending: {
     ref: string
@@ -177,8 +184,11 @@ export const aiPlugins = {
   listPackages: () => request<PluginPackage[]>('/plugin-packages'),
   installPackage: (source: PackageInstall) =>
     request<PluginPackage>('/plugin-packages', json('POST', { source })),
-  approvePackage: (name: string, commit_sha: string, content_hash: string) =>
-    request<PluginPackage>(`/plugin-packages/${seg(name)}/approve`, json('POST', { commit_sha, content_hash })),
+  approvePackage: (name: string, commit_sha: string, content_hash: string, allow_refused = false) =>
+    request<PluginPackage>(
+      `/plugin-packages/${seg(name)}/approve`,
+      json('POST', allow_refused ? { commit_sha, content_hash, allow_refused } : { commit_sha, content_hash }),
+    ),
   setPackageEnabled: (name: string, enabled: boolean) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}`, json('PATCH', { enabled })),
   repinPackage: (name: string, ref?: string) =>
