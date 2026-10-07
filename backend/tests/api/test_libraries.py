@@ -13,20 +13,27 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import libraries as libraries_api
+from scadbuddy.api import library_pins
+from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import (
     DEPENDENCY_CHECK_CONCURRENCY,
     STATE_ATTR,
@@ -34,21 +41,29 @@ from scadbuddy.api.deps import (
     get_fonts,
     get_libraries,
 )
+from scadbuddy.core.components import Components
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library import url_import
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.includes import resolve_dependencies
 from scadbuddy.library.libraries import (
+    CLONE_TIMEOUT,
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
     CheckoutLeases,
+    LibraryDeclarationError,
+    LibraryNotInstalledError,
     LibraryStore,
     ModelLibrary,
 )
 from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream, open_pg_pool
 from tests.test_library_processes import _age
@@ -85,6 +100,9 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
         protocols=("file",),
     )
     app.dependency_overrides[get_libraries] = lambda: store
+    # The pin commands run on the library worker, which reads the state, not the route's
+    # dependencies.
+    state.libraries = store
     return app
 
 
@@ -1238,6 +1256,54 @@ def test_a_checkout_a_render_is_reading_is_not_removed(
     assert not checkout.exists()
 
 
+def test_a_removal_refused_for_a_lease_leaves_no_operation(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    pg_conninfo: str,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """Review #1119 2-2: the removal's refusals are its check, so "try again once the
+    render has finished" is not recorded as a failed operation."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.checkouts.hold("a" * 32, [paths.libraries / "BOSL2" / commits["v1"]])
+    with psycopg.connect(pg_conninfo) as conn:
+        before = conn.execute("SELECT count(*) FROM operations").fetchone()
+
+    leased = lib_client.delete("/api/v1/libraries/BOSL2")
+    unknown = lib_client.delete("/api/v1/libraries/nothing")
+
+    assert leased.status_code == 409, leased.text
+    assert unknown.status_code == 404, unknown.text
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == before
+
+
+def test_a_pin_refused_before_its_clone_leaves_no_operation(
+    lib_client: TestClient, libraries_app: FastAPI, pg_conninfo: str
+) -> None:
+    """Review #1119 2-2: an unknown catalogue name, and an address literal that is not
+    public, are refused by the pin's check."""
+    create_model(lib_client)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    store.protocols = ("https",)
+
+    unknown = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={})
+    private = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://10.0.0.7/o/r.git", "ref": "v1"},
+    )
+
+    assert unknown.status_code == 404, unknown.text
+    assert private.status_code == 422, private.text
+    assert "public" in private.json()["detail"]
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+
+
 def test_a_checkout_the_render_worker_is_reading_is_not_removed(
     lib_client: TestClient,
     paths: DataPaths,
@@ -1723,3 +1789,138 @@ def test_resolving_the_dependencies_of_a_model_that_does_not_exist_is_a_404(
     lib_client: TestClient,
 ) -> None:
     assert lib_client.post("/api/v1/models/nope/dependencies").status_code == 404
+
+
+def _commits(app: FastAPI, slug: str = SLUG) -> int:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    counted = subprocess.run(
+        [GIT, "-C", str(state.paths.model_dir(slug)), "rev-list", "--count", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
+    )
+    return int(counted.stdout)
+
+
+def test_a_repeated_pin_answers_the_recorded_model_without_a_second_commit(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """§4.2: a re-send of the same press (a lost answer) never commits twice."""
+    create_model(lib_client)
+    key = uuid.uuid4().hex
+    first = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    commits = _commits(libraries_app)
+    again = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    assert first.status_code == again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert _commits(libraries_app) == commits
+
+
+def test_a_refused_removal_keeps_its_models_extension(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    refused = lib_client.delete("/api/v1/libraries/BOSL2")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["models"] == [SLUG]
+
+
+def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
+    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone past the answer deadline never holds the request (§4.2 step 4)."""
+    create_model(lib_client)
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    resolve = library_pins.resolve_pin
+
+    async def slowly(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(3)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(library_operations, "resolve_pin", slowly)
+    started = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+    assert started.status_code == 202, started.text
+    deadline = time.monotonic() + 60
+    op = started.json()
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]
+
+
+def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """Review I1: the run answers a model.json it cannot read as every route does."""
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    (state.paths.model_dir(SLUG) / "model.json").write_text("{not json", encoding="utf-8")
+    refused = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["title"] == "Invalid Model Metadata"
+
+
+#: The library kinds read no component.
+_NO_COMPONENTS = cast(Components, SimpleNamespace())
+
+
+def test_a_pin_may_run_longer_than_its_clone() -> None:
+    """Review I2: the run outlives the clone's own limit, so a slow clone is never
+    recorded failed while it goes on to commit."""
+    kinds = library_operations.library_kinds(cast(AppState, SimpleNamespace()), _NO_COMPONENTS)
+    for name in ("library_pin", "library_repin"):
+        timeout = next(kind for kind in kinds if kind.name == name).run_timeout
+        assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT
+
+
+def _raising_state(error: Exception) -> Any:
+    def raise_it(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return SimpleNamespace(
+        catalogue=SimpleNamespace(unpin_library=raise_it, library_users=raise_it),
+        libraries=SimpleNamespace(paths=SimpleNamespace(libraries=Path("/nowhere"))),
+        checkouts=CheckoutGate(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "title"),
+    [
+        (InvalidModelMetaError("w", "not JSON"), "Invalid Model Metadata"),
+        (LibraryDeclarationError("bad entry"), "Invalid Library Declaration"),
+        (LibraryNotInstalledError("not on the volume"), "Conflict"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["library_unpin", "library_remove"])
+async def test_a_runs_unreadable_declaration_is_the_routes_409(
+    kind: str, error: Exception, title: str
+) -> None:
+    """Review #1119 3: what the app's handlers answered 409 under the routes, the
+    runs answer 409 too, not the operation's unexpected 500."""
+    kinds = library_operations.library_kinds(_raising_state(error), _NO_COMPONENTS)
+    run = next(each for each in kinds if each.name == kind).run
+    request = {"slug": "w", "name": "BOSL2", "index": 0, "commit": None}
+    with pytest.raises(ApiError) as raised:
+        await run(request, {})
+    assert (raised.value.status, raised.value.title) == (409, title)
+
+
+def test_a_pin_on_a_model_with_a_thumbnail_answers_its_record(lib_client: TestClient) -> None:
+    """The run's record is read back as the route's answer: a model with media must
+    survive that (its items are views, not model.json entries)."""
+    create_model(lib_client)
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    put = lib_client.put(
+        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", png, "image/png")}
+    )
+    assert put.status_code == 200, put.text
+    pinned = pin(lib_client, "BOSL2")
+    assert [item["id"] for item in pinned["media"]] == ["thumbnail"]

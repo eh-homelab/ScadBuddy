@@ -1265,9 +1265,10 @@ export const api = {
   /**
    * Clones the library at `ref` server-side and pins the resolved commit into this
    * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   * A command (#1054): a clone past the server's deadline is followed to the model.
    */
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -1292,14 +1293,14 @@ export const api = {
 
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
   repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
-    request<ModelSummary>(
+    command<ModelSummary>(
       `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
       { method: 'DELETE' },
     ),
