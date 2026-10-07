@@ -79,6 +79,34 @@ describe('EditPage', () => {
     expect(screen.getByTestId('landing')).toBeInTheDocument()
   })
 
+  it('does not reopen the customizer for an arranged output', async () => {
+    // spec 2026-09-27 §7: an arranged output lays out objects from several outputs and
+    // has no one template state to reopen, so the link says so and points at History.
+    const id = 'f'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Batch',
+          params: {},
+          inputs: {},
+          model_version: null,
+          source: 'record',
+          arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+        }),
+      ),
+    )
+    render(id)
+    expect(await screen.findByRole('heading', { name: 'Batch was arranged' })).toBeInTheDocument()
+    expect(screen.getByText(/from 2 outputs/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open its history' })).toHaveAttribute(
+      'href',
+      '/m/name-keychain/history',
+    )
+    expect(screen.queryByTestId('landing')).not.toBeInTheDocument()
+  })
+
   it('says so when neither the record nor a 3MF is left', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/edit', () =>
