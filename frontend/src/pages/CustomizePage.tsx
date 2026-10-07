@@ -825,12 +825,13 @@ export function CustomizePage() {
   )
 
   return (
-    // #971 — `short:` scrolls the stacked page on a short window; full screen is the view
+    // #971 — `short:` scrolls the stacked page on a short window, and #1741 `phone:` at a
+    // phone's width; full screen is the view
     // alone, so none of it applies there. #362 — minmax(0, 1fr), not the implicit auto
     // column: an auto track grows to its widest child's min-content (a long preset name,
     // a row of slider boxes), which on a phone held every pane wider than the screen.
     <div
-      className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto'}`}
+      className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto phone:block phone:overflow-y-auto'}`}
     >
       {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971, #362). */}
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
@@ -1083,8 +1084,18 @@ export function CustomizePage() {
         </div>
 
         <div
-          className={`grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto]'}`}
+          className={`grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto] phone:contents'}`}
         >
+          {/* #1741 — at a phone's width the preview and its notes are held above the
+              parameters as the page scrolls; elsewhere this box is not there. */}
+          <div
+            data-testid="preview-pane"
+            className={
+              full
+                ? 'contents'
+                : 'contents phone:sticky phone:top-0 phone:z-10 phone:order-first phone:flex phone:h-[max(15rem,45vh)] phone:flex-col phone:border-b phone:border-line phone:bg-bg'
+            }
+          >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into
@@ -1128,8 +1139,10 @@ export function CustomizePage() {
               )}
             </p>
           )}
-          {/* Full screen is the view and its parameters; the actions wait outside it. */}
-          <div hidden={full}>
+          </div>
+          {/* Full screen is the view and its parameters; the actions wait outside it. At a
+              phone's width the bar stays at the bottom of the screen (#1741). */}
+          <div hidden={full} className="phone:sticky phone:bottom-0 phone:z-10">
             {actionBar}
           </div>
         </div>
