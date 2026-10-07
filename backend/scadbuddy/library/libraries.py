@@ -402,6 +402,9 @@ REMOVAL_LOCK = 0x5343_4144_4C45_4153
 LEASE_TTL = 60.0
 #: Seconds between looks at the rows a removal or an install is waiting on.
 POLL_INTERVAL = 0.25
+#: How many looks a waiting removal takes between two log lines: a minute at the default
+#: `POLL_INTERVAL`.
+REMOVAL_WAIT_LOG_EVERY = 240
 
 
 class CheckoutLeases:
@@ -513,8 +516,12 @@ class CheckoutLeases:
         holder may take a lease or pin again before it ends (a create's fetcher), and
         Postgres queues that shared request behind an exclusive one waiting or held,
         so holding it would leave each waiting on the other. ``stop`` set ends the
-        wait with :class:`RemovalStoppedError` (its caller was cancelled)."""
+        wait with :class:`RemovalStoppedError` (its caller was cancelled).
+
+        Pins that never pause -- one live at every look -- keep it waiting for good, so
+        it logs every :data:`REMOVAL_WAIT_LOG_EVERY` looks while it waits."""
         stop = stop or threading.Event()
+        looks = 0
         with self.pool.connection() as conn:
             while True:
                 with conn.transaction():
@@ -524,6 +531,12 @@ class CheckoutLeases:
                     ).fetchone():
                         yield
                         return
+                looks += 1
+                if looks % REMOVAL_WAIT_LOG_EVERY == 0:
+                    logger.warning(
+                        "a library removal still waits for pins in flight",
+                        extra={"looks": looks},
+                    )
                 if stop.wait(self.poll):
                     raise RemovalStoppedError
 
@@ -596,7 +609,7 @@ async def _renewed(
             try:
                 await asyncio.to_thread(renew)
             except Exception:
-                logger.exception(f"could not renew a {what}", extra={"holder": holder})
+                logger.exception("could not renew a row", extra={"row": what, "holder": holder})
 
     task = asyncio.create_task(renewing())
     try:
@@ -607,7 +620,7 @@ async def _renewed(
             await asyncio.to_thread(drop)
         except Exception:
             # It lapses at its expiry instead.
-            logger.exception(f"could not release a {what}", extra={"holder": holder})
+            logger.exception("could not release a row", extra={"row": what, "holder": holder})
 
 
 @contextlib.asynccontextmanager
@@ -773,16 +786,30 @@ class CheckoutGate:
 
     @contextlib.asynccontextmanager
     async def removing(self) -> AsyncIterator[None]:
+        if self.shared is None:
+            async with self._removing_alone(lambda: self._pins == 0):
+                yield
+            return
+        # Postgres's wait covers this process's pins too, each holding a row, so the
+        # flag is taken once the lock is: until then this process's pins and renders
+        # go on, however long another process's pin (a whole clone) keeps the removal
+        # waiting. A pin here that passed the flag meanwhile waits in its thread for
+        # the lock; a render's lease recorded meanwhile is one `leased` reports.
+        stop = threading.Event()
+        async with (
+            _in_thread(self.shared.removing(stop), cancelled=stop.set),
+            self._removing_alone(lambda: True),
+        ):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _removing_alone(self, ready: Callable[[], bool]) -> AsyncIterator[None]:
+        """The in-process flag that holds off new pins and renders, once ``ready``."""
         async with self._condition:
-            await self._condition.wait_for(lambda: not self._removing and self._pins == 0)
+            await self._condition.wait_for(lambda: not self._removing and ready())
             self._removing = True
         try:
-            if self.shared is None:
-                yield
-            else:
-                stop = threading.Event()
-                async with _in_thread(self.shared.removing(stop), cancelled=stop.set):
-                    yield
+            yield
         finally:
             async with self._condition:
                 self._removing = False
