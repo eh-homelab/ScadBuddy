@@ -562,12 +562,37 @@ def test_a_settings_read_timeout_bounds_the_whole_read(
             elapsed = time.monotonic() - started
     finally:
         release.cancel()
-        release.join()
+        # Only a started Timer can be joined; one that never started would mask the
+        # real failure with a RuntimeError (#1269).
+        if release.ident is not None:
+            release.join()
         settings_holder.close()
     # The read waits 0.6 budgets on one table and the rest on the other: about one
     # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
     # unit would give up at once.
     assert 0.9 * budget < elapsed < 1.45 * budget
+
+
+def test_a_bounded_settings_read_gives_up_waiting_for_a_connection(settings: Settings) -> None:
+    """#1261: the pool wait is inside the read's one deadline too: with the pool's only
+    connection held the whole time, the read gives up instead of waiting it out."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    failed: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            store.load(timeout=0.2)
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store.pool.connection():
+            finished = _finishes_while_held(read)
+    finally:
+        store.close()
+    assert finished
+    assert [type(exc) for exc in failed] == [PoolTimeout]
 
 
 def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
