@@ -6,20 +6,29 @@ from __future__ import annotations
 import linecache
 import os
 import traceback
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Link, SpanKind, Status, StatusCode
+from temporalio import workflow
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.exceptions import ApplicationError
+from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy.core import trace_scrub
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter, frames_only
 from scadbuddy.render.runner import ParameterValueError
+from tests.support.temporal import temporal_client
 
 SENTINEL = "s3ntinel-9f1c"
 CODE_ROOTS = trace_scrub._CODE_ROOTS
@@ -370,3 +379,45 @@ def test_stdlib_and_scadbuddy_frames_are_kept_without_filling_linecache(
     ]
     assert stdlib not in linecache.cache
     assert ours not in linecache.cache
+
+
+@workflow.defn(sandboxed=True)
+class _Fails:
+    @workflow.run
+    async def run(self) -> None:
+        raise ApplicationError("boom", type="Boom", non_retryable=True)
+
+
+@pytest.mark.requires_temporal
+async def test_a_failed_workflows_completion_span_survives_the_sandbox(
+    spans: InMemorySpanExporter,
+) -> None:
+    """#1712: the tracing interceptor ends a failed workflow's ``CompleteWorkflow`` span
+    on the sandboxed workflow thread, and the tests' `SimpleSpanProcessor` exports it
+    there. Reading a frame's source must not use the sandbox's restricted ``open``, or
+    the span is dropped."""
+    # Uncached, so the frames' files are read on the workflow thread.
+    trace_scrub._source.cache_clear()
+    async with temporal_client() as plain:
+        client = Client(
+            plain.service_client,
+            namespace=plain.namespace,
+            data_converter=plain.data_converter,
+            interceptors=[TracingInterceptor()],
+        )
+        queue = f"scrub-{uuid.uuid4().hex[:8]}"
+        runner = SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
+        )
+        async with Worker(client, task_queue=queue, workflows=[_Fails], workflow_runner=runner):
+            # Under a span: the sampler drops a parentless client span, and its trace.
+            with (
+                trace.get_tracer(__name__).start_as_current_span("test"),
+                pytest.raises(WorkflowFailureError),
+            ):
+                await client.execute_workflow(_Fails.run, id=queue, task_queue=queue)
+
+    completed = [s for s in spans.get_finished_spans() if s.name == "CompleteWorkflow:_Fails"]
+    assert len(completed) == 1
+    (event,) = [e for e in completed[0].events if e.name == "exception"]
+    assert 'File "' in str(cast(dict[str, object], event.attributes)["exception.stacktrace"])
