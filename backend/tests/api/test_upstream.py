@@ -23,6 +23,7 @@ from scadbuddy.library.upstream import MergePlan, UpstreamStateError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -56,7 +57,10 @@ def _json(response: Any, status: int = 200) -> Any:
 
 
 def _duplicate(client: TestClient, model_id: str = BUILTIN, name: str = "My keychain") -> Any:
-    return _json(client.post(f"/api/v1/models/{model_id}/duplicate", json={"name": name}), 201)
+    return _json(
+        client.post(f"/api/v1/models/{model_id}/duplicate", json={"name": name}, headers=press()),
+        201,
+    )
 
 
 def _put(client: TestClient, slug: str, source: str, **query: str) -> Any:
@@ -336,12 +340,17 @@ def test_a_deleted_upstream_is_gone_and_can_be_detached(client: TestClient) -> N
     assert refused.json()["state"] == "current"
 
     # Deleting a template with duplicates says how many first.
-    guarded = client.delete(f"/api/v1/models/{MINE}")
+    guarded = client.delete(f"/api/v1/models/{MINE}", headers=press())
     assert guarded.status_code == 409, guarded.text
     assert guarded.json()["duplicates"] == 1
     assert guarded.json()["slugs"] == ["variant"]
     assert client.get(f"/api/v1/models/{MINE}").status_code == 200
-    assert client.delete(f"/api/v1/models/{MINE}", params={"force": "true"}).status_code == 204
+    assert (
+        client.delete(
+            f"/api/v1/models/{MINE}", params={"force": "true"}, headers=press()
+        ).status_code
+        == 204
+    )
 
     status = _upstream(client, "variant")
     assert status["state"] == "gone"
@@ -552,7 +561,10 @@ def test_a_merge_takes_the_upstreams_new_thumbnail_and_readme(
 ) -> None:
     """Set through #179's routes on a template of mine, they reach its duplicate the
     way any other file does, and the duplicate serves them as its own afterwards."""
-    upstream = _json(client.post("/api/v1/models", json={"name": "Parent", "source": SOURCE}), 201)
+    upstream = _json(
+        client.post("/api/v1/models", json={"name": "Parent", "source": SOURCE}, headers=press()),
+        201,
+    )
     child = _duplicate(client, upstream["slug"], "Child")
     assert child["has_thumbnail"] is False
     before = client.get(f"/api/v1/models/{child['slug']}/thumbnail")
