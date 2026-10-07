@@ -2906,15 +2906,8 @@ export const handlers = [
         : o,
     )
     await delay(200)
-    const warnings = body.choices.nozzles.some((nozzle) => nozzle.flow === 'high_flow')
-      ? [
-          {
-            kind: 'hf-unsupported' as const,
-            message:
-              "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
-          },
-        ]
-      : []
+    // High Flow is sliced as High Flow (#484), so a run warns of nothing about it.
+    const warnings: PrintRunResult['warnings'] = []
     const result = {
       route: 'slice_queue',
       library_file_id: libraryFileId,

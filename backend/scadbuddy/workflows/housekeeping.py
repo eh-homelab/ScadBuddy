@@ -3,11 +3,12 @@
 The API process's periodic loops are two Schedules that start ``Housekeeping`` on the
 ``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
 ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
-``scadbuddy-prune-<queue>`` prunes settled render jobs every `PRUNE_INTERVAL`, as the
-render service's loop did, whatever that interval. The queue is served in the API
-process, which holds the data volume the sweeps read. Each sweep is best effort, as the
-loop's were: one that fails is logged, fails its activity (the run returns it, and
-Temporal's UI shows it), the rest still run, and the next tick tries again.
+``scadbuddy-prune-<queue>`` prunes settled render jobs (as the render service's loop
+did) and sweeps old request claims every `PRUNE_INTERVAL`, whatever that interval. The
+queue is served in the API process, which holds the data volume the sweeps read. Each
+sweep is best effort, as the loop's were: one that fails is logged, fails its activity
+(the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
+tries again.
 
 The ``library`` worker is unversioned (unlike the render worker), so a run left open
 across a deploy replays on the new code: ``Housekeeping.run`` must stay
@@ -71,8 +72,11 @@ SWEEPS = (
     "housekeeping_sweep_assets",
     "housekeeping_sweep_blobs",
     "housekeeping_sweep_staging",
+    "housekeeping_sweep_claims",
 )
-PRUNE_SWEEPS = SWEEPS[:1]
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
+#: which would otherwise pile up for good with the sweeps off (review 3c M1).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: A long sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -120,16 +124,18 @@ def library_worker(
     task_queue: str,
     activities: Sequence[Callable[..., Any]],
     *,
+    workflows: Sequence[type] = (),
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
-    """The ``library`` worker: ``Housekeeping`` and its sweeps. A stop gives a running
+    """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
+    library commands' ``Operation``). A stop gives a running
     sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5): a cancelled one
     only stops waiting, its thread goes on while the lifespan closes the stores it
     uses. A sweep longer than that (an asset sweep's converge) is still cancelled."""
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[Housekeeping],
+        workflows=[Housekeeping, *workflows],
         activities=activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )

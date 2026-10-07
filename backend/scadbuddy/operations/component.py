@@ -1,5 +1,5 @@
 """Operations (#1053) as a component (`core/components.py`): the record, the client and
-queue ``Operation`` starts on, and every feature's kinds.
+the queues ``Operation`` starts on, and every feature's kinds.
 
 A feature registers its kinds by exporting ``OPERATION_KINDS``, a ``KindsBuild``, from
 its ``scadbuddy/<feature>/operations.py`` (as ``bambuddy/operations.py`` does). They are
@@ -21,18 +21,24 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key, feature_exports
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.kinds import KINDS_ATTR, KINDS_MODULE, OperationKind, build_kinds
+from scadbuddy.operations.kinds import (
+    KINDS_ATTR,
+    KINDS_MODULE,
+    OperationKind,
+    Queue,
+    build_kinds,
+)
 from scadbuddy.operations.store import OperationStore
 
 
 @dataclass(frozen=True)
 class OperationCommands:
-    """What a route that starts an ``Operation`` needs, and what the ``bambuddy``
-    worker serves: the record, the client and queue, and the kinds by name."""
+    """What a route that starts an ``Operation`` needs, and what the workers serve: the
+    record, the client, each kind's task queue, and the kinds by name."""
 
     store: OperationStore
     client: Client
-    task_queue: str
+    queues: Mapping[Queue, str]
     kinds: Mapping[str, OperationKind]
     search_attributes: bool = False
 
@@ -41,12 +47,15 @@ OPERATIONS: Key[OperationCommands] = Key("operations")
 
 
 def _build(core: Core, components: Components) -> OperationCommands:
-    # Print runs and operations share the `bambuddy` queue and the API's lazy client.
+    # Print runs and operations share the `bambuddy` queue and the API's lazy client;
+    # the library kinds run on the `library` worker (#1054).
     runs = core.print_runs
     return OperationCommands(
         store=OperationStore(core.projection.pool, events=transactional_events(core.events)),
         client=runs.client,
-        task_queue=runs.task_queue,
+        queues=MappingProxyType(
+            {"bambuddy": runs.task_queue, "library": core.settings.temporal_task_queue_library}
+        ),
         kinds=MappingProxyType(
             build_kinds(core, components, feature_exports(KINDS_MODULE, KINDS_ATTR))
         ),

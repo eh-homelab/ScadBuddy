@@ -58,19 +58,6 @@ def bundled(seed_dir: Path) -> Path:
 
 
 @pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The API tests' settings, with the Postgres the media list lives in."""
-    return Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
-    )
-
-
-@pytest.fixture
 def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
