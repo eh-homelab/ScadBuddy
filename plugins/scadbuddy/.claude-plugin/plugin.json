@@ -1,7 +1,7 @@
 {
   "name": "scadbuddy",
   "displayName": "ScadBuddy",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Author OpenSCAD templates, drive the ScadBuddy customizer and send multi-colour prints to Bambuddy, through ScadBuddy's own MCP tools.",
   "author": {
     "name": "eh-homelab",
