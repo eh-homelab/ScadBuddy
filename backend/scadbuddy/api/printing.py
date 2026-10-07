@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import (
+    AppState,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -31,6 +32,7 @@ from scadbuddy.api.deps import (
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
@@ -53,7 +55,7 @@ from scadbuddy.bambuddy.print_run import (
     check_for_output,
     filament_options_for_output,
 )
-from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
     ProjectAttach,
@@ -63,6 +65,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
@@ -319,7 +322,7 @@ async def post_run(
     return await accept_run(
         runs,
         response,
-        subject=meta.id,
+        subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
@@ -340,7 +343,7 @@ async def accept_run(
     runs: PrintCommands,
     response: Response,
     *,
-    subject: str,
+    subject: PrintSubject,
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
@@ -348,20 +351,22 @@ async def accept_run(
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
-    ``subject`` is what the run is keyed and recorded under: an output's id, or
-    ``library:<file id>``. Our record is read first: a repeat answers 200 with its run
-    and touches nothing else. Otherwise ``PrintRun`` is started (or attached to) with
-    update-with-start, and its ``accepted`` Update answers with the new row (202), the
-    run it repeats (200) or the refusal, raised as the problem it carries.
+    ``subject`` is what the run prints. It is keyed and announced under its
+    ``run_subject`` (an output's id, or ``library:<file id>``), as before #1750, so a
+    retry across the upgrade still finds its run. Our record is read first: a repeat
+    answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
+    (or attached to) with update-with-start, and its ``accepted`` Update answers with
+    the new row (202), the run it repeats (200) or the refusal, raised as the problem it
+    carries.
     """
-    key = run_key(subject, request)
+    key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
     repeated = await runs.store.find(key, has_request_id=has_request_id)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
     arg = PrintRunInput(
-        subject=subject,
+        subject=subject.run_subject,
         slug=slug,
         key=key,
         source=source,
@@ -590,6 +595,24 @@ async def get_choices(
         )
 
 
+async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
+    """Why the output's newest run failed, when it failed before it queued anything
+    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
+    print's own progress says more. Without a database, or with one that does not
+    answer, there are no runs to read, and the progress is read as it was before."""
+    runs = state.print_runs.store
+    if not runs.available:
+        return None
+    try:
+        latest = await runs.latest_for_output(output_id)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
 @router.get(
     "/outputs/{output_id}/progress",
     response_model=PrintProgress | None,
@@ -603,19 +626,29 @@ async def get_progress(
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     follows: FollowsDep,
+    state: StateDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
 
+    When the output's newest run failed before it queued anything, that failure is the
+    progress (``route: "run"``, #1049): such a run leaves no slice job or queue item to
+    follow, and read as never printed once the dialog that started it was gone.
+
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
+    failed = await _failed_before_queueing(state, meta.id)
+    progress: PrintProgress | None
     async with client_for(store.load()) as client:
-        progress = await progress_for(
-            client, meta, uploads=uploads, links=links if links.available else None
-        )
+        if failed is not None:
+            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+        else:
+            progress = await progress_for(
+                client, meta, uploads=uploads, links=links if links.available else None
+            )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

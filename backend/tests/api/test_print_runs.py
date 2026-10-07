@@ -47,7 +47,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
-from tests.api.test_print_filaments import prepared, queue_route
+from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -55,7 +55,7 @@ from tests.api.test_print_run_choices import (
     run_request,
     run_routes,
 )
-from tests.api.test_send import upload_route
+from tests.api.test_send import died_after_the_upload, stored_files, upload_route
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
@@ -140,6 +140,32 @@ def test_a_run_answers_202_before_the_slice_finishes_and_ends_with_its_result(
     assert ended["result"]["route"] == "slice_queue"
     assert isinstance(ended["result"]["warnings"], list)
     assert ended["result"]["bambuddy_url"].endswith("/queue")
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_plan_retried_after_its_upload_adopts_that_file_rather_than_uploading_again(
+    client: TestClient, model: str, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1127: ``print_plan`` retries under ``READ_RETRY``. An attempt that died after
+    Bambuddy stored the upload, and before it was recorded, left the file in the inbox;
+    the retry records it rather than leaving a spare beside a second upload."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    stored_files(upload)
+    run_routes()
+    gated_slice_routes(gate)
+    gate.open()
+    queued = queue_route()
+    asked = died_after_the_upload(monkeypatch)
+
+    response = start(client, output_id, body())
+    assert response.status_code == 202, response.text
+    ended = follow_run(client, response.json()["id"])
+
+    assert ended["status"] == "succeeded", ended
+    assert upload.call_count == 1
+    assert asked == [41, 41]
     assert queued.call_count == 1
 
 
@@ -277,6 +303,59 @@ def test_a_slot_error_found_after_the_upload_is_the_runs_failure(
     assert run["error"]["status"] == 422
     assert "Slot 1 has no spool chosen." in run["error"]["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_a_run_that_failed_after_its_202_is_the_outputs_progress(
+    client: TestClient, model: str
+) -> None:
+    """#1049: a run that failed before it queued anything recorded no print route, so
+    ``/progress`` answered ``null`` ("never printed") and the failure lived only in a
+    row nothing outside the dialog could find. It is now the output's progress."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    assert client.get(f"/api/v1/print/outputs/{output_id}/progress").json() is None
+
+    response = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    run = follow_run(client, response.json()["id"])
+    assert run["status"] == "failed"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress")
+
+    assert progress.status_code == 200, progress.text
+    answer = progress.json()
+    assert answer["route"] == "run"
+    assert answer["stage"] == "failed"
+    assert answer["settled"] is True
+    assert answer["error_message"] == run["error"]["detail"]
+    assert answer["queue_item_id"] is None
+
+
+@respx.mock
+def test_a_print_after_a_failed_run_is_the_progress_again(client: TestClient, model: str) -> None:
+    """#1049: the failure is the progress only while it is the output's latest run."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 51, "printer_id": 1, "printer_name": "3DP-31B-598", "status": "pending"},
+        )
+    )
+
+    failed = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    assert follow_run(client, failed.json()["id"])["status"] == "failed"
+    printed = start(client, output_id, body())
+    assert follow_run(client, printed.json()["id"])["status"] == "succeeded"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
+
+    assert progress["route"] == "slice_queue"
+    assert progress["error_message"] is None
 
 
 @respx.mock
@@ -497,7 +576,7 @@ def test_a_request_id_retry_after_retention_pruned_its_run_does_not_invite_a_rep
         ).fetchone()
         assert row is not None
         assert workflow_reaper.client is not None
-        workflow_reaper._run(workflow_reaper.client.get_workflow_handle(row[0]).result())
+        workflow_reaper.run(workflow_reaper.client.get_workflow_handle(row[0]).result())
         conn.execute("DELETE FROM print_runs WHERE id = %s", (first.json()["id"],))
 
     retry = start(client, output_id, request)
@@ -839,7 +918,10 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     budget under the proxy's 15 s, or the request is answered still-accepting."""
     output_id = prepared(client, model)
     ended_run = PrintRun(
-        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
     )
     starts: list[timedelta] = []
 
@@ -971,10 +1053,10 @@ def cancel_run(reaper: WorkflowReaper, conninfo: str, run_id: str) -> None:
         row = conn.execute("SELECT workflow_id FROM print_runs WHERE id = %s", (run_id,)).fetchone()
     assert row is not None and reaper.client is not None
     handle = reaper.client.get_workflow_handle(row[0])
-    reaper._run(handle.cancel())
+    reaper.run(handle.cancel())
 
     def requested() -> bool:
-        history = reaper._run(handle.fetch_history())
+        history = reaper.run(handle.fetch_history())
         return any(
             event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
             for event in history.events

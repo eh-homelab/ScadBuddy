@@ -28,10 +28,12 @@ from scadbuddy.bambuddy.filaments import (
     build_options,
     check,
     colour_distance,
+    colours_match,
     gather_options,
     gather_plate_options,
     normalise_colour,
     queue_filaments,
+    seed_plan,
 )
 from scadbuddy.bambuddy.models import (
     Printer,
@@ -693,3 +695,48 @@ def test_a_loaded_cobalt_beats_a_closer_cyan_on_the_shelf() -> None:
         printer=printer(),
     )
     assert [choice.spool_id for choice in built.suggested] == [40]
+
+
+def _seed(slot: SlotNeed, shelf: list[Spool], remembered: int) -> list[SlotChoice]:
+    built = build_options(library_file_id=1, spools=shelf, assignments=[], requirements=[slot])
+    return seed_plan(built, [SlotChoice(slot_id=slot.slot_id, spool_id=remembered)]).slots
+
+
+def test_a_remembered_spool_that_no_longer_fits_the_slot_gives_way_to_the_suggestion() -> None:
+    """#1653: the model was recoloured from black to red since the choice was remembered."""
+    shelf = [_spool(1, "000000FF"), _spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=1) == [
+        SlotChoice(slot_id=1, spool_id=4)
+    ]
+
+
+def test_a_remembered_spool_is_kept_for_a_slot_with_no_colour() -> None:
+    """#1653: with nothing to compare against, the remembered spool beats the suggestion."""
+    shelf = [_spool(1, "000000FF"), _spool(4, "C12E1FFF")]
+    built = build_options(
+        library_file_id=1, spools=shelf, assignments=[], requirements=[SlotNeed(slot_id=1)]
+    )
+    remembered = next(s.id for s in shelf if s.id != built.suggested[0].spool_id)
+    assert _seed(SlotNeed(slot_id=1), shelf, remembered=remembered) == [
+        SlotChoice(slot_id=1, spool_id=remembered)
+    ]
+
+
+def test_a_remembered_spool_that_has_left_the_inventory_gives_way_to_the_suggestion() -> None:
+    shelf = [_spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=99) == [
+        SlotChoice(slot_id=1, spool_id=4)
+    ]
+
+
+def test_a_colourless_spool_fits_every_coloured_slot() -> None:
+    """#1654: a spool with no ``rgba`` cannot be told apart from any colour, so a
+    remembered colourless spool survives every recolour. Deliberate (#933): the
+    auto-match never picks one for a coloured slot, but a person who chose it did."""
+    assert colours_match("#FF0000", None)
+    assert colours_match(None, "#FF0000")
+    assert colours_match(None, None)
+    shelf = [_spool(30, None), _spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=30) == [
+        SlotChoice(slot_id=1, spool_id=30)
+    ]

@@ -36,6 +36,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnreachableError,
     start_command,
 )
+from tests.support.operations import press
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
 PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
@@ -154,7 +155,8 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
 
 
 def post(client: TestClient, body: dict[str, Any], key: str | None = None) -> Any:
-    headers = {"Idempotency-Key": key} if key else {}
+    """One press: ``key``, or a fresh one."""
+    headers = {"Idempotency-Key": key or uuid.uuid4().hex}
     return client.post("/api/v1/test-op", json=body, headers=headers)
 
 
@@ -182,32 +184,24 @@ def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
     assert counts.runs == 1
 
 
-def test_without_a_key_each_request_is_its_own_operation(
-    client: TestClient, counts: Counts
+def test_a_request_without_a_key_is_refused_and_runs_nothing(
+    client: TestClient, counts: Counts, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    post(client, {"a": 1})
-    post(client, {"a": 1})
-    assert counts.runs == 2
+    """#1143: a keyless write cannot be told from its own retry, so a proxy's re-send
+    after a lost answer would upload, enqueue or create twice. It is refused (428) before
+    anything starts."""
 
+    async def no_start(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a keyless request must not reach Temporal")
 
-def test_only_a_request_with_a_key_reads_the_record_first(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
-    match it; reading one would only spend the answer's deadline."""
-    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
-    real = type(store).find
-    reads: list[str] = []
-
-    async def find(self: Any, key: str) -> Any:
-        reads.append(key)
-        return await real(self, key)
-
-    monkeypatch.setattr(type(store), "find", find)
-    assert post(client, {"a": 1}).status_code == 200
-    assert reads == []
-    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
-    assert len(reads) == 1
+    monkeypatch.setattr(operations_api, "start_command", no_start)
+    response = client.post("/api/v1/test-op", json={"a": 1})
+    assert response.status_code == 428, response.text
+    assert response.json()["type"] == operations_api.KEY_REQUIRED_PROBLEM
+    assert "Idempotency-Key" in response.json()["detail"]
+    assert counts.runs == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
 
 
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
@@ -323,8 +317,8 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
 
 def test_each_kind_runs_on_its_own_queue(client: TestClient) -> None:
     """§4.3: a worker serves only the kinds whose effect it holds."""
-    library = client.post("/api/v1/test-op?kind=test_library", json={})
-    bambuddy = client.post("/api/v1/test-op?kind=test_where", json={})
+    library = client.post("/api/v1/test-op?kind=test_library", json={}, headers=press())
+    bambuddy = client.post("/api/v1/test-op?kind=test_where", json={}, headers=press())
     assert library.status_code == bambuddy.status_code == 200, library.text
     assert library.json()["queue"].endswith("-library")
     assert not bambuddy.json()["queue"].endswith("-library")
@@ -335,7 +329,7 @@ def test_a_run_past_its_kinds_timeout_is_cancelled_and_recorded_failed(
 ) -> None:
     """Review I2: the run heartbeats, so its timeout reaches the coroutine, which then
     stops rather than finishing an effect the record calls failed."""
-    response = client.post("/api/v1/test-op?kind=test_slow", json={})
+    response = client.post("/api/v1/test-op?kind=test_slow", json={}, headers=press())
     assert response.status_code == 500, response.text
     deadline = time.monotonic() + 30
     while counts.cancelled == 0 and time.monotonic() < deadline:
@@ -349,7 +343,7 @@ def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
     """Review #1119 1: a pin's clone and commit are threads, which a cancel cannot stop.
     The run keeps its gate until the thread has returned, so nothing that waits on the
     gate runs beside it; the effect itself can still land after the record failed."""
-    response = client.post("/api/v1/test-op?kind=test_threaded", json={})
+    response = client.post("/api/v1/test-op?kind=test_threaded", json={}, headers=press())
     assert response.status_code == 500, response.text
     # Review #1119 2-4: the record says the effect may have landed, not just "failed".
     assert "may have been done" in response.json()["detail"]
@@ -361,7 +355,7 @@ def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
 
 def test_a_library_kinds_slow_check_does_not_blame_bambuddy(client: TestClient) -> None:
     """Review #1119 2: a ``library`` check reads the data volume, not Bambuddy."""
-    response = client.post("/api/v1/test-op?kind=test_slow_check", json={})
+    response = client.post("/api/v1/test-op?kind=test_slow_check", json={}, headers=press())
     assert response.status_code == 504, response.text
     problem = response.json()
     assert problem["type"] == "about:blank"
@@ -390,11 +384,11 @@ def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> Non
     response = client.post(
         "/api/v1/test-op?kind=test_author",
         json={},
-        headers={AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
+        headers={**press(), AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"principal": "token:abc123", "session": "s-1"}
-    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1})
+    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1}, headers=press())
     assert plain.json() == {"principal": None, "session": None}
 
 
@@ -459,5 +453,6 @@ def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
         assert detail in responses["503"]["description"]
     assert "may_have_started" in responses["503"]["description"]
     assert operations_api.RECORD_GONE_PROBLEM in responses["default"]["description"]
+    assert operations_api.KEY_REQUIRED_PROBLEM in responses["428"]["description"]
     schema = responses["503"]["content"]["application/problem+json"]["schema"]
     assert "may_have_started" in schema["properties"]

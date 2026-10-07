@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
+import { READ_RETRIES, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -459,6 +459,113 @@ describe('useRenderJob', () => {
         await vi.advanceTimersByTimeAsync(1_200)
       })
       expect(read.mock.calls.length - before).toBe(3)
+    })
+
+    it('keeps following a running job through a failed read, and reads it again (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValueOnce(new ApiError(500, 'injected 500'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.rendering).toBe(true)
+      expect(realtime.following()).toEqual([`job:${JOB_A}`])
+
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.job?.status).toBe('done')
+    })
+
+    it('reads the job on its job.done after a failed read (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await realtime.signal(`job:${JOB_A}`, 'job.done')
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.job?.status).toBe('done')
+      expect(result.current.rendering).toBe(false)
+    })
+
+    it('backs off between failed reads, then gives up and offers try again (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValue(new ApiError(502, 'Bad Gateway'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(read).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+      // The second wait is longer than the first.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000)
+      })
+      expect(read).toHaveBeenCalledTimes(READ_RETRIES + 1)
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.error?.message).toContain('Bad Gateway')
+      expect(canRetry(result.current.error)).toBe(true)
+      expect(realtime.following()).toEqual([])
+    })
+
+    it('does not poll past a pending retry while the socket is unavailable (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      realtime.setStatus('unavailable')
+      read.mockRejectedValue(new ApiError(500, 'injected 500'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(result.current.error).toBeUndefined()
+      // At 0, then the backoff's 400 and 1200 ms: no 400 ms poll in between.
+      expect(read).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not read past a pending retry for events that came during the failed read (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      let fail!: (cause: Error) => void
+      read.mockImplementationOnce(
+        () =>
+          new Promise<Job>((_, reject) => {
+            fail = reject
+          }),
+      )
+      await realtime.signal(`job:${JOB_A}`)
+      await realtime.signal(`job:${JOB_A}`)
+      const before = read.mock.calls.length
+      await act(async () => {
+        fail(new ApiError(502, 'Bad Gateway'))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      // The event that came during the failed read waits for its backoff.
+      expect(read.mock.calls.length - before).toBe(0)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read.mock.calls.length - before).toBe(1)
+    })
+
+    it('gives up at once on a job that is gone, and offers try again (#1040)', async () => {
+      vi.mocked(api.getJob).mockRejectedValue(new ApiError(404, 'no such job'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(api.getJob).toHaveBeenCalledTimes(1)
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.error?.message).toContain('no such job')
+      expect(canRetry(result.current.error)).toBe(true)
+      expect(realtime.following()).toEqual([])
     })
   })
 })

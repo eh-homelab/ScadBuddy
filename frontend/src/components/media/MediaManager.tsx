@@ -290,7 +290,9 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                 key={item.id}
                 data-media-id={item.id}
                 {...rowDrag(item)}
-                className={`flex items-start gap-3 rounded-[6px] border bg-surface-2 p-2 ${
+                // #1037 — wraps below `sm`, so the buttons drop under the caption instead of
+                // squeezing it to a sliver beside them.
+                className={`flex flex-wrap items-start gap-3 rounded-[6px] border bg-surface-2 p-2 sm:flex-nowrap ${
                   place >= 0 && dropTarget === place ? 'border-accent' : 'border-line'
                 } ${place >= 0 ? 'cursor-grab' : ''}`}
               >
@@ -367,7 +369,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                   )}
                 </div>
                 {!item.missing && (editable || builtin) && (
-                  <div className="flex shrink-0 flex-col items-end gap-1">
+                  <div className="flex basis-full flex-wrap gap-1 sm:basis-auto sm:shrink-0 sm:flex-col sm:flex-nowrap sm:items-end">
                     {place >= 0 && (
                       <div className="flex gap-1">
                         <Button

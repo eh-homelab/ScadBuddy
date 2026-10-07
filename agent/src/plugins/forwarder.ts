@@ -24,9 +24,9 @@ import {
 // WHY. Claude Code's own MCP client, given a plugin URL and header, follows
 // 30x redirects and the `resource_metadata` URL of a `WWW-Authenticate`
 // challenge, and sends the configured header to wherever they point
-// (measured on CLI 2.1.283 by the PR #464 review: a 307 to another origin got
-// every request with the header; resource_metadata=http://169.254.169.254/…
-// got a GET with it). That steps around the egress check (http/egress.ts),
+// (measured on CLI 2.1.283 by the PR #464 review, and again on 2.1.287: a
+// 307 to another origin got every request with the header;
+// resource_metadata=http://169.254.169.254/… got a GET with it). That steps around the egress check (http/egress.ts),
 // the URL binding of the sealed secret, and spec D5's https-only rule. So
 // Claude Code is never given the plugin's URL or its secret. Each run
 // registers its plugins here and hands Claude Code

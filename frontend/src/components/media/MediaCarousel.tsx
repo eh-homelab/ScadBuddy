@@ -322,7 +322,11 @@ function SlideMedia({
   focusable: boolean
   eager: boolean
 }) {
-  const src = slide.kind === 'video' ? slide.poster : slide.src
+  // A catalogue card's copy when there is one: never a 33-megapixel original for a
+  // ~300 px card (#1034). Should it fail, the original image or the video's poster.
+  const [cardFailed, setCardFailed] = useState(false)
+  const original = slide.kind === 'video' ? slide.poster : slide.src
+  const src = slide.card && !cardFailed ? slide.card : original
   const frame = 'relative block aspect-[4/3] w-full overflow-hidden rounded-[4px] bg-surface-2'
   const picture = (
     <>
@@ -332,6 +336,7 @@ function SlideMedia({
           alt={slide.alt}
           loading={eager ? 'eager' : 'lazy'}
           draggable={false}
+          onError={src === slide.card ? () => setCardFailed(true) : undefined}
           className="h-full w-full object-cover"
         />
       ) : (

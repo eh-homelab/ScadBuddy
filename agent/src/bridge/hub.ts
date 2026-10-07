@@ -295,7 +295,10 @@ export class TabHub implements BrowserTabs {
     args: Record<string, unknown>,
     { signal, timeoutMs = this.#callTimeoutMs }: { signal: AbortSignal; timeoutMs?: number },
   ): Promise<CallOutcome> {
-    const resolved = await this.#resolve(target)
+    // The pairing lookup stops with the call (#1410): a hung read is not waited out.
+    const resolved = await this.#resolve(target, signal).catch((err: unknown) => {
+      throw signal.aborted ? abortError() : err
+    })
     if ('problem' in resolved) return failure('no_browser', resolved.problem)
     const { tab } = resolved
     if (tab.calls.size >= MAX_CALLS_PER_TAB) {
