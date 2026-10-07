@@ -958,7 +958,10 @@ def test_a_repeat_of_an_ended_run_still_open_after_the_wait_is_still_accepting(
     client is told to send it again instead, and that request starts the new run."""
     output_id = prepared(client, model)
     ended_run = PrintRun(
-        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
     )
     starts: list[timedelta] = []
 
