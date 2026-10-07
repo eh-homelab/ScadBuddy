@@ -95,6 +95,13 @@ def _code_roots() -> tuple[str, ...]:
     return tuple(sorted({os.path.join(os.path.realpath(path), "") for path in candidates}))
 
 
+#: ``open``, bound at import as `tokenize` binds it: Temporal's workflow sandbox
+#: replaces ``builtins.open`` on the workflow thread, and a failed workflow's
+#: ``CompleteWorkflow`` span is ended there. Production's `BatchSpanProcessor`
+#: (`core/tracing.py`) exports it later on its own thread; a synchronous processor,
+#: as the tests' `SimpleSpanProcessor`, exports it on the workflow thread (#1712).
+_open: Final = open
+
 #: A frame is checked against its file only under these, so a path in a message (a
 #: data file, a blob) is never opened by the exporter.
 _CODE_ROOTS: tuple[str, ...] = _code_roots()
@@ -106,7 +113,7 @@ def _source(path: str) -> tuple[int, frozenset[str]] | None:
     binds; ``None`` when it cannot be read or is larger than ``_MAX_SOURCE_BYTES``.
     Only these are kept, never the text, and never in ``linecache``."""
     try:
-        with open(path, "rb") as file:
+        with _open(path, "rb") as file:
             data = file.read(_MAX_SOURCE_BYTES + 1)
     except OSError:
         return None
