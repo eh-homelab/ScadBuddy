@@ -295,6 +295,20 @@ describe('CustomizePage', () => {
     expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
   })
 
+  it('offers no "Try again" for a refusal no retry fixes, a 422 (review #1066 (13) 2)', async () => {
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'width must be at most 100' },
+          { status: 422 },
+        ),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('width must be at most 100')
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
+  })
+
   it('re-renders after a parameter change and updates the dimensions', async () => {
     const { user } = render()
     await firstRender()
