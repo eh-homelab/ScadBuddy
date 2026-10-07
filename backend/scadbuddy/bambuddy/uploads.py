@@ -136,6 +136,10 @@ class BambuddyUploadStore:
         """Record an upload, replacing the folder and target of one with the same id."""
         await asyncio.to_thread(self._record, output_id, copy)
 
+    async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
+        """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
+        return await asyncio.to_thread(self._recorded, list(library_file_ids))
+
     async def forget(self, output_id: str, library_file_id: int) -> None:
         """Drop one copy, and its slices, once the file has actually gone.
 
@@ -287,6 +291,15 @@ class BambuddyUploadStore:
                 " SET folder_id = EXCLUDED.folder_id, target_key = EXCLUDED.target_key",
                 (output_id, copy.id, copy.folder_id, copy.target_key),
             )
+
+    def _recorded(self, ids: list[int]) -> set[int]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT library_file_id FROM output_bambuddy_uploads"
+                " WHERE library_file_id = ANY(%s)",
+                (ids,),
+            ).fetchall()
+        return {row["library_file_id"] for row in rows}
 
     def _forget(self, output_id: str, library_file_id: int) -> None:
         with self._require().connection() as conn:

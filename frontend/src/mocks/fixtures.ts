@@ -10,6 +10,7 @@ import type {
   CustomizerSchema,
   FontFamily,
   CatalogueLibrary,
+  ManifestObject,
   MediaView,
   ModelSummary,
   ModelVersion,
@@ -270,7 +271,7 @@ export const media: Record<string, MediaView[]> = {
   ],
 }
 
-export const models: ModelSummary[] = [
+const modelsSeed: ModelSummary[] = [
   {
     slug: 'name-keychain',
     name: 'Name Keychain',
@@ -372,6 +373,9 @@ export const models: ModelSummary[] = [
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
 ]
+
+/** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
+export const models: ModelSummary[] = modelsSeed.map((entry) => ({ inputs_version: 0, ...entry }))
 
 /**
  * #90 — the git history of `name-keychain`. Commit ids are the real shape (40 hex
@@ -611,7 +615,7 @@ export const libraries: CatalogueLibrary[] = [
 /** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
 export const MISSING_REF = 'v9.9.9'
 
-export const outputs: Output[] = [
+const outputsSeed: Output[] = [
   {
     id: 'a'.repeat(32),
     slug: 'name-keychain',
@@ -634,6 +638,23 @@ export const outputs: Output[] = [
     },
     bbox_mm: bbox(95.7, 34.6, 6.8),
     colors: ['#1B6CA8', '#E8532F'],
+    manifest: [
+      {
+        part: 'piece-wall',
+        file: 'model.scad',
+        slug: 'name-keychain',
+        revision: null,
+        bbox: { min: [0, 0, 0], max: [60, 20, 5], size: [60, 20, 5] },
+        footprint: [60, 20],
+        colours: ['#1B6CA8', '#E8532F'],
+        count: 2,
+        plates: 1,
+        bom_piece: 'wall',
+        source_output: null,
+        notes: [],
+      },
+    ],
+    arranged_from: [],
     parts: [],
     warnings: [],
     library_files: [{ id: 8812, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] }],
@@ -701,6 +722,39 @@ export const outputs: Output[] = [
   },
 ]
 
+/** #902 — what a re-render records for an output saved before Arrange: one object. */
+export function backfilledManifest(slug: string, colours: string[]): ManifestObject[] {
+  return [
+    {
+      part: 'piece-body',
+      file: 'model.scad',
+      slug,
+      revision: null,
+      bbox: { min: [0, 0, 0], max: [70, 30, 5], size: [70, 30, 5] },
+      footprint: [70, 30],
+      colours,
+      count: 1,
+      plates: 1,
+      bom_piece: 'body',
+      source_output: null,
+      notes: [],
+    } satisfies ManifestObject,
+  ]
+}
+
+/**
+ * Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null; and phase 5's
+ * manifest: [], arranged_from: [], as the API sends them for an output saved before Arrange.
+ */
+export const outputs: Output[] = outputsSeed.map((entry) => ({
+  bom: [],
+  files: [],
+  record: null,
+  manifest: [],
+  arranged_from: [],
+  ...entry,
+}))
+
 /**
  * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what
  * this mock deployment sets through `SCADBUDDY_*`. A reset goes back to the deployment's
@@ -713,6 +767,7 @@ export const settingsDefaults = {
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,
   render_timeout: 120,
+  template_activity_max_timeout: 1800,
   render_concurrency: 2,
   solid_concurrency: 0,
   render_queue_max: 0,
@@ -992,6 +1047,22 @@ export const TEMPLATE_NOTES = [
 export const WARNED_NAME = 'nopic'
 
 export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
+
+/**
+ * #1743, #1744 — a name the mock renders fine with all three kinds of message at once:
+ * the template's notes, ScadBuddy's warnings and OpenSCAD's own, as a busy template's
+ * render can carry.
+ */
+export const CROWDED_NAME = 'crowded'
+
+export const CROWDED_DIAGNOSTICS = [
+  {
+    severity: 'warning' as const,
+    message: 'module cube() does not support child modules',
+    file: 'model.scad',
+    line: 6,
+  },
+]
 
 /** #408 — a name the mock fails the way a template drawing only a missing picture does. */
 export const PICTURELESS_NAME = 'nosvg'
