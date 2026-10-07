@@ -368,16 +368,33 @@ async def test_the_log_replays_after_a_seq_in_pages(make_bus: BusFactory) -> Non
 
 @pytest.mark.requires_postgres
 async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
-    make_bus: BusFactory, pg_conninfo: str
+    make_bus: BusFactory, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The bus's own pruner prunes once when it starts (#1787): under load that first
+    prune came after the events below were logged and pruned them itself, so the
+    test's prune had nothing left to remove. Here it is held until they are heard,
+    and the totals are what is checked, whichever prune removed the rows."""
+    heard = asyncio.Event()
+    pruner = PgNotifyEventBus._pruner
+
+    async def late_pruner(self: PgNotifyEventBus) -> None:
+        await heard.wait()
+        await pruner(self)
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", late_pruner)
     bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
     subscription = bus.subscribe()
     for n in range(5):
         bus.publish(_model(f"m{n}"))
     for _ in range(5):
         await _next(subscription)
+    heard.set()
 
-    assert await bus.prune_log() == 2  # by rows
+    def pruned() -> float:
+        return _sample(bus.metrics, "scadbuddy_event_log_pruned_total")
+
+    await bus.prune_log()  # by rows
+    await _until(lambda: pruned() == 2)
     replay = await bus.replay(0)
     assert _slugs([logged.event for logged in replay.events]) == ["m2", "m3", "m4"]
     assert replay.gap  # m0 and m1 are gone: a client resuming from 0 must resync
@@ -388,9 +405,9 @@ async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
             "UPDATE events SET logged_at = now() - interval '2 hours' WHERE seq = %s",
             (replay.events[0].seq,),
         )
-    assert await bus.prune_log() == 1  # by age
+    await bus.prune_log()  # by age
+    await _until(lambda: pruned() == 3)
     assert _slugs([logged.event for logged in (await bus.replay(0)).events]) == ["m3", "m4"]
-    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 3
 
 
 @pytest.mark.requires_postgres
