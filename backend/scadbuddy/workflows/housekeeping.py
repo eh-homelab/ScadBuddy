@@ -68,6 +68,11 @@ MIN_INTERVAL = 1.0
 
 #: #902's backstop: a finished output re-render whose settling event no API heard.
 BACKFILL_SWEEP = "housekeeping_attach_backfills"
+#: #1007: release the Parts holds of outputs whose record is gone (library/outputs.py
+#: `reap_orphan_holds`). Last, so what it frees waits for the next tick's blob sweep.
+REAP_SWEEP = "housekeeping_reap_output_holds"
+#: The `workflow.patched` id that adds `REAP_SWEEP` to a run (see the module docstring).
+REAP_PATCH = "housekeeping-reap-output-holds"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -76,6 +81,7 @@ SWEEPS = (
     "housekeeping_sweep_staging",
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
+    REAP_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1).
@@ -107,6 +113,9 @@ class Housekeeping:
     async def run(self, sweeps: list[str] | None = None) -> list[str]:
         failed: list[str] = []
         for sweep in SWEEPS if sweeps is None else sweeps:
+            # Added after runs that may still replay; one recorded before it skips it.
+            if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
+                continue
             try:
                 prune = sweep in PRUNE_SWEEPS
                 await workflow.execute_activity(
