@@ -51,7 +51,8 @@ export function traceparentOf(span: Span): string | undefined {
  * `await`), so a request issued after an `await` joins the trace only when its call
  * is wrapped in `within`. `span` is for attributes learnt on the way (an output's id).
  * The span lasts until `run` settles: the print's covers the whole follow of its run,
- * not only the write. An abort (a superseded action) records nothing. A failure sets `ERROR` and
+ * not only the write. An abort (a superseded or abandoned action) sets only
+ * `scadbuddy.outcome` `abandoned`. A failure records the exception, sets `ERROR` and
  * `scadbuddy.failure_class`, and is rethrown unchanged.
  */
 export async function traceAction<T>(
@@ -65,8 +66,13 @@ export async function traceAction<T>(
   try {
     return await within(() => run(within, span))
   } catch (error) {
-    // A superseded action (an aborted print) is not a failure.
-    if (failureClass(error) === 'AbortError') throw error
+    // A superseded action (an aborted print) is not a failure, but is not a success either.
+    if (failureClass(error) === 'AbortError') {
+      span.setAttribute('scadbuddy.outcome', 'abandoned')
+      throw error
+    }
+    // `ScrubbingSpanExporter` strips the message before the event leaves the page.
+    span.recordException(error instanceof Error ? error : String(error))
     span.setStatus({ code: SpanStatusCode.ERROR })
     span.setAttribute('scadbuddy.failure_class', failureClass(error))
     throw error

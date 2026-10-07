@@ -241,7 +241,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     let first = true
     vi.spyOn(service, 'row').mockImplementation(async (id) => {
       const row = await real(id)
-      if (first) {
+      // Hold only the wait's read of its still-pending row (#1410): any other row() call
+      // that came first would otherwise take the hold and leave the test proving nothing.
+      if (first && (row as { outcome: unknown } | undefined)?.outcome === null) {
         // The row as read before the answer commits: still pending.
         first = false
         reading()
@@ -1286,7 +1288,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
     await turn!.done
-    expect(extrasSeen).toEqual({})
+    expect(extrasSeen).toEqual({ turnContext: expect.any(Function) })
   })
 
   // #1333: the hub, the manager and the harness tools wired as main.ts wires them. A
@@ -1495,10 +1497,14 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       return Promise.resolve(n === 2 ? { answered: false, reconnected: true, message: 'x' } : { answered: false, message: 'x' })
     }, never, noop)
     for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await mixed({ tool: 'browser_snapshot', toolUseId: `m${i}`, signal: never, isBack: here })
-    expect(await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })).not.toEqual({
+    const mixedCap = await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
+    // Positively the cap (#1410), not merely "not a replica story": a cap that never fired would pass that.
+    expect(mixedCap).toEqual({
       back: false,
-      message: expect.stringMatching(/replica/),
+      message: expect.stringContaining(`waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now`),
     })
+    expect(mixedCap).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
+    expect(n).toBe(TAB_WAITS_PER_TURN)
   })
 
   // #1308: the tab came back on another replica. This one cannot reach it, and no
@@ -1546,8 +1552,8 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
   // #1394: the reconnect check is handed the wait's signal, so a check that hangs is cancelled when the wait ends.
   it('hands the reconnect check the signal that aborts once the wait stops waiting for it', async () => {
     const seen: AbortSignal[] = []
+    const parked = new AbortController()
     const gate: QuestionGate = async (request) => {
-      const parked = new AbortController()
       const attention = request.attention!
       if (attention.reason === 'done') throw new Error('a tab wait is never a done summary')
       void attention.onParked!(parked.signal)
@@ -1564,6 +1570,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       },
     })
     expect(seen).toHaveLength(1)
+    expect(seen[0]).toBe(parked.signal)
     expect(seen[0]!.aborted).toBe(true)
   })
 

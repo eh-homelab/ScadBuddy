@@ -6,6 +6,7 @@ import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
 import { envDetector, type Resource, resourceFromAttributes } from '@opentelemetry/resources'
 import { NodeSDK } from '@opentelemetry/sdk-node'
 import { BatchSpanProcessor, NoopSpanProcessor, type SpanExporter, type SpanProcessor } from '@opentelemetry/sdk-trace'
+import { setRunning, tracedListener } from './runtime.js'
 import { DEFAULT_SAMPLER } from './sampler.js'
 import { ScrubbingSpanExporter } from './scrub.js'
 
@@ -18,7 +19,10 @@ import { ScrubbingSpanExporter } from './scrub.js'
 //                                provider with no exporter, so spans are created
 //                                (context propagates) and dropped (§3). The exporter
 //                                itself resolves the URL and the (TRACES_)HEADERS.
-//   OTEL_SDK_DISABLED=true       no SDK at all: the API's no-op provider
+//   OTEL_SDK_DISABLED=true       no SDK at all: src/telemetry.ts never imports this
+//                                module, so its packages are not even loaded (main.ts
+//                                imports the SDK-free telemetry/runtime.ts), and the
+//                                API's no-op provider stands
 //   OTEL_TRACES_SAMPLER          replaces DEFAULT_SAMPLER (§6)
 //   OTEL_RESOURCE_ATTRIBUTES     merged into the resource (envDetector)
 // SCADBUDDY_VERSION and SCADBUDDY_REVISION are build provenance stamped into
@@ -86,31 +90,17 @@ export function untracedIncoming(method: string | undefined, url: string | undef
   return method === 'GET' && (path === '/mcp' || /^\/api\/v1\/ai\/sessions\/[^/]+\/events$/.test(path))
 }
 
-/** The app's own listener (main.ts); requests on any other port are not traced. */
-let tracedPort: number | undefined
-
-/**
- * Names the one listener whose requests are traced (main.ts, before it
- * listens). Every other node:http server in the process, the plugin
- * forwarder's loopback server above all (plugins/forwarder.ts: Claude Code
- * sends no traceparent, and its path `/p/<token>` is a capability), is left
- * untraced, as is everything before a listener is named.
- */
-export function traceListener(port: number): void {
-  tracedPort = port
-}
-
 export function httpInstrumentation(): HttpInstrumentation {
   return new HttpInstrumentation({
     ignoreOutgoingRequestHook: () => true,
     ignoreIncomingRequestHook: (request) =>
-      request.socket?.localPort !== tracedPort || untracedIncoming(request.method, request.url),
+      request.socket?.localPort !== tracedListener() || untracedIncoming(request.method, request.url),
   })
 }
 
 let sdk: NodeSDK | undefined
 
-/** Starts the SDK once; undefined when OTEL_SDK_DISABLED=true. */
+/** Starts the SDK once; undefined when OTEL_SDK_DISABLED=true. runtime.ts shutdownTelemetry stops it. */
 export function startTelemetry(env: Env = process.env): NodeSDK | undefined {
   if (sdk || tracingDisabled(env)) return sdk
   sdk = new NodeSDK({
@@ -125,16 +115,6 @@ export function startTelemetry(env: Env = process.env): NodeSDK | undefined {
     logRecordProcessors: [],
   })
   sdk.start()
+  setRunning(sdk)
   return sdk
-}
-
-/** Flushes and stops the SDK, within `timeoutMs`; never throws (main.ts, on SIGTERM). */
-export async function shutdownTelemetry(timeoutMs = 2_000): Promise<void> {
-  const running = sdk
-  sdk = undefined
-  if (!running) return
-  await Promise.race([
-    running.shutdown().catch(() => {}),
-    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref()),
-  ])
 }
