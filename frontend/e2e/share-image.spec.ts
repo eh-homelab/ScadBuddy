@@ -54,9 +54,7 @@ test.describe('rendered image', () => {
     // The bounding box is known before the model's GLB has loaded: until it has, the
     // canvas shows only the plate and the Rendering chip, so a screenshot taken then
     // differs from any taken later without the camera having moved (#1778).
-    await expect(
-      page.getByTestId('preview').locator('[data-overlay="chip"]', { hasText: 'Rendering' }),
-    ).toHaveCount(0)
+    await expect(page.getByTestId('preview-rendering')).toHaveCount(0)
     const canvas = page.getByTestId('preview-canvas').locator('canvas')
     const view = (await canvas.boundingBox())!
     // The chip goes as the model loads; the frame that draws it can land a tick later.
