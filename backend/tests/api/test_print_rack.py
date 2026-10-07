@@ -373,17 +373,49 @@ def test_a_manual_pick_that_does_not_fit_is_refused_before_anything_is_sliced(
 
 
 @respx.mock
-def test_a_high_flow_choice_is_judged_as_the_standard_slice_it_becomes(
+def test_a_high_flow_choice_on_the_rack_side_is_judged_as_high_flow(
     client: TestClient, model: str
 ) -> None:
-    """Review Focus 2 (#484): an HH position is neither offered nor accepted."""
+    """#484: the slice carries the flow chosen for the right, the side the rack swaps
+    onto, so with High Flow chosen there an HH position is offered and accepted, and an
+    HS one is not."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
     high_flow = {"nozzles": [{"size": "0.4", "flow": "high_flow"}], "tier": "standard"}
 
-    response = client.post(
+    accepted = client.post(
         f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 3}
+    )
+    refused = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 2}
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["errors"] == []
+    assert accepted.json()["rack"]["position"] == 3
+    assert [o["position"] for o in accepted.json()["rack"]["options"]] == [3, 5]
+    assert refused.json()["errors"] == [
+        "Rack position 2 holds a 0.4 mm Standard nozzle, and this prints with a 0.4 mm "
+        "High Flow nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_high_flow_choice_on_the_left_only_leaves_the_rack_side_standard(
+    client: TestClient, model: str
+) -> None:
+    """The dialog lists the left first: High Flow there says nothing of the rack side."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    left_only = {
+        "nozzles": [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
+        "tier": "standard",
+    }
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**left_only), "rack_position": 3}
     )
 
     assert response.status_code == 200, response.text
@@ -599,7 +631,8 @@ def _high_flow_sides(warnings: list[dict[str, Any]]) -> set[str]:
 @respx.mock
 def test_a_rack_pick_drops_the_rack_sides_high_flow_warning(client: TestClient, model: str) -> None:
     """#1238: the rack swaps a Standard hotend onto the rack side (the right), so the
-    mounted High Flow there no longer matters. The left's warning stands."""
+    mounted High Flow there no longer matters. Nor does the left's: Standard is chosen,
+    and only the right has it, in its spares, so only the right is offered (#834)."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -608,11 +641,13 @@ def test_a_rack_pick_drops_the_rack_sides_high_flow_warning(client: TestClient, 
     result = check(client, output_id)
 
     assert result["rack"]["position"] in (2, 4, 6)
-    assert _high_flow_sides(result["warnings"]) == {"left"}
+    assert _high_flow_sides(result["warnings"]) == set()
 
 
 @respx.mock
-def test_without_a_rack_pick_both_high_flow_warnings_stand(client: TestClient, model: str) -> None:
+def test_without_a_rack_pick_the_rack_sides_high_flow_warning_stands(
+    client: TestClient, model: str
+) -> None:
     """Left to Bambuddy, nothing is picked here, so nothing says what the right gets."""
     output_id = prepared(client, model)
     upload_route()
@@ -622,7 +657,7 @@ def test_without_a_rack_pick_both_high_flow_warnings_stand(client: TestClient, m
     result = check(client, output_id, rack_algorithm="bambuddy")
 
     assert result["rack"]["position"] is None
-    assert _high_flow_sides(result["warnings"]) == {"left", "right"}
+    assert _high_flow_sides(result["warnings"]) == {"right"}
 
 
 @respx.mock
@@ -638,6 +673,80 @@ def test_a_run_that_picked_from_the_rack_drops_the_rack_sides_high_flow_warning(
     queue_route()
 
     response = run_print(client, output_id, json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == set()
+
+
+@respx.mock
+def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
+    client: TestClient,
+) -> None:
+    """A library file prints as its author left it (#313): it is offered no side, so the
+    left's warning stands beside the rack pick that drops the right's (#1238)."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post(
+        "/api/v1/print/library/89/check",
+        json={**body(**CHECK_04), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+
+
+def _library_high_flow(**extra: Any) -> dict[str, Any]:
+    return {
+        **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        **extra,
+    }
+
+
+@respx.mock
+def test_a_library_file_with_high_flow_chosen_is_judged_as_standard(client: TestClient) -> None:
+    """A library file is sliced with its own flow, Standard unless its author saved it
+    High Flow, whatever the dialog chose (#313, #484). So the mounted High Flow left is
+    warned of, the preview picks a Standard hotend for the right, and a High Flow position
+    is refused, as Bambuddy's dispatch would refuse it."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post("/api/v1/print/library/89/check", json=_library_high_flow())
+    manual = client.post("/api/v1/print/library/89/check", json=_library_high_flow(rack_position=3))
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+    assert manual.json()["errors"] == [
+        "Rack position 3 holds a 0.4 mm High Flow nozzle, and this prints with a 0.4 mm "
+        "Standard nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
+    client: TestClient,
+) -> None:
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=_library_high_flow())
 
     assert response.status_code == 200, response.text
     assert response.json()["rack_picks"]

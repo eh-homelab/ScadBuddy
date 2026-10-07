@@ -290,9 +290,17 @@ path except `/api/v1/ai/*` to the backend.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
-    16 MiB at most, given the 256 KiB cap.
+    16 MiB at most. What is queued is the rewritten batch, which can be
+    several times the body it came from (every default field filled in,
+    non-ASCII escaped), so the rewrite is capped at 256 KiB too and a batch
+    past it is a 413 (#1137).
   - One forwarding task, started and stopped in the app's lifespan, posts
-    the queue to the endpoint with httpx, with a 5 s timeout.
+    the queue to the endpoint with httpx, with a 5 s timeout (or
+    `OTEL_EXPORTER_OTLP_(TRACES_)TIMEOUT`), and the CA and client certificate
+    the SDK's exporter reads (`OTEL_EXPORTER_OTLP_(TRACES_)CERTIFICATE`,
+    `…CLIENT_CERTIFICATE`, `…CLIENT_KEY`, #1160).
+  - If that task dies, it is logged at once, and the route answers 503 and
+    counts each batch `failed` until the process restarts (#1176).
   - **No retries in the app.** A failed post (unreachable, timeout, any
     non-2xx) drops its batch. Retrying and buffering are alloy's job, and
     the browser is already gone.
@@ -305,13 +313,17 @@ path except `/api/v1/ai/*` to the backend.
       budget, not a fresh 5 s.
     - The first post that fails or times out ends the drain at once: an
       unreachable collector would fail every later post the same way.
-    - The rest is dropped and counted as `shutdown`.
+    - The rest is dropped and counted as `shutdown`, as is everything still
+      queued when the drain's own wait is cancelled (#1151).
     - This is an accepted trade-off. When the collector is down at shutdown,
       the queued browser batches are lost either way. The only choice is
       whether the pod waits out its grace period first, and it should not.
   - **Visibility:** every outcome is counted in
     `scadbuddy_trace_relay_batches_total{outcome}`, with the outcomes
-    `forwarded`, `failed`, `queue_full` and `shutdown`. The counter goes in
+    `forwarded`, `failed`, `queue_full` and `shutdown`, and for a batch the
+    route refused `rate_limited` (429) and `rejected` (400, 413, 415; a
+    request from another origin is not the page's and is not counted;
+    #1161). Every outcome but `forwarded` is a lost batch. The counter goes in
     `core/metrics.py` beside the others and is pre-created at zero, so its
     first increase alerts. Failures also log one warning a minute at most,
     naming the status or the error class. This one counter is the only
