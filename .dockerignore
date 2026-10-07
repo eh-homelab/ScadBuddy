@@ -49,3 +49,7 @@ Dockerfile
 .dockerignore
 LICENSE
 README.md
+
+# pytest-split's timings (#1167): CI mounts the file into each shard, so a
+# refresh does not invalidate the test image's `COPY backend/` layer.
+backend/.test_durations

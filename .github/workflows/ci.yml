@@ -569,10 +569,9 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
-    # The pytest step alone took 27 min on main (2026-10-04) and about 40 with the
-    # durable stack's operation tests (#1058), which go through Temporal one by one;
-    # 45 cancelled the job mid-e2e. `--durations` below names the slow tests.
-    timeout-minutes: 60
+    # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
+    # suite is `backend-pytest` (#1167).
+    timeout-minutes: 30
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -642,35 +641,7 @@ jobs:
       - name: mypy
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
 
-      # No `-m` filter: inside the image `requires_openscad` tests are supposed
-      # to run, and the point of building the image at all is that they can.
-      # `requires_postgres` ones run against the service container above.
-      # `requires_temporal` ones, and all of `tests/api` (every app renders on
-      # Temporal, #546), start one dev server per session from the image's
-      # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
-      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
-      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
-      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
-      #
-      # `-n auto`: pytest-xdist, one worker per vCPU (4 on ubuntu-latest). Serial,
-      # this step took ~33 min. Each worker gets a database of its own on the
-      # service (tests/conftest.py `_pg_database_url`), since advisory locks and
-      # NOTIFY channels are per database, and a Temporal dev server of its own (the
-      # session fixture runs once per worker), each well under the 1 GiB of shm.
-      - name: pytest
-        run: >-
-          mkdir -p /tmp/durations && chmod 777 /tmp/durations &&
-          docker run --rm --network host --shm-size=1g -v /tmp/durations:/durations
-          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto --durations=50
-          --store-durations --durations-path /durations/test_durations.json
-
-      - name: Upload the test durations
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-durations
-          path: /tmp/durations/test_durations.json
+      # The backend suite runs in `backend-pytest`, four jobs of its own (#1167).
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -849,6 +820,140 @@ jobs:
       - name: Tear down
         if: always()
         run: docker rm -f scadbuddy-ci temporal-ci || true
+
+  # ── Backend pytest, in four shards (#1167) ─────────────────────────────────
+  #
+  # One 4-vCPU runner is CPU-bound on this suite: eight xdist workers took longer
+  # than four (25:59 against 23:53, the per-test setup 0.70 s -> 2.66 s at the
+  # median). So the lever is more runners: four jobs, each running a quarter by
+  # time with pytest-split and `-n auto` inside it.
+  #
+  # Each shard builds the test image itself, READING the `image` job's gha cache
+  # (`cache-from` only: no new cache scope, nothing written, so the 10 GB ceiling
+  # is untouched); on a warm cache that build is ~3 min. Each has its own Postgres
+  # service, and its xdist workers start their own Temporal dev servers, as the
+  # suite always did.
+  #
+  # The split reads backend/.test_durations (pytest-split's format). A test it does
+  # not list -- a new one -- is placed by the average duration, so it always runs
+  # in some shard; a stale file only balances the shards worse, it never fails a
+  # run. Refresh it with
+  #   cd backend && uv run --frozen pytest -n auto --store-durations
+  # (from the image, as CI runs it, for CI's own timings) and commit the result.
+  #
+  # Each shard also counts what it selected and what the whole suite collects,
+  # and `backend-pytest-split` checks the four counts add up to the whole, so no
+  # test can fall between the shards unnoticed.
+  backend-pytest:
+    name: Backend pytest (${{ matrix.group }}/4)
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:ci-test
+          cache-from: type=gha
+
+      # What this shard selects, and what the suite collects: pytest prints
+      # "<selected>/<collected> tests collected (<n> deselected)".
+      - name: Count this shard's tests
+        run: |
+          set -euo pipefail
+          line=$(docker run --rm -v "$PWD/backend/.test_durations:/durations.json:ro" \
+            -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
+            --collect-only -q --splits 4 --group ${{ matrix.group }} \
+            --durations-path /durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
+          echo "$line"
+          selected=${line%%/*}
+          rest=${line#*/}
+          collected=${rest%% *}
+          mkdir -p counts
+          echo "${{ matrix.group }} ${selected} ${collected}" > counts/shard-${{ matrix.group }}.txt
+
+      - name: Upload the count
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-count-${{ matrix.group }}
+          path: counts/shard-${{ matrix.group }}.txt
+
+      # No `-m` filter: inside the image `requires_openscad` tests are supposed
+      # to run, and the point of building the image at all is that they can.
+      # `requires_postgres` ones run against the service container above.
+      # `requires_temporal` ones, and all of `tests/api` (every app renders on
+      # Temporal, #546), start one dev server per xdist worker from the image's
+      # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
+      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
+      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
+      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
+      #
+      # `-n auto`: pytest-xdist, one worker per vCPU (4 on ubuntu-latest). Each
+      # worker gets a database of its own on the service (tests/conftest.py
+      # `_pg_database_url`), since advisory locks and NOTIFY channels are per
+      # database, and a Temporal dev server of its own, each well under 1 GiB of shm.
+      - name: pytest
+        run: >-
+          docker run --rm --network host --shm-size=1g
+          -v "$PWD/backend/.test_durations:/durations.json:ro"
+          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
+          --splits 4 --group ${{ matrix.group }} --durations-path /durations.json
+          --durations=20
+
+  # The shards between them ran every test: each one's selection adds up to the
+  # whole collection, which every shard saw the same.
+  backend-pytest-split:
+    name: Backend pytest shards cover the suite
+    needs: backend-pytest
+    if: ${{ !cancelled() && needs.backend-pytest.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: backend-pytest-count-*
+          merge-multiple: true
+          path: counts
+
+      - name: Check the counts
+        run: |
+          set -euo pipefail
+          cat counts/shard-*.txt
+          files=(counts/shard-*.txt)
+          [ "${#files[@]}" -eq 4 ] || { echo "::error::expected 4 shard counts, got ${#files[@]}"; exit 1; }
+          totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
+          [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
+          sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
+          [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
+          echo "The four shards select all ${totals} tests."
 
   # ── Each template's verify.sh (#229) ────────────────────────────────────────
   #
@@ -1287,7 +1392,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, image, models, freshness]
+    needs: [layout, lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1315,6 +1420,8 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          BACKEND_PYTEST_RESULT: ${{ needs.backend-pytest.result }}
+          BACKEND_PYTEST_SPLIT_RESULT: ${{ needs.backend-pytest-split.result }}
           MODELS_RESULT: ${{ needs.models.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -1368,6 +1475,8 @@ jobs:
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
+          assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$has_image"
+          assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$has_image"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
@@ -1400,7 +1509,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, models, summary]
+    needs: [lint, frontend, agent, image, backend-pytest, models, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

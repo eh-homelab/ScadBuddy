@@ -41,6 +41,13 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
+CI runs the suite in four `backend-pytest` jobs (#1167), each `--splits 4 --group N`
+(pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
+checks that the four selections add up to the whole collection. A test missing from
+the file is placed by the average, so a stale file only unbalances the shards. Refresh
+it with `uv run --frozen pytest -n auto --store-durations` (best from the test image,
+for CI's timings) and commit it; it is in `.dockerignore`, so a refresh leaves the
+image's layers alone.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
