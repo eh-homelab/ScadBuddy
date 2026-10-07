@@ -437,11 +437,16 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `SCADBUDDY_AGENT_TOOLS_MANIFEST`, which the image sets). Tools are
   `activity_as_tool` stubs declared from the agent's `dist/tools.json`; the agent's
   `agent-tools` worker runs them. It runs no migrations: its tables (`ai_durable_*`,
-  `ai_payload_keys`) are the agent's. Names that cross to TypeScript
-  (`models.py`: the workflow, queue, Updates, Queries) are copied in
+  `ai_payload_keys`) are the agent's. A message is committed to `ai_durable_inputs` by
+  the agent before Temporal is asked anything; the `send_message` Update is only a
+  nudge with its id, and the run loads and takes messages through `inputs.py`'s local
+  activities, so never drop or re-run one there. Names that cross to TypeScript
+  (`models.py`: the workflow, queue, Updates, Queries, `Nudge`) are copied in
   `agent/src/durable/client.ts`, the agent's side (sends, Stop, approvals); a change
   to one is a change to both. `plugin/` is the skills-only plugin a segment loads
-  (`skills` links to `plugins/scadbuddy/skills`; the image copies them).
+  (`skills` links to `plugins/scadbuddy/skills`; the image copies them); its manifest
+  keeps plugins/scadbuddy's version (`plugin-edited.sh` bumps it, `lint-plugin.sh`
+  checks it).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
   `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in

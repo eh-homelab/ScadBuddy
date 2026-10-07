@@ -639,10 +639,13 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - Durable sessions (#1056, §13): `ai_payload_keys` (one sealed data key per
   `session-<uuid>`/`flow-<uuid>` subject, `20261004T2102Z_payload_keys.sql`);
   `ai_durable_segments` (each segment attempt's cost and Claude session id),
-  `ai_durable_streams` (the projector's offset, chain, lease and `sending` mark) and
-  `ai_durable_snapshots` (the latest `AgentState`) (`20261005T0120Z_durable_sessions.sql`,
-  `20261005T1629Z_durable_stream_chain.sql`). `agent-durable` writes them and runs no
-  migrations of its own.
+  `ai_durable_streams` (the projector's offset, chain and lease, the delivering turn's
+  `sending` mark and its `send_attempt` heartbeat), `ai_durable_snapshots` (the latest
+  `AgentState`) and `ai_durable_inputs` (every message, committed before Temporal is
+  asked anything: `pending`, `run` or `abandoned`) (`20261005T0120Z_durable_sessions.sql`,
+  `20261005T1629Z_durable_stream_chain.sql`, `20261007T0132Z_durable_inputs.sql`);
+  `ai_session_entries.owner_session_id` (`20261007T0238Z_session_entries_owner.sql`).
+  `agent-durable` writes them and runs no migrations of its own.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
@@ -870,9 +873,11 @@ in the README, "Durable assistant sessions".
   that names no mode is `classic` whatever `session_mode` says (`defaultMode()` in
   [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 - **In the pod:** a running `agent-durable`. Without one a send is still accepted:
-  after 5 s (`DURABLE_ACCEPT_WAIT_MS`) the log gets a non-fatal `error` with code
+  the message is committed to `ai_durable_inputs` with its turn, after 5 s
+  (`DURABLE_ACCEPT_WAIT_MS`) the log gets a non-fatal `error` with code
   `worker_pending` (the panel shows it as a notice), the session stays `running`, and
-  the turn runs when a worker polls.
+  the turn runs when a worker polls. The same holds while Temporal itself is
+  unreachable: the agent sends the same message id again until it is answered.
 
 ### 13.2 Choosing the mode
 
@@ -889,14 +894,25 @@ session cannot be forked (`409` `unsupported`). It gets ScadBuddy's skills only:
 
 ### 13.3 Stop, and a run that ended badly
 
-- **Stop** cancels the running execution; with none running it answers `false`, and a
-  session that says it runs goes back to `idle`. The workflow returns its state as its
-  result, and the next message starts a new execution from it (the same Claude
-  conversation; calls that were cut off are reported to the model as interrupted,
-  "whether it took effect is unknown"). A message sent while the stopped run is still
-  closing waits for it up to 30 s (`DURABLE_SEND_DEADLINE_MS`), outside the chat
-  socket's queue, then is refused as busy ("this session's previous run is still
-  stopping; send again").
+- **Stop** first abandons the session's messages that no run has started (each gets an
+  `error` with code `interrupted`, "stopped before it ran; this message was not
+  delivered", and no run takes it later, whichever agent replica sends it), then
+  cancels the running execution; with none running and nothing abandoned it answers
+  `false`, and a session that says it runs goes back to `idle`. The workflow returns its
+  state as its result, and the next message starts a new execution from it (the same
+  Claude conversation; calls that were cut off are reported to the model as
+  interrupted, "whether it took effect is unknown"). A message sent while the stopped
+  run is still closing waits for it, outside the chat socket's queue, and is delivered
+  once it closed.
+- **A message is never dropped.** It is committed with its `user.turn` before Temporal
+  is asked anything, and the Update is only a nudge with its id (the Update's id too).
+  A timeout or a `DEADLINE_EXCEEDED`/`UNAVAILABLE` may have reached Temporal, so the
+  agent sends the same id again until the turn starts or is refused, never a fresh
+  send; the workflow takes each message once (a compare-and-set as its turn starts). A
+  refused one is abandoned and logged (`error` code `not_delivered`). If the agent
+  replica sending it dies, another takes the delivery over once its heartbeat
+  (`ai_durable_streams.send_attempt`) has stood still for 150 s
+  (`DURABLE_TAKEOVER_MS`, on a monotonic clock; the session reaper's sweep).
 - **A terminated or failed execution** leaves no result. The workflow saves its state to
   `ai_durable_snapshots` as it goes, and the next message resumes from the latest one.
   Each call that had no answer yet is given one by its status (interrupted, ran but its
@@ -905,10 +921,10 @@ session cannot be forked (`409` `unsupported`). It gets ScadBuddy's skills only:
   tool calls ran after this session's last saved point, and their results were lost:
   …"). Only a session with no snapshot at all continues without its history; its log
   then says so (`error` code `resumed_fresh`).
-- **A session stuck `running`** with no run running (terminated, or the agent died
-  between claiming a send and starting the run) is set `idle` by the projector: at once,
-  or, while a send's `sending` mark is on its stream row, once the mark has stayed
-  unchanged for 60 s (2 × the send deadline, on a monotonic clock).
+- **A session stuck `running`** with no run running (terminated or failed) is set
+  `idle` by the projector, but never while one of its messages is still pending: that
+  one is delivered (by its sender, or the replica that takes it over), or a Stop
+  abandons it.
 
 ### 13.4 Approvals
 
@@ -935,8 +951,10 @@ agent's variables and, in order: deletes the session's `ai_payload_keys` row (ev
 of its payloads in Temporal, history, Visibility and Archival, is then unreadable;
 caches drop the key within 60 s); terminates the workflow if open and deletes it
 (`DeleteWorkflowExecution`, waiting up to 60 s for it to go); then deletes the
-session's rows (`ai_sessions`, its events, `ai_durable_*`, and the transcript entries of
-every Claude session id in `ai_durable_segments`) in one transaction. It prints JSON
+session's rows (`ai_sessions`, its events, `ai_durable_*` including its messages, and
+its transcript entries: those of every Claude session id in `ai_durable_segments`, and
+every line `agent-durable` wrote for it, `owner_session_id`, which covers a segment that
+failed before it could record itself) in one transaction. It prints JSON
 (`keyDeleted`, `workflow`: `terminated`, `closed` or `absent`, `rows`) and records an
 `operator` audit row (`forget_subject`).
 

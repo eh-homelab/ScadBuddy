@@ -1194,22 +1194,39 @@ Each phase is its own implementation plan and ships alone.
        chats" with its own Save (`frontend/src/components/SessionModeSetting.tsx`); the
        composer's Advanced picker (`ModePicker.tsx`) remembers the choice in
        `scadbuddy.assistant.mode`.
-     - **Sends** (`agent/src/sessions/manager.ts` `sendDurable`,
-       `agent/src/durable/client.ts`). The claim (`user.turn`, `running`) is one
-       transaction, then update-with-start `send_message` on `session-<id>` (queue
-       `agent`, `USE_EXISTING`, `ALLOW_DUPLICATE`, every `run` argument passed), aborted
-       after D = 30 s (`DURABLE_SEND_DEADLINE_MS`). With no worker accepting within 5 s
-       the send answers anyway and the log gets a non-fatal `error` with code
-       `worker_pending`, which the panel shows as a notice; the turn runs when a worker
-       starts. The validator refuses a second message while one runs (`busy`).
+     - **Sends** (`agent/src/sessions/manager.ts` `sendDurable`, `deliverDurable`,
+       `agent/src/durable/client.ts`, final fix wave). The claim commits the message to
+       `ai_durable_inputs` (`pending`) with its `user.turn` and `running`, in one
+       transaction, before Temporal is asked anything. Delivery is update-with-start
+       `send_message(Nudge(id))` on `session-<id>` (queue `agent`, `USE_EXISTING`,
+       `ALLOW_DUPLICATE`, run arguments `[SessionInput, AgentState | None]`), with the
+       message id as the Update's `updateId`, each attempt aborted after D = 30 s
+       (`DURABLE_SEND_DEADLINE_MS`). Any failure but a refusal may have reached Temporal
+       (the `may_have_started` rule of #1316 and #1066), so the same id is sent again,
+       with backoff, until the turn started or was refused; each attempt first bumps the
+       stream's `send_attempt` while the message is still `pending`, and a replica takes
+       over a delivery whose heartbeat stood still for 5×D (`resumeDurableSends`). With
+       no answer within 5 s the send answers anyway and the log gets a non-fatal `error`
+       with code `worker_pending`, which the panel shows as a notice. A refused message
+       is abandoned and logged as `not_delivered`.
+     - **The workflow's messages** (`workflow.py`, `inputs.py`). A run loads the
+       session's `pending` messages when it starts and when nudged (local activity
+       `durable_load_inputs`), and takes each with a compare-and-set as its turn starts
+       (`durable_start_input`: `pending` → `run`, false when abandoned). So a lost nudge
+       (Temporal keeps an admitted Update in memory only) loses nothing, a repeated one
+       never repeats a turn, and a message a Stop abandoned never runs. The nudge
+       answers only once its message's turn started, or refuses it (`STOPPING` when a
+       Stop came first, even in the same activation; `busy` when another message's turn
+       did); the stopped run returns its state only after those answers.
      - **Stop** cancels the running execution. The workflow catches the cancellation
        and *completes* with `agent.state()` (deviation 4), so the next message starts a
        new execution from that result. While the cancel is in progress the validator
-       refuses messages (`STOPPING`, `workflow.cancellation_reason()`), and a send that
-       finds the run stopping waits for it to close, up to D, then answers `busy`. The
-       chat socket moves on once the send is claimed (`routes/chat.ts` `sendClaimed`),
-       so a Stop or an approval is never queued behind that wait; a Stop during it aborts
-       the unsent message.
+       refuses messages (`STOPPING`, `workflow.cancellation_reason()`), and a delivery
+       that finds the run stopping waits for it to close, up to D an attempt. The chat
+       socket moves on once the send is claimed (`routes/chat.ts` `sendClaimed`), so a
+       Stop or an approval is never queued behind that wait. A Stop abandons the
+       session's `pending` messages in the database before it cancels, so a delivery on
+       any replica sees it and starts nothing.
      - **Recovery** (deviation 4, ruling 15). The workflow saves `AgentState` to
        `ai_durable_snapshots` (a local activity, whenever the segment count or a tool
        call's status moves; a version never goes backwards). Its `in_flight` is every
@@ -1227,10 +1244,10 @@ Each phase is its own implementation plan and ships alone.
        batch with its status and offset in one transaction. The offset counts in a
        `chain` (the first run's id, which Continue-As-New keeps and a new start does
        not); a follower of another chain reads from 0, and stores only over what it
-       read. `sending` marks a send whose update-with-start has not answered. A session
-       that says it runs with no run running is settled `idle` (open approvals resolved
-       as stopped, or "the session's run ended"), at once with no mark, or once the mark
-       stayed unchanged for more than 2×D on the event loop's monotonic clock. Turn
+       read. A session that says it runs with no run running is settled `idle` (open
+       approvals resolved as stopped, or "the session's run ended"), but never while one
+       of its messages is `pending`. It redacts every credential the worker can open
+       from what it logs, as classic does. Turn
        boundaries are found by parsing each event's JSON `type` and `status`, never by
        matching its text.
      - **Approvals.** Ids are `durable:<session>:<tool_use_id>`; a decision is the
