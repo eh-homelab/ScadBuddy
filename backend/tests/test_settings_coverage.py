@@ -54,6 +54,11 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
         ("render_concurrency", 0, "SCADBUDDY_RENDER_CONCURRENCY must be at least 1"),
         ("check_concurrency", 0, "SCADBUDDY_CHECK_CONCURRENCY must be at least 1"),
         ("render_timeout", 0, "SCADBUDDY_RENDER_TIMEOUT must be more than 0"),
+        (
+            "template_activity_max_timeout",
+            0,
+            "SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT must be more than 0",
+        ),
         ("job_ttl", -1, "SCADBUDDY_JOB_TTL must be more than 0"),
         ("media_upload_max_bytes", 0, "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES"),
         ("event_log_retention_rows", -1, "SCADBUDDY_EVENT_LOG_RETENTION_ROWS must be at least 0"),

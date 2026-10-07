@@ -41,5 +41,6 @@ export function editTargetFor(output: Output): EditTarget {
     inputs: output.inputs,
     model_version: output.model_version,
     source: 'record',
+    arranged_from: output.arranged_from ?? [],
   }
 }

@@ -26,6 +26,7 @@ from tests.api.conftest import set_fake_env
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import _uploaded_colours, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -48,7 +49,11 @@ def project_folder_routes(files: list[dict[str, Any]] | None = None) -> respx.Ro
 
 
 def uploads(*ids: int) -> respx.Route:
-    """One upload per id, each then readable (the reuse check reads it back)."""
+    """One upload per id, each then readable (the reuse check reads it back). The inbox
+    a print uploads into is listed first, for a copy an attempt left (#1145): empty."""
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
     for file_id in ids:
         respx.get(f"{API}/library/files/{file_id}").mock(
             return_value=httpx.Response(
@@ -72,7 +77,7 @@ def uploaded_name(route: respx.Route, index: int = -1) -> str:
 
 def file_into_project(client: TestClient, output_id: str) -> httpx.Response:
     response: httpx.Response = client.post(
-        f"/api/v1/outputs/{output_id}/project-file", json={"project_id": PROJECT}
+        f"/api/v1/outputs/{output_id}/project-file", json={"project_id": PROJECT}, headers=press()
     )
     return response
 
@@ -450,7 +455,7 @@ def test_generate_with_no_project_uploads_nothing(client: TestClient, model: str
 def test_filing_needs_a_project(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
-    response = client.post(f"/api/v1/outputs/{output_id}/project-file", json={})
+    response = client.post(f"/api/v1/outputs/{output_id}/project-file", json={}, headers=press())
     assert response.status_code == 422
 
 
@@ -580,6 +585,7 @@ def test_attaching_with_an_explicit_no_project_files_nothing(
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": None, "queue_item_ids": [71]},
+        headers=press(),
     )
 
     assert response.status_code == 409, response.text

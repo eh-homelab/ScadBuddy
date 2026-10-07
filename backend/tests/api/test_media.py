@@ -30,6 +30,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -384,7 +385,7 @@ def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
     """#1689: a thumbnail PUT landing between the 304 check and the decode."""
     legacy = paths.model_dir(model) / "thumbnail.png"
     legacy.write_bytes(_real_image((400, 300), "PNG"))
-    old = client.get(_thumbnail_url(model, "thumbnail")).headers["etag"]
+    old = media_api._legacy_etag(legacy.stat())
     real = media_api._thumbnail_of
 
     def replaced_first(path: Path, content_type: str) -> Any:
@@ -467,6 +468,75 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
 
     assert codes == [200] * 8
     assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
+
+
+def _counting_decodes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many times `_shrink` runs, in a one-item list."""
+    real = media_api._shrink
+    decoded = [0]
+
+    def counting(file: IO[bytes]) -> bytes | None:
+        decoded[0] += 1
+        return real(file)
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", counting)
+    return decoded
+
+
+def test_a_thumbnail_is_decoded_once(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1420: a decode costs up to some 200 MB, so a thumbnail made once is served from
+    memory after that."""
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    decoded = _counting_decodes(monkeypatch)
+
+    first = client.get(_thumbnail_url(model, item["id"]))
+    again = client.get(_thumbnail_url(model, item["id"]))
+
+    assert first.status_code == again.status_code == 200
+    assert again.content == first.content
+    assert again.headers["content-type"] == "image/webp"
+    assert decoded == [1]
+
+
+def test_a_kept_thumbnail_is_made_again_when_its_file_is_replaced(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy item is replaced in place by a thumbnail PUT: a kept copy of the old
+    file is not served for the new one."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    decoded = _counting_decodes(monkeypatch)
+
+    old = client.get(_thumbnail_url(model, "thumbnail"))
+    legacy.write_bytes(_real_image((300, 400), "PNG") + b"\x00")  # another size, too
+    new = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert old.status_code == new.status_code == 200
+    assert decoded == [2]
+    assert new.headers["etag"] != old.headers["etag"]
+    with Image.open(io.BytesIO(new.content)) as small:
+        assert small.size == (144, 192)
+
+
+def test_a_thumbnail_served_as_it_is_is_not_kept(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the small WebP is kept in memory: a file served as it is can be 10 MB."""
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    decoded = 0
+
+    def undecodable(file: IO[bytes]) -> bytes | None:
+        nonlocal decoded
+        decoded += 1
+        return None
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", undecodable)
+    client.get(_thumbnail_url(model, item["id"]))
+    client.get(_thumbnail_url(model, item["id"]))
+
+    assert decoded == 2
 
 
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:
@@ -791,7 +861,9 @@ def test_a_duplicate_of_a_built_in_takes_what_was_added_to_it(client: TestClient
     added = _upload(client, BUILTIN, JPEG, caption="Mine").json()["media"][1]
     client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -809,7 +881,9 @@ def test_a_duplicate_copies_its_media_videos_included(
     image = _upload(client, model, PNG).json()["media"][0]
     video = _upload(client, model, MP4).json()["media"][1]
 
-    response = client.post(f"/api/v1/models/{model}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{model}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -820,7 +894,9 @@ def test_a_duplicate_copies_its_media_videos_included(
 
 
 def test_a_duplicate_of_a_built_in_copies_its_media(client: TestClient) -> None:
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     [item] = response.json()["media"]

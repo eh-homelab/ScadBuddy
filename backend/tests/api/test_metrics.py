@@ -15,6 +15,7 @@ from scadbuddy.api.metrics import refresh_asset_metrics
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.library.assets import AssetStore
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 
 
 def test_an_upload_store_without_a_database_keeps_the_last_gauges(
@@ -44,7 +45,8 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     the first store error) after a start would never page. They must be exported
     at 0 before anything happens."""
     text = client.get("/metrics").text
-    assert "scadbuddy_render_jobs_rejected_total 0.0" in text
+    assert 'scadbuddy_render_jobs_rejected_total{kind="render"} 0.0' in text
+    assert 'scadbuddy_render_jobs_rejected_total{kind="arrange"} 0.0' in text
     assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
     assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
     # Only outcomes something emits: a series stuck at 0 reads as "never happens"
@@ -73,7 +75,7 @@ def test_metrics_count_renders(client: TestClient, model: str) -> None:
 
     done = 'scadbuddy_render_jobs_finished_total{outcome="done"} 1.0'
     text = _metrics_once(client, done)
-    assert "scadbuddy_render_jobs_submitted_total 1.0" in text
+    assert 'scadbuddy_render_jobs_submitted_total{kind="render"} 1.0' in text
     assert done in text
 
 
@@ -102,7 +104,7 @@ def test_a_body_refused_on_its_size_is_counted(client: TestClient) -> None:
     refused = client.post(
         "/api/v1/models",
         content=b"x" * (MAX_TEXT_BODY_BYTES + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
     assert refused.status_code == 413
 
