@@ -335,6 +335,53 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     assert inner is not None and inner.cancelled()
 
 
+async def test_a_cancelled_finish_piece_returns_only_once_its_writer_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#867: a thread cannot be stopped, so a cancelled (timed-out) `finish_piece` waits
+    for its 3MF writer before it returns, and beats while the stage runs."""
+    paths = demo_paths(tmp_path)
+    deps = worker_deps(tmp_path, paths)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+    await env.run(acts.render_solids, req, prepared, main)
+
+    real = activities._heartbeating
+
+    async def quick[T](work: asyncio.Task[T], every: float = 5.0) -> T:
+        return await real(work, every=0.01)
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def blocked_writer(*args: object, **kwargs: object) -> None:
+        entered.set()
+        release.wait(10)
+        finished.set()
+
+    beat_while_writing = threading.Event()
+
+    def on_heartbeat(*details: object) -> None:
+        if entered.is_set():
+            beat_while_writing.set()
+
+    monkeypatch.setattr(activities, "_heartbeating", quick)
+    monkeypatch.setattr(jobs, "write_plates_3mf", blocked_writer)
+    env.on_heartbeat = on_heartbeat
+    outer = asyncio.create_task(env.run(acts.finish_piece, req, prepared, main))
+    assert await asyncio.to_thread(entered.wait, 10)
+    assert await asyncio.to_thread(beat_while_writing.wait, 10)
+    outer.cancel()
+    await asyncio.sleep(0.1)
+    assert not outer.done()  # the writer still runs
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+    assert finished.is_set()
+
+
 class _StoppedError(Exception):
     """Ends `render_main` once the checkout has been watched."""
 

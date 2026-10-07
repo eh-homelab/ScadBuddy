@@ -893,6 +893,18 @@ async def render_solids_stage(
             )
 
 
+async def _thread_to_end[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """`asyncio.to_thread`, except that a cancel returns only once the thread has: a
+    thread cannot be stopped, and a cancelled (timed-out) attempt must not still be
+    writing while its retry runs (#867)."""
+    thread = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(thread)
+    except asyncio.CancelledError:
+        await asyncio.wait({thread})
+        raise
+
+
 async def finish_piece_stage(
     prepared: Prepared,
     params: Mapping[str, ParamValue],
@@ -929,7 +941,7 @@ async def finish_piece_stage(
     # A built-in's bare slug, as download_filename names the file: the id's
     # `builtin:` prefix is not something to show as the model's title.
     with stage("write"):
-        await asyncio.to_thread(
+        await _thread_to_end(
             write_plates_3mf,
             layout.plates,
             layout.colours,
