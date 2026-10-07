@@ -272,8 +272,10 @@ async def test_a_nudge_racing_its_commit_loads_it_again_and_runs_it_once(rig: Ri
     assert rig.fake.status(message_id) == "run"
 
 
-# How long a nudge may take before a test counts it as deadlocked.
-DEADLOCK = 30.0
+# How long a nudge may take before a test counts it as deadlocked: the dev server fires
+# a workflow timer up to ~15 s late on a loaded host (seen: a 0.5 s one after 12 s), and
+# the nudge below waits out up to three.
+DEADLOCK = 2 * WAIT
 
 
 @temporal
@@ -285,7 +287,7 @@ async def test_a_hand_over_suggested_while_a_nudge_looks_again_waits_for_it(rig:
     handle = await rig.send(wid, inp, "first", workflow=ForcedHandOver)
     await rig.event(wid, "done")
     late = await rig.inputs.commit(inp.session_id, "late")
-    rig.fake.unseen[late] = 3  # three loads miss it: 3.5 s of sleeps between them
+    rig.fake.unseen[late] = 3  # three loads miss it, with waits between them
     loads = rig.fake.loads
     nudging = asyncio.create_task(handle.execute_update(SEND_UPDATE, Nudge(late), id=late))
     assert await until(lambda: rig.fake.loads > loads, WAIT)
@@ -337,7 +339,8 @@ async def test_a_stop_wakes_a_nudge_that_waits_to_look_again(rig: Rig) -> None:
     rig.fake.unseen[unseen] = 99
     loads = rig.fake.loads
     nudging = asyncio.create_task(handle.execute_update(SEND_UPDATE, Nudge(unseen), id=unseen))
-    assert await until(lambda: rig.fake.loads >= loads + 4, WAIT)  # in its 4 s wait now
+    # In its 4 s wait now, after three timers (each up to ~15 s late on a loaded host).
+    assert await until(lambda: rig.fake.loads >= loads + 4, 3 * WAIT)
     await handle.cancel()
     with pytest.raises(WorkflowUpdateFailedError) as err:
         await asyncio.wait_for(nudging, WAIT)
