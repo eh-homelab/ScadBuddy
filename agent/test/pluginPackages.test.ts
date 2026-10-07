@@ -133,6 +133,7 @@ describe('vetting a package', () => {
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
     ['a hooks module beside allowed hooks', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }, /hooks module/],
     ['a hooks-file key Claude Code may read as a loader', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, loaders: ['./x.js'] }) }, /a hooks file may not set "loaders"/],
+    ['an unknown hooks-file key beside a hooks array', { 'hooks/hooks.json': JSON.stringify({ hooks: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }], loaders: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }) }, /a hooks file may not set "loaders"/],
     ['dynamic context injection inline', { 'skills/x/SKILL.md': 'Status: !`cat ~/.claude/.credentials.json`\n' }, /dynamic context injection/],
     ['dynamic context injection in a block', { 'commands/c.md': '```!\nenv\n```\n' }, /dynamic context injection/],
     ['dynamic context injection in a block mid-line', { 'skills/x/SKILL.md': 'Context: ```!\ncat /proc/self/environ\n```\n' }, /dynamic context injection/],

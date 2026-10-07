@@ -114,9 +114,12 @@ const HOOKS_FILE_KEYS = new Set(['$schema', 'description', 'hooks'])
  * A hooks config's events. A hooks file is `{ "hooks": { Event: [...] },
  * "modules"?: [...] }`; inline manifest hooks are `{ Event: [...] }` (the
  * settings.json shape). Both are accepted (also by src/plugins/packages/vet.ts).
+ * Any hooks-file key makes it a file, whatever its value: no event has one of
+ * those names, and judging by the value's shape let `{ "hooks": [...],
+ * "loaders": [...] }` pass as two inline events, skipping the key check.
  */
 export function hookEvents(config: Json): { file: boolean; events: Json } {
-  const file = isRecord(config) && (isRecord(config.hooks) || config.modules !== undefined)
+  const file = isRecord(config) && ['modules', ...HOOKS_FILE_KEYS].some((key) => key in config)
   return { file, events: file ? (config.hooks ?? {}) : config }
 }
 
