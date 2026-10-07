@@ -94,9 +94,8 @@ async def make_bus(pg_conninfo: str) -> AsyncIterator[BusFactory]:
     async def make(retention: EventLogRetention | None = None) -> PgNotifyEventBus:
         listener = PgListener(pg_conninfo, check_interval=1.0, backoff=0.05, max_backoff=0.2)
         bus = PgNotifyEventBus(pg_conninfo, listener=listener, retention=retention)
-        await bus.start()
+        await bus.start()  # returns once it listens
         buses.append(bus)
-        await _until(lambda: listener.backend_pid is not None)
         return bus
 
     yield make
@@ -159,6 +158,35 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
     finally:
         await early.aclose()
         await hears.aclose()
+
+
+class _SlowListener(PgListener):
+    """A LISTEN that takes ``delay`` seconds to be in place, as a loaded host's did."""
+
+    def __init__(self, conninfo: str, delay: float) -> None:
+        super().__init__(conninfo)
+        self.delay = delay
+
+    async def _listen(self) -> None:
+        await asyncio.sleep(self.delay)
+        await super()._listen()
+
+
+@pytest.mark.requires_postgres
+async def test_start_returns_once_the_bus_listens(pg_conninfo: str) -> None:
+    """#1745 with a LISTEN that is slow to be in place, as a loaded host's was: `start`
+    still returns only once it is, and the first event published is heard."""
+    listener = _SlowListener(_migrated(pg_conninfo), delay=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    try:
+        await bus.start()
+        assert listener.backend_pid is not None
+        subscription = bus.subscribe()
+        event = _model("first")
+        bus.publish(event)
+        assert (await _next(subscription)).id == event.id
+    finally:
+        await bus.aclose()
 
 
 @pytest.mark.requires_postgres
