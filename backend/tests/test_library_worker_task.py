@@ -39,6 +39,8 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
+        settings_store=None,
     )
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
@@ -121,6 +123,8 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
+        settings_store=None,
         store=SimpleNamespace(
             content=object(), remote_assets=SimpleNamespace(backfill=backfill), fonts=None
         ),

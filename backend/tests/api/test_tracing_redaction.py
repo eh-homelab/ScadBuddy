@@ -14,7 +14,7 @@ from opentelemetry.trace import SpanKind
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import set_fake_env, wait_for_job
-from tests.conftest import wait_for_span
+from tests.conftest import http_server_span, wait_for_span
 
 SENTINEL = "zz-s3ntinel-zz"
 
@@ -132,7 +132,7 @@ def test_a_captured_header_never_appears(
     monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE", ".*")
     with TestClient(create_app(settings)) as client:
         client.get("/api/v1/models", headers={"Cookie": f"session={SENTINEL}"})
-    server = wait_for_span(spans, _http_server)
+    server = wait_for_span(spans, http_server_span)
     assert (server.attributes or {}).get("http.route") == "/api/v1/models"
     headers = [
         key
@@ -144,18 +144,8 @@ def test_a_captured_header_never_appears(
     assert SENTINEL not in _everything(spans)
 
 
-def _http_server(span: ReadableSpan) -> bool:
-    """An HTTP request's server span. Temporal's ``TracingInterceptor`` makes its
-    RunWorkflow/RunActivity spans SERVER too, and the housekeeping Schedules (#1054)
-    run activities while an app is up, so a SERVER kind alone may be either."""
-    scope = span.instrumentation_scope
-    return span.kind == SpanKind.SERVER and not (
-        scope is not None and scope.name.startswith("temporalio")
-    )
-
-
 def _server_spans(spans: InMemorySpanExporter) -> list[ReadableSpan]:
-    return [s for s in spans.get_finished_spans() if _http_server(s)]
+    return [s for s in spans.get_finished_spans() if http_server_span(s)]
 
 
 def test_a_path_parameter_never_appears(
@@ -190,7 +180,7 @@ def test_an_unmatched_path_never_appears(
         with TestClient(create_app(app_settings)) as client:
             client.get(f"/models/{SENTINEL}")
             client.get(f"/{SENTINEL}/x")
-    wait_for_span(spans, _http_server)
+    wait_for_span(spans, http_server_span)
     assert len(_server_spans(spans)) == 4
     assert SENTINEL not in _everything(spans)
     assert SENTINEL not in "\n".join(s.name for s in spans.get_finished_spans())

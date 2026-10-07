@@ -120,16 +120,18 @@ def library_worker(
     task_queue: str,
     activities: Sequence[Callable[..., Any]],
     *,
+    workflows: Sequence[type] = (),
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
-    """The ``library`` worker: ``Housekeeping`` and its sweeps. A stop gives a running
+    """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
+    library commands' ``Operation``). A stop gives a running
     sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5): a cancelled one
     only stops waiting, its thread goes on while the lifespan closes the stores it
     uses. A sweep longer than that (an asset sweep's converge) is still cancelled."""
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[Housekeeping],
+        workflows=[Housekeeping, *workflows],
         activities=activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )

@@ -36,6 +36,8 @@ of them should carry the author without each route remembering to pass it.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -76,6 +78,17 @@ _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", d
 def current_author() -> AgentAuthor | None:
     """The agent a commit made now is on behalf of; None for anyone else."""
     return _author.get()
+
+
+@contextmanager
+def authored_as(author: AgentAuthor | None) -> Iterator[None]:
+    """Commits made inside are ``author``'s: an operation's run, in a worker with no
+    request of its own, is the request's that started it (#1054)."""
+    token = _author.set(author)
+    try:
+        yield
+    finally:
+        _author.reset(token)
 
 
 class InvalidAuthorError(ValueError):
