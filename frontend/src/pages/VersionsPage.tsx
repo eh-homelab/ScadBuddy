@@ -171,7 +171,9 @@ export function VersionsPage() {
         )}
 
         {versions && versions.length > 0 && (
-          <div className="grid gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+          // #1036 — `grid-cols-1` below `lg`: the implicit `auto` track sized to the longest
+          // commit message, so the list ran off a phone's screen and `truncate` never did.
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
             <ul data-testid="versions" aria-label="Revisions" className="space-y-2">
               {versions.map((version) => (
                 <VersionRow
