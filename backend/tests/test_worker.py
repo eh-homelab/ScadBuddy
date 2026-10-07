@@ -51,6 +51,8 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
+    MAKE_CURRENT_BACKOFF,
+    MAKE_CURRENT_EVERY,
     _drain,
     _poll,
     make_current_until_polled,
@@ -339,12 +341,33 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         assert await make_current_until_polled(
             lambda: make_current(client, namespace=client.namespace, build_id=build_id),
             build_id=build_id,
-            backoff=(0.1,),
-            every=0.2,
-            deadline=30,
+            backoff=MAKE_CURRENT_BACKOFF,
+            every=MAKE_CURRENT_EVERY,
+            deadline=60,
         )
-        assert await is_current(client, namespace=client.namespace, build_id=build_id)
-        assert not await is_current(client, namespace=client.namespace, build_id="other")
+        assert await _is_current_answer(client, build_id)
+        assert not await _is_current_answer(client, "other")
+
+
+#: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
+IS_CURRENT_ATTEMPTS = 12
+IS_CURRENT_MAX_WAIT = 5.0
+
+
+async def _is_current_answer(client: Client, build_id: str) -> bool:
+    """`is_current`, asked again while Temporal cannot answer yet. Just after a build is
+    made current, the deployment's own workflow is still propagating it (over 13 s on a
+    loaded host), and a describe meanwhile times out or is refused as "too many
+    requests"; the worker's `still_current` reads either as not current. Counted
+    attempts, not a deadline: this host's clocks step."""
+    for attempt in range(IS_CURRENT_ATTEMPTS):
+        try:
+            return await is_current(client, namespace=client.namespace, build_id=build_id)
+        except RPCError:
+            if attempt == IS_CURRENT_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+    raise AssertionError("unreachable")
 
 
 @pytest.mark.requires_temporal

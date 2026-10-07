@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
+from scadbuddy.bambuddy.extruders import VOLUME_TYPE
 from scadbuddy.bambuddy.models import ExternalLink
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
@@ -92,6 +93,11 @@ async def read_3mf(store: OutputFiles, meta: OutputMeta) -> bytes:
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
+#: The flow the slicer assumes when the file states none (#484). So an all-Standard
+#: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
+#: bytes differ under one key, and reusing either is right only while Standard stays
+#: the slicer's default.
+_STANDARD = VOLUME_TYPE["standard"]
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,9 @@ class Target:
     #: Which extruders have the nozzle, in the slicer's order (#834). ``None`` — no run,
     #: or a printer whose status says nothing either way — lets the slicer choose.
     nozzle_stats: tuple[str, ...] | None = None
+    #: Each extruder's flow, in the slicer's order (#484). ``None`` — the send bar,
+    #: which chooses none — states none, and the slicer slices Standard.
+    nozzle_volume_type: tuple[str, ...] | None = None
 
     @property
     def key(self) -> str:
@@ -123,6 +132,13 @@ class Target:
             # A file that lets the slicer use either side must not be reused for one
             # that must keep to one side, nor the other way round.
             key = f"{key}^{','.join(self.nozzle_stats)}"
+        if self.nozzle_volume_type is not None and any(
+            flow != _STANDARD for flow in self.nozzle_volume_type
+        ):
+            # A High Flow file must not be reused for Standard, nor the other way round.
+            # All Standard is what the slicer assumes without the key, so it keeps the key
+            # it had, and a file recorded before #484 is still reused.
+            key = f"{key}%{','.join(self.nozzle_volume_type)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -136,7 +152,12 @@ class Target:
         that project reuses it when its spools are the model's own colours; spools in
         other colours get a copy in theirs (#476).
         """
-        return Target(self.plate, self.nozzle_diameter, nozzle_stats=self.nozzle_stats).key
+        return Target(
+            self.plate,
+            self.nozzle_diameter,
+            nozzle_stats=self.nozzle_stats,
+            nozzle_volume_type=self.nozzle_volume_type,
+        ).key
 
 
 async def target_for(
@@ -147,6 +168,7 @@ async def target_for(
     nozzle_diameter: str | None = None,
     colours: Sequence[str] | None = None,
     nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -156,17 +178,19 @@ async def target_for(
     2026-09-27 §4), the send bar does not. ``colours`` are the chosen spools' (#476),
     and only the print run has any. ``nozzle_stats`` (#834) are not the print run's
     alone: Generate's ``generate_target`` computes them too, so the file Generate lays
-    out is the one the project's next print reuses.
+    out is the one the project's next print reuses. So are ``nozzle_volume_type``
+    (#484), each extruder's flow.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
+    flows = tuple(nozzle_volume_type) if nozzle_volume_type is not None else None
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats)
+        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats)
+    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -192,6 +216,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             target.plate,
             nozzle_diameter=target.nozzle_diameter,
             nozzle_stats=target.nozzle_stats,
+            nozzle_volume_type=target.nozzle_volume_type,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
