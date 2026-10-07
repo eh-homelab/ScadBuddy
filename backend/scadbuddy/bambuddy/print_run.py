@@ -22,9 +22,12 @@ from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enq
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
     RACK_SIDE,
+    VOLUME_TYPE,
     high_flow_warning,
     high_flow_warnings,
+    rack_volume_type,
     slicer_nozzle_stats,
+    slicer_volume_types,
     with_sides,
 )
 from scadbuddy.bambuddy.filaments import (
@@ -69,7 +72,6 @@ from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import (
-    SLICED_VOLUME_TYPE,
     RackCandidate,
     RackGroup,
     Usage,
@@ -479,11 +481,10 @@ async def check_print(
     makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
     the catalogue refuses — in the run's own words. It no longer refuses by the mounted
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
-    slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
-    the size, whatever flow is chosen, since the slice is always Standard flow (#723,
-    #797, #484). It never carries the resolver's own ``hf-unsupported`` note for a
-    chosen High Flow nozzle (#862): that one is left to the run and the nozzle step.
-    What needs the uploaded file is still found by the run. Only the run's own refusals
+    slice through the one 0.2 mm nozzle. It warns only of a side the slice may use whose
+    mounted nozzle of the size is not of the flow sliced there (#723, #797, #484), and
+    not of the rack side once the preview picks it a hotend (#1238). What needs
+    the uploaded file is still found by the run. Only the run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
     check, as it would fail the run. With no printer chosen or configured there is
     nothing to judge, and the run says why."""
@@ -502,24 +503,28 @@ async def check_print(
         printer_id=prepared.printer_id,
         status=prepared.printer_status,
         rack=rack,
+        laid_out=source.lays_out,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
     try:
-        _check_manual_pick(request, prepared.printer_status)
+        _check_manual_pick(request, prepared.printer_status, laid_out=source.lays_out)
     except RunRefusalError as refused:
         errors = [refused.detail]
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
-    # The one mounted-nozzle advisory kept (#723): a warning, never a refusal. Not for
-    # the rack side when the preview picks it a hotend (#1238).
+    # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
+    # for the rack side when the preview picks it a hotend (#1238).
     rack_picked = rack_view is not None and rack_view.position is not None
     return PrintCheck(
         errors=errors,
         warnings=[
             *high_flow_warnings(
-                prepared.printer_status, request.choices.nozzles, rack_picked=rack_picked
+                prepared.printer_status,
+                request.choices.nozzles,
+                rack_picked=rack_picked,
+                laid_out=source.lays_out,
             ),
             *rack_notes,
         ],
@@ -552,11 +557,14 @@ async def rack_preview(
     printer_id: int,
     status: PrinterStatus | None,
     rack: RackUsage | None,
+    laid_out: bool,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
-    the preview ``/check`` shows. Judged on the flow the slice will carry (Standard until
-    #484). Every chosen spool counts toward the material test, since the slice may put any
-    of them on the rack side. Advisory: a failure previews nothing."""
+    the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
+    (#484): the one chosen there for a file the run lays out, Standard for a library file
+    (``laid_out``, :func:`~scadbuddy.bambuddy.extruders.rack_volume_type`). Every chosen
+    spool counts toward the material test, since the slice may put any of them on the
+    rack side. Advisory: a failure previews nothing."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     try:
@@ -567,7 +575,7 @@ async def rack_preview(
         group = RackGroup(
             group_id=0,
             nozzle_diameter=request.choices.nozzles[0].size,
-            volume_type=SLICED_VOLUME_TYPE,
+            volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
             # Zero alpha (a Clear spool's 00000000) is no color, never black.
             color=rack_color(first) if first else None,
             materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
@@ -605,11 +613,14 @@ async def rack_preview(
     )
 
 
-def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -> None:
+def _check_manual_pick(
+    request: PrintRunRequest, status: PrinterStatus | None, *, laid_out: bool
+) -> None:
     """Spec §5: a manual pick that cannot print this is a 422 before anything is sliced.
     Judged on the flow the slice will carry, which is what Bambuddy re-checks at
-    dispatch. An unreadable rack refuses nothing: Bambuddy still re-checks it then. A
-    readable status with no rack at all is refused as that, not as one empty position."""
+    dispatch (``laid_out`` as for :func:`rack_preview`). An unreadable rack refuses
+    nothing: Bambuddy still re-checks it then. A readable status with no rack at all is
+    refused as that, not as one empty position."""
     if request.rack_position is None or status is None:
         return
     positions = rack_positions(status.nozzle_rack)
@@ -619,17 +630,18 @@ def _check_manual_pick(request: PrintRunRequest, status: PrinterStatus | None) -
             "nozzle rack. Choose Automatic."
         )
     size = request.choices.nozzles[0].size
+    flow = rack_volume_type(request.choices.nozzles, laid_out=laid_out)
     held = positions.get(request.rack_position)
-    if held is not None and eligible(held, size, SLICED_VOLUME_TYPE):
+    if held is not None and eligible(held, size, flow):
         return
     if held is None:
         holds = "holds no hotend"
     else:
-        flow = "High Flow" if held.high_flow else "Standard"
-        holds = f"holds a {held.nozzle_diameter} mm {flow} nozzle"
+        kind = "High Flow" if held.high_flow else "Standard"
+        holds = f"holds a {held.nozzle_diameter} mm {kind} nozzle"
     raise RunRefusalError(
         f"Rack position {request.rack_position} {holds}, and this prints with a {size} mm "
-        f"{SLICED_VOLUME_TYPE} nozzle. Choose another position, or Automatic."
+        f"{flow} nozzle. Choose another position, or Automatic."
     )
 
 
@@ -733,7 +745,7 @@ async def prepare_run(
     printer_status = await _read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick:
-        _check_manual_pick(request, printer_status)
+        _check_manual_pick(request, printer_status, laid_out=source.lays_out)
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
@@ -887,8 +899,10 @@ async def plan_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
-        # Only the side with the nozzle is offered to the slicer (#834).
-        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles[0].size),
+        # Only the side with the nozzle is offered to the slicer (#834), and each side
+        # states the flow chosen for it (#484).
+        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles),
+        nozzle_volume_type=slicer_volume_types(choices.nozzles),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -954,7 +968,7 @@ async def plan_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
-    hardware += high_flow_warnings(printer_status, choices.nozzles)
+    hardware += high_flow_warnings(printer_status, choices.nozzles, laid_out=source.lays_out)
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
@@ -1007,9 +1021,11 @@ def finish_run(
     one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
     warnings = list(planned.warnings)
     if queued and all(plate.picks for plate in queued):
-        # Every plate had the rack side's hotend picked from the rack, which is always a
-        # Standard one of the size: the High Flow mounted there now is swapped out (#1238).
-        warnings = [warning for warning in warnings if warning != high_flow_warning(RACK_SIDE)]
+        # Every plate had the rack side's hotend picked from the rack, which is always one
+        # of the size and of the flow sliced there: the one mounted now is swapped out
+        # (#1238), whichever flow the slice is for.
+        swapped = [high_flow_warning(RACK_SIDE, flow) for flow in VOLUME_TYPE]
+        warnings = [warning for warning in warnings if warning not in swapped]
     for plate in queued or []:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate.warnings if warning not in warnings]
