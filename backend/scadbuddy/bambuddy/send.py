@@ -9,6 +9,7 @@ a FastAPI app, and so the route stays a thin adapter. The send bar only uploads
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import weakref
 from collections.abc import Sequence
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
-from scadbuddy.bambuddy.models import ExternalLink
+from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
@@ -301,17 +302,28 @@ async def upload_output(
     recorded* — the send itself succeeded, and forgetting the id would strand the file
     in Bambuddy with nothing pointing at it. It is tried again the next time an upload
     supersedes it.
+
+    A file an earlier attempt uploaded and never recorded is taken instead of a second
+    upload (:func:`_left_unrecorded`, #1145, #1127), so a retried send or print leaves
+    no duplicate in the folder.
     """
     target = target if target is not None else await target_for(client, settings)
     payload = _laid_out_for(_read_3mf(store, meta), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-
-    filename = (
-        await project_filename(client, uploads, meta, folder, stem, target)
-        if stem is not None and folder is not None and not is_inbox(folder, settings)
-        else download_filename(meta)
+    project_stem = (
+        stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
-    uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
+
+    uploaded = await _left_unrecorded(
+        client, uploads, folder, payload, project_stem, download_filename(meta)
+    )
+    if uploaded is None:
+        filename = (
+            await project_filename(client, uploads, meta, folder, project_stem, target)
+            if project_stem is not None and folder is not None
+            else download_filename(meta)
+        )
+        uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
     await uploads.record(
         meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
     )
@@ -321,6 +333,69 @@ async def upload_output(
                 continue
             await _delete_copy(client, uploads, meta, copy.id, strict=False)
     return uploaded.id, uploaded.filename
+
+
+async def _left_unrecorded(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    folder: int | None,
+    payload: bytes,
+    project_stem: str | None,
+    inbox_name: str,
+) -> LibraryFile | None:
+    """The file an earlier attempt uploaded into ``folder`` and died before recording,
+    or ``None`` (#1145, #1127).
+
+    An attempt can die after Bambuddy stored the upload and before :func:`upload_output`
+    recorded it: a timeout, a lost worker. Its retry finds no recorded copy and would
+    upload a duplicate. So the folder is listed first, for a file no output records,
+    named as this upload would be (``inbox_name``, or in a project's folder a name made
+    from ``project_stem``) and of the payload's size; only those are read, for a
+    ``file_hash`` that is the sha256 of ``payload``: the same bytes, laid out for the same
+    target. A listing or a read that fails leaves it to the upload: a duplicate is not
+    worth failing the send or the print over.
+    """
+    try:
+        listed: Sequence[LibraryFile | LibraryListRow] = (
+            await client.library_files(folder)
+            if folder is not None
+            else [
+                row for row in await client.library_listing(folder_id=None) if row.folder_id is None
+            ]
+        )
+    except (ApiError, ValueError) as error:
+        logger.warning(
+            "could not list the folder for an unrecorded copy; uploading",
+            extra={"folder_id": folder, "error": str(error)},
+        )
+        return None
+
+    def named(filename: str) -> bool:
+        name = filename.casefold()
+        if project_stem is None:
+            return name == inbox_name.casefold()
+        return name.startswith(project_stem.casefold()) and name.endswith(".3mf")
+
+    rows = [row for row in listed if row.file_size == len(payload) and named(row.filename)]
+    if not rows:
+        return None
+    recorded = await uploads.recorded([row.id for row in rows])
+    digest = hashlib.sha256(payload).hexdigest()
+    # Newest first: a retry's own upload is the latest of its name.
+    for row in sorted(rows, key=lambda row: row.id, reverse=True):
+        if row.id in recorded:
+            continue
+        try:
+            found = await client.library_file(row.id)
+        except ApiError:
+            continue
+        if found.file_hash == digest:
+            logger.info(
+                "an earlier attempt's upload was never recorded; taking it",
+                extra={"library_file_id": found.id, "folder_id": folder},
+            )
+            return found
+    return None
 
 
 async def _delete_copy(

@@ -49,7 +49,11 @@ def project_folder_routes(files: list[dict[str, Any]] | None = None) -> respx.Ro
 
 
 def uploads(*ids: int) -> respx.Route:
-    """One upload per id, each then readable (the reuse check reads it back)."""
+    """One upload per id, each then readable (the reuse check reads it back). The inbox
+    a print uploads into is listed first, for a copy an attempt left (#1145): empty."""
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
     for file_id in ids:
         respx.get(f"{API}/library/files/{file_id}").mock(
             return_value=httpx.Response(

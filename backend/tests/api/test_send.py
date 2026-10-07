@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
@@ -14,6 +15,7 @@ import respx
 import trimesh
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
@@ -46,7 +48,10 @@ def configure(client: TestClient, **extra: Any) -> None:
 
 
 def upload_route(file_id: int = 41) -> respx.Route:
-    """The upload, and the read that finds the copy still there when it is reused (#316)."""
+    """The upload, and the read that finds the copy still there when it is reused (#316).
+    The folder it lists first, for a copy an earlier attempt left unrecorded (#1145), is
+    empty."""
+    respx.get(f"{API}/library/files").mock(return_value=httpx.Response(200, json=[]))
     respx.get(f"{API}/library/files/{file_id}").mock(
         return_value=httpx.Response(
             200, json={"id": file_id, "filename": "demo-elan.3mf", "folder_id": 2}
@@ -64,6 +69,53 @@ def upload_route(file_id: int = 41) -> respx.Route:
             },
         )
     )
+
+
+def stored_files(
+    upload: respx.Route, *, file_id: int = 41, folder_id: int = 2, filename: str = "demo-elan.3mf"
+) -> None:
+    """Bambuddy's folder once ``upload`` has stored the file: listed, and read with the
+    sha256 of the bytes it received. Call after :func:`upload_route`, whose routes these
+    replace."""
+
+    def listing(request: httpx.Request) -> httpx.Response:
+        if not upload.called:
+            return httpx.Response(200, json=[])
+        row = {
+            "id": file_id,
+            "filename": filename,
+            "file_type": "3mf",
+            "folder_id": folder_id,
+            "file_size": len(_uploaded_3mf(upload)),
+        }
+        return httpx.Response(200, json=[row])
+
+    def read(request: httpx.Request) -> httpx.Response:
+        digest = hashlib.sha256(_uploaded_3mf(upload)).hexdigest()
+        return httpx.Response(
+            200,
+            json={"id": file_id, "filename": filename, "folder_id": folder_id, "file_hash": digest},
+        )
+
+    respx.get(f"{API}/library/files").mock(side_effect=listing)
+    respx.get(f"{API}/library/files/{file_id}").mock(side_effect=read)
+
+
+def died_after_the_upload(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The first record of an upload raises, as an attempt does that dies after Bambuddy
+    stored the file and before ScadBuddy recorded it (#1145, #1127). Returns the ids
+    each record was asked for."""
+    real = BambuddyUploadStore.record
+    asked: list[int] = []
+
+    async def record(self: BambuddyUploadStore, output_id: str, copy: LibraryCopy) -> None:
+        asked.append(copy.id)
+        if len(asked) == 1:
+            raise RuntimeError("the attempt died after the upload")
+        await real(self, output_id, copy)
+
+    monkeypatch.setattr(BambuddyUploadStore, "record", record)
+    return asked
 
 
 def plate_routes(*, printer_id: int = 1, model: str = "H2C") -> None:
@@ -167,6 +219,32 @@ def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     assert body["filename"] == "renamed-in-bambuddy.3mf"
     assert upload.call_count == 1
     assert not delete.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_send_retried_after_its_upload_adopts_that_file_rather_than_uploading_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1145: an attempt that died after Bambuddy stored the upload, and before it was
+    recorded, left the file in the inbox. The retry finds it there, the same bytes, and
+    records it rather than uploading a duplicate."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    stored_files(upload)
+    asked = died_after_the_upload(monkeypatch)
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["library_file_id"] == 41
+    assert upload.call_count == 1
+    assert asked == [41, 41]
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    assert [(row["id"], row["folder_id"]) for row in rows] == [(41, 2)]
 
 
 @pytest.mark.requires_postgres
