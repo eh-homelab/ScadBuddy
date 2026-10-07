@@ -174,8 +174,8 @@ class _SlowListener(PgListener):
 
 @pytest.mark.requires_postgres
 async def test_start_returns_once_the_bus_listens(pg_conninfo: str) -> None:
-    """A NOTIFY sent before the LISTEN is lost to this process, and the first LISTEN is
-    no reconnect, so no resync follows: the app must not serve before it listens."""
+    """#1745 with a LISTEN that is slow to be in place, as a loaded host's was: `start`
+    still returns only once it is, and the first event published is heard."""
     listener = _SlowListener(_migrated(pg_conninfo), delay=1.0)
     bus = PgNotifyEventBus(pg_conninfo, listener=listener)
     try:
@@ -190,21 +190,20 @@ async def test_start_returns_once_the_bus_listens(pg_conninfo: str) -> None:
 
 
 @pytest.mark.requires_postgres
-async def test_start_goes_on_past_its_bound_with_a_warning(
-    pg_conninfo: str, caplog: pytest.LogCaptureFixture
+async def test_a_bus_hears_what_it_publishes_as_soon_as_it_has_started(
+    pg_conninfo: str,
 ) -> None:
-    """A listener still connecting past ``listen_timeout`` does not hold the app's
-    start: it says so, and the listener keeps trying."""
-    listener = _SlowListener(_migrated(pg_conninfo), delay=2.0)
-    bus = PgNotifyEventBus(pg_conninfo, listener=listener, listen_timeout=0.2)
+    # #1745: `start` returned before the listener's LISTEN, so an event published
+    # straight after it (an app's first request) could commit its NOTIFY to nobody.
+    _migrated(pg_conninfo)
+    listener = PgListener(pg_conninfo, check_interval=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    subscription = bus.subscribe()
+    await bus.start()
     try:
-        started = time.monotonic()
-        with caplog.at_level(logging.WARNING, logger=pg_events.__name__):
-            await bus.start()
-        assert time.monotonic() - started < 1.5
-        assert listener.backend_pid is None
-        assert any("not listening yet" in r.getMessage() for r in caplog.records)
-        await _until(lambda: listener.backend_pid is not None, timeout=10)
+        assert listener.backend_pid is not None
+        bus.publish(_model("first"))
+        assert _slugs([await _next(subscription)]) == ["first"]
     finally:
         await bus.aclose()
 

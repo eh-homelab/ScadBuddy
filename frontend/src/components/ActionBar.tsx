@@ -26,8 +26,9 @@ import { fitLabel, fitMessages } from '../lib/plate'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { sameJson, type InputsExtra } from '../lib/inputs'
-import { saveOutput } from '../lib/saveOutput'
+import { ExtraOutputsError, saveOutput, saveRemaining } from '../lib/saveOutput'
 import { traceAction } from '../lib/traceAction'
+import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { ImageDialog } from './ImageDialog'
@@ -113,7 +114,18 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
+  /** #1741 — at a phone's width the project, Download, Send and Print wait behind More. */
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreId = useId()
+  const footer = useRef<HTMLElement>(null)
+  const dialogOpen = sendOpen || printOpen || imageOpen
   const [error, setError] = useState<string | null>(null)
+  /** A job whose first output was saved but not the rest: Generate saves only those. */
+  const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
+  /** Stops a render Generate is waiting for when the page leaves this model. */
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => generation.current?.abort(), [slug])
   /** #967 — what the last Generate or download came to, for the polite live region. */
   const [announcement, setAnnouncement] = useState('')
   /**
@@ -180,8 +192,14 @@ export function ActionBar({
   /** The saved output, and the project file Generate filed it as (#931: the agent records both). */
   async function generate(): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
+    const controller = new AbortController()
+    generation.current?.abort()
+    generation.current = controller
     setGenerating(true)
     setError(null)
+    // Matched on the job Generate was asked to save, not a re-render it made for it.
+    const resume = unfinished?.requested.id === job.id ? unfinished : null
+    setUnfinished(null)
     setAnnouncement('')
     setFiled(null)
     setFileError(null)
@@ -190,9 +208,23 @@ export function ActionBar({
         'generate',
         { 'scadbuddy.slug': slug, 'scadbuddy.job_id': job.id },
         async (within, span) => {
-          const created = await saveOutput({ slug, job, extra, capture, within })
+          let created: Output
+          if (resume) {
+            await saveRemaining(resume)
+            created = resume.saved
+          } else {
+            // The first output shows as soon as it is saved, before a pipeline job's others.
+            created = await saveOutput({
+              slug,
+              job,
+              extra,
+              capture,
+              onSaved: (saved) => onGenerated(saved, extra),
+              signal: controller.signal,
+              within,
+            })
+          }
           span.setAttribute('scadbuddy.output_id', created.id)
-          onGenerated(created, extra)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
           const filed = await within(() => fileIntoProject(created))
           setAnnouncement(
@@ -202,7 +234,14 @@ export function ActionBar({
         },
       )
     } catch (cause) {
-      const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
+      if (controller.signal.aborted) return null // the page has moved on
+      if (cause instanceof ExtraOutputsError) setUnfinished(cause)
+      const message =
+        cause instanceof ExtraOutputsError
+          ? cause.message
+          : cause instanceof ApiError
+            ? cause.detail
+            : 'Could not save this output.'
       setError(message)
       setAnnouncement(message)
       throw new AgentToolError('failed', message)
@@ -270,6 +309,27 @@ export function ActionBar({
     },
   })
 
+  // Escape, or a press outside the bar, closes More; not while one of its dialogs is up,
+  // which takes its own Escape and returns focus to the button that opened it.
+  useEffect(() => {
+    if (!phone || !moreOpen || dialogOpen) return
+    const onDown = (event: MouseEvent) => {
+      if (!footer.current?.contains(event.target as Node)) setMoreOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      const inside = !!footer.current?.contains(document.activeElement)
+      setMoreOpen(false)
+      if (inside) footer.current?.querySelector<HTMLButtonElement>('[data-testid="more-actions"]')?.focus()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [phone, moreOpen, dialogOpen])
+
   async function download() {
     if (!output || downloading) return
     setDownloading(true)
@@ -293,9 +353,77 @@ export function ActionBar({
     }
   }
 
+  // #317 — Generate files the editable 3MF in this project's Bambuddy folder.
+  const projectPicker = (
+    <ProjectPicker
+      id="customize-project"
+      testId="customize-project-select"
+      inline
+      value={projectId}
+      onChange={chooseProject}
+      list={projects}
+      onProject={setProject}
+      disabled={generating}
+      onCreating={setPageCreating}
+    />
+  )
+  const generateButtons = (
+    <div className="flex">
+      <Button
+        variant="primary"
+        onClick={() => {
+          if (!generating) void generate().catch(() => undefined)
+        }}
+        // #967 — busy is aria-disabled, not disabled: a disabled button drops the
+        // keyboard focus it was pressed with to <body>.
+        disabled={!ready || creatingProject}
+        aria-disabled={generating || undefined}
+        data-testid="generate"
+        className="rounded-r-none"
+      >
+        {generating && <Spinner />}
+        {generating ? 'Generating' : 'Generate'}
+      </Button>
+      <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
+    </div>
+  )
+  const downloadButton = (
+    <Button
+      onClick={() => void download()}
+      disabled={!output}
+      aria-disabled={downloading || undefined}
+    >
+      {downloading && <Spinner />}
+      Download 3MF
+    </Button>
+  )
+  const sendButton = (
+    <Button onClick={() => setSendOpen(true)} disabled={!output}>
+      Send to Bambuddy
+    </Button>
+  )
+  const printButton = (
+    <Button
+      variant={misfit ? 'danger' : 'default'}
+      onClick={() => setPrintOpen(true)}
+      // #317 — Generate is still filing the project file, which the print reuses.
+      disabled={!output || generating || creatingProject}
+      data-testid="print"
+      title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
+    >
+      Print
+      {misfit && <span className="text-[12px]">· {misfit}</span>}
+    </Button>
+  )
+
   return (
     <>
-      <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
+      <footer
+        ref={footer}
+        className={`flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2 ${
+          phone ? 'relative' : ''
+        }`}
+      >
         {/* #967 — always in the page, so a change to it is announced. */}
         <p className="sr-only" role="status" data-testid="action-status">
           {announcement}
@@ -309,7 +437,8 @@ export function ActionBar({
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
-              <span className="whitespace-nowrap text-[12px] text-muted">
+              {/* #1741 — the swatches alone on a phone, so the bar stays one row. */}
+              <span className={phone ? 'sr-only' : 'whitespace-nowrap text-[12px] text-muted'}>
                 {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
               </span>
             </>
@@ -343,60 +472,53 @@ export function ActionBar({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {/* #317 — Generate files the editable 3MF in this project's Bambuddy folder. */}
-          <ProjectPicker
-            id="customize-project"
-            testId="customize-project-select"
-            inline
-            value={projectId}
-            onChange={chooseProject}
-            list={projects}
-            onProject={setProject}
-            disabled={generating}
-            onCreating={setPageCreating}
-          />
-          <div className="flex">
+        {phone ? (
+          // #1741 — one row on a phone: Generate, and the rest behind More.
+          <div className="flex shrink-0 items-center gap-2">
+            {generateButtons}
             <Button
-              variant="primary"
-              onClick={() => {
-                if (!generating) void generate().catch(() => undefined)
-              }}
-              // #967 — busy is aria-disabled, not disabled: a disabled button drops the
-              // keyboard focus it was pressed with to <body>.
-              disabled={!ready || creatingProject}
-              aria-disabled={generating || undefined}
-              data-testid="generate"
-              className="rounded-r-none"
+              // Print's "does not fit" warning, while Print is out of sight.
+              variant={misfit ? 'danger' : 'default'}
+              onClick={() => setMoreOpen((open) => !open)}
+              aria-expanded={moreOpen}
+              aria-controls={moreOpen ? moreId : undefined}
+              data-testid="more-actions"
             >
-              {generating && <Spinner />}
-              {generating ? 'Generating' : 'Generate'}
+              More
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 12 12"
+                className={`size-3 fill-current ${moreOpen ? '' : 'rotate-180'}`}
+              >
+                <path d="M2 4.5 6 8.5 10 4.5z" />
+              </svg>
             </Button>
-            <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
           </div>
-          <Button
-            onClick={() => void download()}
-            disabled={!output}
-            aria-disabled={downloading || undefined}
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            {projectPicker}
+            {generateButtons}
+            {downloadButton}
+            {sendButton}
+            {printButton}
+          </div>
+        )}
+        {phone && moreOpen && (
+          <div
+            id={moreId}
+            role="group"
+            aria-label="More actions"
+            data-testid="more-actions-panel"
+            className="absolute inset-x-0 bottom-full max-h-[60vh] space-y-3 overflow-y-auto border-t border-line bg-surface px-3 py-3 shadow-xl"
           >
-            {downloading && <Spinner />}
-            Download 3MF
-          </Button>
-          <Button onClick={() => setSendOpen(true)} disabled={!output}>
-            Send to Bambuddy
-          </Button>
-          <Button
-            variant={misfit ? 'danger' : 'default'}
-            onClick={() => setPrintOpen(true)}
-            // #317 — Generate is still filing the project file, which the print reuses.
-            disabled={!output || generating || creatingProject}
-            data-testid="print"
-            title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
-          >
-            Print
-            {misfit && <span className="text-[12px]">· {misfit}</span>}
-          </Button>
-        </div>
+            {projectPicker}
+            <div className="flex flex-wrap items-center gap-2">
+              {downloadButton}
+              {sendButton}
+              {printButton}
+            </div>
+          </div>
+        )}
       </footer>
 
       <ImageDialog

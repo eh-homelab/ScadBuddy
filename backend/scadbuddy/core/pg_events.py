@@ -145,10 +145,6 @@ DEFAULT_OUTBOX_SIZE = 1024
 WRITE_BATCH = 100
 #: How often each replica prunes the log.
 PRUNE_INTERVAL = 300.0
-#: How long `start` waits for the listener's first LISTEN before the app serves
-#: without it (with a warning). Its connect is the pool's, which just succeeded, so
-#: past this the database is struggling rather than slow.
-LISTEN_TIMEOUT = 15.0
 #: The most events one :meth:`PgNotifyEventBus.replay` returns.
 MAX_REPLAY_LIMIT = 1000
 #: How long :meth:`PgNotifyEventBus.aclose` waits for the outbox to drain.
@@ -305,14 +301,12 @@ class PgNotifyEventBus:
         queue_size: int = DEFAULT_QUEUE_SIZE,
         outbox_size: int = DEFAULT_OUTBOX_SIZE,
         connect_timeout: float = 30.0,
-        listen_timeout: float = LISTEN_TIMEOUT,
         prune_interval: float = PRUNE_INTERVAL,
     ) -> None:
         self.metrics = metrics if metrics is not None else Metrics()
         self.retention = retention or EventLogRetention()
         self.listener = listener
         self.connect_timeout = connect_timeout
-        self.listen_timeout = listen_timeout
         self.prune_interval = prune_interval
         self.outbox_size = outbox_size
         #: Delivery within this process, fed only by what the listener hears.
@@ -334,21 +328,26 @@ class PgNotifyEventBus:
         self._closed = False
         self._tasks: list[asyncio.Task[None]] = []
         self._drainer: asyncio.Task[None] | None = None
+        #: Set on the listener's first connect: what `start` waits for.
+        self._listening = asyncio.Event()
         listener.listen(PG_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
     # -- lifecycle ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect, then start draining the outbox, listening and pruning, and return
-        once the LISTEN is in place (or `listen_timeout` passed, with a warning): a
-        NOTIFY before it is lost to this process, and the first LISTEN is no reconnect,
-        so no resync would follow. The app serves only after this returns.
+        """Connect and listen, then start draining the outbox and pruning.
+
+        Returns once the listener's ``LISTEN`` is in place (#1745), so whatever this
+        process publishes from then on -- the buffered early events included -- is
+        heard here too; a NOTIFY committed before it reached nobody in this process.
+        Raises `TimeoutError` if that takes longer than ``connect_timeout``.
 
         The ``events`` table must exist: open the job store (which migrates) first.
         Raises `EventLogMissingError` when it does not, rather than failing later
         in every write. A failed start closes the pool it opened, so the caller's
         `aclose` -- in a ``finally`` a failed start never reaches -- is not needed
         to release it."""
+        listening: asyncio.Task[None] | None = None
         try:
             await self._pool.open(wait=True, timeout=self.connect_timeout)
             async with self._pool.connection() as conn:
@@ -359,7 +358,12 @@ class PgNotifyEventBus:
                     f"the {EVENTS_TABLE!r} table does not exist: open the job store, which "
                     "migrates the database, before starting the event bus"
                 )
+            listening = asyncio.create_task(self.listener.run())
+            await asyncio.wait_for(self._listening.wait(), self.connect_timeout)
         except BaseException:
+            if listening is not None:
+                listening.cancel()
+                await asyncio.gather(listening, return_exceptions=True)
             await self._pool.close()
             raise
         outbox = _Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
@@ -369,17 +373,7 @@ class PgNotifyEventBus:
         for item in early:
             outbox.offer(item)
         self._drainer = asyncio.create_task(self._drain(outbox))
-        self._tasks = [
-            asyncio.create_task(self.listener.run()),
-            asyncio.create_task(self._pruner()),
-        ]
-        if not await self.listener.wait_listening(self.listen_timeout):
-            # The listener keeps trying; its first LISTEN is then a late start, and
-            # events published until it are not heard here.
-            logger.warning(
-                "the event bus is not listening yet; starting anyway",
-                extra={"timeout_s": self.listen_timeout},
-            )
+        self._tasks = [listening, asyncio.create_task(self._pruner())]
 
     async def aclose(self) -> None:
         with self._lock:
@@ -562,6 +556,7 @@ class PgNotifyEventBus:
         self.local.publish(event)
 
     def _connected(self, reconnected: bool) -> None:
+        self._listening.set()
         if not reconnected:
             return
         logger.warning(
