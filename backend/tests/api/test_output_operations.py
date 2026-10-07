@@ -131,7 +131,9 @@ def test_a_delete_started_without_a_prelude_still_takes_the_inbox_copies(
     run(client, output_id)
     monkeypatch.setattr("scadbuddy.api.operations._prelude", lambda *_: None)
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code == 204, response.text
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]

@@ -241,12 +241,14 @@ def test_the_api_drops_its_cached_archive_when_the_print_worker_changed_it(
         client.get("/api/v1/prints/35")
         reads = before.call_count
 
-        pulled = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+        pulled = client.post(
+            "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+        )
         assert pulled.status_code == 204, pulled.text
         client.get("/api/v1/prints/35")
         assert before.call_count == reads + 2, "the detail after a pull reads the archive again"
 
-        assert client.post("/api/v1/prints/35/reprint").status_code == 201
+        assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
         client.get("/api/v1/prints/35")
         assert before.call_count == reads + 4, "the detail after a reprint reads it again"
 

@@ -303,7 +303,7 @@ async def test_a_retry_takes_the_upload_its_attempt_left_unrecorded(
     """#1145, #1127: in a project's folder (a name made unique from the stem) and in the
     inbox, the retry finds the file by its bytes and records it rather than uploading it
     twice."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = Hashing()
     uploads = DiesOnce()
@@ -335,7 +335,7 @@ async def test_a_file_of_the_same_name_and_size_with_other_bytes_is_not_taken(
 ) -> None:
     """#1145: only the same bytes are the copy an attempt left; an unrecorded file that
     merely shares the name and size (someone else's upload) is left alone."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = Hashing()
     await bambuddy.upload_library_file("Demo.3mf", b"abc", folder_id=FOLDER)
