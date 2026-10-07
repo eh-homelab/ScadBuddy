@@ -16,7 +16,7 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
@@ -316,20 +316,28 @@ async def test_an_execution_ended_before_its_update_answered_is_a_closed_command
         # Accepted, not merely sent (#1659): terminated while only admitted, the Update is
         # aborted with a NOT_FOUND RPCError instead, which `start_command` classifies as a
         # refusal and render submit reads as a closing execution.
-        await update_accepted(client, workflow_id)
+        await update_accepted(client, workflow_id, pending)
         await client.get_workflow_handle(workflow_id).terminate("an operator ended it")
         with pytest.raises(CommandClosedError):
             await pending
 
 
-async def update_accepted(client: Client, workflow_id: str) -> None:
+async def update_accepted(
+    client: Client, workflow_id: str, pending: asyncio.Task[EchoAnswer]
+) -> None:
     """Wait until the execution's history records an accepted Update. A fixed sleep was
-    not enough on a loaded runner (#1659)."""
+    not enough on a loaded runner (#1659). A ``pending`` call that already ended is
+    awaited, so its own error is the test's."""
     deadline = time.monotonic() + 10
     while True:
+        if pending.done():
+            await pending
+            raise AssertionError("the command answered before its Update was accepted")
         try:
             history = await client.get_workflow_handle(workflow_id).fetch_history()
-        except RPCError:  # not started yet
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:  # not started yet
+                raise
             history = None
         if history is not None and any(
             event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED
