@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import io
 import os
+import shutil
 import threading
 import time
 import zipfile
@@ -229,6 +230,30 @@ async def test_eviction_skips_a_directory_touched_after_the_scan(
     monkeypatch.setattr(cache_module, "_size", size_then_claim)
     assert a.evict() == []
     assert a.local.exists("claimed")
+
+
+async def test_an_eviction_cut_short_leaves_no_hit_behind(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1271: a worker killed mid-removal leaves a directory whose marker no longer
+    claims the published bytes, so the next fetch downloads it again."""
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("old") / "m").write_bytes(b"x" * 10)
+    await a.publish("old", scope=SCOPE)
+    past = time.time() - 3600
+    os.utime(a.local.root / "old", (past, past))
+
+    def killed_part_way(path: Path, *args: object, **kwargs: object) -> None:
+        (path / "m").unlink()  # the content goes first; the process dies before the rest
+        raise SystemExit
+
+    monkeypatch.setattr(shutil, "rmtree", killed_part_way)
+    with pytest.raises(SystemExit):
+        a.evict()
+    monkeypatch.undo()
+    assert not (a.local.root / "old" / MARKER).exists()
+    assert await a.fetch("old")
+    assert (a.local.root / "old" / "m").read_bytes() == b"x" * 10
 
 
 async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_index(
