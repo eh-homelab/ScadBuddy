@@ -21,7 +21,8 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.extruders import slicer_nozzle_stats
+from scadbuddy.bambuddy.extruders import slicer_nozzle_stats, slicer_volume_types
+from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -129,24 +130,36 @@ async def generate_target(
 
     With a printer and nozzle it also states which of the printer's sides has that
     nozzle now (#834), as the print does, so a print on the same printer and nozzles
-    reuses this file. An unreadable status states nothing, as the print's does."""
+    reuses this file. An unreadable status states nothing, as the print's does.
+
+    It states each side's flow too (#484): the model's remembered flows, else Standard,
+    since a project remembers only the printer and size its last print used."""
     remembered = await uploads.project_target(project_id)
+    nozzles: list[NozzleChoice] = []
     if remembered is not None:
         printer_id: int | None = remembered.printer_id
         nozzle = remembered.nozzle_diameter
+        if nozzle is not None:
+            nozzles = [NozzleChoice.model_validate({"size": nozzle})]
     else:
         choices = settings.model_print_choices.get(meta.slug)
         printer_id = (choices.printer_id if choices else None) or settings.printer_id
-        nozzle = choices.nozzles[0].size if choices and choices.nozzles else None
+        nozzles = list(choices.nozzles) if choices else []
+        nozzle = nozzles[0].size if nozzles else None
     stats = None
-    if printer_id is not None and nozzle is not None:
+    if printer_id is not None and nozzles:
         try:
-            stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzle)
+            stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzles)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; no nozzle is known")
             stats = None
     return await target_for(
-        client, settings, printer_id=printer_id, nozzle_diameter=nozzle, nozzle_stats=stats
+        client,
+        settings,
+        printer_id=printer_id,
+        nozzle_diameter=nozzle,
+        nozzle_stats=stats,
+        nozzle_volume_type=slicer_volume_types(nozzles) if nozzles else None,
     )
 
 
