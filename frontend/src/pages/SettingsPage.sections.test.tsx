@@ -43,14 +43,21 @@ describe('SettingsPage sources (#322)', () => {
   it('resets a saved value back to the deployment value', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
+    // This page is ~1000 elements, and it took most of the test's 5 s under load (#1485):
+    // each keystroke re-renders all of it, and a role query over all of it runs jsdom's
+    // getComputedStyle on every element (~0.5 s). So the value is pasted, and the buttons
+    // are looked for in their section and badge. Reset is the point here.
     const field = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(field)
-    await user.type(field, 'https://mine.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(field)
+    await user.paste('https://mine.test')
+    await user.click(within(field.closest('section')!).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
 
     const put = vi.spyOn(api, 'putSettings')
-    await user.click(screen.getByRole('button', { name: 'Reset public_url to the deployment value' }))
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset public_url to the deployment value' }),
+    )
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL'))
     expect(put).toHaveBeenCalledWith({ reset: ['public_url'] })
     await waitFor(() => expect(field).toHaveValue('https://scadbuddy.internal.nullreference.io'))

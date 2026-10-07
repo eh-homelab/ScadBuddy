@@ -1543,6 +1543,32 @@ Each phase is its own implementation plan and ships alone.
 3. **Library commands** (§4.3 `library`, §4.4 Schedules): the `scadbuddy-library`
    container, every git, file and download command, and the sweeps as Schedules. Done by
    route group, one plan per group if the plan says so.
+   - As built so far (3a, #1054, plan `2026-10-03-durable-phase-3a-housekeeping-schedule.md`):
+     the Schedule `scadbuddy-housekeeping-<queue>` (overlap `SKIP`, every
+     `asset_sweep_interval`; `0` deletes it) starts `Housekeeping` on the `library` queue.
+     It runs four activities in order, each tried once and best effort: prune settled
+     render jobs, sweep unused uploads, sweep unreferenced blobs, sweep old duplicate
+     staging. A second Schedule, `scadbuddy-prune-<queue>`, runs only the prune every
+     300 s (the old loop's cadence) and stays when the interval is `0`. Setup is retried
+     until Temporal takes it. Its worker runs in the API process, which holds the data volume, until the
+     `scadbuddy-library` container. The API's sweep loop and `RenderService`'s prune
+     loop are gone. The boot passes stay in the boot, since they must finish before the
+     first request; the boot then triggers the Schedule once. That run is the start's only
+     sweep of the uploads (review #1095 1). While an operator keeps the Schedule paused,
+     the start backfills the uploads to the store itself (review #1095 2).
+   - As built so far (3b, #1054, plan `2026-10-03-durable-phase-3b-library-pins.md`): an
+     `OperationKind` names its queue (`bambuddy` or `library`), and each worker serves only
+     its own kinds. Pin, re-pin, unpin and checkout removal are `library` kinds
+     (`library/operations.py`) on the generic `Operation` workflow. They are `done`, not
+     `accepted`: a fast clone answers the model as before, and one past the deadline
+     answers 202 with the operation, so no request is held past it either way. Only the
+     refusals that need no clone, no DNS lookup and no lock are checks (an unknown model
+     or catalogue name, a malformed URL or ref, an address literal that is not public,
+     and a removal's lease, pin and missing checkout, made again under the gate in the
+     run). The rest (a clone's 502, a lookup's 503 or non-public host, a re-pin or unpin
+     whose entry changed) arrive as failed operations. The
+     library check (`POST …/check`) stays a request. The UI's and the agent's pin calls go
+     through `command()`.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
 5. **Durable session mode** (§6.1, §6.2, §6.4, §6.6): `agent-durable/`, the plugin pin,

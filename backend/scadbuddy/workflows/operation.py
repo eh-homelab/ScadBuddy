@@ -47,13 +47,14 @@ with workflow.unsafe.imports_passed_through():
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
-#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin. The browser's
-#: ``operationFollowMs`` (frontend ``client.ts``) is reckoned from it: change them together.
-#: The agent follows only for ``COMMAND_ANSWER_DEADLINE`` plus a margin, then hands back
-#: the running operation.
+#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin; a kind may set its own.
+#: The browser's ``operationFollowMs`` (frontend ``client.ts``) is reckoned from it: change
+#: them together. The agent follows only for ``COMMAND_ANSWER_DEADLINE`` plus a margin, then
+#: hands back the running operation.
 RUN_TIMEOUT = timedelta(minutes=5)
-#: The run heartbeats (`operation_activities.py`), so a run on a worker that died is
-#: retired after this, not after ``RUN_TIMEOUT`` (review #1063 second review 2).
+#: The run heartbeats (`operation_activities.py`), so a timeout or cancel reaches it, and
+#: a run on a worker that died is retired after this, not after ``RUN_TIMEOUT`` (review
+#: #1063 second review 2).
 RUN_HEARTBEAT = timedelta(seconds=30)
 SHORT = timedelta(seconds=60)
 READ_RETRY = RetryPolicy(
@@ -162,9 +163,11 @@ class OperationWorkflow:
         try:
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
-                RunOp(request=input.request, checked=checked),
+                RunOp(request=input.request, checked=checked, author=input.author),
                 result_type=dict,
-                start_to_close_timeout=RUN_TIMEOUT,
+                start_to_close_timeout=(
+                    timedelta(seconds=input.run_timeout_s) if input.run_timeout_s else RUN_TIMEOUT
+                ),
                 heartbeat_timeout=RUN_HEARTBEAT,
                 retry_policy=RetryPolicy(
                     maximum_attempts=input.run_attempts,

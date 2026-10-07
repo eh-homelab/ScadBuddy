@@ -104,7 +104,8 @@ SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
 must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only once
 `frontend/dist` is built (`pnpm build` in `frontend/`); otherwise it serves only the API.
 `SCADBUDDY_TEMPORAL_NAMESPACE` defaults to `scadbuddy` (hence `--namespace` above)
-and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
+and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`
+(`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`, the API's own housekeeping queue, to `library`).
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
 
@@ -175,13 +176,32 @@ on shutdown.
     file that no saved output, preset or render job references is removed once
     nothing has uploaded or used it for this long. The same grace applies to the
     blob store's pieces and snapshots (see "Blob store and render workers").
-  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off. The same interval drives the blob
+  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs;
+    0 turns it off. It is the interval of the Temporal Schedule
+    `scadbuddy-housekeeping-library`, on the API's own `library` queue
+    (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
+    also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
+    converges the uploads with the store (reconcile and backfill), so expect that
+    Bambuddy traffic right after a deploy. A run still open from before the start
+    goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
+    paused across restarts, and a start does not trigger it: while it is paused nothing
+    sweeps the uploads or reconciles them with the store, and a start only backfills
+    them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
+    Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
+    library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
+    old two Schedules starting runs on a queue nothing serves, so delete them by hand
+    (`temporal schedule delete --schedule-id scadbuddy-housekeeping-<old queue>`, and
+    the same for `scadbuddy-prune-<old queue>`). The same interval drives the blob
     store's sweep, which 0 also turns off, and a render worker's piece-cache
     eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
+  - The `library` queue's worker is not versioned: any API replica may take any of
+    its tasks. A release that adds a sweep (a new activity) says so here and needs a
+    `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
+    old build takes the new sweep's task and fails it as unregistered, and since a
+    sweep is not retried, that sweep waits for the next tick (a day, by default).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -900,12 +920,17 @@ call parks, and the decision is a trace of its own linked to it
 (`backend/scadbuddy/telemetry/`) forwards it in the background to
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is) or else
 `$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
-`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
+`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It reads the CA file, the client
+certificate and key, and the timeout (seconds) as the backend's exporter does:
+`OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `…_CLIENT_CERTIFICATE`, `…_CLIENT_KEY` and
+`…_TIMEOUT`, each else its `OTEL_EXPORTER_OTLP_` form; a file it cannot read stops the
+start. It accepts only the UI's own origins (the
 public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
 `same-origin`, so a page on another allowed origin is refused; a request without
 `Sec-Fetch-Site`, from an older browser or a non-browser client, is admitted on `Origin`
 alone), at
-most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`, and 256 KiB
+once rewritten), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
 reduced to the backend route template its path matches, or to its origin (a relative
 one on no route is dropped), as a server span keeps only its route; a URL on any host
@@ -914,7 +939,8 @@ No user agent and no `exception.message` is forwarded, wherever the page put it.
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
 limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
-client), so with more than one API replica the overall ceiling multiplies.
+client, an IPv6 client being its /64), so with more than one API replica the overall
+ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
 whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
 `SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
@@ -922,8 +948,11 @@ gets a bucket of its own. Empty, every browser behind the gateway shares one. It
 only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
 `FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
 that flag lets any loopback caller name its own client.
-`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
-`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+`scadbuddy_trace_relay_batches_total{outcome}` counts every batch a page sent:
+`forwarded`, `failed` (the collector refused it or was unreachable, or the forwarding
+task had died, which is logged when it happens and answered 503), `queue_full`,
+`shutdown`, `rate_limited` (429) and `rejected` (400, 413, 415); any rise in an outcome
+but `forwarded` means browser spans were lost.
 
 The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
 directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
