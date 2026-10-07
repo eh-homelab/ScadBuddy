@@ -8,7 +8,8 @@ from scadbuddy.api import deps
 
 def _pattern(alias: object) -> str:
     field = typing.get_args(alias)[1]
-    return next(m.pattern for m in field.metadata if getattr(m, "pattern", None))
+    pattern: str = next(m.pattern for m in field.metadata if getattr(m, "pattern", None))
+    return pattern
 
 
 def test_job_run_and_operation_ids_share_one_pattern() -> None:
