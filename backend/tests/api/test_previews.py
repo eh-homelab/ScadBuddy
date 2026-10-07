@@ -226,7 +226,9 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     assert scheduler(state).store.image(SLUG) is not None
 
     own = client.put(
-        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{SLUG}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
     assert own.json()["thumbnail_source"] == "model"
     # Dropped with the write, not later: there is nothing left for it to stand in for.
@@ -234,7 +236,7 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     settle(client, state)
     assert len(stub.calls) == 1
 
-    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).status_code == 200
     settle(client, state)
     assert len(stub.calls) == 2
     assert _model(client)["thumbnail_source"] == "preview"
@@ -283,7 +285,7 @@ def test_a_source_edit_re_renders_and_changes_the_preview_id(
     edited = SOURCE.replace("width = 10", "width = 12")
     assert (
         client.put(
-            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}
+            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}, headers=press()
         ).status_code
         == 200
     )
@@ -304,10 +306,11 @@ def test_a_restored_revision_is_rendered_again(
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "12"), "force": True},
+        headers=press(),
     )
     settle(client, state)
 
-    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore")
+    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore", headers=press())
     assert restored.status_code == 200, restored.text
     settle(client, state)
 
@@ -320,7 +323,7 @@ def test_a_readme_or_metadata_edit_does_not_re_render(
     _create(client)
     settle(client, state)
 
-    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"})
+    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"}, headers=press())
     client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget Two"}, headers=press())
     settle(client, state)
 
@@ -369,6 +372,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "11"), "force": True},
+        headers=press(),
     )
     settle(client, state)
     assert len(stub.calls) == 2

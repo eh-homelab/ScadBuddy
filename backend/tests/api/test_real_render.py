@@ -129,11 +129,14 @@ def test_paste_check_and_replace_against_a_real_openscad(client: TestClient) -> 
     schema = client.get("/api/v1/models/pasted/schema").json()
     assert [parameter["name"] for parameter in schema["parameters"]] == ["size"]
 
-    refused = client.put("/api/v1/models/pasted/source", json={"source": "cube(;\n"})
+    refused = client.put(
+        "/api/v1/models/pasted/source", json={"source": "cube(;\n"}, headers=press()
+    )
     assert refused.status_code == 422
     replaced = client.put(
         "/api/v1/models/pasted/source",
         json={"source": "width = 3; // [1:1:9]\ncube(width);\n"},
+        headers=press(),
     )
     assert replaced.status_code == 200, replaced.text
     schema = client.get("/api/v1/models/pasted/schema").json()

@@ -16,13 +16,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
@@ -41,6 +44,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     TemporalUnreachableError,
     start_command,
+    temporal_failure,
 )
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
@@ -263,6 +267,25 @@ async def recorded(
     return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
 
 
+async def _running(ops: OperationCommands, workflow_id: str) -> bool:
+    """Whether the operation's workflow is running: not when there is none, or it closed."""
+    try:
+        described = await ops.client.get_workflow_handle(workflow_id).describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return False
+        # Read as a start's failure is (review #1316 (12) 1); this describe starts nothing.
+        failure = temporal_failure(error, workflow_id)
+        if isinstance(failure, TemporalUnavailableError):
+            raise temporal_unavailable(
+                "an operation", _unavailable_detail(failure), may_have_started=None
+            ) from None
+        raise temporal_refused(
+            "to describe an operation", OPERATION_REFUSED_DETAIL, may_have_started=None
+        ) from None
+    return described.status == WorkflowExecutionStatus.RUNNING
+
+
 def _body(request: BaseModel | dict[str, Any]) -> dict[str, Any]:
     return request.model_dump(mode="json") if isinstance(request, BaseModel) else request
 
@@ -276,11 +299,14 @@ async def run_operation(
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
     claimed: Claimed | None = None,
+    before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | OperationAccepted:
     """Run ``kind`` as an operation; its result body, or 202 with the operation.
     A refusal or a recorded failure is raised as the problem the route answers with.
     ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
-    the operation may still run."""
+    the operation may still run. ``before_start`` is a route's own refusal, made only
+    when no record answers and the same request is not still running: a repeat is its
+    first answer whatever has changed since (§4.2)."""
     try:
         result = await _run_operation(
             ops,
@@ -289,6 +315,7 @@ async def run_operation(
             subject=subject,
             request=request,
             idempotency_key=idempotency_key,
+            before_start=before_start,
         )
     except ApiError as error:
         if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
@@ -309,6 +336,7 @@ async def _run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    before_start: Callable[[], Awaitable[None]] | None,
 ) -> dict[str, Any] | OperationAccepted:
     if not idempotency_key:
         raise ApiError(
@@ -328,6 +356,11 @@ async def _run_operation(
     recorded = await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
+    workflow_id = f"op-{kind.name}-{key}"
+    # A re-send can arrive before the first one's record is written: it follows that
+    # operation, whatever the route's refusal would say now (review 1130 2).
+    if before_start is not None and not await _running(ops, workflow_id):
+        await before_start()
     arg = OperationInput(
         kind=kind.name,
         subject=subject,
@@ -344,7 +377,7 @@ async def _run_operation(
             ops.client,
             OPERATION_WORKFLOW,
             arg,
-            id=f"op-{kind.name}-{key}",
+            id=workflow_id,
             task_queue=ops.queues[kind.queue],
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,

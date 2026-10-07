@@ -198,7 +198,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Each worker serves only its queue's kinds: the Bambuddy kinds are
   `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
   `library`, #1054) exports the library pins with a model's lifecycle
-  (`library/model_operations.py` `model_kinds`). Request bytes too large for a workflow
+  and edits (`library/model_operations.py` `model_kinds`: create, import, patch,
+  duplicate, delete, source, README, thumbnail, sibling files, restore and upstream; an
+  upstream merge that would conflict is refused by the route, so its merged text never
+  enters a history). Request bytes too large for a workflow
   payload (a create's source, thumbnail, README, a patch's presets, an import's URL) go
   by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
   sha256 so a re-send keeps its key. `run_operation(..., claimed=)` releases them once

@@ -213,7 +213,9 @@ def test_a_built_ins_thumbnail_cannot_be_replaced(client: TestClient) -> None:
     png = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 
     response = client.put(
-        f"/api/v1/models/{BUILTIN}/thumbnail", files={"file": ("t.png", png, "image/png")}
+        f"/api/v1/models/{BUILTIN}/thumbnail",
+        files={"file": ("t.png", png, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 403, response.text
