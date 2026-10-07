@@ -41,19 +41,19 @@ def pg_conninfo() -> Iterator[str]:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(ident))
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
 
 
-@pytest.fixture(scope="session")
-def _temporal_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    cli = os.environ.get("SCADBUDDY_TEST_TEMPORAL_DEV_SERVER") or shutil.which("temporal")
-    if not cli:
-        pytest.skip("no Temporal CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or temporal on PATH)")
-    port = _free_port()
-    db = tmp_path_factory.mktemp("temporal") / "t.db"
+def temporal_cli() -> str | None:
+    return os.environ.get("SCADBUDDY_TEST_TEMPORAL_DEV_SERVER") or shutil.which("temporal")
+
+
+def start_dev_server(cli: str, port: int, db: Path) -> subprocess.Popen[bytes]:
+    """`temporal server start-dev` on 127.0.0.1:`port`, its store in the SQLite file `db`
+    (so a restart on the same file keeps what it persisted); returns once it listens."""
     proc = subprocess.Popen(
         [
             cli,
@@ -70,24 +70,38 @@ def _temporal_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    address = f"127.0.0.1:{port}"
-    try:
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
-                    break
-            except OSError:
-                if proc.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError("temporal dev server did not start") from None
-                time.sleep(0.2)
-        yield address
-    finally:
-        proc.terminate()
+    deadline = time.monotonic() + 60
+    while True:
         try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return proc
+        except OSError:
+            if proc.poll() is not None or time.monotonic() > deadline:
+                stop_dev_server(proc)
+                raise RuntimeError("temporal dev server did not start") from None
+            time.sleep(0.2)
+
+
+def stop_dev_server(proc: subprocess.Popen[bytes]) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture(scope="session")
+def _temporal_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    cli = temporal_cli()
+    if not cli:
+        pytest.skip("no Temporal CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or temporal on PATH)")
+    port = free_port()
+    proc = start_dev_server(cli, port, tmp_path_factory.mktemp("temporal") / "t.db")
+    try:
+        yield f"127.0.0.1:{port}"
+    finally:
+        stop_dev_server(proc)
 
 
 @pytest_asyncio.fixture

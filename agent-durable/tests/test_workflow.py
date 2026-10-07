@@ -46,6 +46,7 @@ from scadbuddy_durable.models import (
     restore_state,
 )
 from scadbuddy_durable.workflow import DurableSession
+from tests.conftest import free_port, start_dev_server, stop_dev_server, temporal_cli
 from tests.short_runs import LongStop, ShortRuns
 from tests.support import WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
 
@@ -366,6 +367,48 @@ async def test_a_message_whose_nudge_was_lost_runs_on_the_next_nudge_of_a_live_r
     await rig.event(wid, "done", 2)
     assert rig.fake.takes[1:] == [lost]
     assert [p for p, _ in rig.seen.calls] == ["first", "lost one"]
+
+
+@temporal
+async def test_a_nudge_lost_with_a_temporal_restart_is_sent_again_and_runs_once(tmp_path: Path) -> None:
+    # The live run is idle and no worker polls; the nudge is admitted, which Temporal keeps
+    # in memory only, and the server restarts. The message is committed, so the agent
+    # service sends the same id again (client.ts `send`), and it runs exactly once.
+    cli = temporal_cli()
+    if not cli:
+        pytest.skip("no Temporal CLI")
+    port, db = free_port(), tmp_path / "restart.db"
+    address = f"127.0.0.1:{port}"
+    queue = f"agent-{uuid.uuid4()}"
+    inputs = FakeInputs()
+    server = start_dev_server(cli, port, db)
+    try:
+        client = await Client.connect(address)
+        async with rig_on(client, tmp_path / "sessions", task_queue=queue, inputs=inputs) as rig:
+            wid, inp = rig.new()
+            await rig.send(wid, inp, "first")
+            await rig.event(wid, "done")
+            rig.ids.remove(wid)  # the run lives on past this worker
+        lost = await inputs.commit(inp.session_id, "lost one")
+        nudge = asyncio.create_task(rig.nudge(wid, inp, lost))
+        await asyncio.sleep(2)  # admitted: no worker polls the queue to accept it
+        stop_dev_server(server)
+        server = start_dev_server(cli, port, db)
+        # The call died with the server, or still retries against the new one: either way
+        # the agent service gives it up after its deadline and sends again.
+        nudge.cancel()
+        with contextlib.suppress(BaseException):
+            await nudge
+        client = await Client.connect(address)
+        async with rig_on(client, tmp_path / "sessions", task_queue=queue, inputs=inputs) as again:
+            again.ids.append(wid)
+            await again.nudge(wid, inp, lost)  # the same id
+            await again.event(wid, "done", 2)
+            await again.nudge(wid, inp, lost)  # and again: a no-op
+            assert inputs.takes[1:] == [lost]
+            assert [p for p, _ in again.seen.calls] == ["lost one"]
+    finally:
+        stop_dev_server(server)
 
 
 @temporal
