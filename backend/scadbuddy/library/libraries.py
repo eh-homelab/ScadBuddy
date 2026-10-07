@@ -504,7 +504,7 @@ class CheckoutLeases:
             return [_first_column(row) for row in cur.fetchall()]
 
     @contextlib.contextmanager
-    def removing(self) -> Iterator[None]:
+    def removing(self, stop: threading.Event | None = None) -> Iterator[None]:
         """Hold :data:`REMOVAL_LOCK` exclusively, at a moment no pin is live: no lease
         or pin is inserted meanwhile. A transaction's lock, so however the block ends
         it goes with the transaction and never back to the pool on its connection.
@@ -512,7 +512,9 @@ class CheckoutLeases:
         While a pin is live the lock is let go again before the next look: a pin's
         holder may take a lease or pin again before it ends (a create's fetcher), and
         Postgres queues that shared request behind an exclusive one waiting or held,
-        so holding it would leave each waiting on the other."""
+        so holding it would leave each waiting on the other. ``stop`` set ends the
+        wait with :class:`RemovalStoppedError` (its caller was cancelled)."""
+        stop = stop or threading.Event()
         with self.pool.connection() as conn:
             while True:
                 with conn.transaction():
@@ -522,7 +524,12 @@ class CheckoutLeases:
                     ).fetchone():
                         yield
                         return
-                time.sleep(self.poll)
+                if stop.wait(self.poll):
+                    raise RemovalStoppedError
+
+
+class RemovalStoppedError(Exception):
+    """A removal stopped waiting for the pins in flight: its caller was cancelled."""
 
 
 def _first_column(row: Any) -> str:
@@ -530,10 +537,43 @@ def _first_column(row: Any) -> str:
     return str(next(iter(row.values())) if isinstance(row, dict) else row[0])
 
 
+async def _taken[T](
+    take: Callable[[], T],
+    undo: Callable[[T], object],
+    *,
+    cancelled: Callable[[], None] = lambda: None,
+) -> T:
+    """``take()`` off the loop. A cancel meanwhile cannot stop the thread: ``cancelled``
+    asks it to stop, and whatever it took after all is undone before the cancel goes on,
+    so a cancelled activity leaves no hold, slot or lock behind (#1131)."""
+    future = asyncio.ensure_future(asyncio.to_thread(take))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancelled()
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        if future.exception() is None:
+            try:
+                await asyncio.shield(asyncio.to_thread(undo, future.result()))
+            except Exception:
+                # A row lapses at its expiry instead; a lock goes with its connection.
+                logger.exception("could not undo what a cancelled step took")
+        raise
+
+
 @contextlib.asynccontextmanager
-async def _in_thread(manager: contextlib.AbstractContextManager[None]) -> AsyncIterator[None]:
-    """A blocking context manager entered and exited off the event loop."""
-    await asyncio.to_thread(manager.__enter__)
+async def _in_thread(
+    manager: contextlib.AbstractContextManager[None],
+    *,
+    cancelled: Callable[[], None] = lambda: None,
+) -> AsyncIterator[None]:
+    """A blocking context manager entered and exited off the event loop. Cancelled
+    while it enters, it is left again once entered (:func:`_taken`)."""
+    await _taken(
+        manager.__enter__, lambda _: manager.__exit__(None, None, None), cancelled=cancelled
+    )
     try:
         yield
     except BaseException as error:
@@ -575,7 +615,7 @@ async def _shared_lease(
     leases: CheckoutLeases, holder: str, checkouts: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease row held, and renewed every third of its TTL, until the block exits."""
-    token = await asyncio.to_thread(leases.take, holder, checkouts)
+    token = await _taken(lambda: leases.take(holder, checkouts), leases.drop)
     async with _renewed(
         leases.ttl,
         lambda: leases.renew(token),
@@ -589,7 +629,7 @@ async def _shared_lease(
 @contextlib.asynccontextmanager
 async def _shared_pin(leases: CheckoutLeases) -> AsyncIterator[None]:
     """A pin's hold, renewed every third of its TTL, until the block exits."""
-    token = await asyncio.to_thread(leases.take_pin)
+    token = await _taken(leases.take_pin, leases.drop_pin)
     async with _renewed(
         leases.ttl,
         lambda: leases.renew_pin(token),
@@ -631,7 +671,7 @@ class InstallPermits:
             if self.pool is None:
                 yield
                 return
-            while (claimed := await asyncio.to_thread(self.claim)) is None:
+            while (claimed := await _taken(self.claim, self._undo_claim)) is None:
                 await asyncio.sleep(self.poll)
             slot, token = claimed
             async with _renewed(
@@ -660,6 +700,10 @@ class InstallPermits:
                 ).fetchone():
                     return slot, token
         return None
+
+    def _undo_claim(self, claimed: tuple[int, uuid.UUID] | None) -> None:
+        if claimed is not None:
+            self._drop(*claimed)
 
     def _renew(self, slot: int, token: uuid.UUID) -> None:
         assert self.pool is not None
@@ -736,7 +780,8 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _in_thread(self.shared.removing()):
+                stop = threading.Event()
+                async with _in_thread(self.shared.removing(stop), cancelled=stop.set):
                     yield
         finally:
             async with self._condition:

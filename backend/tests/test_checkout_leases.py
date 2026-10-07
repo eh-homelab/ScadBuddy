@@ -4,8 +4,10 @@ own `CheckoutGate`, and a lease one takes must be seen by the other's removal.""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -235,3 +237,83 @@ async def test_installs_in_one_process_are_capped_without_a_database() -> None:
 
     await asyncio.gather(*(install() for _ in range(5)))
     assert most == 2
+
+
+async def test_a_removal_cancelled_while_it_waits_leaves_no_lock(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """A removal activity cancelled while it waits on another process's pin must not
+    leave its thread to take the lock later and hold it for good (#1131)."""
+    worker, api = _gate(pg_pool, tmp_path), _gate(pg_pool, tmp_path)
+    checkout = _checkout(tmp_path)
+
+    async with worker.pinning():
+        removal = asyncio.create_task(_enter_removal(api))
+        await asyncio.sleep(1.0)
+        removal.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(removal, 10)
+    await asyncio.sleep(1.0)
+
+    # Neither a lease nor another removal waits on a lock nobody will let go.
+    async def render() -> None:
+        async with worker.rendering(JOB, [checkout]):
+            pass
+
+    await asyncio.wait_for(render(), 10)
+    await asyncio.wait_for(_enter_removal(worker), 10)
+
+
+async def test_a_pin_cancelled_while_it_takes_its_hold_leaves_none(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """The hold's insert waits out a removal in its thread; cancelled meanwhile, the
+    row it inserts afterwards is dropped, not left to block removals for a TTL."""
+    worker, api = _gate(pg_pool, tmp_path), _gate(pg_pool, tmp_path)
+
+    async def pin() -> None:
+        async with worker.pinning():
+            pass
+
+    async with api.removing():
+        pinning = asyncio.create_task(pin())
+        await asyncio.sleep(0.5)
+        pinning.cancel()
+        await asyncio.sleep(0.2)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(pinning, 10)
+
+    # A live hold would keep this waiting for the hold's 60 s TTL.
+    await asyncio.wait_for(_enter_removal(api), 10)
+
+
+async def test_an_install_cancelled_while_it_claims_leaves_its_slot_free(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, api = InstallPermits(1, pg_pool), InstallPermits(1, pg_pool)
+    claim = worker.claim
+
+    def slow_claim() -> Any:
+        time.sleep(0.5)
+        return claim()
+
+    monkeypatch.setattr(worker, "claim", slow_claim)
+
+    async def install() -> None:
+        async with worker.permit():
+            pass
+
+    task = asyncio.create_task(install())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, 10)
+    # The claim's thread has finished (and claimed) by now.
+    await asyncio.sleep(1.0)
+
+    # A claimed slot left behind would keep this one waiting for its 60 s TTL.
+    async def other() -> None:
+        async with api.permit():
+            pass
+
+    await asyncio.wait_for(other(), 10)
