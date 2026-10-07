@@ -508,24 +508,56 @@ async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> N
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise SnapshotPendingError("still uploading", retry_after=1)
+            raise SnapshotPendingError("still uploading", retry_after=0)
         return b"png"
 
+    loop = asyncio.get_running_loop()
+    written = asyncio.Event()
     store = mock.MagicMock()
+    # `write` runs in a worker thread.
+    store.write.side_effect = lambda *args, **kwargs: loop.call_soon_threadsafe(written.set)
     scheduler = previews_module.PreviewScheduler(
         mock.MagicMock(), store, runner, timeout=1.0, debounce=0, interval=0
     )
     with mock.patch.object(scheduler, "_plan", return_value="key"):
         scheduler.start()
         scheduler.request(SLUG)
-        for _ in range(300):
-            if store.write.called:
-                break
-            await asyncio.sleep(0.01)
-        await scheduler.aclose()
+        try:
+            await asyncio.wait_for(written.wait(), 5)
+        finally:
+            await scheduler.aclose()
     assert calls == 2
-    assert store.write.called
     store.record_failure.assert_not_called()
+
+
+async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
+    """#1435: each try holds the scheduler's one worker for up to `PIN_TIMEOUT`, so a
+    stalled Bambuddy must not have it retried at a fixed rate, starving every other
+    model's preview. The wait doubles, up to a cap, and starts over once the snapshot
+    is stored."""
+    pending = True
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        if pending:
+            raise SnapshotPendingError("still uploading", retry_after=100)
+        return b"png"
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    with (
+        mock.patch.object(scheduler, "_plan", return_value="key"),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+    ):
+        for _ in range(5):
+            assert await scheduler._refresh(SLUG) is True
+        pending = False
+        assert await scheduler._refresh(SLUG) is True
+        pending = True
+        assert await scheduler._refresh(SLUG) is True
+    cap = previews_module.MAX_SNAPSHOT_RETRY_DELAY
+    assert delays == [100, 200, 400, cap, cap, 100]
 
 
 async def test_a_preview_render_starts_a_root_span_its_workflow_joins(
