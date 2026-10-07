@@ -19,6 +19,7 @@ from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.libraries import (
     NAME_PATTERN,
     CheckoutGate,
+    InstallPermits,
     LibraryError,
     LibraryFetchError,
     LibraryNotFoundError,
@@ -40,13 +41,13 @@ async def resolve_pin(
     url: str | None,
     ref: str | None,
     libraries: LibraryStore,
-    installs: asyncio.Semaphore,
+    installs: InstallPermits,
 ) -> ModelLibrary:
     """Clone ``name`` at ``ref`` and return the pin. The caller holds
     :meth:`CheckoutGate.pinning` until the pin is recorded."""
     try:
         # A clone is a network fetch; off the loop, and a bounded number at a time.
-        async with installs:
+        async with installs.permit():
             return await asyncio.to_thread(libraries.resolve, name, url=url, ref=ref)
     except LibraryNotFoundError:
         raise ApiError(
@@ -83,7 +84,7 @@ async def pinned_at_create(
     meta: ModelMeta,
     *,
     libraries: LibraryStore,
-    installs: asyncio.Semaphore,
+    installs: InstallPermits,
     checkouts: CheckoutGate,
 ) -> AsyncIterator[ModelMeta]:
     """``meta`` with the curated ``names`` pinned at the catalogue's ref, for a create

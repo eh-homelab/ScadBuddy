@@ -43,6 +43,7 @@ from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
     CheckoutLeases,
+    InstallPermits,
     LibraryStore,
 )
 from scadbuddy.library.media_store import PostgresMediaStore
@@ -160,17 +161,16 @@ class AppState:
     #: one: the worker's cap is its activity slots, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
-    #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
-    #: thread for up to the git timeout; uncapped, a burst of installs would hold the
-    #: default executor that every other `to_thread` route shares. More than one, so
+    #: At most INSTALL_CONCURRENCY library clones at once, across every process that
+    #: shares the database (#1131). Each runs in a worker thread for up to the git
+    #: timeout; uncapped, a burst of installs would hold the default executor that
+    #: every other `to_thread` route shares. More than one, so
     #: a long clone (NopSCADlib) doesn't hold up adding another library. Nothing
     #: orders two clones of the same library: each runs in full, and the one whose
     #: commit is already checked out gives way to it (`LibraryStore._clone`); the pin
     #: itself is written under the history's write lock. A queued install waits on
     #: the loop, not in a thread.
-    installs: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
-    )
+    installs: InstallPermits = field(default_factory=lambda: InstallPermits(INSTALL_CONCURRENCY))
     #: At most IMPORT_CONCURRENCY `POST /models/import` and `POST
     #: /models/{slug}/assets/fetch` fetches at once on this replica, together. Held for
     #: the fetch only -- an import's parse check takes `checks` like any create, an
@@ -304,7 +304,7 @@ def _build_core(settings: Settings) -> AppState:
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
-    installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
+    installs = InstallPermits(INSTALL_CONCURRENCY, pool)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
         paths.assets,
@@ -554,7 +554,7 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
 
-def get_installs(state: StateDep) -> asyncio.Semaphore:
+def get_installs(state: StateDep) -> InstallPermits:
     return state.installs
 
 
@@ -587,7 +587,7 @@ EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
-InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+InstallsDep = Annotated[InstallPermits, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
 ImportsDep = Annotated[ImportPermits, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
