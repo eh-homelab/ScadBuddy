@@ -687,7 +687,10 @@ class TemplatePipeline:
             if not await self._project(state="running"):
                 # Settled before this run began: an older build's API commits the row
                 # before it starts the run, and a release in between cancels the row
-                # with no run to cancel. Nothing to render (#603).
+                # with no run to cancel. Nothing to render (#603). In this build's
+                # own runs the row is never closed first (only this run's `release`
+                # cancels it, and sets `_cancelled`), short of a prune, so the run's
+                # status here is "settled": it cancelled nothing.
                 return
             self._upsert(STATUS.value_set("running"))
             await self._project(steps=steps)
