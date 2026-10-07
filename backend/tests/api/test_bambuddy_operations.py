@@ -314,6 +314,8 @@ def test_a_request_without_a_key_is_428_and_does_nothing(
     is refused before the check or the effect runs."""
     configure(client)
     case = KINDS[kind](client, model)
+    with psycopg.connect(pg_conninfo) as conn:
+        before = conn.execute("SELECT count(*) FROM operations").fetchone()
 
     response = client.post(case.path, json=case.body)
 
@@ -321,7 +323,7 @@ def test_a_request_without_a_key_is_428_and_does_nothing(
     assert response.json()["type"].endswith("/idempotency-key-required")
     assert case.effect.call_count == 0
     with psycopg.connect(pg_conninfo) as conn:
-        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == before
 
 
 @pytest.mark.parametrize("kind", list(KINDS))

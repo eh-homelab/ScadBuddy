@@ -231,12 +231,18 @@ def test_every_preset_write_publishes_presets_changed(
 ) -> None:
     """#357: another tab, or the assistant, sees a preset change without a reload."""
     url = f"/api/v1/models/{model}/presets"
-    saved = _ok(client.post(url, json={"name": "Big", "params": {"width": 25}}), 201)
-    _ok(client.patch(f"{url}/{saved['id']}", json={"name": "Bigger"}))
-    copy = _ok(client.post(f"{url}/{saved['id']}/duplicate", json={"name": "Copy"}), 201)
+    saved = _ok(
+        client.post(url, json={"name": "Big", "params": {"width": 25}}, headers=press()), 201
+    )
+    _ok(client.patch(f"{url}/{saved['id']}", json={"name": "Bigger"}, headers=press()))
+    copy = _ok(
+        client.post(f"{url}/{saved['id']}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
     _ok(client.delete(f"{url}/{copy['id']}"), 204)
     # A refused write changed nothing, so it says nothing.
-    assert client.post(url, json={"name": "bigger", "params": {}}).status_code == 409
+    assert (
+        client.post(url, json={"name": "bigger", "params": {}}, headers=press()).status_code == 409
+    )
     assert published(events, "presets.changed") == [{"kind": "presets.changed", "slug": model}] * 4
 
 
@@ -508,7 +514,7 @@ def test_saving_and_deleting_an_output_publish_their_events(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
     output_id = make_output(client, model)
-    _ok(client.delete(f"/api/v1/outputs/{output_id}"), 204)
+    _ok(client.delete(f"/api/v1/outputs/{output_id}", headers=press()), 204)
     cast(Recorded, events).wait_for_kind("output.deleted")
     assert published(events, "output.created") == [
         {"kind": "output.created", "output_id": output_id, "slug": model}
@@ -589,7 +595,7 @@ def test_installing_a_font_publishes_font_installed(
 ) -> None:
     service = FakeBackedService(data_dir, client=FakeClient())
     app.dependency_overrides[get_fonts] = lambda: service
-    _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}))
+    _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press()))
     assert published(events, "font.installed") == [{"kind": "font.installed", "family": "Pacifico"}]
 
 

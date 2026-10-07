@@ -72,7 +72,9 @@ def _generate(client: TestClient, paths: DataPaths, slug: str, cover: bytes | No
     ).json()["job_id"]
     wait_for_job(client, job_id)
     set_plate_image(client, job_id, cover)
-    response = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id})
+    response = client.post(
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
     return output_id
@@ -231,7 +233,7 @@ def test_the_etag_follows_every_change_of_image(client: TestClient, paths: DataP
     seen.append(_etag(client))
     assert client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).status_code == 200
     seen.append(_etag(client))  # back to the first output's plate image
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
     seen.append(_etag(client))  # the next output's
 
     assert seen[0] == seen[3]  # the same bytes as before, the same tag
@@ -559,12 +561,12 @@ def test_the_record_names_the_output_behind_the_fallback(
     assert (record["thumbnail_source"], record["thumbnail_output_id"]) == ("output", first)
     assert _listed(client)[SLUG]["thumbnail_output_id"] == first
 
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
     moved = client.get(f"/api/v1/models/{SLUG}").json()
     assert (moved["thumbnail_source"], moved["thumbnail_output_id"]) == ("output", second)
     assert moved["version"] == record["version"]
 
-    assert client.delete(f"/api/v1/outputs/{second}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{second}", headers=press()).status_code == 204
     gone = _listed(client)[SLUG]
     assert (gone["has_thumbnail"], gone["thumbnail_source"], gone["thumbnail_output_id"]) == (
         False,
@@ -592,7 +594,7 @@ def test_deleting_the_covering_output_falls_back_to_the_next(
     _generate(client, paths, SLUG, COVER_TWO)
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
 
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
 
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_TWO
 
@@ -605,7 +607,7 @@ def test_deleting_the_only_covering_output_leaves_no_thumbnail(
     only = _generate(client, paths, SLUG, COVER_ONE)
     assert _listed(client)[SLUG]["has_thumbnail"] is True
 
-    assert client.delete(f"/api/v1/outputs/{only}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{only}", headers=press()).status_code == 204
 
     assert _listed(client)[SLUG]["has_thumbnail"] is False
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").status_code == 404

@@ -62,15 +62,23 @@ def held(pool: Pool) -> set[tuple[str, str]]:
     return {(row["key"], row["holder_id"]) for row in rows}
 
 
+def answer_for(app: FastAPI, job: Job) -> None:
+    """Make the app's render service answer for ``job``: the routes through `get_render`,
+    the output operations' checks through the app's own (#1054)."""
+    app.dependency_overrides[get_render] = lambda: OneJob(job)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    setattr(state.render.store, "read", OneJob(job).read)  # noqa: B010
+
+
 def finished(app: FastAPI, tmp_path: Path) -> tuple[str, list[str]]:
     """A done job the app's render service answers for: its id and its output's Parts."""
     _, job, written = asyncio.run(finished_job(tmp_path))
-    app.dependency_overrides[get_render] = lambda: OneJob(job)
+    answer_for(app, job)
     return job.id, [m.part for m in written.manifest]
 
 
 def save(client: TestClient, job_id: str) -> str:
-    response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+    response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press())
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
     return output_id
@@ -92,7 +100,7 @@ def test_deleting_an_output_releases_its_parts(
 ) -> None:
     job_id, _ = finished(app, tmp_path)
     output_id = save(client, job_id)
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert held(pool) == set()
 
 
@@ -124,7 +132,9 @@ def test_a_save_whose_hold_fails_saves_nothing(
     ):
         state: AppState = getattr(app.state, STATE_ATTR)
         state.refs = _HoldFails(opened)
-        response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+        response = client.post(
+            "/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press()
+        )
         assert response.status_code == 500
         assert client.get("/api/v1/models/demo/outputs").json() == []
 
@@ -143,7 +153,7 @@ def test_a_save_whose_write_fails_holds_nothing(
 
     monkeypatch.setattr(OutputStore, "create", full)
     # The base's answer for a copy that fails (#427), raised after the release.
-    response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+    response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press())
     assert response.status_code == 404
     assert "is gone" in response.json()["detail"]
     assert held(pool) == set()
@@ -167,7 +177,9 @@ def test_a_hold_that_fails_part_way_is_released(
     ):
         state: AppState = getattr(app.state, STATE_ATTR)
         state.refs = _HoldLandsThenFails(opened)
-        response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+        response = client.post(
+            "/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press()
+        )
         assert response.status_code == 500
         assert held(opened) == set()
 
@@ -184,7 +196,7 @@ def test_a_save_cancelled_mid_write_keeps_its_holds(
 
     monkeypatch.setattr(OutputStore, "create", cancelled)
     with TestClient(app, raise_server_exceptions=False) as client:
-        client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
+        client.post("/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press())
     assert {part for part, _ in held(pool)} == set(parts)
 
 
@@ -199,7 +211,7 @@ def test_saving_an_arrange_job_records_its_sources_and_holds_its_parts(
         sources=sources,
     )
     arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
-    app.dependency_overrides[get_render] = lambda: OneJob(arranged)
+    answer_for(app, arranged)
     output_id = save(client, "arr-1")
     detail = client.get(f"/api/v1/outputs/{output_id}").json()
     assert detail["arranged_from"] == sources
@@ -219,7 +231,7 @@ def test_the_edit_link_of_an_arranged_output_says_it_was_arranged(
         sources=sources,
     )
     arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
-    app.dependency_overrides[get_render] = lambda: OneJob(arranged)
+    answer_for(app, arranged)
     output_id = save(client, "arr-2")
     target = client.get(f"/api/v1/outputs/{output_id}/edit").json()
     assert target["arranged_from"] == sources

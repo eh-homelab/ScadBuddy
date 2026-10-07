@@ -427,7 +427,9 @@ def test_deleting_an_output_can_take_its_inbox_copies_and_never_a_projects(
     run(client, output_id)
     run(client, output_id, project_id=7)
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code == 204
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
@@ -445,7 +447,7 @@ def test_deleting_an_output_leaves_bambuddy_alone_unless_asked(
     delete = deletes()
     run(client, output_id)
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert not delete.called
 
 
@@ -462,7 +464,9 @@ def test_an_inbox_copy_that_cannot_be_deleted_keeps_the_output(
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code >= 500
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
@@ -509,7 +513,7 @@ def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
 
     monkeypatch.setattr(links, "delete_outputs", forget)
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
     # The upload records' failure does not keep the links serving its archives.
     assert forgotten == [[output_id]]

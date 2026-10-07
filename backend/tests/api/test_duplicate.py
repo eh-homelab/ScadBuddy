@@ -596,7 +596,9 @@ def _generate_with_cover(client: TestClient, paths: DataPaths, model_id: str, co
     job_id = client.post(f"/api/v1/models/{model_id}/render", json={"params": {}}).json()["job_id"]
     assert wait_for_job(client, job_id)["status"] == "done"
     set_plate_image(client, job_id, cover)
-    saved = client.post(f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id})
+    saved = client.post(
+        f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert saved.status_code == 201, saved.text
     output_id: str = saved.json()["id"]
     return output_id

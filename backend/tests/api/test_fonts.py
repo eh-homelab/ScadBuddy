@@ -222,7 +222,7 @@ def test_an_unreachable_catalogue_is_a_503_problem(
 def test_installing_returns_the_styles_to_write_into_the_font_string(
     client: TestClient, fonts: FakeBackedService
 ) -> None:
-    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 200
     assert response.json()["family"] == "Pacifico"
     assert response.json()["styles"] == ["Regular"]
@@ -231,7 +231,9 @@ def test_installing_returns_the_styles_to_write_into_the_font_string(
 def test_installing_something_outside_the_catalogue_is_a_404(
     client: TestClient, fonts: FakeBackedService
 ) -> None:
-    response = client.post("/api/v1/fonts/install", json={"family": "Comic Sans MS"})
+    response = client.post(
+        "/api/v1/fonts/install", json={"family": "Comic Sans MS"}, headers=press()
+    )
     assert response.status_code == 404
 
 
@@ -239,7 +241,7 @@ def test_a_download_failure_is_reported_rather_than_left_to_the_render(
     client: TestClient, fonts: FakeBackedService
 ) -> None:
     fonts.client.download_fails = True
-    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 502
     assert "could not be downloaded" in response.json()["detail"]
 
@@ -247,7 +249,10 @@ def test_a_download_failure_is_reported_rather_than_left_to_the_render(
 def test_an_empty_family_is_rejected_before_anything_is_fetched(
     client: TestClient, fonts: FakeBackedService
 ) -> None:
-    assert client.post("/api/v1/fonts/install", json={"family": ""}).status_code == 422
+    assert (
+        client.post("/api/v1/fonts/install", json={"family": ""}, headers=press()).status_code
+        == 422
+    )
 
 
 def test_an_install_fontconfig_then_does_not_resolve_is_a_500_naming_the_files(
@@ -255,7 +260,7 @@ def test_an_install_fontconfig_then_does_not_resolve_is_a_500_naming_the_files(
 ) -> None:
     """#253: not a success that leaves every render of the family in DejaVu Sans."""
     fonts.downloads_resolve = False
-    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 500
     body = response.json()
     assert "does not resolve" in body["detail"]
@@ -366,7 +371,9 @@ def test_a_render_or_preset_naming_a_family_that_is_not_installed_is_refused(
 
     render = client.post("/api/v1/models/sign/render", json={"params": {"label": "Pacifico"}})
     preset = client.post(
-        "/api/v1/models/sign/presets", json={"name": "curly", "params": {"label": "Pacifico"}}
+        "/api/v1/models/sign/presets",
+        json={"name": "curly", "params": {"label": "Pacifico"}},
+        headers=press(),
     )
 
     for response in (render, preset):
@@ -401,7 +408,12 @@ def test_an_installed_family_is_published_to_the_store(
 ) -> None:
     mirror = _Mirror()
     _with_store(app, mirror)
-    assert client.post("/api/v1/fonts/install", json={"family": "Pacifico"}).status_code == 200
+    assert (
+        client.post(
+            "/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press()
+        ).status_code
+        == 200
+    )
     assert mirror.published == ["Pacifico"]
 
 
@@ -409,6 +421,6 @@ def test_a_failed_publish_still_answers_the_install(
     app: FastAPI, client: TestClient, fonts: FakeBackedService, caplog: pytest.LogCaptureFixture
 ) -> None:
     _with_store(app, _Mirror(fail=True))
-    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 200 and response.json()["family"] == "Pacifico"
     assert "could not publish an installed font family" in caplog.text

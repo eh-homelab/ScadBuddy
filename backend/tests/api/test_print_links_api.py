@@ -54,7 +54,7 @@ def test_deleting_an_output_forgets_its_links(client: TestClient, model: str) ->
     links = state(client).print_links
     asyncio.run(links.record(output_id, PrintLink(archive_id=18, matched_by="queue_item")))
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
 
     assert asyncio.run(links.output_for(18)) is None
 
