@@ -113,6 +113,13 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'How long one openscad run may take before it is stopped.',
   },
   {
+    name: 'template_activity_max_timeout',
+    section: 'rendering',
+    label: 'Template activity limit',
+    kind: 'seconds',
+    help: "The longest a template pipeline's own activity may run; a whole pipeline gets four times this.",
+  },
+  {
     name: 'job_ttl',
     section: 'rendering',
     label: 'Keep finished renders for',

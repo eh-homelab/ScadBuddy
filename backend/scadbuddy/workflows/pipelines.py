@@ -1,9 +1,10 @@
-"""TemplatePipeline and RenderPiece (spec 2026-09-27 §3.4). Phase 1 runs only the
-built-in default pipeline: one piece, one plate layout, one output."""
+"""TemplatePipeline and RenderPiece (spec 2026-09-27 §3.4): a job runs its template's
+pipeline, or the built-in one (§5.3), over `Ctx`; each piece is a child workflow."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import timedelta
 from typing import Any
 
@@ -20,10 +21,20 @@ from temporalio.exceptions import (
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
-    from scadbuddy.render.job_models import CANCELLED_ERROR, SUPERSEDED_ERROR, Job, StepInfo
+    from scadbuddy.render.job_models import (
+        CANCELLED_ERROR,
+        SUPERSEDED_ERROR,
+        Job,
+        OutputRecord,
+        PipelineOutput,
+        StepInfo,
+        StepState,
+    )
+    from scadbuddy.template import Blob, Part
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
         ACCEPT_TRANSIENT,
+        ARRANGE_VERSION,
         CLAIMS_ACTIVITY,
         CLOSING,
         LEGACY_PENDING,
@@ -31,7 +42,15 @@ with workflow.unsafe.imports_passed_through():
         RELEASE_UPDATE,
         RENDER_UNSTARTABLE,
         AcceptRender,
+        ArrangeInputs,
         Failure,
+        Layout,
+        LoadedPipeline,
+        LoadRequest,
+        MigrateRequest,
+        MigrateResult,
+        OutputRequest,
+        PackRequest,
         PieceOutcome,
         PieceRequest,
         PieceResult,
@@ -43,9 +62,11 @@ with workflow.unsafe.imports_passed_through():
         RenderMainResult,
         RenderStart,
         input_problem,
-        piece_key,
     )
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
+    from scadbuddy.workflows.sandbox import load_pipeline_module, pipeline_error, pipeline_error_at
+
+from scadbuddy.workflows.ctx import Ctx, PieceFailedError
 
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
@@ -127,6 +148,13 @@ def _solids_timeout() -> timedelta:
     return _openscad_timeout() + 3 * TRANSFER
 
 
+def _prepare_timeout() -> timedelta:
+    """`prepare`: the transfers in `PREPARE_TIMEOUT`, then the schema export that checks
+    the piece's parameters, one openscad run (`cached_schema`, under the render's own
+    timeout), so the budget adds that run rather than folding it into the transfers."""
+    return PREPARE_TIMEOUT + _openscad_timeout()
+
+
 #: `cached_piece`: an index read and, on a miss, one download.
 CACHED_TIMEOUT = SHORT + TRANSFER
 #: `finish_piece`: the piece fetched, the short stage, the piece published.
@@ -143,7 +171,7 @@ def _waiter_recheck() -> timedelta:
     harmless (the re-signal is idempotent)."""
     return (
         _retried(CACHED_TIMEOUT)
-        + _retried(PREPARE_TIMEOUT)
+        + _retried(_prepare_timeout())
         + _retried(_main_timeout())
         + _retried(_solids_timeout())
         + _retried(FINISH_TIMEOUT)
@@ -166,6 +194,9 @@ def _target_gone(error: FailureError) -> bool:
     return isinstance(error, ApplicationError) and error.type == EXTERNAL_NOT_FOUND
 
 
+#: The failure types whose first detail is a `Failure` (the job's error, log tail and
+#: diagnostics): openscad's own, a refused file or parameter, a template activity's.
+FAILURE_TYPES = ("OpenSCADError", "ParameterError", "TemplateActivityError")
 #: What each piece activity does, for a failure that is not OpenSCAD's (#952).
 _STAGES = {
     "cached_piece": "looking up the finished piece",
@@ -184,13 +215,21 @@ def _failure_of(error: BaseException) -> Failure:
     innermost = error
     cause: BaseException | None = error
     while cause is not None:
-        if isinstance(cause, ApplicationError) and cause.type == "OpenSCADError" and cause.details:
+        if isinstance(cause, ApplicationError) and cause.type in FAILURE_TYPES and cause.details:
             detail = cause.details[0]
             return detail if isinstance(detail, Failure) else Failure.model_validate(detail)
-        if isinstance(cause, ActivityError):
-            stage = _STAGES.get(cause.activity_type, cause.activity_type)
+        if isinstance(cause, ActivityError) and cause.activity_type in _STAGES:
+            stage = _STAGES[cause.activity_type]
         innermost = cause
         cause = cause.__cause__
+    if stage is None:
+        # Not a piece's stage (`load_pipeline` refusing the template, say): the
+        # activity's own message.
+        cause = error
+        while cause is not None:
+            if isinstance(cause, ApplicationError):
+                return Failure(error=cause.message)
+            cause = cause.__cause__
     if isinstance(innermost, ApplicationError) and innermost.type:
         reason = f"{innermost.type}: {innermost.message}"
     else:
@@ -215,9 +254,11 @@ class RenderPiece:
         try:
             result = await self._render(req)
         except ActivityError as error:
-            await self._tell_waiting(PieceOutcome(failure=_failure_of(error)))
+            await self._tell_waiting(
+                PieceOutcome(failure=_failure_of(error), piece_key=req.piece_key)
+            )
             raise
-        await self._tell_waiting(PieceOutcome(result=result))
+        await self._tell_waiting(PieceOutcome(result=result, piece_key=req.piece_key))
         return result
 
     async def _render(self, req: PieceRequest) -> PieceResult:
@@ -236,7 +277,7 @@ class RenderPiece:
             "prepare",
             req,
             result_type=PrepareResult,
-            start_to_close_timeout=PREPARE_TIMEOUT,
+            start_to_close_timeout=_prepare_timeout(),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
@@ -308,13 +349,19 @@ class RenderPreview:
 
 @workflow.defn(name="TemplatePipeline")
 class TemplatePipeline:
-    """One render job, started as ``render-<render_key>`` with update-with-start
-    (spec 2026-10-01 §4.5, #1053). Its first step inserts the job's row; every
-    identical request that reaches the open execution joins it as one more claim, and
-    the last claim released cancels it."""
+    """One job, started as ``render-<render_key>`` with update-with-start (spec
+    2026-10-01 §4.5, #1053): the template's pipeline (or the built-in one, §5.3) run
+    over `Ctx`, or an arrange (spec 2026-09-27 §7). Its first step inserts the job's
+    row; every identical request that reaches the open execution joins it as one more
+    claim, and the last claim released cancels it."""
 
     def __init__(self) -> None:
-        self._outcome: PieceOutcome | None = None
+        self._outcomes: dict[str, PieceOutcome] = {}
+        self._parts: dict[str, Part] = {}
+        self._pieces: dict[str, asyncio.Task[PieceOutcome]] = {}
+        self._progress: asyncio.Task[None] | None = None
+        #: The pieces another job is rendering that this one waits on, by key.
+        self._waiting_on: list[str] = []
         self._job: Job | None = None
         self._queue_full: int | None = None
         #: Why the first step failed past its retries: the run completes with no row.
@@ -338,7 +385,85 @@ class TemplatePipeline:
 
     @workflow.signal
     def piece_finished(self, outcome: PieceOutcome) -> None:
-        self._outcome = outcome
+        key = outcome.piece_key
+        if not key and len(self._waiting_on) == 1:
+            # From a build before `piece_key` (draining in a deploy): the one piece
+            # waited on is the one that sent it. With several, the re-check restarts.
+            key = self._waiting_on[0]
+            outcome = outcome.model_copy(update={"piece_key": key})
+        self._outcomes[key] = outcome
+
+    def part_of(self, key: str) -> Part:
+        part = self._parts.get(key)
+        if part is None:
+            raise ValueError(f"the layout places piece {key}, which this job never rendered")
+        return part
+
+    async def activity_call(self, name: str, arg: Any, *, result_type: type[Any]) -> Any:
+        # `write_output` loads meshes, renders every plate's thumbnails (bounded by the
+        # render timeout) and writes the 3MF: it gets the openscad bound and heartbeats.
+        if name == "write_output":
+            return await workflow.execute_activity(
+                name,
+                arg,
+                result_type=result_type,
+                start_to_close_timeout=_output_timeout(arg),
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=RETRY,
+            )
+        return await workflow.execute_activity(
+            name, arg, result_type=result_type, start_to_close_timeout=SHORT, retry_policy=RETRY
+        )
+
+    def _projection(self, fields: dict[str, Any]) -> Projection:
+        job = self._job
+        if job is None:
+            raise RuntimeError("the job has not started")
+        return Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields})
+
+    async def _project(self, **fields: Any) -> bool:
+        """For ``state="running"``, whether the row is still open (#603); else True."""
+        open_row: bool = await workflow.execute_activity(
+            "project",
+            self._projection(fields),
+            result_type=bool,
+            start_to_close_timeout=SHORT,
+            retry_policy=PROJECT_RETRY,
+            # A release that cancels the job mid-projection waits for the write to
+            # resolve: its outcome must be in history before the run completes, or
+            # Temporal rejects that workflow task and the release with it.
+            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+        )
+        if self._released is not None and fields.get("state") in (None, "running"):
+            # A write that completed despite the cancel returns normally: the release
+            # still stands.
+            raise asyncio.CancelledError
+        return open_row
+
+    def project_later(self, **fields: Any) -> None:
+        """`ctx.progress` is synchronous (§5.2): the write goes out without waiting.
+        Each waits for the one before it, so they land in order (`set_steps` is
+        last-writer-wins). A late one after the job settles is a no-op."""
+        projection = self._projection(fields)
+        previous = self._progress
+
+        async def write() -> None:
+            if previous is not None:
+                await previous
+            with contextlib.suppress(ActivityError):
+                await workflow.execute_activity(
+                    "project",
+                    projection,
+                    start_to_close_timeout=SHORT,
+                    retry_policy=PROJECT_RETRY,
+                )
+
+        self._progress = asyncio.create_task(write())
+
+    async def _settle_progress(self) -> None:
+        """Let every progress write land before the final one, so it cannot overtake it."""
+        if self._progress is not None:
+            await self._progress
 
     def _started(self) -> bool:
         return (
@@ -434,7 +559,9 @@ class TemplatePipeline:
                 retry_policy=PROJECT_RETRY,
             )
 
-    async def _project_released(self, job: Job, steps: list[StepInfo]) -> None:
+    async def _project_released(
+        self, job: Job, steps: list[StepInfo], version: str = "default"
+    ) -> None:
         """The cancelled job its last release leaves. Local, so it never waits behind
         openscad runs (the piece goes on) for one of the worker's activity slots:
         `release` waits for it."""
@@ -446,6 +573,7 @@ class TemplatePipeline:
                 state="cancelled",
                 failure=Failure(error=self._released or "cancelled"),
                 steps=steps,
+                pipeline_version=version,
             ),
             start_to_close_timeout=SHORT,
             retry_policy=PROJECT_RETRY,
@@ -477,7 +605,7 @@ class TemplatePipeline:
             return
         self._search_attributes = start.search_attributes
         self._upsert(
-            KIND.value_set("render"), SUBJECT.value_set(start.slug), STATUS.value_set("pending")
+            KIND.value_set(start.kind), SUBJECT.value_set(start.slug), STATUS.value_set("pending")
         )
         info = workflow.info()
         try:
@@ -539,114 +667,257 @@ class TemplatePipeline:
         await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _render(self, job: Job) -> None:
-        async def project(**fields: object) -> bool:
-            open_row: bool = await workflow.execute_activity(
-                "project",
-                Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields}),
-                result_type=bool,
-                start_to_close_timeout=SHORT,
-                retry_policy=PROJECT_RETRY,
-                # A release that cancels the job mid-projection waits for the write to
-                # resolve: its outcome must be in history before the run completes, or
-                # Temporal rejects that workflow task and the release with it.
-                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-            )
-            if self._released is not None and fields.get("state") in (None, "running"):
-                # A write that completed despite the cancel returns normally: the
-                # release still stands.
-                raise asyncio.CancelledError
-            return open_row
-
         problem = input_problem(job.slug, job.model_version)
         if problem is not None:
             try:
-                await project(state="failed", failure=Failure(error=problem))
+                await self._project(state="failed", failure=Failure(error=problem))
             except BaseException as error:
                 # Released while the write waited for a worker (review #1066 2.2).
                 if not self._released_by(error):
                     raise
                 await self._project_released(job, [])
             return
-        steps = [StepInfo(name="render", state="running", done=0, total=1)]
+        if job.kind == "arrange":
+            await self._arrange(job)
+            return
+        ctx: Ctx | None = None
+        steps = [StepInfo(name="render", state="running", done=0, total=None)]
+        version = "default"
         try:
-            if not await project(state="running"):
+            if not await self._project(state="running"):
                 # Settled before this run began: an older build's API commits the row
                 # before it starts the run, and a release in between cancels the row
                 # with no run to cancel. Nothing to render (#603).
                 return
             self._upsert(STATUS.value_set("running"))
-            params = job.inputs.get("params", job.params)
-            # Without a revision the source is live and may change before the next job,
-            # so the piece is this job's own: its blob directory and workflow (#642).
-            scope = f"job:{job.id}" if job.model_version is None else None
-            version = job.model_version if job.model_version is not None else scope
-            key = piece_key(job.slug, version, "model.scad", params)
-            req = PieceRequest(
-                slug=job.slug,
-                revision=job.model_version,
-                scope=scope,
-                params=dict(params),
-                piece_key=key,
+            await self._project(steps=steps)
+            loaded: LoadedPipeline = await workflow.execute_activity(
+                "load_pipeline",
+                LoadRequest(slug=job.slug, revision=job.model_version),
+                result_type=LoadedPipeline,
+                start_to_close_timeout=_load_timeout(),
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=RETRY,
             )
-            await project(steps=steps)
-            outcome = await self._piece(req)
-            if outcome.result is None:
-                steps[0].state = "failed"
-                await project(state="failed", failure=outcome.failure, steps=steps)
+            version = loaded.version
+            inputs = job.inputs or {"params": job.params, "v": 0}
+            ctx = Ctx(self, job, loaded, inputs)
+            failure = await self._run_pipeline(ctx, loaded, inputs)
+            steps = ctx.steps
+            if failure is None and not ctx.outputs:
+                failure = Failure(error=f"{loaded.file}: the pipeline wrote no output")
+            await self._settle_progress()
+            if failure is not None:
+                await self._project(
+                    state="failed",
+                    failure=failure,
+                    steps=_settled(steps, "failed"),
+                    pipeline_version=version,
+                )
                 return
-            steps[0].state, steps[0].done = "done", 1
-            await project(
+            await self._project(
                 state="done",
-                result=outcome.result.result,
-                log_tail=outcome.result.log_tail,
-                steps=steps,
-                blob_key=key,
+                result=ctx.outputs[0].result,
+                outputs=ctx.outputs,
+                log_tail=ctx.log_tail,
+                steps=_settled(steps, "done"),
+                blob_keys=ctx.blob_keys,
+                pipeline_version=version,
             )
         except BaseException as error:
-            released = self._released_by(error)
-            if released or (
-                is_cancelled_exception(error) and workflow.cancellation_reason() is not None
-            ):
-                # Its last claim released (superseded, or by hand), or the run cancelled
-                # by hand: the piece goes on (ABANDON), the job is cancelled.
-                steps[0].state = "cancelled"
-                if released:
-                    await self._project_released(job, steps)
-                    return  # a released job is an outcome: the run completes
-                await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
+            steps = ctx.steps if ctx is not None else steps
+            await self._settle_failed(job, error, steps, version)
+
+    async def _settle_failed(
+        self,
+        job: Job,
+        error: BaseException,
+        steps: list[StepInfo],
+        version: str,
+        failure: Failure | None = None,
+    ) -> None:
+        """The row a job that raised leaves: cancelled when released or cancelled by
+        hand, else failed (with ``failure`` when the caller has a better one). Re-raises
+        what is not a job outcome."""
+        released = self._released_by(error)
+        if released or (
+            is_cancelled_exception(error) and workflow.cancellation_reason() is not None
+        ):
+            # Its last claim released (superseded, or by hand), or the run cancelled by
+            # hand: the piece goes on (ABANDON), the job is cancelled.
+            if released:
+                await self._project_released(job, _settled(steps, "cancelled"), version)
+                return  # a released job is an outcome: the run completes
+            await self._project(
+                state="cancelled",
+                failure=Failure(error="cancelled"),
+                steps=_settled(steps, "cancelled"),
+                pipeline_version=version,
+            )
+            raise error
+        if not isinstance(error, Exception):
+            raise error  # the SDK's own (an eviction), or another cancel: not a job outcome
+        # An activity said no (`load_pipeline` refusing the template): the job's outcome,
+        # with its message. Anything else ends in a terminal row too, never one left at
+        # `running`.
+        said_no = _said_no(error)
+        if failure is None:
+            failure = (
+                _failure_of(error) if said_no else Failure(error=f"{type(error).__name__}: {error}")
+            )
+        try:
+            await self._project(
+                state="failed",
+                failure=failure,
+                steps=_settled(steps, "failed"),
+                pipeline_version=version,
+            )
+        except BaseException as cancel:
+            # Released while the write waited for a worker (review #1066 2.2).
+            if not self._released_by(cancel):
                 raise
-            if not isinstance(error, Exception):
-                raise  # the SDK's own (an eviction), or another cancel: not a job outcome
-            # Anything else ends in a terminal row too, never one left at `running`.
-            steps[0].state = "failed"
-            try:
-                await project(
-                    state="failed",
-                    failure=Failure(error=f"{type(error).__name__}: {error}"),
-                    steps=steps,
-                )
-            except BaseException as cancel:
-                # Released while the write waited for a worker (review #1066 2.2).
-                if not self._released_by(cancel):
-                    raise
-                steps[0].state = "cancelled"
-                await self._project_released(job, steps)
-                return
-            if isinstance(error, FailureError):
+            await self._project_released(job, _settled(steps, "cancelled"), version)
+            return
+        if said_no:
+            return
+        if isinstance(error, FailureError):
+            raise error
+        # A plain exception would fail only the workflow task, which Temporal retries
+        # forever with the run open (and its build never drained).
+        raise ApplicationError(
+            f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
+        ) from error
+
+    async def _run_pipeline(
+        self, ctx: Ctx, loaded: LoadedPipeline, inputs: dict[str, Any]
+    ) -> Failure | None:
+        """Run the template's `run(ctx, inputs)`. What it raises becomes the job's error
+        with its file and line (§3.4 step 2); cancellation passes through untouched. The
+        workflow task never fails on a template's exception: `Exception` includes the
+        sandbox's `RestrictedWorkflowAccessError`, and `asyncio.CancelledError` is not
+        one."""
+        try:
+            namespace = load_pipeline_module(loaded.source, loaded.file)
+            await namespace["run"](ctx, inputs)
+        except PieceFailedError as error:
+            if loaded.version == "default":
+                return error.failure  # today's behaviour (§5.3): the one piece's own error
+            return error.failure.model_copy(update={"error": str(error)})
+        except (ActivityError, ChildWorkflowError) as error:
+            if is_cancelled_exception(error):
                 raise
-            # A plain exception would fail only the workflow task, which Temporal
-            # retries forever with the run open (and its build never drained).
-            raise ApplicationError(
-                f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
-            ) from error
+            failure = _failure_of(error)
+            if loaded.version == "default":
+                return failure  # no line in a file the template does not have
+            return failure.model_copy(
+                update={"error": pipeline_error_at(error, loaded.file, failure.error)}
+            )
+        except Exception as error:
+            if is_cancelled_exception(error):
+                raise
+            if loaded.version == "default":
+                return Failure(error=f"{type(error).__name__}: {error}")
+            return Failure(error=pipeline_error(error, loaded.file))
+        return None
+
+    async def _arrange(self, job: Job) -> None:
+        """Objects from saved outputs onto plates for a goal, then one 3MF (spec §7). No
+        piece is rendered: the Parts are in the store already."""
+        inputs = ArrangeInputs.model_validate(job.inputs)
+        steps = [StepInfo(name="arrange", state="running", done=0, total=2)]
+        try:
+            if not await self._project(state="running", pipeline_version=ARRANGE_VERSION):
+                return  # settled before this run began, as in `_render` (#603)
+            self._upsert(STATUS.value_set("running"))
+            await self._project(steps=steps)
+            layout = await workflow.execute_activity(
+                "pack",
+                # Always plates, never the piece as rendered: only the writer applies
+                # the pinned colour order (Review Focus 4).
+                PackRequest(
+                    items=inputs.items,
+                    plate=inputs.plate,
+                    goal=inputs.goal,
+                    filament_plan=inputs.filament_plan,
+                    colours=inputs.colours,
+                    allow_own=False,
+                ),
+                result_type=Layout,
+                start_to_close_timeout=SHORT,
+                retry_policy=RETRY,
+            )
+            steps[0].done = 1
+            await self._project(steps=steps)
+            parts = list({item.part.piece_key: item.part for item in inputs.items}.values())
+            keys = [p.piece_key for p in parts]
+            req = OutputRequest(
+                job_id=job.id,
+                index=0,
+                slug=job.slug,
+                layout=layout,
+                parts=parts,
+                name=inputs.name,
+                bom=[],
+                files={},
+                plate_model=inputs.plate_model,
+                colours=inputs.colours,
+                provenance=inputs.provenance,
+                record=OutputRecord(
+                    revision=None,
+                    ui_api=None,
+                    pipeline_api=0,
+                    pipeline_version=ARRANGE_VERSION,
+                    inputs_v=0,
+                    plate_key=inputs.plate.key,
+                    parts=keys,
+                ),
+            )
+            written = await workflow.execute_activity(
+                "write_output",
+                req,
+                result_type=PipelineOutput,
+                # Every Part is fetched from the store: the writer's bound, as a
+                # pipeline's `ctx.output` gets it, and it heartbeats.
+                start_to_close_timeout=_output_timeout(req),
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=RETRY,
+            )
+            steps[0].state, steps[0].done = "done", 2
+            await self._project(
+                state="done",
+                result=written.result,
+                outputs=[written],
+                blob_keys=list(dict.fromkeys([*keys, *written.blob_keys])),
+                steps=steps,
+                pipeline_version=ARRANGE_VERSION,
+            )
+        except BaseException as error:
+            failure: Failure | None = None
+            if _said_no(error) and isinstance(error, ActivityError):
+                # The packer or the writer said no (an object that does not fit the
+                # plate): the job's outcome, with the activity's message.
+                cause = error.cause
+                message = cause.message if isinstance(cause, ApplicationError) else str(error)
+                failure = Failure(error=message)
+            await self._settle_failed(job, error, steps, ARRANGE_VERSION, failure)
+
+    async def piece(self, req: PieceRequest) -> PieceOutcome:
+        """Identical renders in one pipeline share one task, so one child (§3.4)."""
+        if req.piece_key not in self._pieces:
+            self._pieces[req.piece_key] = asyncio.create_task(self._piece(req))
+        outcome = await self._pieces[req.piece_key]
+        if outcome.result is not None:
+            self._parts[req.piece_key] = Part.of(req, outcome.result)
+        return outcome
 
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
         Neither a cancelled job nor its closing touches the piece (ABANDON twice)."""
-        piece_id = f"piece-{req.piece_key}"
+        key = req.piece_key
+        piece_id = f"piece-{key}"
         while True:
-            if self._outcome is not None:
-                return self._outcome  # arrived between waits
+            if self._outcomes.get(key) is not None:
+                return self._outcomes[key]  # arrived between waits
             try:
                 child = await workflow.start_child_workflow(
                     RenderPiece.run,
@@ -660,27 +931,87 @@ class TemplatePipeline:
                 piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
                     workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
                 )
+                self._waiting_on.append(key)
                 try:
-                    await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
-                except FailureError as error:
+                    try:
+                        await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
+                    except FailureError as error:
+                        _raise_if_cancelled()
+                        if not _target_gone(error):
+                            raise
+                        continue  # it closed in between; start it again
                     _raise_if_cancelled()
-                    if not _target_gone(error):
-                        raise
-                    continue  # it closed in between; start it again
-                _raise_if_cancelled()
-                try:
-                    await workflow.wait_condition(
-                        lambda: self._outcome is not None, timeout=_waiter_recheck()
-                    )
-                except TimeoutError:
-                    continue  # it may have closed without telling us (terminated, timed out)
-                assert self._outcome is not None
-                return self._outcome
+                    try:
+                        await workflow.wait_condition(
+                            lambda: key in self._outcomes, timeout=_waiter_recheck()
+                        )
+                    except TimeoutError:
+                        continue  # it may have closed without telling us (terminated, timed out)
+                finally:
+                    self._waiting_on.remove(key)
+                return self._outcomes[key]
             try:
-                return PieceOutcome(result=await child)
+                return PieceOutcome(result=await child, piece_key=key)
             except ChildWorkflowError as error:
                 if is_cancelled_exception(error) and (
                     workflow.cancellation_reason() is not None or self._released is not None
                 ):
                     raise  # this job was cancelled: ABANDON resolves the child as cancelled
-                return PieceOutcome(failure=_failure_of(error))
+                return PieceOutcome(failure=_failure_of(error), piece_key=key)
+
+
+def _said_no(error: BaseException) -> bool:
+    """An activity or piece refused the job (`load_pipeline` refusing the template, the
+    packer an object too large): its outcome. A `project` write that failed is not one:
+    the run fails, as any error the job's row cannot record."""
+    if isinstance(error, ActivityError):
+        return error.activity_type != "project"
+    return isinstance(error, ChildWorkflowError)
+
+
+def _settled(steps: list[StepInfo], state: StepState) -> list[StepInfo]:
+    return [s.model_copy(update={"state": state}) for s in steps]
+
+
+def _output_timeout(req: OutputRequest) -> timedelta:
+    """`write_output`: the openscad bound (thumbnails, the 3MF), plus one transfer per
+    store move: the revision's snapshot (this worker may not have it yet), each piece
+    and each `Blob` it fetches, and the output it publishes."""
+    moves = 1 + len(req.parts) + sum(isinstance(v, Blob) for v in req.files.values()) + 1
+    return _openscad_timeout() + moves * TRANSFER
+
+
+def _load_timeout() -> timedelta:
+    """`load_pipeline` and `migrate_inputs`: the revision's snapshot brought onto this
+    worker (one transfer, heartbeated, as `prepare` budgets it), then their own work: a
+    file read, or the template's `migrate` (`MIGRATE_SECONDS`, under `SHORT`)."""
+    return SHORT + TRANSFER
+
+
+#: `migrate_inputs`' retries: two attempts, a second after the first.
+MIGRATE_RETRY = RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=1))
+#: The migration workflow's bound: both attempts at `_load_timeout()`, the backoff
+#: between them, and a margin for scheduling, so it outlasts its activity rather than
+#: cutting it off.
+MIGRATE_EXECUTION_TIMEOUT = (
+    (MIGRATE_RETRY.maximum_attempts or 1) * _load_timeout()
+    + (MIGRATE_RETRY.initial_interval or timedelta())
+    + timedelta(seconds=10)
+)
+
+
+@workflow.defn(name="MigrateInputs")
+class MigrateInputs:
+    """Saved inputs brought up to the template's `INPUTS_VERSION` (§8.2), on a worker."""
+
+    @workflow.run
+    async def run(self, req: MigrateRequest) -> MigrateResult:
+        result: MigrateResult = await workflow.execute_activity(
+            "migrate_inputs",
+            req,
+            result_type=MigrateResult,
+            start_to_close_timeout=_load_timeout(),
+            heartbeat_timeout=HEARTBEAT,
+            retry_policy=MIGRATE_RETRY,
+        )
+        return result

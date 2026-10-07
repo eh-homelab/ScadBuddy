@@ -581,8 +581,12 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     setCredentials(Array.from({ length: 100 }, (_, i) => credentialEntry({ id: `k${i}`, last4: `K${String(i).padStart(3, '0')}` })))
     const { user } = renderPage(<AiCredentialSection />)
     await waitFor(() => expect(rows()).toHaveLength(100))
-    await user.type(screen.getByLabelText('Anthropic API key'), 'sk-ant-api03-one-too-many')
-    await user.click(screen.getByRole('button', { name: 'Add' }))
+    // Pasted, and the button found by its text: with 100 rows each keystroke re-renders
+    // all of them, and a role query computes a style for every element; together they
+    // took this test past 15 s on a loaded host (#1485).
+    await user.click(screen.getByLabelText('Anthropic API key'))
+    await user.paste('sk-ant-api03-one-too-many')
+    await user.click(screen.getByText('Add', { selector: 'button' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('at most 100 Claude credentials can be stored')
     expect(rows()).toHaveLength(100)
     expect(screen.getByLabelText('Anthropic API key')).toHaveValue('sk-ant-api03-one-too-many')

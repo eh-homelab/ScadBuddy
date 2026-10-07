@@ -8,6 +8,7 @@ is the template UI's own state: stored with presets and outputs, never rendered.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -105,3 +106,18 @@ def normalize_inputs(
     if params and _typed(params) != _typed(checked):
         raise InputsDisagreeError("params and inputs.params disagree; send inputs only")
     return NormalizedInputs(data=result, params=checked)
+
+
+def inputs_key(slug: str, inputs: Mapping[str, Any], model_version: str | None) -> str:
+    """The job key of a pipeline template (§3.4): its whole inputs, which the pipeline
+    reads, not only ``params``."""
+    raw = json.dumps(
+        ["inputs", slug, model_version, dict(inputs)], sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def arrange_key(slug: str, inputs: Mapping[str, Any]) -> str:
+    """An arrange job's key: identical requests coalesce like renders (§3.3)."""
+    raw = json.dumps(["arrange", slug, dict(inputs)], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
