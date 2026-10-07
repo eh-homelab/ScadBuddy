@@ -31,7 +31,8 @@ export class PgPayloadKeys implements PayloadKeys {
   constructor(sql: Sql, keks: PayloadKeks, options: { now?: () => number } = {}) {
     this.#sql = sql
     this.keks = keks
-    this.#now = options.now ?? Date.now
+    // Monotonic: the cache window must not follow the wall clock's steps.
+    this.#now = options.now ?? (() => performance.now())
   }
 
   async createKey(subject: string, tx?: TransactionSql): Promise<void> {

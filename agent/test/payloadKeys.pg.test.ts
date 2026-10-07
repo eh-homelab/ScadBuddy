@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
 import { migrate } from '../src/db/migrations.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
@@ -76,6 +76,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('rejects a subject that is not a session or flow id', async () => {
       const keys = new PgPayloadKeys(db.sql, { current: newKek() })
       await expect(keys.createKey('render-x')).rejects.toThrow('render-x is not a session or flow workflow id')
+    })
+
+    it("times its cache on a monotonic clock: a wall-clock step neither expires nor extends it", async () => {
+      // This host's wall clock steps by seconds; the cache window must not follow it.
+      const wall = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(wall)
+      try {
+        const kek = newKek()
+        const here = new PgPayloadKeys(db.sql, { current: kek })
+        const elsewhere = new PgPayloadKeys(db.sql, { current: kek })
+        await here.createKey(subject)
+        expect(await elsewhere.dataKey(subject)).toHaveLength(32)
+        await here.forget(subject)
+        clock.mockReturnValue(wall + 120_000) // the wall clock steps two minutes ahead
+        expect(await elsewhere.dataKey(subject)).toHaveLength(32)
+      } finally {
+        clock.mockRestore()
+      }
     })
 
     it('forgets at once here, and within the cache window elsewhere', async () => {
