@@ -158,13 +158,15 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 @pytest.fixture(autouse=True)
-def _writes_carry_a_key(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def _writes_carry_a_key(request: pytest.FixtureRequest) -> Iterator[None]:
     """Every write an api test sends without an ``Idempotency-Key`` is sent with a fresh
     one, as the browser's and the agent's ``command()`` do for each press: a command
     route refuses a keyless request with 428 (#1143). A test that sends its own key (a
     retry of one press) keeps it, and one marked ``keyless`` sends none, to see that
-    refusal."""
+    refusal. Patched on a `MonkeyPatch` of its own: a test's ``monkeypatch.undo()``
+    must not take it away mid-test."""
     if request.node.get_closest_marker("keyless") is not None:
+        yield
         return
     send = TestClient.request
 
@@ -177,7 +179,9 @@ def _writes_carry_a_key(request: pytest.FixtureRequest, monkeypatch: pytest.Monk
         response: httpx.Response = send(self, method, url, **kwargs)
         return response
 
-    monkeypatch.setattr(TestClient, "request", keyed)
+    with pytest.MonkeyPatch.context() as own:
+        own.setattr(TestClient, "request", keyed)
+        yield
 
 
 @pytest.fixture(autouse=True)
