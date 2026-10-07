@@ -48,9 +48,9 @@ export const PRINT_OPTIONS: readonly OptionSpec[] = [
   { name: 'manual_start', label: 'Wait for a manual start', kind: 'boolean' },
   { name: 'insert_at_top', label: 'Insert at the top of the queue', kind: 'boolean' },
   { name: 'auto_off_after', label: 'Power off afterwards', kind: 'boolean' },
-  // No bound: Bambuddy declares `project_id` as a plain integer, so inventing one here
-  // would reject an id the user's own instance would accept.
-  { name: 'project_id', label: 'Bambuddy project', kind: 'number', hint: 'Project id', min: 1 },
+  // No `project_id`: the Project picker is the one control for it, and a run drops an
+  // options `project_id` rather than half-apply it (`print_run.py`), so a field here
+  // would be a control that never takes effect (#1047).
   { name: 'preheat_override', label: 'Preheat', kind: 'preheat' },
   {
     name: 'preheat_chamber_target_override',
