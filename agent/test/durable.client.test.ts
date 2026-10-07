@@ -15,6 +15,7 @@ import {
   DurableRefused,
   type DurableSessionInput,
   DurableStopped,
+  DurableUnavailable,
   durableWorkflowId,
   parseDurableApprovalId,
   REVIEW_UPDATE,
@@ -211,6 +212,15 @@ describe('TemporalDurableSessions', () => {
     await expect(again.review(SID, 'toolu_1', true, 'browser:browser')).rejects.toThrow(
       new DurableRefused('Tool call toolu_1 was already decided'),
     )
+  })
+
+  it('gives a review a deadline: a dead worker answers unavailable instead of holding the socket', async () => {
+    const { client } = fakeClient({ status: 'RUNNING', hangReview: true })
+    const started = performance.now()
+    await expect(
+      new TemporalDurableSessions(client, noRows, { askMs: 50 }).review(SID, 'toolu_1', true, 'browser:browser'),
+    ).rejects.toBeInstanceOf(DurableUnavailable)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   it('cancels only a running execution', async () => {

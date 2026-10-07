@@ -384,12 +384,20 @@ export class TemporalDurableSessions implements DurableSessions {
   }
 
   async review(sessionId: string, toolUseId: string, approved: boolean, approver: string): Promise<void> {
+    // Under a deadline: a decision is taken on the chat socket's queue, which a dead worker
+    // (the Update is never accepted) must not hold.
+    const deadline = AbortSignal.timeout(this.#askMs)
     try {
-      await this.#client.workflow.getHandle(durableWorkflowId(sessionId)).executeUpdate(REVIEW_UPDATE, {
-        args: [toolUseId, approved, approver],
-      })
+      await this.#client.connection.withAbortSignal(deadline, () =>
+        this.#client.workflow.getHandle(durableWorkflowId(sessionId)).executeUpdate(REVIEW_UPDATE, {
+          args: [toolUseId, approved, approver],
+        }),
+      )
     } catch (err) {
       if (notFound(err)) throw new DurableRefused(`No tool call ${toolUseId} is waiting for approval`)
+      if (deadline.aborted || err instanceof WorkflowUpdateRPCTimeoutOrCancelledError) {
+        throw new DurableUnavailable(`Temporal did not take the decision on ${toolUseId} in time: ${(err as Error).message}`)
+      }
       throw this.#mapped(err)
     }
   }
