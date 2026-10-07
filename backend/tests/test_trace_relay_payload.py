@@ -885,6 +885,8 @@ _SCALE = 16
 #: The most `_growth` may be: about 1 for linear work, about `_SCALE` for quadratic.
 #: Their geometric mean, so neither noise nor a regression passes for the other: CPU
 #: time on a machine running 24 of these at once came within 2.7 of linear.
+#: `_growth` counts a call's fixed cost `_SCALE` times on the small side and once on the
+#: large, which only pulls the ratio down, toward passing: no reason to tighten this.
 _LINEAR_GROWTH = 4.0
 #: Runs of each size; the fastest counts, as the one load slowed least.
 _RUNS = 5
@@ -913,6 +915,7 @@ def _growth(work: Callable[[int], object], size: int) -> float:
     for _ in range(_RUNS):
         small = min(small, _timed(repeated))
         large = min(large, _timed(lambda: work(size * _SCALE)))
+    assert small > 0, "this thread's CPU clock is too coarse to time the small input"
     return large / small
 
 
@@ -958,7 +961,29 @@ def test_a_pathological_stack_line_is_dropped_in_linear_time() -> None:
     assert _stack_after_prepare("    at " + "a" * 100_000 + ":1:1") == ""
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        lambda n: "    at " + "a" * n + ":1:1",
+        lambda n: "    at f (" + ":1" * (n // 2) + "x",
+        lambda n: "a@" + "a" * n + ":1:1",
+        lambda n: "a@" + ":1" * (n // 2) + "x",
+        lambda n: "a@x:" + "1" * n + ":",
+    ],
+    ids=["at-letters", "at-positions", "at-sign-letters", "at-sign-positions", "digits"],
+)
+def test_the_frame_pattern_is_linear_in_the_line(line: Callable[[int], str]) -> None:
+    """`_BROWSER_FRAME` on lines far past :data:`payload.MAX_FRAME_LINE_CHARS`: the cap
+    bounds its cost per line in `prepare`, but a pattern that backtracks would still make
+    every capped line costly, which a check of the line count alone does not see."""
+    growth = _growth(lambda n: payload._BROWSER_FRAME.fullmatch(line(n)), 6_250)
+    assert growth < _LINEAR_GROWTH
+
+
 def test_a_stack_of_long_frame_lines_is_read_in_linear_time() -> None:
+    """Linear in the number of lines, each at the cap; the cost within a line is
+    `test_the_frame_pattern_is_linear_in_the_line`'s and
+    `test_finding_a_frame_url_is_linear_in_the_token`'s."""
     line = "    at " + "a" * (payload.MAX_FRAME_LINE_CHARS - 11) + ":1:1"
     bodies = {n: _stack_body("\n".join([line] * n)) for n in (32, 512)}
     assert _growth(lambda n: prepare(bodies[n]), 32) < _LINEAR_GROWTH
