@@ -119,9 +119,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     await durable.cancel(sid)
   }, 120_000)
 
-  it('a stopped execution that does not close within D: refused as still stopping, or waited for while delivering', async () => {
+  it('a stopped execution that does not close within the stopping wait: refused as still stopping, or waited for while delivering', async () => {
     const sid = randomUUID()
-    const durable = new TemporalDurableSessions(env.client, db.sql, { sendDeadlineMs: 1_000 })
+    const durable = new TemporalDurableSessions(env.client, db.sql, { stoppingWaitMs: 1_000 })
     const input = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: null, stop_ms: 600_000 }
     const first = randomUUID()
     await durable.send(input, first)

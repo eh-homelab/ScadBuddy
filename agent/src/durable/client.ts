@@ -83,7 +83,7 @@ export const DURABLE_ABANDONED = 'this message was abandoned and will not run'
 export const DURABLE_BUSY = 'the session is busy'
 export const DURABLE_UNKNOWN_INPUT = 'no message with this id was committed for this session'
 
-/** A send's refusal when the stopped execution did not close within D (DurableSendOptions). */
+/** A send's refusal when the stopped execution did not close within its wait (DurableSendOptions). */
 export const STILL_STOPPING = "this session's previous run is still stopping; send again"
 
 /** Temporal did not answer: nothing was started. */
@@ -149,8 +149,9 @@ const ASK_MS = 10_000
 
 /**
  * D: the longest an update-with-start may take before it is aborted (it then rejects with
- * WorkflowUpdateRPCTimeoutOrCancelledError, and the start may still land). agent-durable's
- * projector counts a send's mark unchanged for 2 x D as stale (projector.py SEND_DEADLINE_S).
+ * WorkflowUpdateRPCTimeoutOrCancelledError, the start may still land, and the next attempt
+ * sends the same id again). Also how long a send waits for a stopped run to close, unless
+ * `stoppingWaitMs` says otherwise.
  */
 export const DURABLE_SEND_DEADLINE_MS = 30_000
 
@@ -195,16 +196,23 @@ export class TemporalDurableSessions implements DurableSessions {
   readonly #client: Client
   readonly #sql: Sql
   readonly #sendDeadlineMs: number
+  readonly #stoppingWaitMs: number
   readonly #askMs: number
 
   /**
    * `sql` reads ai_durable_snapshots and the audit's tool calls for a restore, and writes a
    * restore's note on the message (ai_durable_inputs).
    */
-  constructor(client: Client, sql: Sql, options: { sendDeadlineMs?: number; askMs?: number } = {}) {
+  constructor(
+    client: Client,
+    sql: Sql,
+    options: { sendDeadlineMs?: number; stoppingWaitMs?: number; askMs?: number } = {},
+  ) {
     this.#client = client
     this.#sql = sql
     this.#sendDeadlineMs = options.sendDeadlineMs ?? DURABLE_SEND_DEADLINE_MS
+    // Its own knob: a test that shortens the wait must not shorten the RPC deadline too.
+    this.#stoppingWaitMs = options.stoppingWaitMs ?? this.#sendDeadlineMs
     this.#askMs = options.askMs ?? ASK_MS
   }
 
@@ -240,15 +248,16 @@ export class TemporalDurableSessions implements DurableSessions {
   /**
    * A stopped execution still running: the plugin ends its task (and the session reads
    * `idle`) before the execution returns its state, and its send validator refuses
-   * messages meanwhile (workflow.py). The send waits for it to close, up to D, and is then
-   * handed over; a Stop of the session (`stopped`) ends the wait.
+   * messages meanwhile (workflow.py). The send waits for it to close, up to
+   * `stoppingWaitMs` (D by default), and is then handed over; a Stop of the session
+   * (`stopped`) ends the wait.
    */
   async #closed(
     sessionId: string,
     stopped: AbortSignal | undefined,
   ): Promise<{ status: string; chain: string; stopping: boolean } | undefined> {
     const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), this.#sendDeadlineMs)
+    const timer = setTimeout(() => abort.abort(), this.#stoppingWaitMs)
     const stop = () => abort.abort()
     stopped?.addEventListener('abort', stop, { once: true })
     try {
@@ -291,8 +300,9 @@ export class TemporalDurableSessions implements DurableSessions {
     const sessionId = input.session_id
     const workflowId = durableWorkflowId(sessionId)
     let before = await this.#describe(sessionId)
-    // A stopped run still closing would refuse the nudge: wait for it, up to D. A Stop
-    // handled by another replica meanwhile abandoned the message: look again before sending.
+    // A stopped run still closing would refuse the nudge: wait for it (`stoppingWaitMs`).
+    // A Stop handled by another replica meanwhile abandoned the message: look again before
+    // sending.
     if (before?.status === 'RUNNING' && before.stopping) {
       before = await this.#closed(sessionId, options.signal)
       if (options.attempt && !(await options.attempt())) throw new DurableStopped('the message is no longer waiting to be sent')
