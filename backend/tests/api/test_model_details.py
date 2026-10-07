@@ -598,6 +598,30 @@ def test_deleting_the_covering_output_falls_back_to_the_next(
 
 
 @pytest.mark.requires_postgres
+def test_the_first_output_stays_first_when_the_clock_stepped_back(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Outputs are ordered by ``created_at``, the wall clock at their save: a clock
+    that stepped back between two saves (this host's did, by 13 s, under load) gave
+    the second an earlier one, and it took the first's place as the model's cover.
+    Here the first is stamped 60 s ahead, which is what that step looks like to the
+    second save."""
+    _create(client)
+    first = _generate(client, paths, SLUG, COVER_ONE)
+    meta_path = paths.output_dir(SLUG, first) / outputs_module.META_NAME
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    ahead = datetime.fromisoformat(meta["created_at"]) + timedelta(seconds=60)
+    meta["created_at"] = ahead.isoformat()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    second = _generate(client, paths, SLUG, COVER_TWO)
+
+    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
+    listed = [row["id"] for row in client.get(f"/api/v1/models/{SLUG}/outputs").json()]
+    assert listed == [second, first]  # newest first
+
+
+@pytest.mark.requires_postgres
 def test_deleting_the_only_covering_output_leaves_no_thumbnail(
     client: TestClient, paths: DataPaths
 ) -> None:
