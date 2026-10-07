@@ -50,7 +50,7 @@ from scadbuddy_durable.models import (
 )
 from scadbuddy_durable.workflow import DurableSession
 from tests.conftest import free_port, start_dev_server, stop_dev_server, temporal_cli
-from tests.short_runs import ForcedHandOver, LongStop, ShortRuns
+from tests.short_runs import ForcedHandOver, LongStop, ShortRuns, SlowTakes
 from tests.support import WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
 
 HISTORIES = Path(__file__).parent / "histories"
@@ -238,7 +238,9 @@ async def test_a_nudge_while_its_message_is_taken_never_runs_it_twice(rig: Rig) 
     wid, inp = rig.new()
     message_id = await rig.inputs.commit(inp.session_id, "hello")
     rig.fake.take_gate = asyncio.Event()
-    first = asyncio.create_task(rig.nudge(wid, inp, message_id))
+    # The second nudge is admitted only at a workflow task heartbeat while the take (a
+    # local activity) runs; SlowTakes gives the take a minute, so it is never retried.
+    first = asyncio.create_task(rig.nudge(wid, inp, message_id, workflow=SlowTakes))
     await asyncio.wait_for(rig.fake.taking.wait(), WAIT)
     handle = rig.handle(wid)
     loads = rig.fake.loads

@@ -73,3 +73,15 @@ class ForcedHandOver(DurableSession):
     @workflow.signal(name="release")
     def release(self) -> None:
         self._held = False
+
+
+@workflow.defn(name="DurableSessionSlowTakes")
+class SlowTakes(DurableSession):
+    """Gives its input activities a minute, so a test can hold a take open across the
+    workflow task's heartbeats (which admit a nudge meanwhile) without it timing out."""
+
+    input_timeout = timedelta(minutes=1)
+
+    @workflow.run
+    async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:
+        return await super().run(inp, state)

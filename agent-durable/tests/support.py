@@ -40,7 +40,7 @@ from scadbuddy_durable.models import (
 from scadbuddy_durable.segments import SAVE_SNAPSHOT
 from scadbuddy_durable.tools import TOOL_QUEUE, TOOLS
 from scadbuddy_durable.workflow import DurableSession
-from tests.short_runs import ForcedHandOver, LongStop, ShortRuns
+from tests.short_runs import ForcedHandOver, LongStop, ShortRuns, SlowTakes
 
 WAIT = 60.0
 
@@ -376,7 +376,7 @@ async def rig_on(
             Worker(
                 client,
                 task_queue=task_queue,
-                workflows=[DurableSession, ShortRuns, LongStop, ForcedHandOver],
+                workflows=[DurableSession, ShortRuns, LongStop, ForcedHandOver, SlowTakes],
                 activities=[snaps.activity, *inputs.activities],
                 plugins=[ClaudeAgentPlugin(runner, heartbeat_every=1.0)],
             ),

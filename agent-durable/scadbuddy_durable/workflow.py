@@ -65,6 +65,9 @@ class DurableSession:
     before its turn: a message abandoned meanwhile (a Stop) is skipped, and one that ran
     never runs again, so a lost or repeated nudge neither loses nor repeats a turn."""
 
+    #: How long one input activity (inputs.py) may take.
+    input_timeout = _INPUT_TIMEOUT
+
     @workflow.init
     def __init__(self, inp: SessionInput, state: AgentState | None = None) -> None:
         if state is not None and inp.restored is not None:
@@ -164,7 +167,7 @@ class DurableSession:
 
     async def _load(self, inp: LoadInputs) -> Loaded:
         loaded: Loaded = await workflow.execute_local_activity(
-            LOAD_INPUTS, inp, result_type=Loaded, start_to_close_timeout=_INPUT_TIMEOUT
+            LOAD_INPUTS, inp, result_type=Loaded, start_to_close_timeout=self.input_timeout
         )
         return loaded
 
@@ -173,7 +176,7 @@ class DurableSession:
             START_INPUT,
             StartInput(self._inp.session_id, message_id, token),
             result_type=bool,
-            start_to_close_timeout=_INPUT_TIMEOUT,
+            start_to_close_timeout=self.input_timeout,
         )
         return taken
 
@@ -185,7 +188,7 @@ class DurableSession:
             RELEASE_INPUT,
             ReleaseInput(self._inp.session_id, message_id, token),
             result_type=bool,
-            start_to_close_timeout=_INPUT_TIMEOUT,
+            start_to_close_timeout=self.input_timeout,
         )
         self._outcome[message_id] = ABANDONED
         self._taking = None
