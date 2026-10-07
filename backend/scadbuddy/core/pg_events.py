@@ -145,6 +145,10 @@ DEFAULT_OUTBOX_SIZE = 1024
 WRITE_BATCH = 100
 #: How often each replica prunes the log.
 PRUNE_INTERVAL = 300.0
+#: How long `start` waits for the listener's first LISTEN before the app serves
+#: without it (with a warning). Its connect is the pool's, which just succeeded, so
+#: past this the database is struggling rather than slow.
+LISTEN_TIMEOUT = 15.0
 #: The most events one :meth:`PgNotifyEventBus.replay` returns.
 MAX_REPLAY_LIMIT = 1000
 #: How long :meth:`PgNotifyEventBus.aclose` waits for the outbox to drain.
@@ -301,12 +305,14 @@ class PgNotifyEventBus:
         queue_size: int = DEFAULT_QUEUE_SIZE,
         outbox_size: int = DEFAULT_OUTBOX_SIZE,
         connect_timeout: float = 30.0,
+        listen_timeout: float = LISTEN_TIMEOUT,
         prune_interval: float = PRUNE_INTERVAL,
     ) -> None:
         self.metrics = metrics if metrics is not None else Metrics()
         self.retention = retention or EventLogRetention()
         self.listener = listener
         self.connect_timeout = connect_timeout
+        self.listen_timeout = listen_timeout
         self.prune_interval = prune_interval
         self.outbox_size = outbox_size
         #: Delivery within this process, fed only by what the listener hears.
@@ -333,7 +339,10 @@ class PgNotifyEventBus:
     # -- lifecycle ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect, then start draining the outbox, listening and pruning.
+        """Connect, then start draining the outbox, listening and pruning, and return
+        once the LISTEN is in place (or `listen_timeout` passed, with a warning): a
+        NOTIFY before it is lost to this process, and the first LISTEN is no reconnect,
+        so no resync would follow. The app serves only after this returns.
 
         The ``events`` table must exist: open the job store (which migrates) first.
         Raises `EventLogMissingError` when it does not, rather than failing later
@@ -364,6 +373,13 @@ class PgNotifyEventBus:
             asyncio.create_task(self.listener.run()),
             asyncio.create_task(self._pruner()),
         ]
+        if not await self.listener.wait_listening(self.listen_timeout):
+            # The listener keeps trying; its first LISTEN is then a late start, and
+            # events published until it are not heard here.
+            logger.warning(
+                "the event bus is not listening yet; starting anyway",
+                extra={"timeout_s": self.listen_timeout},
+            )
 
     async def aclose(self) -> None:
         with self._lock:

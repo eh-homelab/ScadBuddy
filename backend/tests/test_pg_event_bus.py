@@ -161,6 +161,55 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
         await hears.aclose()
 
 
+class _SlowListener(PgListener):
+    """A LISTEN that takes ``delay`` seconds to be in place, as a loaded host's did."""
+
+    def __init__(self, conninfo: str, delay: float) -> None:
+        super().__init__(conninfo)
+        self.delay = delay
+
+    async def _listen(self) -> None:
+        await asyncio.sleep(self.delay)
+        await super()._listen()
+
+
+@pytest.mark.requires_postgres
+async def test_start_returns_once_the_bus_listens(pg_conninfo: str) -> None:
+    """A NOTIFY sent before the LISTEN is lost to this process, and the first LISTEN is
+    no reconnect, so no resync follows: the app must not serve before it listens."""
+    listener = _SlowListener(_migrated(pg_conninfo), delay=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    try:
+        await bus.start()
+        assert listener.backend_pid is not None
+        subscription = bus.subscribe()
+        event = _model("first")
+        bus.publish(event)
+        assert (await _next(subscription)).id == event.id
+    finally:
+        await bus.aclose()
+
+
+@pytest.mark.requires_postgres
+async def test_start_goes_on_past_its_bound_with_a_warning(
+    pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A listener still connecting past ``listen_timeout`` does not hold the app's
+    start: it says so, and the listener keeps trying."""
+    listener = _SlowListener(_migrated(pg_conninfo), delay=2.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener, listen_timeout=0.2)
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=pg_events.__name__):
+            await bus.start()
+        assert time.monotonic() - started < 1.5
+        assert listener.backend_pid is None
+        assert any("not listening yet" in r.getMessage() for r in caplog.records)
+        await _until(lambda: listener.backend_pid is not None, timeout=10)
+    finally:
+        await bus.aclose()
+
+
 @pytest.mark.requires_postgres
 async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> None:
     """The ordering the lifespan relies on, asserted: an unmigrated database is a

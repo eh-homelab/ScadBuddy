@@ -69,6 +69,12 @@ class PgListener:
         self._state_callbacks: list[Callable[[bool], None]] = []
         self._task: asyncio.Task[None] | None = None
         self._runners = 0
+        #: Set while the LISTEN is in place: from its LISTENs to the connection's end.
+        #: An `asyncio.Event` is bound to one loop, and an app (so its listener) may be
+        #: started on another loop after the first stopped: `_listening_event` keeps one
+        #: per loop.
+        self._listening: asyncio.Event | None = None
+        self._listening_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def channels(self) -> tuple[str, ...]:
@@ -89,6 +95,25 @@ class PgListener:
         if self._task is not None and channel not in self._channels:
             raise RuntimeError(f"register {channel!r} before the listener runs")
         self._channels[channel] = _Channel(on_notify=on_notify, on_connect=on_connect)
+
+    def _listening_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        if self._listening is None or self._listening_loop is not loop:
+            self._listening, self._listening_loop = asyncio.Event(), loop
+            if self.backend_pid is not None:
+                self._listening.set()
+        return self._listening
+
+    async def wait_listening(self, timeout: float) -> bool:
+        """Whether the LISTEN is in place within ``timeout`` seconds (on the loop's
+        monotonic clock); True at once when it already is. A NOTIFY sent before it is
+        lost to this process, so a caller that must hear what follows waits here."""
+        try:
+            async with asyncio.timeout(timeout):
+                await self._listening_event().wait()
+        except TimeoutError:
+            return False
+        return True
 
     def on_state(self, callback: Callable[[bool], None]) -> None:
         """Call ``callback(connected)`` whenever the connection comes up or drops."""
@@ -150,6 +175,7 @@ class PgListener:
             reconnected = self.connects > 0
             self.connects += 1
             self.backend_pid = conn.info.backend_pid
+            self._listening_event().set()
             self._state(True)
             try:
                 for registered in self._channels.values():
@@ -163,6 +189,7 @@ class PgListener:
                     await conn.execute(b"SELECT 1")
             finally:
                 self.backend_pid = None
+                self._listening_event().clear()
                 self._state(False)
 
     @staticmethod
