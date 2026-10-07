@@ -341,4 +341,30 @@ describe('ProjectPicker', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(calls).toBe(2)
   })
+
+  it('keeps a project created while the list was failed when Retry then loads it (#1045)', async () => {
+    const created = { ...fixtures.projectViews[0]!, id: 99, name: 'Workshop Bins' }
+    let calls = 0
+    server.use(
+      http.get('/api/v1/print/projects', () => {
+        calls += 1
+        if (calls === 1) return new HttpResponse('upstream request timeout', { status: 504 })
+        return HttpResponse.json({ projects: [...fixtures.projectViews, created], last_project_id: 1 })
+      }),
+      http.post('/api/v1/print/projects', () => HttpResponse.json(created, { status: 201 })),
+    )
+    const onChange = vi.fn()
+    const { user } = mount(onChange)
+    await screen.findByRole('alert')
+
+    await user.selectOptions(select(), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(99))
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await listed()
+    // The remembered project does not replace the one just made.
+    expect(select()).toHaveValue('99')
+  })
 })
