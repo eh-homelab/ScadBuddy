@@ -110,7 +110,7 @@ def test_a_large_source_goes_by_claim_not_in_history(client: TestClient, app: Fa
     created = client.post(
         "/api/v1/models?force=true",
         content=source.encode(),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Large"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Large"},
     )
     assert created.status_code == 201, created.text
     assert client.get("/api/v1/models/large/source").text == source

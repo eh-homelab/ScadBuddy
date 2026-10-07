@@ -59,7 +59,7 @@ def test_a_body_too_large_is_refused_on_its_headers(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content=b"x" * (MAX_TEXT_BODY_BYTES + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"
@@ -77,7 +77,7 @@ def test_a_chunked_body_is_cut_off_at_the_limit(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content=chunks(),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"

@@ -1947,7 +1947,9 @@ def test_a_pin_on_the_library_worker_holds_off_another_processs_removal(
             removal.append(None)
 
     with ThreadPoolExecutor(2) as threads:
-        pinned = threads.submit(lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+        pinned = threads.submit(
+            lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press()
+        )
         assert cloned.wait(60)
         checkouts = list((state.paths.libraries / "BOSL2").iterdir())
         assert checkouts

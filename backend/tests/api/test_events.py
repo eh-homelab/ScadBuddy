@@ -146,7 +146,7 @@ def test_creating_a_model_publishes_model_created(client: TestClient, events: li
         client.post(
             "/api/v1/models",
             content=SOURCE,
-            headers={"content-type": "text/plain", "X-Model-Name": "Pasted"},
+            headers={**press(), "content-type": "text/plain", "X-Model-Name": "Pasted"},
         ),
         201,
     )

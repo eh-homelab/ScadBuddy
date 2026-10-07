@@ -1108,7 +1108,7 @@ def test_deeply_nested_tags_are_a_422_not_a_500(client: TestClient) -> None:
 
 def test_a_deeply_nested_json_paste_is_a_422_not_a_500(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=DEEP, headers={"Content-Type": "application/json"}
+        "/api/v1/models", content=DEEP, headers={**press(), "Content-Type": "application/json"}
     )
     assert _refused_without_a_model(response, client)["detail"] == (
         "the request body is not valid JSON"

@@ -668,7 +668,11 @@ def test_a_plain_text_paste_takes_its_name_from_the_header(client: TestClient) -
     response = client.post(
         "/api/v1/models",
         content=SOURCE.encode(),
-        headers={"Content-Type": "text/plain; charset=utf-8", "X-Model-Name": "Pasted Thing"},
+        headers={
+            **press(),
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Model-Name": "Pasted Thing",
+        },
     )
     assert response.status_code == 201
     assert response.json()["slug"] == "pasted-thing"
@@ -676,7 +680,7 @@ def test_a_plain_text_paste_takes_its_name_from_the_header(client: TestClient) -
 
 def test_a_plain_text_paste_without_a_name_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=SOURCE.encode(), headers={"Content-Type": "text/plain"}
+        "/api/v1/models", content=SOURCE.encode(), headers={**press(), "Content-Type": "text/plain"}
     )
     assert response.status_code == 422
     assert "X-Model-Name" in response.json()["detail"]
@@ -850,7 +854,7 @@ def test_a_plain_text_paste_that_is_not_utf8_is_rejected(client: TestClient) -> 
     response = client.post(
         "/api/v1/models",
         content=b"\xff\xfe cube(1);",
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Bad Bytes"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Bad Bytes"},
     )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -861,7 +865,7 @@ def test_a_plain_text_paste_with_a_nul_byte_is_rejected(client: TestClient) -> N
     response = client.post(
         "/api/v1/models",
         content=b"cube(1);\x00",
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Binary"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Binary"},
     )
     assert response.status_code == 422
     assert "binary" in response.json()["detail"]
@@ -869,7 +873,9 @@ def test_a_plain_text_paste_with_a_nul_byte_is_rejected(client: TestClient) -> N
 
 def test_a_body_that_is_not_json_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=b"{not json", headers={"Content-Type": "application/json"}
+        "/api/v1/models",
+        content=b"{not json",
+        headers={**press(), "Content-Type": "application/json"},
     )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -878,7 +884,7 @@ def test_a_body_that_is_not_json_is_rejected(client: TestClient) -> None:
 
 def test_an_empty_json_body_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=b"", headers={"Content-Type": "application/json"}
+        "/api/v1/models", content=b"", headers={**press(), "Content-Type": "application/json"}
     )
     assert response.status_code == 422
 
@@ -940,7 +946,7 @@ def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient)
     response = client.post(
         "/api/v1/models",
         content=b"<html>not openscad</html>",
-        headers={"Content-Type": "text/html", "X-Model-Name": "Sneaky"},
+        headers={**press(), "Content-Type": "text/html", "X-Model-Name": "Sneaky"},
     )
     assert response.status_code == 415
     assert "text/plain" in response.json()["detail"]
@@ -1055,7 +1061,7 @@ def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content="y" * (MAX_SOURCE_CHARS + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge Text"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge Text"},
     )
     assert response.status_code == 422
     assert "too large" in response.json()["detail"]
