@@ -34,6 +34,7 @@ class OperationKind:
     check: CheckFn
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
+    #: Above 1, a transient Bambuddy failure is retried too, not only a crash (#1144).
     run_attempts: int = 1
     queue: Queue = "bambuddy"
     #: How long one run may take; the workflow's ``RUN_TIMEOUT`` when None.

@@ -18,6 +18,7 @@ from scadbuddy.workflows.operation_models import PreludeStep
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.api.test_library_copies import API, deletes, run, set_up, uploads
 from tests.api.test_model_operations import _workflow_ids
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -52,16 +53,19 @@ def test_a_repeated_output_create_makes_one_output(
 
 
 def test_output_writes_are_operations(client: TestClient, app: FastAPI, model: str) -> None:
-    created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": _job(client, model)})
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _job(client, model)}, headers=press()
+    )
     assert created.status_code == 201, created.text
     output_id = created.json()["id"]
     covered = client.put(
         f"/api/v1/outputs/{output_id}/thumbnail",
         files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
     assert covered.status_code == 204, covered.text
     assert client.get(f"/api/v1/outputs/{output_id}/thumbnail").content == PNG_BYTES
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
     for kind in ("output_create", "output_thumbnail", "output_delete"):
         assert _workflow_ids(app, kind), kind
@@ -71,7 +75,9 @@ def test_a_job_not_done_is_still_409_without_an_operation_record(
     client: TestClient, app: FastAPI, model: str
 ) -> None:
     failed = _job(client, model, FAIL_WIDTH)
-    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": failed})
+    response = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": failed}, headers=press()
+    )
     assert response.status_code == 409, response.text
     assert "failed" in response.json()["detail"]
     assert _workflow_ids(app, "output_create") == []
@@ -87,7 +93,9 @@ def test_an_inbox_copy_that_fails_to_delete_keeps_the_output(
     respx.delete(f"{API}/library/files/41").mock(
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
     assert response.status_code >= 500, response.text
     # Bambuddy's failure, recorded: not a 503 from before the operation started.
     assert response.json()["type"] != STILL_ACCEPTING_PROBLEM, response.text
@@ -123,7 +131,9 @@ def test_a_delete_started_without_a_prelude_still_takes_the_inbox_copies(
     run(client, output_id)
     monkeypatch.setattr("scadbuddy.api.operations._prelude", lambda *_: None)
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code == 204, response.text
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]

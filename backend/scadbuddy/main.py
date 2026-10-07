@@ -20,10 +20,10 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
+from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.cross_site import CrossSiteGate
-from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
@@ -39,6 +39,7 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
@@ -50,6 +51,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -67,6 +69,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
+    BACKFILL_SWEEP,
     HEARTBEAT_TIMEOUT,
     SWEEPS,
     ensure_schedules,
@@ -356,7 +359,26 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
             logger.exception("could not sweep operation claims")
             raise
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
+    @activity.defn(name=BACKFILL_SWEEP)
+    async def sweep_backfills() -> None:
+        # #902: `follow_backfills` attaches on the job's event; this finds what no
+        # process heard (the API was down, the listener reconnecting).
+        await _heartbeating(_attach_backfills_logged(state))
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims, sweep_backfills]
+
+
+async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
+    """#902's backstop pass. The Schedule's sweep (``reraise``) fails its activity on an
+    error; the boot's pass only logs it."""
+    try:
+        await asyncio.to_thread(
+            attach_backfills, state.outputs, state.refs, state.render.store.read
+        )
+    except Exception:
+        logger.exception("could not attach the finished output re-renders")
+        if reraise:
+            raise
 
 
 def _preview_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -828,6 +850,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
+    unfollow_backfills: Callable[[], None] | None = None
+    attach_now: asyncio.Task[None] | None = None
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
@@ -846,6 +870,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
+        # #902: a finished re-render is attached on its event, by every replica;
+        # the housekeeping Schedule's `BACKFILL_SWEEP` catches one none heard.
+        unfollow_backfills = follow_backfills(
+            state.events,
+            partial(attach_job_backfills, state.outputs, state.refs, state.render.store.read),
+        )
+        # And once now, whatever the Schedule: a re-render that settled while no replica
+        # was listening (the sweeps' interval 0, or the Schedule paused).
+        attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
         if serves_print_queue(state.settings):
@@ -881,7 +914,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await state.previews.aclose()
         stop_library.set()
         await _stop_queue_worker(library, "library")
-        for background in (backfill,):
+        if unfollow_backfills is not None:
+            unfollow_backfills()
+        for background in (backfill, attach_now):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
@@ -919,6 +954,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description=DESCRIPTION,
         version=__version__,
         lifespan=lifespan,
+        # FastAPI (0.142) would otherwise add exporters of its own to
+        # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
+        # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
+        telemetry={"auto_configure": False},
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
@@ -968,7 +1007,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

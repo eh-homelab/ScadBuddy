@@ -193,6 +193,65 @@ describe('TurnTrace', () => {
     expect(one('agent.turn').attributes['scadbuddy.outcome']).toBe('parked')
     expect(one('agent.tool/x').attributes['scadbuddy.outcome']).toBe('parked')
     expect(one('agent.tool/y').attributes['scadbuddy.outcome']).toBe('unfinished')
+    expect(one('agent.turn.resume').attributes['scadbuddy.outcome']).toBe('interrupted')
+  })
+
+  it('a turn that ends while parked records its outcome on a closing segment, the parked one’s child', async () => {
+    const t = turn()
+    const park = t.park('toolu_1', 'x')
+    park.parked('a1')
+    t.fail(new TypeError(SENTINEL))
+    t.finish({ kind: 'failed', message: SENTINEL })
+    const resulted = turn()
+    resulted.park('toolu_2', 'x').parked('a2')
+    resulted.finish(success, { usage: { input_tokens: 10, output_tokens: 3 } } as unknown as SDKResultMessage)
+    await flushTracing()
+    const [failedTurn, resultTurn] = named('agent.turn')
+    const [closing, closingResult] = named('agent.turn.resume')
+    expect(failedTurn!.attributes['scadbuddy.outcome']).toBe('parked')
+    expect(closing!.parentSpanContext?.spanId).toBe(failedTurn!.spanContext().spanId)
+    expect(closing!.status.code).toBe(SpanStatusCode.ERROR)
+    expect(closing!.attributes).toMatchObject({
+      'scadbuddy.segment': 1,
+      'scadbuddy.turn_id': 't-1',
+      'scadbuddy.outcome': 'failed',
+      'scadbuddy.failure_class': 'TypeError',
+      'scadbuddy.tool_calls': 0,
+    })
+    expect(resultTurn!.attributes['scadbuddy.outcome']).toBe('parked')
+    expect(closingResult!.parentSpanContext?.spanId).toBe(resultTurn!.spanContext().spanId)
+    expect(closingResult!.attributes).toMatchObject({
+      'scadbuddy.outcome': 'success',
+      'scadbuddy.cost_usd': 0.02,
+      'scadbuddy.turns': 2,
+      'scadbuddy.input_tokens': 10,
+      'scadbuddy.output_tokens': 3,
+    })
+    expect(exportedText(spans)).not.toContain(SENTINEL)
+  })
+
+  it('a call that starts after its segment parked opens the next segment early, and is counted there', async () => {
+    const t = turn()
+    const park = t.park('toolu_1', 'x')
+    park.parked('a1')
+    // A read of the same message whose tool.call arrives after the park.
+    t.toolStarted('toolu_r', 'read')
+    t.toolEnded('toolu_r', true)
+    const d = decision()
+    park.decided(approved('a1', d.traceparent), true)
+    const exec = execution('toolu_1')
+    t.toolEnded('toolu_1', true)
+    t.finish(success)
+    await flushTracing()
+    const seg0 = one('agent.turn')
+    const seg1 = one('agent.turn.resume')
+    expect(seg0.attributes['scadbuddy.tool_calls']).toBe(1)
+    expect(seg1.parentSpanContext?.spanId).toBe(seg0.spanContext().spanId)
+    expect(seg1.links.map((l) => l.context.spanId)).toEqual([d.spanId])
+    expect(seg1.attributes).toMatchObject({ 'scadbuddy.segment': 1, 'scadbuddy.outcome': 'success', 'scadbuddy.tool_calls': 2 })
+    expect(one('agent.tool/read').parentSpanContext?.spanId).toBe(seg1.spanContext().spanId)
+    const ran = named('agent.tool/x').find((s) => s.spanContext().spanId === exec.spanId)!
+    expect(ran.parentSpanContext?.spanId).toBe(seg1.spanContext().spanId)
   })
 
   it('under an unsampled parent nothing is stored on the row', async () => {
@@ -283,7 +342,8 @@ describe('TurnTrace', () => {
     latePark.parked('a3')
     latePark.decided(approved('a3', null), true)
     await flushTracing()
-    expect(named('agent.turn.resume')).toHaveLength(0)
+    // Only the segment finish() closed the parked turn with.
+    expect(named('agent.turn.resume').map((r) => r.attributes['scadbuddy.outcome'])).toEqual(['interrupted'])
     expect(named('agent.tool/late')).toHaveLength(0)
     expect(trace.getSpan(t.context())!.isRecording()).toBe(false)
   })

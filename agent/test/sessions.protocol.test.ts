@@ -110,6 +110,46 @@ describe('SdkEventMapper', () => {
     ])
   })
 
+  it('maps a subagent’s tool calls and results, tagged with the Agent call that spawned it, but not its text (#1108)', async () => {
+    const sub = (content: unknown) =>
+      ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: 'toolu_agent', session_id: S }) as unknown as SDKMessage
+    const events = mapAll([
+      assistant('msg_a', [{ type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: { prompt: 'look' } }]),
+      stream({ type: 'message_start', message: { id: 'msg_s' } }, 'toolu_agent'),
+      stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, 'toolu_agent'),
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'sub' } }, 'toolu_agent'),
+      assistant(
+        'msg_s',
+        [
+          { type: 'text', text: 'subagent text' },
+          { type: 'tool_use', id: 'toolu_sub', name: 'mcp__scadbuddy__catalogue_list', input: { q: 'box' } },
+        ],
+        'toolu_agent',
+      ),
+      stream({ type: 'content_block_stop', index: 0 }, 'toolu_agent'),
+      sub([{ type: 'tool_result', tool_use_id: 'toolu_sub', content: 'three models' }]),
+      sub('the subagent’s prompt'),
+      user([{ type: 'tool_result', tool_use_id: 'toolu_agent', content: 'found three' }]),
+    ])
+    expect(events).toEqual([
+      event({ type: 'tool.call', sessionId: S, id: 'toolu_agent', name: 'Agent', input: { prompt: 'look' }, risk: 'outward' }),
+      event({
+        type: 'tool.call',
+        sessionId: S,
+        id: 'toolu_sub',
+        name: 'mcp__scadbuddy__catalogue_list',
+        input: { q: 'box' },
+        risk: 'read',
+        parent: 'toolu_agent',
+      }),
+      event({ type: 'tool.result', sessionId: S, id: 'toolu_sub', ok: true, summary: 'three models' }),
+      event({ type: 'tool.result', sessionId: S, id: 'toolu_agent', ok: true, summary: 'found three' }),
+    ])
+    // The panel keeps `parent`: zod drops a key its schema does not name.
+    const parse = await frontendParseServerEvent()
+    for (const e of events) expect(parse(e)).toEqual({ ok: true, value: e })
+  })
+
   it('takes a result from the block the model was sent, not from tool_use_result (#1540)', () => {
     // SDK 0.3.287 leaves an MCP tool's structuredContent over 1,048,576 JSON
     // characters out of `tool_use_result` and sets `structuredContentOmitted`.

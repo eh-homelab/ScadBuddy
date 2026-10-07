@@ -5,7 +5,13 @@
  * zoom is 720x450. There the page scrolls rather than splitting the height into slivers.
  */
 @custom-variant short (@media (max-width: 1023.98px) and (max-height: 640px));
-@custom-variant stacked-tall (@media (max-width: 1023.98px) and (min-height: 640.02px));
+@custom-variant stacked-tall (@media (min-width: 640px) and (max-width: 1023.98px) and (min-height: 640.02px));
+/*
+ * #1741 — a phone's width (below sm). The page scrolls as one column there too, with
+ * the preview held at the top and the action bar at the bottom. `PHONE_QUERY`
+ * (lib/useMediaQuery.ts) is the same query for the components that change shape.
+ */
+@custom-variant phone (@media (max-width: 639.98px));
 
 /*
  * ScadBuddy reads as an instrument panel inside Bambuddy's dark chrome: steel-dark

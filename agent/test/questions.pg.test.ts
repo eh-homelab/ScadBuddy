@@ -158,6 +158,51 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(JSON.stringify(rows)).not.toContain('teal')
   })
 
+  // #1108: a subagent's call is in the feed and has its tool_call row, so the
+  // question row's tool_use_id points at a call the audit log has.
+  it("a subagent's ask_user has a tool_call row and a tool.call tagged with the Agent call that spawned it", async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const say = (parent: string | null, content: unknown[]) =>
+      ({ type: 'assistant', message: { id: `msg_${parent ?? 'top'}`, content }, parent_tool_use_id: parent }) as unknown as SDKMessage
+    const result = (parent: string | null, id: string, text: string) =>
+      ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] }, parent_tool_use_id: parent }) as unknown as SDKMessage
+    const subagent = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        yield say(null, [{ type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: { description: 'ask', prompt: 'ask the user' } }])
+        yield say('toolu_agent', [{ type: 'tool_use', id: 'toolu_q1', name: ASK_USER_TOOL, input: { questions: QUESTIONS } }])
+        const verdict = await run.questionGate!({ tool: ASK_USER_TOOL, questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal })
+        verdicts.push(verdict)
+        yield result('toolu_agent', 'toolu_q1', 'answered')
+        yield result(null, 'toolu_agent', 'the user picked blue')
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: subagent, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+
+    const log = await events(m, session.id)
+    expect(log.filter((e) => e.type === 'tool.call').map((e) => (e.type === 'tool.call' ? [e.id, e.name, e.parent] : []))).toEqual([
+      ['toolu_agent', 'Agent', undefined],
+      ['toolu_q1', ASK_USER_TOOL, 'toolu_agent'],
+    ])
+    expect(log.filter((e) => e.type === 'tool.result').map((e) => (e.type === 'tool.result' ? [e.id, e.ok] : []))).toEqual([
+      ['toolu_q1', true],
+      ['toolu_agent', true],
+    ])
+    await expectPanelAccepts(log)
+
+    const rows = await db.sql`SELECT kind, action, tool_use_id, tier, outcome FROM ai_audit ORDER BY id`
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { kind: 'tool_call', action: ASK_USER_TOOL, tool_use_id: 'toolu_q1', tier: 'read', outcome: 'ok' },
+        { kind: 'tool_call', action: 'Agent', tool_use_id: 'toolu_agent', tier: expect.any(String), outcome: 'ok' },
+        { kind: 'question', action: 'answered', tool_use_id: 'toolu_q1', tier: 'read', outcome: 'ok' },
+      ]),
+    )
+  })
+
   it('only the user in the panel answers, once, with one answer per question', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })

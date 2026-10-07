@@ -25,6 +25,7 @@ from scadbuddy.workflows.commands import start_command
 from tests.api.test_assets import _svg
 from tests.api.test_model_operations import _state, _workflow_ids
 from tests.conftest import MODEL_SLUG
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres]
 
@@ -33,7 +34,7 @@ def _upload(client: TestClient, data: bytes, key: str | None = None) -> Any:
     return client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("a.svg", data, "image/svg+xml")},
-        headers={"Idempotency-Key": key} if key else None,
+        headers={"Idempotency-Key": key} if key else press(),
     )
 
 
@@ -92,7 +93,9 @@ def test_an_asset_fetch_never_records_the_urls_query(
 ) -> None:
     url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
     respx.get(url).mock(return_value=httpx.Response(200, content=_svg(3)))
-    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
     assert response.status_code == 201, response.text
     assert "s3cret" not in response.json()["source_url"]
     pool = _state(app).components.get(OPERATIONS).store._require()
@@ -110,7 +113,9 @@ def test_a_fetch_url_refused_on_its_shape_is_refused_before_any_record(
     """Its refusal quotes the URL, query and all: made in the route, it is never
     recorded in an operation's error."""
     url = "http://openmoji.org/x.svg?token=s3cret"
-    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
     assert response.status_code == 422, response.text
     assert "https" in response.json()["detail"]
     assert _workflow_ids(app, "asset_fetch") == []
@@ -123,7 +128,9 @@ def test_a_fetch_refused_on_a_full_budget_leaves_no_url_claim(
     started, so the URL's claim (its query may carry a token) is released."""
     url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
     monkeypatch.setattr(_state(app).imports, "full", lambda: True)
-    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
     assert response.status_code == 503, response.text
     claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
     assert not claim.exists()
@@ -138,7 +145,9 @@ def test_a_fetch_whose_run_finds_a_full_budget_leaves_no_url_claim(
     url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
     checks = iter([False])
     monkeypatch.setattr(_state(app).imports, "full", lambda: next(checks, True))
-    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url})
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
     assert response.status_code == 503, response.text
     assert len(_workflow_ids(app, "asset_fetch")) == 1
     claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
@@ -153,7 +162,9 @@ def test_an_asset_fetch_names_the_host_of_a_url_pasted_with_whitespace(
     """Review #1194 2.2: the subject and the recorded URL come from the URL as fetched."""
     url = "https://openmoji.org/data/color/svg/1F984.svg"
     respx.get(url).mock(return_value=httpx.Response(200, content=_svg(4)))
-    response = client.post(f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": f" {url}  "})
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": f" {url}  "}, headers=press()
+    )
     assert response.status_code == 201, response.text
     pool = _state(app).components.get(OPERATIONS).store._require()
     with pool.connection() as conn:

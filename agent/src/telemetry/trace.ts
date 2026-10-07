@@ -114,8 +114,13 @@ export function toolUseIdFrom(extra: unknown): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
-/** The bound context of the call `extra` belongs to, else the active one. */
-export function toolContextFor(extra: unknown): Context {
+/**
+ * The bound context of the call `extra` belongs to, else `fallback`'s: the
+ * turn's open segment for a harness call (tools/projections.ts), so a call
+ * whose `_meta` lost its id is still traced under its turn. The active
+ * context is the query's start, not the turn's, and only the default.
+ */
+export function toolContextFor(extra: unknown, fallback: () => Context = () => context.active()): Context {
   const id = toolUseIdFrom(extra)
-  return (id !== undefined ? toolContexts.get(id) : undefined) ?? context.active()
+  return (id !== undefined ? toolContexts.get(id) : undefined) ?? fallback()
 }

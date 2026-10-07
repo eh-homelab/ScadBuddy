@@ -46,7 +46,20 @@ export function fitTargets(job: Job | undefined): FitTarget[] {
       colours: plate.colors.length,
     }))
   }
-  return [{ plate: null, size: job.bbox_mm.size, colours: job.colors?.length ?? 1 }]
+  return [{ plate: null, size: job.bbox_mm.size, colours: coloursPrinted(job) }]
+}
+
+/**
+ * The filaments a part prints with. `colors` is slot order, and an arranged output can
+ * keep a planned slot no part uses (#428), so a slot counts only when a part names its
+ * extruder: the two lists are paired by `PartInfo.extruder`, never by index.
+ */
+function coloursPrinted(job: Job): number {
+  const colors = job.colors ?? []
+  const parts = job.parts ?? []
+  if (parts.length === 0) return colors.length || 1
+  const used = new Set(parts.map((part) => part.extruder))
+  return colors.filter((_, index) => used.has(index + 1)).length || 1
 }
 
 /** Every plate's fit problems, each named by its plate when there is more than one. */

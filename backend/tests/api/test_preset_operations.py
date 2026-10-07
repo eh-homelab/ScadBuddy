@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import params as params_api
 from tests.api.test_model_operations import _workflow_ids
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres]
 
@@ -20,16 +21,24 @@ def _presets(model: str) -> str:
 
 
 def test_preset_writes_are_operations(client: TestClient, app: FastAPI, model: str) -> None:
-    created = client.post(_presets(model), json={"name": "Wide", "params": {"width": 20}})
+    created = client.post(
+        _presets(model), json={"name": "Wide", "params": {"width": 20}}, headers=press()
+    )
     assert created.status_code == 201, created.text
     preset_id = created.json()["id"]
-    copied = client.post(f"{_presets(model)}/{preset_id}/duplicate", json={"name": "Copy"})
+    copied = client.post(
+        f"{_presets(model)}/{preset_id}/duplicate", json={"name": "Copy"}, headers=press()
+    )
     assert copied.status_code == 201, copied.text
     assert copied.json()["params"] == {"width": 20}
-    patched = client.patch(f"{_presets(model)}/{preset_id}", json={"params": {"width": 30}})
+    patched = client.patch(
+        f"{_presets(model)}/{preset_id}", json={"params": {"width": 30}}, headers=press()
+    )
     assert patched.status_code == 200, patched.text
     assert patched.json()["params"] == {"width": 30}
-    renamed = client.patch(f"{_presets(model)}/{preset_id}", json={"name": "Wider"})
+    renamed = client.patch(
+        f"{_presets(model)}/{preset_id}", json={"name": "Wider"}, headers=press()
+    )
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["name"] == "Wider"
     for kind in ("preset_create", "preset_duplicate", "preset_update"):
@@ -60,6 +69,8 @@ def test_a_preset_create_without_openscad_is_still_503(
         raise FileNotFoundError("openscad")
 
     monkeypatch.setattr(params_api, "cached_schema", no_openscad)
-    response = client.post(_presets(model), json={"name": "Wide", "params": {"width": 20}})
+    response = client.post(
+        _presets(model), json={"name": "Wide", "params": {"width": 20}}, headers=press()
+    )
     assert response.status_code == 503, response.text
     assert "openscad is not available" in response.json()["detail"]

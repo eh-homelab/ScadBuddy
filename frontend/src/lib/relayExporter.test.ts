@@ -9,7 +9,14 @@ import { HttpResponse, delay, http } from 'msw'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { MAX_REQUEST_BYTES, MAX_REQUEST_SPANS, RELAY_PATH, REQUEST_TIMEOUT_MS, RelayExporter } from './relayExporter'
+import {
+  MAX_IN_FLIGHT_BYTES,
+  MAX_REQUEST_BYTES,
+  MAX_REQUEST_SPANS,
+  RELAY_PATH,
+  REQUEST_TIMEOUT_MS,
+  RelayExporter,
+} from './relayExporter'
 
 /** `count` finished spans, each carrying `padding` characters in one attribute. */
 function spans(count: number, padding = 0): ReadableSpan[] {
@@ -31,30 +38,46 @@ function exportOnce(exporter: RelayExporter, batch: ReadableSpan[]): Promise<Exp
 }
 
 interface Seen {
-  bodies: { spanNames: string[]; bytes: number; keepalive: boolean; contentType: string | null }[]
+  bodies: {
+    spanNames: string[]
+    bytes: number
+    keepalive: boolean
+    contentType: string | null
+    attributes: Record<string, unknown>[]
+  }[]
   maxInFlight: number
+  maxInFlightBytes: number
 }
 
 /** The relay accepting every batch (204, tracing on), after `wait` ms, recording what came. */
 function acceptingRelay(wait = 0): Seen {
-  const seen: Seen = { bodies: [], maxInFlight: 0 }
+  const seen: Seen = { bodies: [], maxInFlight: 0, maxInFlightBytes: 0 }
   let inFlight = 0
+  let inFlightBytes = 0
   server.use(
     http.post(RELAY_PATH, async ({ request }) => {
       inFlight += 1
       seen.maxInFlight = Math.max(seen.maxInFlight, inFlight)
       const text = await request.text()
+      const bytes = new TextEncoder().encode(text).byteLength
+      inFlightBytes += bytes
+      seen.maxInFlightBytes = Math.max(seen.maxInFlightBytes, inFlightBytes)
       const json = JSON.parse(text) as {
-        resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[]
+        resourceSpans: {
+          scopeSpans: { spans: { name: string; attributes: { key: string; value: Record<string, unknown> }[] }[] }[]
+        }[]
       }
+      const sent = json.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans))
       seen.bodies.push({
-        spanNames: json.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans.map((x) => x.name))),
-        bytes: new TextEncoder().encode(text).byteLength,
+        spanNames: sent.map((x) => x.name),
+        bytes,
         keepalive: request.keepalive,
         contentType: request.headers.get('content-type'),
+        attributes: sent.map((x) => Object.fromEntries(x.attributes.map((a) => [a.key, Object.values(a.value)[0]]))),
       })
       await delay(wait)
       inFlight -= 1
+      inFlightBytes -= bytes
       return new HttpResponse(null, { status: 204 })
     }),
   )
@@ -112,7 +135,13 @@ describe('RelayExporter', () => {
     const result = await exportOnce(new RelayExporter(), spans(3))
     expect(result.code).toBe(ExportResultCode.SUCCESS)
     expect(seen.bodies).toEqual([
-      { spanNames: ['span-0', 'span-1', 'span-2'], bytes: expect.any(Number), keepalive: true, contentType: 'application/json' },
+      {
+        spanNames: ['span-0', 'span-1', 'span-2'],
+        bytes: expect.any(Number),
+        keepalive: true,
+        contentType: 'application/json',
+        attributes: expect.any(Array),
+      },
     ])
   })
 
@@ -136,17 +165,52 @@ describe('RelayExporter', () => {
     expect(seen.bodies.flatMap((b) => b.spanNames)).toEqual(['span-0', 'span-1'])
   })
 
-  it('sends one request at a time, within a batch and across batches', async () => {
+  it('reports dropped spans on the next span it sends, once', async () => {
+    const seen = acceptingRelay()
+    const exporter = new RelayExporter()
+    const [huge] = spans(1, MAX_REQUEST_BYTES)
+    await exportOnce(exporter, [huge!])
+    await exportOnce(exporter, spans(2))
+    await exportOnce(exporter, spans(1))
+    expect(seen.bodies.flatMap((b) => b.attributes.map((a) => a['scadbuddy.dropped_spans']))).toEqual([
+      1,
+      undefined,
+      undefined,
+    ])
+  })
+
+  it('keeps in-flight bytes under the keepalive cap, within a batch and across batches', async () => {
     const seen = acceptingRelay(20)
     const exporter = new RelayExporter()
     const results = await Promise.all([
       exportOnce(exporter, spans(64, 2_000)),
-      exportOnce(exporter, spans(2)),
+      exportOnce(exporter, spans(64, 2_000)),
       exportOnce(exporter, spans(2)),
     ])
     expect(results.map((r) => r.code)).toEqual([ExportResultCode.SUCCESS, ExportResultCode.SUCCESS, ExportResultCode.SUCCESS])
     expect(seen.bodies.length).toBeGreaterThan(3)
-    expect(seen.maxInFlight).toBe(1)
+    expect(seen.maxInFlightBytes).toBeLessThanOrEqual(MAX_IN_FLIGHT_BYTES)
+  })
+
+  it('starts a flush while an earlier request is still unanswered', async () => {
+    let answer: () => void = () => undefined
+    const posted: string[] = []
+    server.use(
+      http.post(RELAY_PATH, async () => {
+        posted.push(posted.length === 0 ? 'first' : 'flush')
+        if (posted.length === 1) await new Promise<void>((resolve) => (answer = resolve))
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const exporter = new RelayExporter()
+    const first = exportOnce(exporter, spans(2))
+    await vi.waitFor(() => expect(posted).toEqual(['first']))
+    const flush = exportOnce(exporter, spans(1))
+    // The page may be going away: the flush cannot wait for the first answer.
+    await vi.waitFor(() => expect(posted).toEqual(['first', 'flush']))
+    expect((await flush).code).toBe(ExportResultCode.SUCCESS)
+    answer()
+    expect((await first).code).toBe(ExportResultCode.SUCCESS)
   })
 
   it('switches itself off on X-ScadBuddy-Tracing: off and never sends again', async () => {
