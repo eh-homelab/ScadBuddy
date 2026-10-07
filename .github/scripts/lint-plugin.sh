@@ -24,6 +24,8 @@
 #   - agent/plugins/scadbuddy, the harness's copy, when present: the same
 #     `version`, no `userConfig` or .mcp.json, and `skills` and `agents` as
 #     links to plugins/scadbuddy's
+#   - agent-durable/plugin, the durable worker's copy, when present: the same
+#     `version`
 #
 # Every problem is printed (one per line, prefixed with the file); the exit
 # status is 1 if there was any, 2 on a usage error.
@@ -200,6 +202,19 @@ if [ -d "$own" ]; then
       err "$(rel "$own/$part")" "does not resolve to a directory"
     fi
   done
+fi
+
+# ── agent-durable's copy (#1056) ──────────────────────────────────────────────
+# agent-durable/plugin is plugins/scadbuddy's skills for a durable session, with a
+# manifest of its own; plugin-edited.sh bumps it with the others.
+durable_manifest="$root/agent-durable/plugin/.claude-plugin/plugin.json"
+shared_manifest="$root/plugins/scadbuddy/.claude-plugin/plugin.json"
+if [ -f "$durable_manifest" ] && json_ok "$shared_manifest"; then
+  if ! json_ok "$durable_manifest"; then
+    err "$(rel "$durable_manifest")" "not a JSON object"
+  elif [ "$(jq -r .version "$durable_manifest")" != "$(jq -r .version "$shared_manifest")" ]; then
+    err "$(rel "$durable_manifest")" "'version' must match $(rel "$shared_manifest")"
+  fi
 fi
 
 if [ "$errors" -gt 0 ]; then

@@ -28,8 +28,8 @@ g() { git -C "$r" -c user.name=t -c user.email=t@t "$@"; }
 repo() {
   rm -rf "$r"
   mkdir -p "$r/plugins/scadbuddy/.claude-plugin" "$r/plugins/scadbuddy/skills/one" \
-    "$r/agent/plugins/scadbuddy/.claude-plugin"
-  for m in plugins/scadbuddy agent/plugins/scadbuddy; do
+    "$r/agent/plugins/scadbuddy/.claude-plugin" "$r/agent-durable/plugin/.claude-plugin"
+  for m in plugins/scadbuddy agent/plugins/scadbuddy agent-durable/plugin; do
     printf '{"name": "scadbuddy", "version": "0.1.0"}\n' >"$r/$m/.claude-plugin/plugin.json"
   done
   printf 'one\n' >"$r/plugins/scadbuddy/skills/one/SKILL.md"
@@ -70,6 +70,12 @@ repo
 printf '{"name": "scadbuddy", "version": "0.1.0", "description": "x"}\n' \
   >"$r/agent/plugins/scadbuddy/.claude-plugin/plugin.json" && commit
 check "a change to the agent copy counts as the plugin's" \
+  "1:plugins/scadbuddy/.claude-plugin/plugin.json: plugin files changed but 'version' is still 0.1.0; bump it" "$(run)"
+
+repo
+printf '{"name": "scadbuddy", "version": "0.1.0", "description": "x"}\n' \
+  >"$r/agent-durable/plugin/.claude-plugin/plugin.json" && commit
+check "a change to agent-durable's copy counts as the plugin's" \
   "1:plugins/scadbuddy/.claude-plugin/plugin.json: plugin files changed but 'version' is still 0.1.0; bump it" "$(run)"
 
 repo

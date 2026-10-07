@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
 # Claude Code PostToolUse hook (.claude/settings.json): after an edit under
-# plugins/, agent/plugins/scadbuddy/ or .claude-plugin/, bump the plugin's
-# version if this branch has not yet, then lint and validate.
+# plugins/, agent/plugins/scadbuddy/, agent-durable/plugin/ or .claude-plugin/,
+# bump the plugin's version if this branch has not yet, then lint and validate.
 #
 # Why bump: "Setting [version] keeps users on that version until you change
 # it" (https://code.claude.com/docs/en/plugins-reference, "Fields"), so a change
 # shipped at the same version never reaches an install. The version is bumped
 # once per branch: a patch bump when it still equals the merge base's, and left
 # alone once it differs (bumped already, or by hand). plugins/scadbuddy's bump
-# is mirrored into agent/plugins/scadbuddy, which lint-plugin.sh holds to the
-# same version.
+# is mirrored into its copies, agent/plugins/scadbuddy and agent-durable/plugin,
+# which lint-plugin.sh holds to the same version.
 #
 # Reads the hook's JSON on stdin. Exit 0 with a JSON `additionalContext` when it
 # bumped something; exit 2 with the problems on stderr (shown to Claude) when
@@ -34,7 +34,7 @@ rel="$(realpath -m --relative-to="$root" "$file")"
 
 plugin=""
 case "$rel" in
-  agent/plugins/scadbuddy/*) plugin=scadbuddy ;;
+  agent/plugins/scadbuddy/* | agent-durable/plugin/*) plugin=scadbuddy ;;
   plugins/*/*)
     plugin="${rel#plugins/}"
     plugin="${plugin%%/*}"
@@ -73,13 +73,14 @@ set_version() {
 if [ -n "$plugin" ]; then
   manifest="plugins/$plugin/.claude-plugin/plugin.json"
   bump "$manifest" || true
-  own="agent/plugins/scadbuddy/.claude-plugin/plugin.json"
-  if [ "$plugin" = scadbuddy ] && [ -f "$root/$own" ] && [ -f "$root/$manifest" ]; then
+  if [ "$plugin" = scadbuddy ] && [ -f "$root/$manifest" ]; then
     version="$(jq -r .version "$root/$manifest")"
-    if [ "$(jq -r .version "$root/$own")" != "$version" ]; then
-      set_version "$own" "$version"
-      notes+=("set $own to $version to match $manifest")
-    fi
+    for own in agent/plugins/scadbuddy/.claude-plugin/plugin.json agent-durable/plugin/.claude-plugin/plugin.json; do
+      if [ -f "$root/$own" ] && [ "$(jq -r .version "$root/$own")" != "$version" ]; then
+        set_version "$own" "$version"
+        notes+=("set $own to $version to match $manifest")
+      fi
+    done
   fi
 fi
 

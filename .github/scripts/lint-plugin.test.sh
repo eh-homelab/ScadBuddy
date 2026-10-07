@@ -217,6 +217,18 @@ check 'an agent copy at another version fails' \
   "$(run "$r")"
 
 own "$r"
+mkdir -p "$r/agent-durable/plugin/.claude-plugin"
+printf '{"name": "scadbuddy", "version": "0.2.0", "description": "d"}\n' \
+  >"$r/agent-durable/plugin/.claude-plugin/plugin.json"
+check "agent-durable's copy in step passes" '0:' "$(run "$r")"
+printf '{"name": "scadbuddy", "version": "0.1.0", "description": "d"}\n' \
+  >"$r/agent-durable/plugin/.claude-plugin/plugin.json"
+check "agent-durable's copy at another version fails" \
+  "1:agent-durable/plugin/.claude-plugin/plugin.json: 'version' must match plugins/scadbuddy/.claude-plugin/plugin.json" \
+  "$(run "$r")"
+rm -r "$r/agent-durable"
+
+own "$r"
 printf '{"name": "scadbuddy", "version": "0.2.0", "description": "d", "userConfig": {}}\n' \
   >"$r/agent/plugins/scadbuddy/.claude-plugin/plugin.json"
 check 'an agent copy with userConfig fails' \

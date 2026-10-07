@@ -9,8 +9,8 @@
 #
 #   .github/scripts/check-plugin-version.sh <base commit> [repo-root]
 #
-# A change under agent/plugins/scadbuddy counts as a change to
-# plugins/scadbuddy (lint-plugin.sh holds the two at one version). A plugin
+# A change under agent/plugins/scadbuddy or agent-durable/plugin counts as a
+# change to plugins/scadbuddy (lint-plugin.sh holds the three at one version). A plugin
 # new since <base> passes. Exit 1 with one line per plugin on failure, 2 on a
 # usage error.
 set -euo pipefail
@@ -26,8 +26,8 @@ if ! git -C "$root" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
   exit 2
 fi
 
-changed="$(git -C "$root" diff --name-only "$base" HEAD -- plugins agent/plugins/scadbuddy)"
-plugins="$(printf '%s\n' "$changed" | sed -nE 's#^(agent/)?plugins/([^/]+)/.*#\2#p' | sort -u)"
+changed="$(git -C "$root" diff --name-only "$base" HEAD -- plugins agent/plugins/scadbuddy agent-durable/plugin)"
+plugins="$(printf '%s\n' "$changed" | sed -nE -e 's#^agent-durable/plugin/.*#scadbuddy#p' -e 's#^(agent/)?plugins/([^/]+)/.*#\2#p' | sort -u)"
 
 errors=0
 for plugin in $plugins; do

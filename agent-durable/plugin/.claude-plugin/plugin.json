@@ -1,7 +1,7 @@
 {
   "name": "scadbuddy",
   "displayName": "ScadBuddy",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "ScadBuddy's skills for a durable session: no subagents, hooks or MCP servers",
   "author": {
     "name": "eh-homelab",
