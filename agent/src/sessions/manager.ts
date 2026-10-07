@@ -10,14 +10,13 @@ import { context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { PayloadKeys } from '../temporal/payloadKeys.js'
 import {
+  DURABLE_SEND_DEADLINE_MS,
   DurableRefused,
-  type DurableSendResult,
   DurableStopped,
   type DurableSessionInput,
   type DurableSessions,
   DurableUnavailable,
 } from '../durable/client.js'
-import { WorkflowUpdateRPCTimeoutOrCancelledError } from '@temporalio/client'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
@@ -188,6 +187,21 @@ export const DURABLE_ACCEPT_WAIT_MS = 5_000
 export const DURABLE_WAITING_CODE = 'worker_pending'
 export const DURABLE_WAITING =
   'the durable worker has not picked up this message yet; it will run when a worker is available'
+/** The `error` a durable message that will never run is logged with (a refusal abandoned it). */
+export const NOT_DELIVERED_CODE = 'not_delivered'
+export function notDelivered(reason?: string): string {
+  return reason ? `Your message was not delivered (${reason}); send it again.` : 'Your message was not delivered; send it again.'
+}
+/** The `error` (code `interrupted`) for each durable message a Stop abandoned before it ran. */
+export const STOPPED_BEFORE_IT_RAN = 'stopped before it ran; this message was not delivered'
+/**
+ * How long a pending durable message's heartbeat must stand still before another replica
+ * takes its delivery over: an attempt takes at most a few deadlines (describe, a stopped
+ * run's close, the update-with-start; DURABLE_SEND_DEADLINE_MS each) and bumps it first.
+ */
+export const DURABLE_TAKEOVER_MS = 5 * DURABLE_SEND_DEADLINE_MS
+/** A durable turn's `error`s that are notices, not its failure (durableOutcome). */
+const DURABLE_NOTICE_CODES = new Set([DURABLE_WAITING_CODE, 'interrupted', 'resumed_fresh'])
 
 export function isSessionMode(value: unknown): value is SessionMode {
   return value === 'classic' || value === 'durable'
@@ -519,6 +533,8 @@ export type SessionManagerDeps = {
   durable?: DurableSessions
   /** DURABLE_ACCEPT_WAIT_MS by default. */
   durableAcceptWaitMs?: number
+  /** DURABLE_TAKEOVER_MS by default (resumeDurableSends). */
+  durableTakeoverMs?: number
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -792,8 +808,11 @@ export class SessionManager {
   private readonly run: QueryRunner
   private readonly leaseMs: number
   private readonly renewMs: number
-  /** Durable sends claimed and not yet sent to Temporal, which a Stop aborts (interruptDurable). */
+  /** Durable deliveries running in this process, by turn id, which a Stop aborts (interruptDurable). */
   private readonly unsent = new Map<string, AbortController>()
+  private readonly delivering = new Set<string>()
+  /** Pending durable messages and the heartbeat this replica last saw on each (resumeDurableSends). */
+  private stalled = new Map<string, { attempt: string; since: number }>()
   /** Turns running in THIS process, by session id. */
   private readonly active = new Map<string, LocalTurn>()
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
@@ -1165,102 +1184,25 @@ export class SessionManager {
   // -- durable sessions (#1056) -------------------------------------------------
 
   /**
-   * A durable session's send: the message goes to its DurableSession workflow
-   * (durable/client.ts), whose live output agent-durable's projector logs. The claim is
-   * one UPDATE taken once the execution is chosen (DurableSendOptions.beforeStart), with
-   * the stream offset reset for a new execution in the same transaction, so the projector
-   * never follows a new execution from the old one's offset. Resolves once the Update was
-   * accepted, or after `durableAcceptWaitMs` when it was not yet (no worker polls): the
-   * turn then stays `running` and runs when a worker starts.
+   * A durable session's send. The claim commits the message (`ai_durable_inputs`) and logs
+   * its `user.turn` in one transaction, BEFORE Temporal is asked anything; the Update is
+   * then only a nudge with the message's id, which the DurableSession workflow answers by
+   * loading the session's pending messages (agent-durable inputs.py). So nothing a Temporal
+   * outage, a lost Update or a dead sender does can lose the message: it runs, or someone
+   * abandons it and the log says so (`deliverDurable`). After the claim nothing is thrown:
+   * every outcome is in the log, which the sender follows.
    */
   private async sendDurable(session: SessionRecord, principal: Owner, prompt: string, options: SendOptions): Promise<Turn> {
     const durable = this.deps.durable
     if (!durable) throw new SessionError('unsupported', DURABLE_NEEDS_TEMPORAL)
     const id = session.id
-    // Checked before Temporal is asked anything; the claim checks again.
+    // Checked before anything is written; the claim checks again.
     if (!sameOwner(principal, session.owner) || !this.claimable(session)) throw await this.whyNotClaimed(id, principal, session)
     const turnId = randomUUID()
-    const [expiry, model] = await Promise.all([
-      this.approvals.expirySeconds(),
-      this.deps.settings?.get<unknown>(SETTING_MODEL),
-    ])
-    const input: DurableSessionInput = {
-      session_id: id,
-      max_turns: session.maxTurns,
-      approval_expiry_seconds: expiry,
-      model: typeof model === 'string' && model ? model : null,
-    }
-    let userSeq: number | undefined
-    let planned: DurableSendResult | undefined
-    let claimed = () => {}
-    const claim = new Promise<void>((resolve) => {
-      claimed = resolve
-    })
-    const unsent = new AbortController()
-    const sent = () => {
-      if (this.unsent.get(id) === unsent) this.unsent.delete(id)
-    }
-    const sending = durable.send(
-      input,
-      { text: prompt, context: options.context ?? null },
-      {
-        beforeStart: async (result) => {
-          userSeq = await this.claimDurable(session, principal, turnId, prompt, result)
-          planned = result
-          this.unsent.set(id, unsent)
-          claimed()
-          options.onClaimed?.()
-        },
-        starting: sent,
-        signal: unsent.signal,
-        newRun: () => this.newDurableRun(id, turnId),
-      },
-    )
-    sending.then(sent, sent)
-    let timer: NodeJS.Timeout | undefined
-    const late = Symbol('late')
-    const first = await Promise.race([
-      sending.then(
-        (ok) => ({ ok }),
-        (err: unknown) => ({ err }),
-      ),
-      claim.then(
-        () =>
-          new Promise<typeof late>((resolve) => {
-            timer = setTimeout(() => resolve(late), this.deps.durableAcceptWaitMs ?? DURABLE_ACCEPT_WAIT_MS)
-          }),
-      ),
-    ])
-    clearTimeout(timer)
-    const report = (e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)
-    // Once the update-with-start answered, no start is in flight, except when its RPC timed
-    // out or was aborted: the start may still land, so the mark stays (the projector counts
-    // it stale only after 2 x DURABLE_SEND_DEADLINE_MS).
-    sending.then(
-      () => this.clearSending(id, turnId).catch(report),
-      (err: unknown) =>
-        err instanceof WorkflowUpdateRPCTimeoutOrCancelledError ? undefined : this.clearSending(id, turnId).catch(report),
-    )
-    if (first === late) {
-      // Nobody waits for the answer any more: the log says what becomes of the message.
-      await this.events.append(id, [
-        event({ type: 'error', sessionId: id, code: DURABLE_WAITING_CODE, message: DURABLE_WAITING }),
-      ])
-      sending.then(
-        (ok) => this.startedDurable(id, planned!, ok).catch(report),
-        (err: unknown) => this.failDurable(id, err, { logged: true }).catch(report),
-      )
-    } else if ('err' in first) {
-      if (userSeq === undefined) throw durableError(first.err)
-      // Stopped before it was sent: the log says so (failDurable), and the sender is not told of an error.
-      if (first.err instanceof DurableStopped) await this.failDurable(id, first.err, { logged: true })
-      // The sender is told (the thrown error), so the log only records the release.
-      else if (await this.failDurable(id, first.err, { logged: false })) throw durableError(first.err)
-    } else {
-      await this.startedDurable(id, planned!, first.ok)
-    }
-    const after = userSeq!
-    const outcome = () => this.durableOutcome(id, after)
+    const userSeq = await this.claimDurable(session, principal, turnId, prompt, options.context ?? null)
+    options.onClaimed?.()
+    await this.deliverDurable(session, turnId)
+    const outcome = () => this.durableOutcome(id, userSeq)
     let done: Promise<TurnOutcome> | undefined
     // Followed only when someone waits for it: with no worker, it may never settle.
     return {
@@ -1270,6 +1212,119 @@ export class SessionManager {
         return done
       },
     }
+  }
+
+  /**
+   * Delivers a committed message (`turnId`) to the session's workflow. Resolves once its
+   * turn started, or after `durableAcceptWaitMs` (no worker took it yet: the log says it
+   * will run when one does, `worker_pending`, and delivery goes on in the background).
+   * Every attempt sends the same id (DurableSendOptions.attempt) and bumps the stream's
+   * heartbeat, so a replica can take over a send whose sender died (`resumeDurableSends`).
+   */
+  private async deliverDurable(session: SessionRecord, turnId: string, { wait = true }: { wait?: boolean } = {}): Promise<void> {
+    const durable = this.deps.durable!
+    const id = session.id
+    const report = (e: unknown) => this.deps.stderr?.(`durable send ${id}: ${describe(e)}`)
+    const [expiry, model] = await Promise.all([this.approvals.expirySeconds(), this.deps.settings?.get<unknown>(SETTING_MODEL)])
+    const input: DurableSessionInput = {
+      session_id: id,
+      max_turns: session.maxTurns,
+      approval_expiry_seconds: expiry,
+      model: typeof model === 'string' && model ? model : null,
+    }
+    let pendingShown = false
+    const showPending = async () => {
+      if (pendingShown) return
+      pendingShown = true
+      await this.events.append(id, [event({ type: 'error', sessionId: id, code: DURABLE_WAITING_CODE, message: DURABLE_WAITING })])
+    }
+    let freshShown = false
+    // A Stop in this process aborts at once; one elsewhere abandons the message, which the
+    // next attempt's heartbeat sees.
+    const unsent = new AbortController()
+    this.unsent.set(turnId, unsent)
+    this.delivering.add(turnId)
+    const sending = durable.send(input, turnId, {
+      beforeStart: async (result) => {
+        if (result.started !== 'attached') await this.newDurableRun(id, turnId)
+        if (result.resumedFresh && !freshShown) {
+          freshShown = true
+          await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
+        }
+      },
+      starting: () => {},
+      signal: unsent.signal,
+      attempt: () => this.durableHeartbeat(id, turnId),
+      retrying: (err) => {
+        report(err)
+        showPending().catch(report)
+      },
+    })
+    const settled = sending
+      .then(
+        async (result) => {
+          if (result.resumedFresh && !freshShown) {
+            freshShown = true
+            await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
+          }
+        },
+        (err: unknown) => this.undeliveredDurable(id, turnId, err),
+      )
+      .then(() => this.clearSending(id, turnId))
+      .catch(report)
+      .finally(() => {
+        if (this.unsent.get(turnId) === unsent) this.unsent.delete(turnId)
+        this.delivering.delete(turnId)
+      })
+    if (!wait) return
+    let timer: NodeJS.Timeout | undefined
+    const late = await Promise.race([
+      settled.then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), this.deps.durableAcceptWaitMs ?? DURABLE_ACCEPT_WAIT_MS)
+      }),
+    ])
+    clearTimeout(timer)
+    if (late) await showPending()
+  }
+
+  /**
+   * Before each delivery attempt: bumps the stream's `send_attempt` (another replica takes
+   * over a send only after it saw no bump for long) while the message is still pending.
+   */
+  private async durableHeartbeat(id: string, turnId: string): Promise<boolean> {
+    const rows = await this.deps.sql`
+      UPDATE ai_durable_streams SET send_attempt = send_attempt + 1
+      WHERE session_id = ${id} AND EXISTS (
+        SELECT 1 FROM ai_durable_inputs WHERE id = ${turnId} AND session_id = ${id} AND status = 'pending')
+      RETURNING session_id`
+    return rows.length > 0
+  }
+
+  /**
+   * A delivery that ended without its turn starting. Refused (busy, stopping, abandoned):
+   * the message is abandoned, so no run takes it later, and the log says it was not
+   * delivered. Given up (a Stop abandoned it, or a run took it after all): whoever abandoned
+   * it logged that; a run that took it logs its own turn.
+   */
+  private async undeliveredDurable(id: string, turnId: string, err: unknown): Promise<void> {
+    if (err instanceof DurableStopped) return
+    if (!(err instanceof DurableRefused)) throw err
+    const abandoned = await this.deps.sql.begin(async (tx) => {
+      const rows = await tx`
+        UPDATE ai_durable_inputs SET status = 'abandoned' WHERE id = ${turnId} AND status = 'pending' RETURNING id`
+      if (rows.length === 0) return undefined
+      const released = await tx`
+        UPDATE ai_sessions SET status = 'idle', updated_at = now()
+        WHERE id = ${id} AND status IN ('running', 'waiting_approval')
+          AND NOT EXISTS (SELECT 1 FROM ai_durable_inputs WHERE session_id = ${id} AND status = 'pending')`
+      const events: ServerEvent[] = [
+        event({ type: 'error', sessionId: id, code: NOT_DELIVERED_CODE, message: notDelivered(err.message) }),
+        ...(released.count > 0 ? [event({ type: 'session.status', sessionId: id, status: 'idle' })] : []),
+      ]
+      return { events, seqs: await this.events.append(id, events, tx) }
+    })
+    if (abandoned) this.events.committed(id, abandoned.events, abandoned.seqs)
   }
 
   /** What a send may claim: not running or waiting, not done, budget left. */
@@ -1283,20 +1338,19 @@ export class SessionManager {
   }
 
   /**
-   * Claims a durable session for a turn and logs it, in one transaction; returns the
-   * `user.turn`'s seq. A new execution's live output starts at offset 0 again
-   * (plan ruling 9), so its `ai_durable_streams.next_offset` is reset with the claim.
+   * Claims a durable session for a turn, commits its message (`ai_durable_inputs`) and logs
+   * its `user.turn`, in one transaction; returns the `user.turn`'s seq. `sending` marks the
+   * turn whose delivery runs, which a new execution's stream reset is tied to.
    */
   private async claimDurable(
     session: SessionRecord,
     principal: Owner,
     turnId: string,
     prompt: string,
-    result: DurableSendResult,
+    context: string | null,
   ): Promise<number> {
     const id = session.id
     const events: ServerEvent[] = [
-      ...(result.resumedFresh ? [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })] : []),
       event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author: principal }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ]
@@ -1307,108 +1361,107 @@ export class SessionManager {
           AND status NOT IN ('running', 'waiting_approval', 'done') AND cost_usd < budget_usd
         RETURNING id`
       if (claimed.length === 0) return undefined
-      // `sending` marks the update-with-start in flight until it answers (clearSending):
-      // until then a closed run may be the new one not started yet, which the projector
-      // must not settle idle on (projector.py `_settle_if_stale`).
-      // A new run's reset writes the turn id as the chain, never NULL: a follower still on
-      // the previous chain cannot compare-and-set against a reset it did not see (ABA).
-      if (result.started === 'attached') {
-        await tx`
-          INSERT INTO ai_durable_streams (session_id, sending) VALUES (${id}, ${turnId})
-          ON CONFLICT (session_id) DO UPDATE SET sending = excluded.sending`
-      } else {
-        await tx`
-          INSERT INTO ai_durable_streams (session_id, chain, sending) VALUES (${id}, ${turnId}, ${turnId})
-          ON CONFLICT (session_id) DO UPDATE SET next_offset = 0, chain = excluded.chain, sending = excluded.sending`
-      }
+      await tx`INSERT INTO ai_durable_inputs (id, session_id, text, context) VALUES (${turnId}, ${id}, ${prompt}, ${context})`
+      await tx`
+        INSERT INTO ai_durable_streams (session_id, sending, send_attempt) VALUES (${id}, ${turnId}, 1)
+        ON CONFLICT (session_id) DO UPDATE SET sending = excluded.sending,
+          send_attempt = ai_durable_streams.send_attempt + 1`
       return this.events.append(id, events, tx)
     })
     if (!seqs) throw await this.whyNotClaimed(id, principal, session)
     this.events.committed(id, events, seqs)
-    return seqs[result.resumedFresh ? 1 : 0]!
+    return seqs[0]!
   }
 
   /**
-   * A durable send whose execution turned out other than planned at the claim: `describe`
-   * took it for an attach and the running one closed in between, or a stopped run closed
-   * other than with its state. A new run's live output starts at offset 0 in a new chain,
-   * which the projector reads from 0 itself (the stream row's offset counts in its
-   * `chain`, projector.py `_drain`), so nothing is reset here; the log says when the
-   * conversation could not be resumed.
-   */
-  private async startedDurable(id: string, planned: DurableSendResult, actual: DurableSendResult): Promise<void> {
-    if (actual.resumedFresh && !planned.resumedFresh) {
-      await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
-    }
-  }
-
-  /**
-   * The stream reset a claim taken as an attach owes once the run it waited for closed
-   * (DurableSendOptions.newRun): the next run's live output starts at offset 0, in a chain
-   * of this turn's own, as claimDurable writes one for a new execution.
+   * A delivery attempt that starts a new execution (DurableSendOptions.beforeStart): its
+   * live output starts at offset 0 (plan ruling 9), in a chain of this turn's own, never
+   * NULL, so a follower still on the previous chain cannot compare-and-set against a reset
+   * it did not see (ABA).
    */
   private async newDurableRun(id: string, turnId: string): Promise<void> {
     await this.deps.sql`
       UPDATE ai_durable_streams SET next_offset = 0, chain = ${turnId} WHERE session_id = ${id} AND sending = ${turnId}`
   }
 
-  /** The claim's `sending` mark, once its update-with-start answered (claimDurable). */
+  /** The delivery's `sending` mark, once it ended. */
   private async clearSending(id: string, turnId: string): Promise<void> {
     await this.deps.sql`UPDATE ai_durable_streams SET sending = NULL WHERE session_id = ${id} AND sending = ${turnId}`
   }
 
   /**
-   * A claimed durable send that did not reach its workflow: the session goes back to
-   * `idle`. `logged`: the log says why too, when no sender is told (the error would
-   * otherwise show twice). False when the Update may still be delivered (its RPC timed
-   * out after Temporal admitted it): the turn stays `running`.
+   * Takes over the deliveries whose sender is gone (#1056): a committed message still
+   * pending whose stream heartbeat (`send_attempt`) this replica saw unchanged for
+   * `durableTakeoverMs` on its monotonic clock. An attempt bumps it at least every few
+   * deadlines, so a live sender is never taken over; and if one were, both send the same
+   * id, which Temporal and the workflow dedupe. The take-over is a compare-and-set on the
+   * heartbeat, so one replica wins. Run by the reaper (`startReaper`).
    */
-  private async failDurable(id: string, err: unknown, { logged }: { logged: boolean }): Promise<boolean> {
-    if (err instanceof WorkflowUpdateRPCTimeoutOrCancelledError) return false
-    const failure = durableError(err)
-    const code = failure instanceof SessionError ? failure.code : 'internal'
-    const released = await this.deps.sql`
-      UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`
-    if (released.count > 0) {
-      const stopped = err instanceof DurableStopped
-      await this.events.append(id, [
-        ...(stopped ? [event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' })] : []),
-        ...(logged && !stopped ? [event({ type: 'error', sessionId: id, code, message: describe(failure) })] : []),
-        event({ type: 'session.status', sessionId: id, status: 'idle' }),
-      ])
+  async resumeDurableSends(): Promise<string[]> {
+    if (!this.deps.durable) return []
+    const rows = await this.deps.sql<{ id: string; session_id: string; send_attempt: string }[]>`
+      SELECT i.id, i.session_id, d.send_attempt FROM ai_durable_inputs i
+      JOIN ai_durable_streams d ON d.session_id = i.session_id
+      WHERE i.status = 'pending'`
+    const now = performance.now()
+    const seen = new Map<string, { attempt: string; since: number }>()
+    const taken: string[] = []
+    for (const row of rows) {
+      const before = this.stalled.get(row.id)
+      const since = before && before.attempt === row.send_attempt ? before.since : now
+      seen.set(row.id, { attempt: row.send_attempt, since })
+      if (this.delivering.has(row.id) || now - since < (this.deps.durableTakeoverMs ?? DURABLE_TAKEOVER_MS)) continue
+      const won = await this.deps.sql`
+        UPDATE ai_durable_streams SET send_attempt = send_attempt + 1, sending = ${row.id}
+        WHERE session_id = ${row.session_id} AND send_attempt = ${row.send_attempt}
+        RETURNING session_id`
+      if (won.length === 0) continue
+      seen.delete(row.id)
+      const session = await this.row(row.session_id)
+      if (!session) continue
+      taken.push(row.id)
+      await this.deliverDurable(session, row.id, { wait: false })
     }
-    return true
+    this.stalled = seen
+    return taken
   }
 
   /**
-   * Stop on a durable session (deviation 4): cancels the running execution, whose
-   * projector logs the end. Like classic, false when no turn runs (an idle execution is
-   * left alone). A session that says it runs with no execution running (its run was
-   * terminated or failed) goes back to `idle`, so it never stays `running`.
+   * Stop on a durable session (deviation 4). Its pending messages are abandoned first, in
+   * one transaction with an `error` that says so, so no run takes them after the Stop (a
+   * run checks each one as it starts it, agent-durable inputs.py), whichever replica sends
+   * them; then the running execution is cancelled, and its projector logs the end. Like
+   * classic, false when no turn runs (an idle execution is left alone). A session that says
+   * it runs with no execution running (its run was terminated or failed, or its message
+   * never reached one) goes back to `idle`, so it never stays `running`.
    */
   private async interruptDurable(session: SessionRecord): Promise<boolean> {
     const id = session.id
     if (!this.deps.durable || (session.status !== 'running' && session.status !== 'waiting_approval')) return false
-    // A send not yet at Temporal (waiting for a stopped run to close): it gives up, and
-    // its failure gives the session back (failDurable). No execution has its message.
-    const unsent = this.unsent.get(id)
-    if (unsent) {
-      this.unsent.delete(id)
-      unsent.abort()
-      return true
-    }
+    const abandoned = await this.deps.sql<{ id: string }[]>`
+      UPDATE ai_durable_inputs SET status = 'abandoned' WHERE session_id = ${id} AND status = 'pending' RETURNING id`
+    // A delivery in this process gives up at once.
+    for (const { id: turnId } of abandoned) this.unsent.get(turnId)?.abort()
+    const stopped: ServerEvent[] = abandoned.map(() =>
+      event({ type: 'error', sessionId: id, code: 'interrupted', message: STOPPED_BEFORE_IT_RAN }),
+    )
     let cancelled: boolean
     try {
       cancelled = await this.deps.durable.cancel(id)
     } catch (err) {
+      if (stopped.length > 0) await this.events.append(id, stopped)
       throw durableError(err)
     }
-    if (cancelled) return true
+    if (cancelled) {
+      if (stopped.length > 0) await this.events.append(id, stopped)
+      return true
+    }
     const released = await this.deps.sql`
       UPDATE ai_sessions SET status = 'idle', updated_at = now()
       WHERE id = ${id} AND status IN ('running', 'waiting_approval')`
-    if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
-    return false
+    const idle = released.count > 0 ? [event({ type: 'session.status', sessionId: id, status: 'idle' })] : []
+    if (stopped.length + idle.length > 0) await this.events.append(id, [...stopped, ...idle])
+    return stopped.length > 0
   }
 
   /** A durable turn's end, from the log after its `user.turn` to the next settled status. */
@@ -1417,7 +1470,7 @@ export class SessionManager {
     let result = false
     try {
       for await (const { event: e } of this.events.follow(id, afterSeq)) {
-        if (e.type === 'error' && e.code !== DURABLE_WAITING_CODE && e.code !== 'interrupted') failed = e.message
+        if (e.type === 'error' && !DURABLE_NOTICE_CODES.has(e.code ?? '')) failed = e.message
         if (e.type === 'session.result') result = true
         if (e.type === 'session.status' && (e.status === 'idle' || e.status === 'done' || e.status === 'failed')) break
       }
@@ -2403,7 +2456,10 @@ export class SessionManager {
     return rows.map((r) => r.id)
   }
 
-  /** Runs `reapExpired` now and every `intervalMs` (main.ts), like the approval sweeper. */
+  /**
+   * Runs `reapExpired` and `resumeDurableSends` now and every `intervalMs` (main.ts), like
+   * the approval sweeper.
+   */
   startReaper(
     intervalMs: number,
     options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {},
@@ -2411,7 +2467,7 @@ export class SessionManager {
     const ready = options.ready ?? (() => Promise.resolve(true))
     const sweep = () => {
       ready()
-        .then((ok) => (ok ? this.reapExpired() : []))
+        .then(async (ok) => (ok ? [...(await this.reapExpired()), ...(await this.resumeDurableSends())] : []))
         .catch(options.onError ?? (() => {}))
     }
     sweep()

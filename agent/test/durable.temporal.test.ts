@@ -7,7 +7,6 @@ import type { Database } from '../src/db.js'
 import {
   DURABLE_TASK_QUEUE,
   DurableRefused,
-  type DurableSendResult,
   type DurableSessionInput,
   durableWorkflowId,
   STILL_STOPPING,
@@ -59,15 +58,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     const durable = new TemporalDurableSessions(env.client, db.sql)
     const handle = env.client.workflow.getHandle(durableWorkflowId(sid))
     const input: DurableSessionInput = { session_id: sid, max_turns: 30, approval_expiry_seconds: 600, model: null }
+    const [hi, more, again, afterStop] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()]
 
-    expect(await durable.send(input, { text: 'hi', context: null })).toEqual({ started: 'fresh', resumedFresh: false })
+    expect(await durable.send(input, hi)).toEqual({ started: 'fresh', resumedFresh: false })
+    // The wire shape agent-durable's models.py takes: [SessionInput, AgentState | None], and
+    // the nudge `Nudge(id)`.
     expect(await handle.query(seenQuery)).toEqual({
-      args: [{ session_id: sid, max_turns: 30, approval_expiry_seconds: 600, model: null }, null, null],
-      messages: [{ text: 'hi', context: null }],
+      args: [{ session_id: sid, max_turns: 30, approval_expiry_seconds: 600, model: null }, null],
+      messages: [{ id: hi }],
       reviews: [],
     })
-    expect(await durable.send(input, { text: 'more', context: 'route: /' })).toEqual({ started: 'attached', resumedFresh: false })
-    await expect(durable.send(input, { text: 'again', context: null })).rejects.toThrow(new DurableRefused('the session is busy'))
+    expect(await durable.send(input, more)).toEqual({ started: 'attached', resumedFresh: false })
+    // The same id again (a re-send after a timeout): Temporal dedupes the Update by its id.
+    expect(await durable.send(input, more)).toEqual({ started: 'attached', resumedFresh: false })
+    expect((await handle.query(seenQuery)).messages).toEqual([{ id: hi }, { id: more }])
+    await expect(durable.send(input, again)).rejects.toThrow(new DurableRefused('the session is busy'))
 
     expect(await durable.pending(sid)).toEqual([{ id: 'toolu_1', name: 'send_to_bambuddy', input: { output: 'box.3mf' } }])
     await durable.review(sid, 'toolu_1', true, 'browser:browser')
@@ -81,13 +86,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     expect(await handle.result()).toEqual({ handed_over: 2 })
     expect(await durable.cancel(sid)).toBe(false)
     expect(await durable.pending(sid)).toEqual([])
-    expect(await durable.send(input, { text: 'after stop', context: null })).toEqual({
-      started: 'handed_over',
-      resumedFresh: false,
-    })
+    expect(await durable.send(input, afterStop)).toEqual({ started: 'handed_over', resumedFresh: false })
     expect(await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)).toEqual({
-      args: [input, { handed_over: 2 }, null],
-      messages: [{ text: 'after stop', context: null }],
+      args: [input, { handed_over: 2 }],
+      messages: [{ id: afterStop }],
       reviews: [],
     })
     await durable.cancel(sid)
@@ -98,44 +100,41 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     const durable = new TemporalDurableSessions(env.client, db.sql)
     // The stand-in returns its state this long after the cancel (the plugin's end of task).
     const input = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: null, stop_ms: 2_000 }
-    await durable.send(input, { text: 'first', context: null })
+    await durable.send(input, randomUUID())
     expect(await durable.cancel(sid)).toBe(true)
     // Sent at once: the stopping execution would accept it, then close and lose it.
+    const after = randomUUID()
     const steps: string[] = []
     expect(
-      await durable.send(
-        input,
-        { text: 'after stop', context: null },
-        {
-          beforeStart: async (r) => void steps.push(`claim ${r.started}`),
-          newRun: async () => void steps.push('new run'),
-          starting: () => void steps.push('starting'),
-        },
-      ),
+      await durable.send(input, after, {
+        beforeStart: async (r) => void steps.push(`chose ${r.started}`),
+        starting: () => void steps.push('starting'),
+      }),
     ).toEqual({ started: 'handed_over', resumedFresh: false })
-    // Claimed while the stopped run was the latest; its stream is reset once it closed.
-    expect(steps).toEqual(['claim attached', 'new run', 'starting'])
+    // Chosen once the stopped run closed: the next run, with the stream reset.
+    expect(steps).toEqual(['chose handed_over', 'starting'])
     const seen = await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)
     expect(seen.args[1]).toEqual({ handed_over: 1 })
-    expect(seen.messages).toEqual([{ text: 'after stop', context: null }])
+    expect(seen.messages).toEqual([{ id: after }])
     await durable.cancel(sid)
   }, 120_000)
 
-  it('a stopped execution that does not close within D: claimed, then refused as still stopping', async () => {
+  it('a stopped execution that does not close within D: refused as still stopping, or waited for while delivering', async () => {
     const sid = randomUUID()
     const durable = new TemporalDurableSessions(env.client, db.sql, { sendDeadlineMs: 1_000 })
     const input = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: null, stop_ms: 600_000 }
-    await durable.send(input, { text: 'first', context: null })
+    const first = randomUUID()
+    await durable.send(input, first)
     expect(await durable.cancel(sid)).toBe(true)
-    const planned: DurableSendResult[] = []
-    await expect(
-      durable.send(input, { text: 'too soon', context: null }, { beforeStart: async (r) => void planned.push(r) }),
-    ).rejects.toThrow(new DurableRefused(STILL_STOPPING))
-    // Claimed before the wait (as an attach: the stopped run is still the latest), so the
-    // sender was answered without it.
-    expect(planned).toEqual([{ started: 'attached', resumedFresh: false }])
+    await expect(durable.send(input, randomUUID())).rejects.toThrow(new DurableRefused(STILL_STOPPING))
+    // Delivering (the manager's `attempt`), it waits again rather than give the message up.
+    let beats = 0
+    await expect(durable.send(input, randomUUID(), { attempt: async () => ++beats <= 2 })).rejects.toThrow(
+      'the message is no longer waiting to be sent',
+    )
+    expect(beats).toBe(3)
     const handle = env.client.workflow.getHandle(durableWorkflowId(sid))
-    expect((await handle.query(seenQuery)).messages).toEqual([{ text: 'first', context: null }])
+    expect((await handle.query(seenQuery)).messages).toEqual([{ id: first }])
     await handle.terminate('test over')
   }, 120_000)
 
@@ -143,10 +142,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`DurableSession over Tempor
     const sid = randomUUID()
     const durable = new TemporalDurableSessions(env.client, db.sql)
     const input: DurableSessionInput = { session_id: sid, max_turns: 5, approval_expiry_seconds: 60, model: 'm' }
-    await durable.send(input, { text: 'hi', context: null })
+    await durable.send(input, randomUUID())
     await env.client.workflow.getHandle(durableWorkflowId(sid)).terminate('operator')
-    expect(await durable.send(input, { text: 'hi again', context: null })).toEqual({ started: 'fresh', resumedFresh: true })
-    expect((await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)).args).toEqual([input, null, null])
+    expect(await durable.send(input, randomUUID())).toEqual({ started: 'fresh', resumedFresh: true })
+    expect((await env.client.workflow.getHandle(durableWorkflowId(sid)).query(seenQuery)).args).toEqual([input, null])
     await durable.cancel(sid)
   }, 120_000)
 })

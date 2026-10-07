@@ -4,23 +4,25 @@ import { CancellationScope, condition, defineQuery, defineUpdate, isCancellation
 // with its names, so test/durable.temporal.test.ts checks the wire shape of the agent
 // service's calls without Python. It records what it receives; a Stop (cancellation)
 // returns a state the next execution must be started with; with `stop_ms` in its input, only
-// that long after the Stop, as the plugin ends its task before the execution returns.
+// that long after the Stop, as the plugin ends its task before the execution returns. Like
+// the Python workflow, a nudge for a message it already took is a no-op.
 
 export type Seen = { args: unknown[]; messages: unknown[]; reviews: unknown[] }
 
 export const seenQuery = defineQuery<Seen>('seen')
 
-export async function DurableSession(input: unknown, state: unknown, inbox: unknown): Promise<unknown> {
-  const messages: unknown[] = []
+export async function DurableSession(input: unknown, state: unknown): Promise<unknown> {
+  const messages: { id: string }[] = []
   const reviews: unknown[] = []
+  const known = (nudge: { id: string }) => messages.some((m) => m.id === nudge.id)
   setHandler(
-    defineUpdate<void, [unknown]>('send_message'),
-    (message) => {
-      messages.push(message)
+    defineUpdate<void, [{ id: string }]>('send_message'),
+    (nudge) => {
+      if (!known(nudge)) messages.push(nudge)
     },
     {
-      validator: (_message: unknown) => {
-        if (messages.length >= 2) throw new Error('the session is busy')
+      validator: (nudge: { id: string }) => {
+        if (messages.length >= 2 && !known(nudge)) throw new Error('the session is busy')
       },
     },
   )
@@ -38,7 +40,7 @@ export async function DurableSession(input: unknown, state: unknown, inbox: unkn
   setHandler(defineQuery<unknown[]>('pending_approvals'), () => [
     { id: 'toolu_1', name: 'send_to_bambuddy', input: { output: 'box.3mf' } },
   ])
-  setHandler(seenQuery, () => ({ args: [input, state, inbox], messages, reviews }))
+  setHandler(seenQuery, () => ({ args: [input, state], messages, reviews }))
   try {
     await condition(() => false)
   } catch (err) {

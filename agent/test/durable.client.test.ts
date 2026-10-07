@@ -14,6 +14,7 @@ import {
   durableApprovalId,
   DurableRefused,
   type DurableSessionInput,
+  DurableStopped,
   durableWorkflowId,
   parseDurableApprovalId,
   REVIEW_UPDATE,
@@ -29,20 +30,23 @@ import { type FakeUpdate, fakeTemporalClient as fakeClient } from './support/fak
 
 const SID = '0b5c6a2e-8a4b-4d3c-9e1f-2a3b4c5d6e7f'
 const input: DurableSessionInput = { session_id: SID, max_turns: 30, approval_expiry_seconds: 600, model: null }
+/** The committed message's id (manager.ts claimDurable): the nudge, and the Update's id. */
+const MID = '7d1e2f3a-4b5c-4d6e-8f70-81920a1b2c3d'
 
 /** No snapshot rows: a tagged template that answers every query with nothing. */
 const noRows = ((..._args: unknown[]) => Promise.resolve([])) as unknown as Sql
 
 function expectStart(update: FakeUpdate | undefined, state: unknown) {
   expect(update?.name).toBe(SEND_UPDATE)
-  expect(update?.options.args).toEqual([{ text: 'hi', context: 'page' }])
+  expect(update?.options.args).toEqual([{ id: MID }])
+  expect(update?.options.updateId).toBe(MID)
   const operation = update?.options.startWorkflowOperation
   expect(operation).toBeInstanceOf(WithStartWorkflowOperation)
   expect(operation?.workflowTypeOrFunc).toBe(DURABLE_WORKFLOW)
   expect(operation?.options).toEqual({
     workflowId: `session-${SID}`,
     taskQueue: DURABLE_TASK_QUEUE,
-    args: [input, state, null],
+    args: [input, state],
     workflowIdConflictPolicy: 'USE_EXISTING',
     workflowIdReusePolicy: 'ALLOW_DUPLICATE',
   })
@@ -57,7 +61,7 @@ describe('TemporalDurableSessions', () => {
 
   it('attaches to a running execution with no state', async () => {
     const { client, updates } = fakeClient({ status: 'RUNNING' })
-    const result = await new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: 'page' })
+    const result = await new TemporalDurableSessions(client, noRows).send(input, MID)
     expect(result).toEqual({ started: 'attached', resumedFresh: false })
     expectStart(updates[0], null)
   })
@@ -67,7 +71,7 @@ describe('TemporalDurableSessions', () => {
     const seen: unknown[] = []
     const result = await new TemporalDurableSessions(client, noRows).send(
       input,
-      { text: 'hi', context: 'page' },
+      MID,
       { beforeStart: async (r) => void seen.push(r) },
     )
     expect(seen).toEqual([{ started: 'attached', resumedFresh: false }])
@@ -77,12 +81,12 @@ describe('TemporalDurableSessions', () => {
 
   it('asks again when the describe after the start fails, and keeps attached when Temporal cannot say', async () => {
     const retried = fakeClient({ status: 'RUNNING', chain: 'run-1', chainAfterUpdate: 'run-2', failDescribes: [2] })
-    expect(await new TemporalDurableSessions(retried.client, noRows).send(input, { text: 'hi', context: 'page' })).toEqual({
+    expect(await new TemporalDurableSessions(retried.client, noRows).send(input, MID)).toEqual({
       started: 'fresh',
       resumedFresh: true,
     })
     const unknown = fakeClient({ status: 'RUNNING', chain: 'run-1', chainAfterUpdate: 'run-2', failDescribes: [2, 3] })
-    expect(await new TemporalDurableSessions(unknown.client, noRows).send(input, { text: 'hi', context: 'page' })).toEqual({
+    expect(await new TemporalDurableSessions(unknown.client, noRows).send(input, MID)).toEqual({
       started: 'attached',
       resumedFresh: false,
     })
@@ -91,7 +95,7 @@ describe('TemporalDurableSessions', () => {
   it('gives the update-with-start a deadline: an RPC that hangs is aborted after it', async () => {
     const { client, signals } = fakeClient({ status: 'RUNNING', hangUpdate: true })
     const durable = new TemporalDurableSessions(client, noRows, { sendDeadlineMs: 50 })
-    await expect(durable.send(input, { text: 'hi', context: 'page' })).rejects.toBeInstanceOf(
+    await expect(durable.send(input, MID)).rejects.toBeInstanceOf(
       WorkflowUpdateRPCTimeoutOrCancelledError,
     )
     // The describes before it carry timeout signals of their own; the update's is the last.
@@ -101,7 +105,7 @@ describe('TemporalDurableSessions', () => {
 
   it('starts an unknown ID with no state, and says it is fresh rather than resumed', async () => {
     const { client, updates } = fakeClient({})
-    const result = await new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: 'page' })
+    const result = await new TemporalDurableSessions(client, noRows).send(input, MID)
     expect(result).toEqual({ started: 'fresh', resumedFresh: false })
     expectStart(updates[0], null)
   })
@@ -112,7 +116,7 @@ describe('TemporalDurableSessions', () => {
     const seen: unknown[] = []
     const result = await new TemporalDurableSessions(client, noRows).send(
       input,
-      { text: 'hi', context: 'page' },
+      MID,
       { beforeStart: async (r) => void seen.push(r) },
     )
     expect(result).toEqual({ started: 'handed_over', resumedFresh: false })
@@ -122,7 +126,7 @@ describe('TemporalDurableSessions', () => {
 
   it('says a closed execution with neither a result nor a snapshot resumed fresh', async () => {
     const { client, updates } = fakeClient({ status: 'TERMINATED' })
-    expect(await new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: 'page' })).toEqual({
+    expect(await new TemporalDurableSessions(client, noRows).send(input, MID)).toEqual({
       started: 'fresh',
       resumedFresh: true,
     })
@@ -133,7 +137,7 @@ describe('TemporalDurableSessions', () => {
     const { client, updates } = fakeClient({ status: 'RUNNING' })
     const durable = new TemporalDurableSessions(client, noRows)
     await expect(
-      durable.send(input, { text: 'hi', context: null }, { beforeStart: () => Promise.reject(new Error('busy')) }),
+      durable.send(input, MID, { beforeStart: () => Promise.reject(new Error('busy')) }),
     ).rejects.toThrow('busy')
     expect(updates).toEqual([])
   })
@@ -141,9 +145,61 @@ describe('TemporalDurableSessions', () => {
   it("turns a validator's refusal into DurableRefused with its message", async () => {
     const refused = new WorkflowUpdateFailedError('Workflow Update failed', ApplicationFailure.create({ message: 'the session is busy' }))
     const { client } = fakeClient({ status: 'RUNNING', updateError: refused })
-    const sent = new TemporalDurableSessions(client, noRows).send(input, { text: 'hi', context: null })
+    const sent = new TemporalDurableSessions(client, noRows).send(input, MID)
     await expect(sent).rejects.toBeInstanceOf(DurableRefused)
     await expect(sent).rejects.toThrow('the session is busy')
+  })
+
+  describe('delivery until an answer (#1056: the same message id, never a fresh send)', () => {
+    const grpc = (code: number, message: string) => Object.assign(new Error(`${code} ${message}`), { code })
+
+    it.each([
+      ['DEADLINE_EXCEEDED', grpc(4, 'DEADLINE_EXCEEDED: Deadline exceeded')],
+      ['UNAVAILABLE', grpc(14, 'UNAVAILABLE: Connection dropped')],
+      ['an update RPC timeout', new WorkflowUpdateRPCTimeoutOrCancelledError('Workflow update call timeout or cancelled')],
+    ])('%s may have reached Temporal: sent again with the same id, and the message kept', async (_name, error) => {
+      const { client, updates } = fakeClient({ status: 'RUNNING', updateErrors: [error] })
+      const beats: number[] = []
+      const retried: unknown[] = []
+      const result = await new TemporalDurableSessions(client, noRows).send(input, MID, {
+        attempt: async () => {
+          beats.push(beats.length + 1)
+          return true
+        },
+        retrying: (err) => void retried.push(err),
+      })
+      expect(result).toEqual({ started: 'attached', resumedFresh: false })
+      expect(updates.map((u) => u.options.updateId)).toEqual([MID, MID])
+      expect(updates.map((u) => u.options.args)).toEqual([[{ id: MID }], [{ id: MID }]])
+      expect(beats).toEqual([1, 2])
+      expect(retried).toEqual([error])
+    }, 30_000)
+
+    it('a refusal is an answer: not sent again', async () => {
+      const refused = new WorkflowUpdateFailedError('Workflow Update failed', ApplicationFailure.create({ message: 'the session is busy' }))
+      const { client, updates } = fakeClient({ status: 'RUNNING', updateError: refused })
+      await expect(
+        new TemporalDurableSessions(client, noRows).send(input, MID, { attempt: async () => true }),
+      ).rejects.toThrow(new DurableRefused('the session is busy'))
+      expect(updates).toHaveLength(1)
+    })
+
+    it('gives up, sending nothing more, once the message is no longer pending (a Stop elsewhere)', async () => {
+      const { client, updates } = fakeClient({ status: 'RUNNING', updateErrors: [grpc(14, 'UNAVAILABLE')] })
+      let beats = 0
+      await expect(
+        new TemporalDurableSessions(client, noRows).send(input, MID, { attempt: async () => ++beats === 1 }),
+      ).rejects.toBeInstanceOf(DurableStopped)
+      expect(updates).toHaveLength(1)
+    }, 30_000)
+
+    it("asks for a completed execution's result under a deadline", async () => {
+      const { client, updates } = fakeClient({ status: 'COMPLETED', result: { handed_over: 1 }, hangResult: true })
+      const started = performance.now()
+      await expect(new TemporalDurableSessions(client, noRows, { askMs: 50 }).send(input, MID)).rejects.toThrow('CANCELLED')
+      expect(performance.now() - started).toBeLessThan(10_000)
+      expect(updates).toEqual([])
+    })
   })
 
   it('reviews with the approver string, and a refused review is DurableRefused', async () => {

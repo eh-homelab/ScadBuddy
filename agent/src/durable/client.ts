@@ -50,15 +50,22 @@ export type DurableSessionInput = {
   restored?: { in_flight: InFlightCall[] }
 }
 
-/** models.py `Message`: `context` is model-only (the panel's page context). */
-export type DurableMessage = { text: string; context: string | null }
+/**
+ * models.py `Nudge`: the send_message Update's one argument, the id of a message committed
+ * to `ai_durable_inputs` (the manager's claim). The id is the Update's `updateId` too.
+ */
+export type DurableNudge = { id: string }
 
 /** A validator refused the Update ("the session is busy", "No tool call … is waiting for approval"). */
 export class DurableRefused extends Error {
   override name = 'DurableRefused'
 }
 
-/** The session was stopped (DurableSendOptions.signal) before the message was sent: nothing was started. */
+/**
+ * The send gave up: the session was stopped (DurableSendOptions.signal), or its message is
+ * no longer pending (DurableSendOptions.attempt: a Stop elsewhere abandoned it, or a run
+ * already took it). It may have reached a run before; the message's row says what became of it.
+ */
 export class DurableStopped extends Error {
   override name = 'DurableStopped'
 }
@@ -84,38 +91,47 @@ export type DurableSendResult = { started: 'attached' | 'handed_over' | 'restore
 
 export type DurableSendOptions = {
   /**
-   * Runs once the execution is chosen and before anything is sent: the manager's claim
-   * (and, for a new execution, its `ai_durable_streams.next_offset` reset, plan ruling 9).
-   * When it throws, nothing is sent.
+   * Runs once each attempt chose its execution, before it sends anything: for a new
+   * execution, the manager's `ai_durable_streams.next_offset` reset (plan ruling 9).
+   * When it throws, the attempt sends nothing.
    */
   beforeStart?: (result: DurableSendResult) => Promise<void>
   /**
-   * Runs as the update-with-start is sent; from then on a Stop reaches the execution
-   * (`cancel`). Before it, a Stop aborts `signal` instead, and `send` gives up with
-   * DurableStopped, having started nothing.
+   * Runs as an attempt's update-with-start is sent; from then on a Stop reaches the
+   * execution (`cancel`). Before it, a Stop aborts `signal` instead, and `send` gives up
+   * with DurableStopped.
    */
   starting?: () => void
   signal?: AbortSignal
   /**
-   * After a claim taken while a stopped run was still closing (`beforeStart` was told
-   * `attached`: that run was still the latest, and the projector must not leave it yet),
-   * runs once it closed and before the next run is started: the manager's stream reset.
+   * With it, `send` delivers until it has an answer (the may_have_started rule of #1316 and
+   * #1066): any failure but a refusal may have reached Temporal, or not, so it sends again,
+   * always with the same message id (the Update's id, which Temporal dedupes, and the
+   * workflow's idempotency key), never a fresh send. Runs before every attempt: the
+   * manager's heartbeat on the stream row; false when the message is no longer pending,
+   * and `send` gives up (DurableStopped). Without it, one attempt.
    */
-  newRun?: () => Promise<void>
+  attempt?: () => Promise<boolean>
+  /** After an attempt that did not answer, before the next: the manager's `worker_pending`. */
+  retrying?: (err: unknown) => void
 }
 
 /** A waiting call; `expires_at` (ISO 8601) is when the run's expiry timer denies it (workflow.py). */
 export type PendingCall = { id: string; name: string; input: unknown; expires_at?: string }
 
 export interface DurableSessions {
-  send(input: DurableSessionInput, message: DurableMessage, options?: DurableSendOptions): Promise<DurableSendResult>
+  /**
+   * Nudges the session's workflow with a message committed to `ai_durable_inputs`,
+   * starting the execution that takes it when none runs. Resolves once its turn started.
+   */
+  send(input: DurableSessionInput, messageId: string, options?: DurableSendOptions): Promise<DurableSendResult>
   review(sessionId: string, toolUseId: string, approved: boolean, approver: string): Promise<void>
   pending(sessionId: string): Promise<PendingCall[]>
   /** Stop: cancels the running execution; false when none is running. */
   cancel(sessionId: string): Promise<boolean>
 }
 
-/** How long a describe or a query may take before Temporal counts as unreachable. */
+/** How long a describe, a query, a review or a result may take before Temporal counts as unreachable. */
 const ASK_MS = 10_000
 
 /**
@@ -125,6 +141,10 @@ const ASK_MS = 10_000
  */
 export const DURABLE_SEND_DEADLINE_MS = 30_000
 
+/** The first and the longest pause between delivery attempts (DurableSendOptions.attempt). */
+const RETRY_FIRST_MS = 1_000
+const RETRY_MAX_MS = 10_000
+
 /** The model-only line for calls whose results a snapshot restore lost (deviation 4, point 3). */
 export function lostResultsLine(calls: { id: string; name: string }[]): string | undefined {
   if (calls.length === 0) return undefined
@@ -132,6 +152,20 @@ export function lostResultsLine(calls: { id: string; name: string }[]): string |
     "These tool calls ran after this session's last saved point, and their results were lost: " +
     calls.map((c) => `${c.name} (${c.id})`).join(', ')
   )
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts (a monotonic timer). */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
 }
 
 function notFound(err: unknown): boolean {
@@ -148,17 +182,22 @@ export class TemporalDurableSessions implements DurableSessions {
   readonly #client: Client
   readonly #sql: Sql
   readonly #sendDeadlineMs: number
+  readonly #askMs: number
 
-  /** `sql` reads ai_durable_snapshots and the audit's tool calls for a restore. */
-  constructor(client: Client, sql: Sql, options: { sendDeadlineMs?: number } = {}) {
+  /**
+   * `sql` reads ai_durable_snapshots and the audit's tool calls for a restore, and writes a
+   * restore's note on the message (ai_durable_inputs).
+   */
+  constructor(client: Client, sql: Sql, options: { sendDeadlineMs?: number; askMs?: number } = {}) {
     this.#client = client
     this.#sql = sql
     this.#sendDeadlineMs = options.sendDeadlineMs ?? DURABLE_SEND_DEADLINE_MS
+    this.#askMs = options.askMs ?? ASK_MS
   }
 
   async #ask<T>(work: () => Promise<T>): Promise<T> {
     // A timer, not a wall-clock deadline (the host's clock may jump).
-    return this.#client.connection.withAbortSignal(AbortSignal.timeout(ASK_MS), work)
+    return this.#client.connection.withAbortSignal(AbortSignal.timeout(this.#askMs), work)
   }
 
   /** The execution's status name, or undefined when the ID has none. */
@@ -215,62 +254,81 @@ export class TemporalDurableSessions implements DurableSessions {
     return this.#describe(sessionId)
   }
 
-  async send(input: DurableSessionInput, message: DurableMessage, options: DurableSendOptions = {}): Promise<DurableSendResult> {
+  async send(input: DurableSessionInput, messageId: string, options: DurableSendOptions = {}): Promise<DurableSendResult> {
+    const attempt = options.attempt
+    if (!attempt) return this.#attempt(input, messageId, options)
+    let delay = RETRY_FIRST_MS
+    for (;;) {
+      if (options.signal?.aborted) throw new DurableStopped('the session was stopped before this message was sent')
+      if (!(await attempt())) throw new DurableStopped('the message is no longer waiting to be sent')
+      try {
+        return await this.#attempt(input, messageId, options)
+      } catch (err) {
+        if (err instanceof DurableStopped) throw err
+        // A refusal is an answer; a run still stopping is not (it closes, and then takes it).
+        if (err instanceof DurableRefused && err.message !== STILL_STOPPING) throw err
+        options.retrying?.(err)
+      }
+      await pause(delay, options.signal)
+      delay = Math.min(delay * 2, RETRY_MAX_MS)
+    }
+  }
+
+  async #attempt(input: DurableSessionInput, messageId: string, options: DurableSendOptions): Promise<DurableSendResult> {
     const sessionId = input.session_id
     const workflowId = durableWorkflowId(sessionId)
     let before = await this.#describe(sessionId)
-    // Claimed before the wait, so the sender is answered without it (the chat socket's
-    // queue moves on at the claim), as an attach: until the stopped run closes it is the
-    // latest, whose stream the projector keeps; `newRun` resets it once it closed.
-    let claimed: DurableSendResult | undefined
+    // A stopped run still closing would refuse the nudge: wait for it, up to D. A Stop
+    // handled by another replica meanwhile abandoned the message: look again before sending.
     if (before?.status === 'RUNNING' && before.stopping) {
-      claimed = { started: 'attached', resumedFresh: false }
-      await options.beforeStart?.(claimed)
       before = await this.#closed(sessionId, options.signal)
-      if (before?.status !== 'RUNNING') await options.newRun?.()
+      if (options.attempt && !(await options.attempt())) throw new DurableStopped('the message is no longer waiting to be sent')
     }
     const status = before?.status
     let state: unknown = null
     let start = input
-    let context = message.context
+    let note: string | null = null
     let result: DurableSendResult
     // Taken for a running execution too: USE_EXISTING ignores the start's arguments while
     // it runs, and they matter only if it closed (a Stop, a terminate) since `describe`.
     let fallback: DurableSendResult = { started: 'fresh', resumedFresh: status !== undefined }
     if (status === 'COMPLETED') {
       // A Stop's hand-over (deviation 4): the AgentState, passed back as opaque JSON.
-      state = await this.#client.workflow.getHandle(workflowId).result()
+      state = await this.#ask(() => this.#client.workflow.getHandle(workflowId).result())
       result = { started: 'handed_over', resumedFresh: false }
     } else {
       const snapshot = await this.#snapshot(sessionId)
       if (snapshot) {
         state = snapshot.state
         start = { ...input, restored: { in_flight: snapshot.inFlight } }
-        const line = lostResultsLine(snapshot.lost)
-        if (line) context = context ? `${context}\n\n${line}` : line
+        note = lostResultsLine(snapshot.lost) ?? null
         fallback = { started: 'restored', resumedFresh: false }
       }
       result = status === 'RUNNING' ? { started: 'attached', resumedFresh: false } : fallback
     }
-    if (!claimed) await options.beforeStart?.(result)
+    await options.beforeStart?.(result)
+    // The model-only line a restore owes the message, read by the run that loads it.
+    if (result.started !== 'attached') await this.#sql`UPDATE ai_durable_inputs SET note = ${note} WHERE id = ${messageId}`
     if (options.signal?.aborted) throw new DurableStopped('the session was stopped before this message was sent')
     options.starting?.()
     const operation = new WithStartWorkflowOperation(DURABLE_WORKFLOW, {
       workflowId,
       taskQueue: DURABLE_TASK_QUEUE,
       // Every run argument, so Temporal applies the Python types (plan ruling 6).
-      args: [start, state, null],
+      args: [start, state],
       workflowIdConflictPolicy: 'USE_EXISTING',
       workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
-    // Aborted after D (a timer, not a wall-clock deadline): a hung RPC ends, and the
-    // projector can then tell a send that is gone from one still starting its run.
+    const nudge: DurableNudge = { id: messageId }
+    // Aborted after D (a timer, not a wall-clock deadline): a hung RPC ends, and the next
+    // attempt sends the same id again.
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), this.#sendDeadlineMs)
     try {
       await this.#client.connection.withAbortSignal(abort.signal, () =>
         this.#client.workflow.executeUpdateWithStart(SEND_UPDATE, {
-          args: [{ text: message.text, context }],
+          args: [nudge],
+          updateId: messageId,
           startWorkflowOperation: operation,
         }),
       )
