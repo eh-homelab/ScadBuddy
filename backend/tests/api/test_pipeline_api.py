@@ -12,6 +12,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.workflows.models import MigrateResult
 from scadbuddy.workflows.outputs import output_key
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -249,7 +250,9 @@ def test_migrate_at_an_unknown_revision_is_a_404(
 def test_migrate_resolves_a_short_revision(
     client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created = client.post("/api/v1/models", json={"name": "Pasted", "source": "cube();\n"})
+    created = client.post(
+        "/api/v1/models", json={"name": "Pasted", "source": "cube();\n"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     full = client.get("/api/v1/models/pasted").json()["version"]
     # A pipeline, or the route answers identity without asking (below).
@@ -278,7 +281,9 @@ def test_inputs_of_a_template_without_a_pipeline_are_identity_at_any_revision(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nothing to migrate with: no worker, whatever the revision or the inputs' `v`."""
-    created = client.post("/api/v1/models", json={"name": "Pasted", "source": "cube();\n"})
+    created = client.post(
+        "/api/v1/models", json={"name": "Pasted", "source": "cube();\n"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     full = client.get("/api/v1/models/pasted").json()["version"]
     calls = _spy_migrations(client, monkeypatch)
