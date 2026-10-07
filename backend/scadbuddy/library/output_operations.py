@@ -135,7 +135,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         arranged = job.kind == "arrange"
         sources = ArrangeInputs.model_validate(job.inputs).sources if arranged else []
         try:
-            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
+            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
             meta = await asyncio.to_thread(
                 state.outputs.create,
                 job,

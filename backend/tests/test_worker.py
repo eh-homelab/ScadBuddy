@@ -289,6 +289,23 @@ async def test_the_second_signal_stops_now() -> None:
     assert stop_now.is_set()
 
 
+@pytest.mark.parametrize("queue", ["render", "bambuddy"])
+async def test_both_workers_are_handed_the_second_signal(
+    queue: worker_module.Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The print worker drains for up to ``PRINT_DRAIN_TIMEOUT``: a second signal cuts
+    that short too, not only the render worker's drain."""
+    handed: dict[str, Any] = {}
+
+    async def run(settings: Settings, **kwargs: Any) -> None:
+        handed.update(kwargs)
+
+    monkeypatch.setattr(worker_module, "run_worker", run)
+    monkeypatch.setattr(worker_module, "run_print_worker", run)
+    await worker_module._main(cast(Settings, None), queue)
+    assert isinstance(handed["stop_now"], asyncio.Event)
+
+
 @workflow.defn(name="BlocksUntilReleased")
 class _BlocksUntilReleased:
     def __init__(self) -> None:

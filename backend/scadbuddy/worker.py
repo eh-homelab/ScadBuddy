@@ -720,11 +720,12 @@ async def run_print_worker(
     settings: Settings,
     *,
     stop: asyncio.Event | None = None,
+    stop_now: asyncio.Event | None = None,
     health_port: int | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
-    (#1060), versioned and drained like the render worker."""
+    (#1060), versioned and drained like the render worker, ``stop_now`` included."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
@@ -752,6 +753,7 @@ async def run_print_worker(
                 deployment_name=PRINT_DEPLOYMENT_NAME,
                 drain_timeout=PRINT_DRAIN_TIMEOUT,
                 ignore_types=PRINT_UNPINNED,
+                stop_now=stop_now,
             )
         finally:
             if server is not None and serving is not None:
@@ -782,7 +784,7 @@ async def _main(settings: Settings, queue: Queue = "render") -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _on_signal(stop, stop_now))
     if queue == "bambuddy":
-        await run_print_worker(settings, stop=stop)
+        await run_print_worker(settings, stop=stop, stop_now=stop_now)
     else:
         await run_worker(settings, stop=stop, stop_now=stop_now)
 
