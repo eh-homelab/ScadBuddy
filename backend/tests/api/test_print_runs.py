@@ -839,7 +839,10 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     budget under the proxy's 15 s, or the request is answered still-accepting."""
     output_id = prepared(client, model)
     ended_run = PrintRun(
-        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
     )
     starts: list[timedelta] = []
 

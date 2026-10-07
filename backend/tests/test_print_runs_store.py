@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.runs import (
     PrintRunError,
     PrintRunStore,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
@@ -73,7 +74,7 @@ async def accept(
 ) -> PrintRun:
     return await store.insert_accepted(
         run_id,
-        subject=OUTPUT,
+        subject=PrintSubject.output(OUTPUT),
         key=key,
         slug="demo",
         workflow_id=f"print-{key}",
@@ -170,7 +171,7 @@ async def test_retention_none_keeps_every_row_and_a_number_prunes_older_finished
     await asyncio.sleep(0.05)
     await store.insert_accepted(
         "b",
-        subject=OUTPUT,
+        subject=PrintSubject.output(OUTPUT),
         key="b",
         slug="demo",
         workflow_id="print-b",
@@ -186,6 +187,45 @@ async def test_get_reads_a_row_and_an_unknown_id_is_none(store: PrintRunStore) -
     got = await store.get(run.id)
     assert got is not None and got.output_id == OUTPUT
     assert await store.get("nope") is None
+
+
+async def test_a_run_reads_back_its_subject_and_the_output_id_it_always_answered(
+    store: PrintRunStore,
+) -> None:
+    # #1750: `subject` is the key; `output_id` stays what clients read before it, an
+    # output's bare id and a library file's `library:<file id>`.
+    output = await accept(store, "k1", run_id="r1")
+    library = await store.insert_accepted(
+        "r2",
+        subject=PrintSubject.library(41),
+        key="k2",
+        slug="library-41",
+        workflow_id="print-k2",
+        workflow_run_id="w2",
+        retention=None,
+    )
+    for run, subject, output_id in (
+        (output, f"output:{OUTPUT}", OUTPUT),
+        (library, "library:41", "library:41"),
+    ):
+        got = await store.get(run.id)
+        assert got is not None
+        assert (got.subject, got.output_id) == (subject, output_id)
+        assert got.model_dump(mode="json")["output_id"] == output_id
+        assert got.model_dump(mode="json")["subject"] == subject
+
+
+def test_a_run_from_before_1750_still_reads() -> None:
+    # Temporal history and the accept Update carry runs serialized with `output_id` only.
+    old = {
+        "id": "r1",
+        "output_id": OUTPUT,
+        "status": "running",
+        "created_at": "2026-10-06T10:00:00Z",
+    }
+    run = PrintRun.model_validate(old)
+    assert (run.subject, run.output_id) == (f"output:{OUTPUT}", OUTPUT)
+    assert PrintRun.model_validate(run.model_dump(mode="json")) == run
 
 
 async def test_fail_lost_says_whether_anything_could_have_been_queued(
@@ -294,7 +334,7 @@ async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
         for run_id, handle in (("live", live), ("killed", killed)):
             await store.insert_accepted(
                 run_id,
-                subject=OUTPUT,
+                subject=PrintSubject.output(OUTPUT),
                 key=run_id,
                 slug="demo",
                 workflow_id=handle.id,
@@ -325,7 +365,7 @@ async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
         reset = await client.start_workflow("PrintRun", "x", id=workflow_id, task_queue=queue)
         await store.insert_accepted(
             "reset",
-            subject=OUTPUT,
+            subject=PrintSubject.output(OUTPUT),
             key="reset",
             slug="demo",
             workflow_id=workflow_id,

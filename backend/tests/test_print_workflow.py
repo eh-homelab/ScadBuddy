@@ -43,6 +43,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows import print_activities, printing
@@ -131,7 +132,7 @@ class Fake:
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
             id="run-1",
-            output_id="o" * 32,
+            subject="output:" + "o" * 32,
             status=status,  # type: ignore[arg-type]
             created_at=datetime(2026, 10, 2, tzinfo=UTC),
             **fields,  # type: ignore[arg-type]
@@ -1019,3 +1020,46 @@ async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the
     assert fake.enqueue_attempted  # the write finished before the run failed
     assert finished.status == "failed" and not finished.may_have_queued
     assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}:unqueued"
+
+
+class _Sends:
+    available = True
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[PrintSubject, list[int]]] = []
+
+    async def record_sends(self, subject: PrintSubject, sends: list[Any]) -> None:
+        self.recorded.append((subject, [send.queue_item_id for send in sends]))
+
+
+async def test_a_library_plate_is_recorded_by_subject_without_reading_bambuddy() -> None:
+    """#1750 (R1, R2): ``print_record`` records a library file's plate through its source,
+    as an output's, and reads nothing back from Bambuddy to do it: there are no Bambuddy
+    settings here at all."""
+    unused: Any = None
+    sends = _Sends()
+    real = PrintActivities(
+        PrintDeps(
+            settings_store=unused,
+            outputs=unused,
+            uploads=unused,
+            catalogue=unused,
+            store=unused,
+            observer=unused,
+            links=cast(Any, sends),
+        )
+    )
+    outcome = QueueOutcome(
+        slice_job_id=9, sliced_library_file_id=41, queue_item_ids=[51], printer_id=1
+    )
+    sent = await ActivityEnvironment().run(
+        real.record,
+        RecordInput(
+            source=SourceSpec(kind="library", file_id=41),
+            library_file_id=41,
+            plate_id=1,
+            outcome=outcome,
+        ),
+    )
+    assert sends.recorded == [(PrintSubject.library(41), [51])]
+    assert sent == [PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9)]

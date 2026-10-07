@@ -1,10 +1,10 @@
 """The prints API (#308, epic #305; print-history plan §2.4).
 
-A print is one Bambuddy archive linked to one of ScadBuddy's outputs
-(``output_bambuddy_prints``, #306), or to a Bambuddy library file ScadBuddy printed
-(``library_bambuddy_prints``, #976), keyed by the archive's id. The list is driven by
-those tables, so an archive printed from anywhere else is never listed: this is
-ScadBuddy's print history, not a copy of Bambuddy's. A library file's print has no
+A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), or to a
+Bambuddy library file ScadBuddy printed (#976), keyed by the archive's id. The list is
+driven by those links (``print_links``, keyed by print subject since #1750), so an
+archive printed from anywhere else is never listed: this is ScadBuddy's print history,
+not a copy of Bambuddy's. A library file's print has no
 template, parameters or files of ScadBuddy's: only the archive's. Bambuddy stays the source of
 truth for the print; its reads are kept 30 s (`ArchiveCache`) and nothing else of it
 is stored.

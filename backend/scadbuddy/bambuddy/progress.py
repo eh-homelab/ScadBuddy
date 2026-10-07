@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.linking import link_by_hash, link_item
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -217,7 +218,7 @@ class _Linker:
         # An item linked before it went needs nothing; another plate's gone item still
         # may, so this item's own link must not spend the read's one scan (#522 review).
         if queue_item_id is not None:
-            known = await self.links.for_output(self.meta.id)
+            known = await self.links.for_subject(PrintSubject.output(self.meta.id))
             if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
                 return
         # Once per read, however many plates' items are gone: one scan covers them all.

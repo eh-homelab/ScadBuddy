@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
@@ -319,7 +320,7 @@ async def post_run(
     return await accept_run(
         runs,
         response,
-        subject=meta.id,
+        subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
@@ -340,7 +341,7 @@ async def accept_run(
     runs: PrintCommands,
     response: Response,
     *,
-    subject: str,
+    subject: PrintSubject,
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
@@ -348,20 +349,22 @@ async def accept_run(
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
-    ``subject`` is what the run is keyed and recorded under: an output's id, or
-    ``library:<file id>``. Our record is read first: a repeat answers 200 with its run
-    and touches nothing else. Otherwise ``PrintRun`` is started (or attached to) with
-    update-with-start, and its ``accepted`` Update answers with the new row (202), the
-    run it repeats (200) or the refusal, raised as the problem it carries.
+    ``subject`` is what the run prints. It is keyed and announced under its
+    ``run_subject`` (an output's id, or ``library:<file id>``), as before #1750, so a
+    retry across the upgrade still finds its run. Our record is read first: a repeat
+    answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
+    (or attached to) with update-with-start, and its ``accepted`` Update answers with
+    the new row (202), the run it repeats (200) or the refusal, raised as the problem it
+    carries.
     """
-    key = run_key(subject, request)
+    key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
     repeated = await runs.store.find(key, has_request_id=has_request_id)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
     arg = PrintRunInput(
-        subject=subject,
+        subject=subject.run_subject,
         slug=slug,
         key=key,
         source=source,

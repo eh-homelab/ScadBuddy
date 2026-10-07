@@ -40,9 +40,10 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,9 @@ class PrintRun(BaseModel):
     """One ``POST .../run``, as ``GET /print/runs/{id}`` reads it."""
 
     id: str
-    output_id: str
+    #: What the run prints, as a print subject's key: ``output:<id>`` or
+    #: ``library:<file id>`` (#1750).
+    subject: str
     #: ``running`` until the print is queued (``succeeded``) or refused (``failed``).
     #: Both are final.
     status: RunStatus
@@ -101,6 +104,22 @@ class PrintRun(BaseModel):
     #: Only on a ``POST .../run`` answered 200: this is an earlier run with the same key,
     #: and the POST started nothing.
     repeated: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_output_id(cls, data: Any) -> Any:
+        # A row (its column is still ``output_id``) and a run serialized before #1750
+        # (Temporal history, the accept Update) carry the run subject only.
+        if isinstance(data, dict) and "subject" not in data and "output_id" in data:
+            data = {**data, "subject": PrintSubject.from_run_subject(data["output_id"]).key}
+        return data
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def output_id(self) -> str:
+        """The subject as clients read it before #1750: an output's id, or
+        ``library:<file id>``. Kept so they work unchanged; read ``subject``."""
+        return PrintSubject.parse(self.subject).run_subject
 
 
 LOST_DETAIL = (
@@ -139,7 +158,8 @@ UPGRADE_INTERRUPTED = LOST.model_copy(
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
-    """The output plus the request as parsed, so key order and spacing do not matter.
+    """The run subject (``PrintSubject.run_subject``) plus the request as parsed, so key
+    order and spacing do not matter.
 
     ``request_id``, ``print_sequence``, ``rack_position`` and ``rack_algorithm`` are part
     of it when sent; without them the key is what it was before the fields existed.
@@ -206,18 +226,25 @@ class PrintRunStore:
         self,
         run_id: str,
         *,
-        subject: str,
+        subject: PrintSubject,
         key: str,
         slug: str,
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
     ) -> PrintRun:
-        """Record an accepted run; the execution's row if it has one already (a retried
-        activity, §4.2 step 3), announced only when inserted. Prunes runs that finished
-        more than ``retention`` ago; ``None`` keeps every one."""
+        """Record an accepted run of ``subject``; the execution's row if it has one
+        already (a retried activity, §4.2 step 3), announced only when inserted. Prunes
+        runs that finished more than ``retention`` ago; ``None`` keeps every one."""
         return await asyncio.to_thread(
-            self._insert, run_id, subject, key, slug, workflow_id, workflow_run_id, retention
+            self._insert,
+            run_id,
+            subject.run_subject,
+            key,
+            slug,
+            workflow_id,
+            workflow_run_id,
+            retention,
         )
 
     async def start_enqueue(self, run_id: str) -> None:

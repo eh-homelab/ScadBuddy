@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -51,7 +52,11 @@ def test_deleting_an_output_forgets_its_links(client: TestClient, model: str) ->
     configure(client)
     output_id = make_output(client, model)
     links = state(client).print_links
-    asyncio.run(links.record(output_id, PrintLink(archive_id=18, matched_by="queue_item")))
+    asyncio.run(
+        links.record(
+            PrintSubject.output(output_id), PrintLink(archive_id=18, matched_by="queue_item")
+        )
+    )
 
     assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
 
@@ -88,7 +93,9 @@ def test_attaching_a_queue_item_that_is_not_the_outputs_does_not_link_it(
     # Still filed under the project as asked: that is Bambuddy's record, not a link.
     assert queue.called
     links = state(client).print_links
-    assert [link.archive_id for link in asyncio.run(links.for_output(output_id))] == [18]
+    assert [
+        link.archive_id for link in asyncio.run(links.for_subject(PrintSubject.output(output_id)))
+    ] == [18]
     assert asyncio.run(links.output_for(99)) is None
     assert client.get("/api/v1/prints/99/thumbnail").status_code == 404
     assert not foreign.called
@@ -104,7 +111,10 @@ def test_attaching_an_item_already_linked_to_the_output_links_it(
     output_id = make_output(client, model)
     links = state(client).print_links
     asyncio.run(
-        links.record(output_id, PrintLink(archive_id=32, matched_by="queue_item", queue_item_id=90))
+        links.record(
+            PrintSubject.output(output_id),
+            PrintLink(archive_id=32, matched_by="queue_item", queue_item_id=90),
+        )
     )
     respx.get(f"{API}/queue/90").mock(
         return_value=httpx.Response(
@@ -121,4 +131,6 @@ def test_attaching_an_item_already_linked_to_the_output_links_it(
 
     assert response.status_code == 200
     assert response.json()["archive_ids"] == [32]
-    assert [link.archive_id for link in asyncio.run(links.for_output(output_id))] == [32]
+    assert [
+        link.archive_id for link in asyncio.run(links.for_subject(PrintSubject.output(output_id)))
+    ] == [32]

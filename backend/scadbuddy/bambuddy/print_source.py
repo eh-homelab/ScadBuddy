@@ -7,26 +7,39 @@ shared unchanged.
   is uploaded on demand, replated for the printer (#105) and recolored for the spools
   (#476), and each queued plate is recorded on the output (#83).
 - A library file prints as its author left it (``LibrarySource``, #313).
+
+Both record each queued plate's items by their :class:`PrintSubject` (#1750).
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, target_for
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    DatabaseRequiredError,
+    ProjectTarget,
+    SlicedCopy,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,6 +60,11 @@ class PrintFile:
 
 
 class PrintSource(Protocol):
+    @property
+    def subject(self) -> PrintSubject:
+        """What the run prints: every record of it is keyed by this (#1750)."""
+        ...
+
     @property
     def colours(self) -> list[str]:
         """One color per filament of the file, in slot order: what a slot with no
@@ -117,6 +135,36 @@ async def _spool_colours(
     ]
 
 
+async def record_sends(
+    sends: PrintLinkStore | None,
+    subject: PrintSubject,
+    plate_id: int,
+    outcome: QueueOutcome,
+    project_id: int | None,
+) -> None:
+    """Record one plate's queue items under ``subject`` (#1750), for either source. Best
+    effort: the plate is queued, and failing the run over its record would tell the user
+    it was not (#976)."""
+    if sends is None or not sends.available:
+        return
+    try:
+        await sends.record_sends(
+            subject,
+            [
+                PrintSend(
+                    queue_item_id=item,
+                    plate_id=plate_id,
+                    printer_id=outcome.printer_id,
+                    project_id=project_id,
+                    slice_job_id=outcome.slice_job_id,
+                )
+                for item in outcome.queue_item_ids
+            ],
+        )
+    except (psycopg.Error, DatabaseRequiredError) as exc:
+        logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
+
+
 @dataclass
 class OutputSource:
     store: OutputStore
@@ -127,6 +175,12 @@ class OutputSource:
     stem: str | None = None
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: Where each queued plate's items are recorded by subject (#1750).
+    sends: PrintLinkStore | None = None
+
+    @property
+    def subject(self) -> PrintSubject:
+        return PrintSubject.output(self.meta.id)
 
     @property
     def colours(self) -> list[str]:
@@ -200,7 +254,7 @@ class OutputSource:
         not leave the plates already on Bambuddy's queue unknown to the output (#83).
         ``plates`` carries every plate of this print, since the single ids hold only the
         last. The plate's sliced file is recorded against the copy it was sliced from
-        (#316).
+        (#316). The items are also recorded by subject, as a library file's are (#1750).
         """
         await self.uploads.record_sliced(
             self.meta.id,
@@ -220,6 +274,7 @@ class OutputSource:
                 project_id=project_id,
                 plates=sent,
             )
+        await record_sends(self.sends, self.subject, plate_id, outcome, project_id)
         return sent
 
     async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
@@ -256,15 +311,20 @@ def _refusal(file: LibraryFile) -> str:
 @dataclass(frozen=True)
 class LibrarySource:
     """A file already in Bambuddy's library (#313), printed as its author left it:
-    never uploaded, replated or recolored, and recorded nowhere in ScadBuddy."""
+    never uploaded, replated or recolored. Its queued plates are recorded by subject,
+    as an output's are (#1750)."""
 
     file_id: int
     colours: list[str]
     plates: list[int]
     options_slug: str | None = None
+    #: Where each queued plate's items are recorded by subject (#1750).
+    sends: PrintLinkStore | None = None
 
     @classmethod
-    async def load(cls, client: BambuddyClient, file_id: int) -> LibrarySource:
+    async def load(
+        cls, client: BambuddyClient, file_id: int, *, sends: PrintLinkStore | None = None
+    ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read."""
         file = await client.library_file(file_id)
@@ -282,7 +342,16 @@ class LibrarySource:
             colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
         # No plate metadata is one plate, and no filaments is one of unknown color: a
         # file laid out that way still has something on the bed to print.
-        return cls(file_id=file_id, colours=colours or [UNKNOWN_COLOUR], plates=plates or [1])
+        return cls(
+            file_id=file_id,
+            colours=colours or [UNKNOWN_COLOUR],
+            plates=plates or [1],
+            sends=sends,
+        )
+
+    @property
+    def subject(self) -> PrintSubject:
+        return PrintSubject.library(self.file_id)
 
     @property
     def print_settings(self) -> dict[str, str]:
@@ -319,9 +388,11 @@ class LibrarySource:
         project_id: int | None,
         sent: list[PlateSend],
     ) -> list[PlateSend]:
-        # Recorded nowhere in ScadBuddy: Bambuddy's queue and archives are the record
-        # (print history is #305).
-        return sent
+        await record_sends(self.sends, self.subject, plate_id, outcome, project_id)
+        return sent + [
+            PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
+            for item in outcome.queue_item_ids
+        ]
 
     async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
         # A library file is not laid out by ScadBuddy, so it says nothing about what the

@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import SettledHook
 from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
@@ -362,7 +363,7 @@ class ArchiveReader(Protocol):
 
 
 class LinkReader(Protocol):
-    async def for_output(self, output_id: str) -> list[PrintLink]: ...
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]: ...
 
 
 def _now() -> datetime:
@@ -398,7 +399,7 @@ async def record_settled(
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
-            for link in await links.for_output(output_id)
+            for link in await links.for_subject(PrintSubject.output(output_id))
             if link.queue_item_id is not None
         ]
         picked = await store.picked_items(item for _, item in linked)

@@ -19,7 +19,8 @@ from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -37,7 +38,8 @@ def state(client: TestClient) -> AppState:
 def link(client: TestClient, output_id: str, archive_id: int, **fields: Any) -> None:
     asyncio.run(
         state(client).print_links.record(
-            output_id, PrintLink(archive_id=archive_id, matched_by="queue_item", **fields)
+            PrintSubject.output(output_id),
+            PrintLink(archive_id=archive_id, matched_by="queue_item", **fields),
         )
     )
 
@@ -583,7 +585,13 @@ def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
 
     perth = timezone(timedelta(hours=8))
     seen = datetime(2026, 9, 27, 2, 0, tzinfo=perth)  # 2026-09-26 18:00 UTC
-    link = LinkedPrint(output_id="a" * 32, archive_id=35, matched_by="queue_item", first_seen=seen)
+    link = LinkedPrint(
+        subject="output:" + "a" * 32,
+        output_id="a" * 32,
+        archive_id=35,
+        matched_by="queue_item",
+        first_seen=seen,
+    )
 
     def dated(started_at: datetime | None) -> ArchiveDetail:
         return ArchiveDetail(id=35, started_at=started_at)
@@ -629,7 +637,10 @@ def test_runs_that_agree_with_the_archive_are_taken_as_they_are() -> None:
 
 def record_library(client: TestClient, queue_item_id: int) -> None:
     asyncio.run(
-        state(client).print_links.record_library(89, queue_item_id, plate_id=1, printer_id=1)
+        state(client).print_links.record_sends(
+            PrintSubject.library(89),
+            [PrintSend(queue_item_id=queue_item_id, plate_id=1, printer_id=1)],
+        )
     )
 
 

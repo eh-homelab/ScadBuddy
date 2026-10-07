@@ -20,6 +20,7 @@ from scadbuddy.bambuddy.follow import SETTLE_TIMEOUT
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -54,7 +55,7 @@ class Links:
     def __init__(self, *links: PrintLink) -> None:
         self.links = list(links)
 
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         return self.links
 
 
@@ -251,7 +252,7 @@ class HangingLinks(Links):
         super().__init__()
         self.started = asyncio.Event()
 
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         self.started.set()
         await asyncio.Event().wait()
         return self.links
@@ -341,7 +342,7 @@ async def test_a_settle_cut_off_mid_write_still_records_that_archive(
 
 
 class FailingLinks:
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         raise psycopg.OperationalError(f"connection lost near {A}")
 
 
@@ -416,7 +417,7 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
             return await progress_for(client, meta, uploads=uploads, links=links)
 
     write_output(paths)
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
     follower, seen = follower_for(paths, read)
     follower.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
     assert await follower.follow(OUTPUT, NOW, read_now=True) == "settled"
