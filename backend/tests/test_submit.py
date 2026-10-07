@@ -380,6 +380,8 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
             raise
         raise AssertionError("unreachable")
 
+    # Only the release goes through `execute_update`: a submit's own start and join are
+    # update-with-start (`_accepted`), which this does not touch.
     monkeypatch.setattr(WorkflowHandle, "execute_update", unanswered)
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"

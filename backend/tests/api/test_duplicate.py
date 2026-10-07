@@ -521,6 +521,9 @@ async def _a_sweep_run_from_now(client: Client, schedule_id: str) -> None:
                     raise
                 before = before if before is not None else set()  # not yet created
             else:
+                # `recent_actions` keeps only the latest few; with overlaps skipped the
+                # Schedule starts at most one run per tick, far slower than these polls,
+                # so a new run cannot rotate out between two of them unseen.
                 started = [result.action for result in info.recent_actions]
                 started += info.running_actions
                 runs = {
@@ -547,7 +550,12 @@ def test_the_periodic_sweep_clears_old_duplicate_staging(
         staged = _stage(paths, "late", DUPLICATE_STAGING_MAX_AGE + 60)
         assert workflow_reaper.client is not None
         schedule_id = schedule_id_for(periodic.temporal_task_queue_library)
-        workflow_reaper.run(_a_sweep_run_from_now(workflow_reaper.client, schedule_id))
+        workflow_reaper.run(
+            _a_sweep_run_from_now(workflow_reaper.client, schedule_id),
+            # The inner bound is what fires: the reaper's own default (60 s) would not
+            # cancel the poll, and is shorter than a loaded host's sweep run.
+            timeout=SWEEP_RUN_BOUND + 10,
+        )
         assert not staged.exists()
 
 
