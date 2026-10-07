@@ -28,6 +28,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import follow_run, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
+from tests.support.operations import press
 
 API = f"{BASE}/api/v1"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
@@ -311,8 +312,8 @@ def test_pinning_and_unpinning_a_library_publish_library_changed(
     app.dependency_overrides[get_libraries] = lambda: store
     getattr(app.state, STATE_ATTR).libraries = store
 
-    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
-    _ok(client.delete(f"/api/v1/models/{mine}/libraries/BOSL2"))
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{mine}/libraries/BOSL2", headers=press()))
 
     assert (
         published(events, "library.changed")
@@ -342,12 +343,16 @@ def test_repinning_and_removing_checkouts_publish_their_events(
     )
     app.dependency_overrides[get_libraries] = lambda: store
     getattr(app.state, STATE_ATTR).libraries = store
-    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press()))
     events.clear()
 
-    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}))
-    assert client.delete("/api/v1/libraries/BOSL2").status_code == 409  # still pinned
-    assert client.patch("/api/v1/models/widget/libraries/other", json={}).status_code == 404
+    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}, headers=press()))
+    # Still pinned.
+    assert client.delete("/api/v1/libraries/BOSL2", headers=press()).status_code == 409
+    assert (
+        client.patch("/api/v1/models/widget/libraries/other", json={}, headers=press()).status_code
+        == 404
+    )
     # Through published(), which settles the Postgres bus first (#562).
     repinned = [
         event
@@ -356,7 +361,7 @@ def test_repinning_and_removing_checkouts_publish_their_events(
     ]
     events.clear()
     _ok(
-        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}),
+        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()),
         204,
     )
 
@@ -416,7 +421,7 @@ def test_a_pin_that_lands_after_its_run_was_cancelled_still_publishes(
 
     monkeypatch.setattr(state.catalogue, "pin_library", slow_pin)
 
-    response = client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={})
+    response = client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press())
     assert response.status_code == 500, response.text
     assert "may have been done" in response.json()["detail"]
     events.wait_for_kind("model.updated", timeout=40)
