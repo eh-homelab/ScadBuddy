@@ -659,9 +659,9 @@ jobs:
       # session fixture runs once per worker), each well under the 1 GiB of shm.
       - name: pytest
         run: >-
-          docker run --rm --network host --shm-size=1g
+          docker run --rm --network host --shm-size=2g
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto --durations=0 --durations-min=0.25 -o faulthandler_timeout=8
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n 8 --durations=0 --durations-min=0.25
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
