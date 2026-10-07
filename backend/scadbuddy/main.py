@@ -842,6 +842,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description=DESCRIPTION,
         version=__version__,
         lifespan=lifespan,
+        # FastAPI (0.142) would otherwise add exporters of its own to
+        # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
+        # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
+        telemetry={"auto_configure": False},
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
