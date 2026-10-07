@@ -31,7 +31,7 @@ describe('CopiesField (#1046)', () => {
     expect(typed(raw)).toHaveBeenLastCalledWith(sent)
   })
 
-  it('a cleared box falls back to the remembered quantity', () => {
+  it('a cleared box sends null, so the remembered quantity is queued', () => {
     const onChange = vi.fn()
     render(<CopiesField value={4} remembered={null} onChange={onChange} />)
     fireEvent.change(screen.getByLabelText('Copies'), { target: { value: '' } })
